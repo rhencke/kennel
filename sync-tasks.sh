@@ -139,7 +139,7 @@ for t in tasks:
     elif status in ('pending', 'in_progress'):
         if title.startswith('CI failure:'):
             ci.append(fmt(t))
-        elif title.startswith('PR comment:'):
+        elif t.get('thread'):
             pr_comment.append(fmt(t))
         else:
             other.append(fmt(t))
