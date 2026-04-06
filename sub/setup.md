@@ -6,34 +6,24 @@ A fresh git branch has been created from upstream, a sentinel commit pushed, and
 Check for CLAUDE.md files. Note the test command, commit discipline, and any other requirements.
 
 ### 2. Plan
-Use TaskCreate to break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.
+Break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.
+
+For each task, write it to the shared task file AND call TaskCreate:
+```bash
+bash /home/rhencke/workspace/kennel/task-cli.sh <work_dir> add "<task title>"
+```
+Where `<work_dir>` is from the Context section.
 
 ### 3. Sync the work queue
-Fetch the PR body, replace the block between the HTML comment markers, write it back:
-- Pending tasks: `- [ ] Title` list; mark highest-priority with `**→ next**`
-- No completed tasks yet (omit the completed block)
-- For tasks whose title starts with `PR comment:`, render as a link to the thread URL in the task description
-
-The PR body must always end with `Fixes #N` (where N is the issue number from the request).
-
+Run sync-tasks to update the PR body from the task file:
 ```bash
-gh pr edit <PR> --repo <repo> --body "$(cat <<'EOF'
-<1–3 sentence summary>
-
----
-
-## Work queue
-
-<!-- WORK_QUEUE_START -->
-<!-- WORK_QUEUE_END -->
-
-Fixes #N
-EOF
-)"
+bash /home/rhencke/workspace/kennel/sync-tasks.sh <work_dir>
 ```
 
 ## Done when
-Plan written to TaskCreate and work queue synced in the PR body.
+Tasks written to task file, synced to PR body.
+
+**Verify**: the PR body should have a `<!-- WORK_QUEUE_START -->` block with `- [ ]` items and end with `Fixes #N`.
 
 **Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
