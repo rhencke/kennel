@@ -15,6 +15,7 @@ class Config:
     work_dir: Path
     work_script: Path
     project: str
+    allowed_bots: frozenset[str]
     log_level: str
 
     @classmethod
@@ -39,6 +40,11 @@ class Config:
             )
             .expanduser()
             .resolve(),
+            allowed_bots=frozenset(
+                b.strip()
+                for b in os.environ.get("KENNEL_ALLOWED_BOTS", "copilot[bot]").split(",")
+                if b.strip()
+            ),
             project=os.environ["KENNEL_PROJECT"],
             log_level=os.environ.get("KENNEL_LOG_LEVEL", "INFO").upper(),
         )

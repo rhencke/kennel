@@ -18,6 +18,12 @@ class Action:
     reply_to: dict[str, Any] | None = None  # {repo, pr, comment_id}
 
 
+def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
+    """Check if user is the repo owner or an allowed bot."""
+    owner = payload.get("repository", {}).get("owner", {}).get("login", "")
+    return user == owner or user in config.allowed_bots
+
+
 def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | None:
     """Map a GitHub webhook event to an action. Returns None if ignored."""
     action = payload.get("action", "")
@@ -45,6 +51,9 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         user = review.get("user", {}).get("login", "")
         if not number:
             return None
+        if not _is_allowed(user, payload, config):
+            log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
+            return None
         log.info("review on PR #%s: %s by %s", number, state, user)
         return Action(prompt=f"Review on PR #{number}: {state} by {user}")
 
@@ -58,6 +67,9 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
             log.debug("ignoring own comment on PR #%s", number)
             return None
         if not number:
+            return None
+        if not _is_allowed(user, payload, config):
+            log.debug("ignoring comment on PR #%s by %s (not allowed)", number, user)
             return None
         body_preview = (comment.get("body", "") or "")[:80]
         log.info("comment on PR #%s by %s: %s", number, user, body_preview)
