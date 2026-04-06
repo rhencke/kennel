@@ -149,6 +149,9 @@ claude_run() {     # continue session; progress to stdout
     | stdbuf -oL jq -rj "$STREAM_FILTER"
 }
 
+# ── Main loop (lock held throughout) ──────────────────────────────────────
+while true; do
+
 # ── Find current issue ─────────────────────────────────────────────────────
 CURRENT_ISSUE=""
 if [[ -f "$STATE_FILE" ]]; then
@@ -196,7 +199,7 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
 
   if [[ -z "$NEXT" || "$NEXT" == "null	null" ]]; then
     log "no eligible issues assigned to $GH_USER in $REPO"
-    exit 0
+    break
   fi
 
   CURRENT_ISSUE=$(echo "$NEXT" | cut -f1)
@@ -232,7 +235,7 @@ if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
   git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
   [[ -n "$EXISTING_SLUG" ]] && git branch -d "$EXISTING_SLUG" 2>/dev/null || true
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 if [[ -n "$EXISTING_SLUG" ]]; then
@@ -377,7 +380,7 @@ $CI_THREADS"
   log "CI fix done"
   bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "CI failure: $FAILING" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 # ── Review-level feedback (non-inline "Request changes" body) ─────────────
@@ -411,7 +414,7 @@ $REVIEW_FEEDBACK"
   log "review feedback done"
   bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "Address review feedback from $OWNER" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 # ── Threads ────────────────────────────────────────────────────────────────
@@ -474,7 +477,7 @@ $THREADS"
   claude_run
   log "threads done"
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 # ── Task ───────────────────────────────────────────────────────────────────
@@ -501,7 +504,7 @@ Task title: $PENDING"
   log "task done: $PENDING"
   bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 # ── Promote or merge ───────────────────────────────────────────────────────
@@ -512,7 +515,7 @@ if [[ "$IS_DRAFT" == "true" ]]; then
   log "PR #$PR work complete — marking ready, requesting review from $OWNER"
   gh pr ready "$PR" --repo "$REPO"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  exit 0
+  break
 fi
 
 _REVIEWS_JSON=$(gh pr view "$PR" --repo "$REPO" --json reviews)
@@ -525,7 +528,7 @@ if [[ "$APPROVED" == "true" ]]; then
   if [[ "$MERGE_STATE" == "BLOCKED" ]]; then
     log "PR #$PR approved but merge blocked (CI pending) — enabling auto-merge"
     gh pr merge "$PR" --repo "$REPO" --squash --auto 2>/dev/null || true
-    exit 0
+    break
   fi
   log "PR #$PR approved by $OWNER — merging"
   gh pr merge "$PR" --repo "$REPO" --squash 2>/dev/null \
@@ -537,7 +540,7 @@ if [[ "$APPROVED" == "true" ]]; then
   git checkout "$DEFAULT_BRANCH"
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
   git branch -d "$SLUG" 2>/dev/null || true
-  exec bash "$0" "$WORK_DIR"
+  continue
 fi
 
 LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
@@ -547,9 +550,12 @@ LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
 if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
   log "PR #$PR: changes requested by $OWNER — all addressed, re-requesting review"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  exit 0
+  break
 fi
 
 # ── No work ────────────────────────────────────────────────────────────────
 log "no work"
+break
+
+done # end main loop
 exit 0
