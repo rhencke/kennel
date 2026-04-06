@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 from kennel.config import Config
 from kennel.events import dispatch, launch_worker, reply_to_comment, update_task_list
@@ -86,11 +87,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
 def run() -> None:
     config = Config.from_env()
 
+    log_file = Path.home() / "log" / "kennel.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
     logging.basicConfig(
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)-5s %(message)s",
         datefmt="%H:%M:%S",
-        stream=sys.stderr,
+        handlers=[
+            logging.StreamHandler(sys.stderr),
+            logging.FileHandler(log_file),
+        ],
     )
 
     WebhookHandler.config = config
