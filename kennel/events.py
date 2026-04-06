@@ -146,10 +146,16 @@ def reply_to_comment(action: Action, config: Config) -> None:
 def update_task_list(prompt: str, config: Config) -> None:
     """Run a fresh claude CLI to update the shared task list."""
     env = {**os.environ, "CLAUDE_CODE_TASK_LIST_ID": config.project}
+    full_prompt = (
+        f"{prompt}\n\n"
+        "Add a task for this event. Do NOT edit the PR body, "
+        "do NOT post comments, do NOT run any git commands. "
+        "Only update the task list."
+    )
     log.info("updating task list: %s", prompt[:100])
     try:
         result = subprocess.run(
-            ["claude", "--print", "-p", prompt],
+            ["claude", "--print", "-p", full_prompt],
             env=env,
             capture_output=True,
             text=True,
