@@ -86,7 +86,8 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         is_bot = user.endswith("[bot]")
         return Action(
             prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
-            reply_to={"repo": repo, "pr": number, "comment_id": comment_id},
+            reply_to={"repo": repo, "pr": number, "comment_id": comment_id,
+                      "url": comment.get("html_url", "")},
             comment_body=comment_body,
             is_bot=is_bot,
             context={

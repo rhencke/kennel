@@ -79,25 +79,29 @@ tasks = json.load(sys.stdin)
 pending = []
 completed = []
 
-for t in tasks:
+def fmt(t):
     title = t.get('title', '')
+    url = (t.get('thread') or {}).get('url', '')
+    return f'[{title}]({url})' if url else title
+
+for t in tasks:
     status = t.get('status', 'pending')
     if status in ('pending', 'in_progress'):
-        pending.append(title)
+        pending.append(fmt(t))
     elif status == 'completed':
-        completed.append(title)
+        completed.append(fmt(t))
 
 lines = []
-for i, title in enumerate(pending):
+for i, display in enumerate(pending):
     suffix = ' **→ next**' if i == 0 else ''
-    lines.append(f'- [ ] {title}{suffix}')
+    lines.append(f'- [ ] {display}{suffix}')
 
 if completed:
     lines.append('')
     lines.append(f'<details><summary>Completed ({len(completed)})</summary>')
     lines.append('')
-    for title in completed:
-        lines.append(f'- [x] {title}')
+    for display in completed:
+        lines.append(f'- [x] {display}')
     lines.append('</details>')
 
 print('\n'.join(lines))
