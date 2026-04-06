@@ -2,7 +2,7 @@
 # fido/work.sh — one step of the fido loop
 # exit 0: no more eligible issues (all done)
 # exit 1: did work (re-run immediately via exec tail-call)
-# exit 2: waiting (re-run after ~2 minutes)
+# exit 2: lock held / transient failure (retry later)
 set -euo pipefail
 
 WORK_DIR="${1:-$PWD}"
@@ -438,7 +438,7 @@ if [[ "$IS_DRAFT" == "true" ]]; then
   log "PR #$PR work complete — marking ready, requesting review from $OWNER"
   gh pr ready "$PR" --repo "$REPO"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  exit 2
+  exit 0
 fi
 
 _REVIEWS_JSON=$(gh pr view "$PR" --repo "$REPO" --json reviews)
@@ -465,9 +465,9 @@ LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
 if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
   log "PR #$PR: changes requested by $OWNER — all addressed, re-requesting review"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  exit 2
+  exit 0
 fi
 
 # ── No work ────────────────────────────────────────────────────────────────
 log "no work"
-exit 2
+exit 0
