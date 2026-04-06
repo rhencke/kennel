@@ -309,7 +309,7 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
 
   # Build PR body with tasks already populated
   _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
-  _PR_BODY_TEXT=$(printf '%s\n\nWrite a short, friendly pull request description (2-3 sentences) for the following work. No headers, no bullet points. Output only the description text.\n\n%s' \
+  _PR_BODY_TEXT=$(printf '%s\n\nWrite a 2-3 sentence pull request description for this work. No headers, no bullet points, no preamble like "Here is" or "Here'\''s". Just the description itself, nothing else.\n\n%s' \
     "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PR_BODY_PLAIN" \
     | claude --model claude-opus-4-6 --print 2>/dev/null | head -10)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
