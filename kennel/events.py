@@ -18,6 +18,8 @@ class Action:
     prompt: str
     reply_to: dict[str, Any] | None = None  # {repo, pr, comment_id}
     review_comments: dict[str, Any] | None = None  # {repo, pr, review_id}
+    comment_body: str | None = None
+    is_bot: bool = False
 
 
 def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
@@ -84,6 +86,8 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         return Action(
             prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
             reply_to={"repo": repo, "pr": number, "comment_id": comment_id},
+            comment_body=comment_body,
+            is_bot=is_bot,
         )
 
     if event == "check_run" and action == "completed":
@@ -201,10 +205,52 @@ def reply_to_review(action: Action, config: Config) -> None:
         )
 
 
-def create_task(prompt: str, config: Config) -> None:
-    """Write a task directly to the shared task file, then trigger sync."""
-    log.info("creating task: %s", prompt[:100])
-    add_task(config.work_dir, title=prompt)
+def _triage(comment_body: str, is_bot: bool) -> tuple[str, str]:
+    """Ask Haiku to triage a comment. Returns (prefix, title)."""
+    if is_bot:
+        categories = "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
+    else:
+        categories = "ACT (code change needed), ASK (unclear, need clarification), ANSWER (question, not a code change)"
+
+    prompt = (
+        f"Triage this PR comment into exactly one category: {categories}\n\n"
+        f"Comment: {comment_body}\n\n"
+        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short task title. "
+        "Example: ACT: add unit tests for parser"
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "claude-haiku-4-5-20251001", "--print", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if ":" in line:
+            prefix, title = line.split(":", 1)
+            prefix = prefix.strip().upper()
+            title = title.strip()
+            if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
+                return prefix, title
+    except Exception:
+        pass
+    # Fallback: ACT for humans, DO for bots
+    return ("DO" if is_bot else "ACT"), comment_body[:80]
+
+
+def create_task(prompt: str, config: Config, comment_body: str | None = None, is_bot: bool = False) -> None:
+    """Triage (if comment) and write a task to the shared task file, then trigger sync."""
+    if comment_body is not None:
+        prefix, title = _triage(comment_body, is_bot)
+        if prefix == "DUMP":
+            log.info("triage: DUMP — skipping task for: %s", comment_body[:80])
+            return
+        task_title = f"{prefix}: {title}" if prefix not in ("ACT", "DO") else title
+    else:
+        task_title = prompt
+
+    log.info("creating task: %s", task_title[:100])
+    add_task(config.work_dir, title=task_title)
     launch_sync(config)
 
 

@@ -60,7 +60,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 reply_to_comment(action, self.config)
             if action.review_comments:
                 reply_to_review(action, self.config)
-            create_task(action.prompt, self.config)
+            create_task(action.prompt, self.config,
+                        comment_body=action.comment_body,
+                        is_bot=action.is_bot)
             launch_worker(self.config)
 
     def do_GET(self) -> None:
