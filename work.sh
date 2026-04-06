@@ -194,7 +194,8 @@ EXISTING_PR_STATE=$(printf '%s' "$_PR_JSON" | jq -r '.state // empty')
 EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
 
 if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
-  log "PR #$EXISTING_PR already merged — advancing to next issue"
+  log "PR #$EXISTING_PR already merged — closing issue #$CURRENT_ISSUE"
+  gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
@@ -464,7 +465,8 @@ if [[ "$APPROVED" == "true" ]]; then
   log "PR #$PR approved by $OWNER — merging"
   gh pr merge "$PR" --repo "$REPO" --squash --auto 2>/dev/null \
     || gh pr merge "$PR" --repo "$REPO" --squash
-  log "PR #$PR merged — cleaning up"
+  log "PR #$PR merged — closing issue #$CURRENT_ISSUE"
+  gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH"
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
