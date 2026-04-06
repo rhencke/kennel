@@ -16,6 +16,7 @@ log = logging.getLogger("kennel")
 class Action:
     prompt: str
     reply_to: dict[str, Any] | None = None  # {repo, pr, comment_id}
+    review_comments: dict[str, Any] | None = None  # {repo, pr, review_id}
 
 
 def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
@@ -49,13 +50,18 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         number = pr.get("number")
         state = review.get("state", "")
         user = review.get("user", {}).get("login", "")
+        review_id = review.get("id")
         if not number:
             return None
         if not _is_allowed(user, payload, config):
             log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
             return None
         log.info("review on PR #%s: %s by %s", number, state, user)
-        return Action(prompt=f"Review on PR #{number}: {state} by {user}")
+        return Action(
+            prompt=f"Review on PR #{number}: {state} by {user}",
+            review_comments={"repo": repo, "pr": number, "review_id": review_id}
+                if review_id else None,
+        )
 
     if event == "pull_request_review_comment" and action == "created":
         comment = payload.get("comment", {})
@@ -154,6 +160,44 @@ def reply_to_comment(action: Action, config: Config) -> None:
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
+
+
+def reply_to_review(action: Action, config: Config) -> None:
+    """Fetch inline comments from a review and reply to each."""
+    info = action.review_comments
+    if not info:
+        return
+
+    log.info("fetching review comments for PR #%s review %s", info["pr"], info["review_id"])
+    try:
+        result = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{info['repo']}/pulls/{info['pr']}/reviews/{info['review_id']}/comments",
+                "--jq", ".[] | .id",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        comment_ids = [cid.strip() for cid in result.stdout.strip().splitlines() if cid.strip()]
+    except Exception:
+        log.exception("failed to fetch review comments")
+        return
+
+    if not comment_ids:
+        log.info("no inline comments in review")
+        return
+
+    log.info("replying to %d review comments", len(comment_ids))
+    for cid in comment_ids:
+        reply_to_comment(
+            Action(
+                prompt=action.prompt,
+                reply_to={"repo": info["repo"], "pr": info["pr"], "comment_id": int(cid)},
+            ),
+            config,
+        )
 
 
 def update_task_list(prompt: str, config: Config) -> None:
