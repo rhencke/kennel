@@ -500,9 +500,15 @@ APPROVED=$(printf '%s' "$_REVIEWS_JSON" \
     '[.reviews[] | select(.author.login == $owner and .state == "APPROVED")] | length > 0')
 
 if [[ "$APPROVED" == "true" ]]; then
+  MERGE_STATE=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
+  if [[ "$MERGE_STATE" == "BLOCKED" ]]; then
+    log "PR #$PR approved but merge blocked (CI pending) — enabling auto-merge"
+    gh pr merge "$PR" --repo "$REPO" --squash --auto 2>/dev/null || true
+    exit 0
+  fi
   log "PR #$PR approved by $OWNER — merging"
-  gh pr merge "$PR" --repo "$REPO" --squash --auto 2>/dev/null \
-    || gh pr merge "$PR" --repo "$REPO" --squash
+  gh pr merge "$PR" --repo "$REPO" --squash 2>/dev/null \
+    || gh pr merge "$PR" --repo "$REPO" --squash --auto
   log "PR #$PR merged — closing issue #$CURRENT_ISSUE"
   gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   rm -f "$STATE_FILE"
