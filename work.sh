@@ -274,7 +274,7 @@ else
     "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PR_BODY_PLAIN" \
     | claude --model claude-opus-4-6 --print 2>/dev/null | head -10)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
-  _PR_BODY="$(printf '%s\n\nFixes #%s' "$_PR_BODY_TEXT" "$CURRENT_ISSUE")"
+  _PR_BODY="$(printf '%s\n\n---\n\n## Work queue\n\n<!-- WORK_QUEUE_START -->\n<!-- WORK_QUEUE_END -->\n\nFixes #%s' "$_PR_BODY_TEXT" "$CURRENT_ISSUE")"
   PR_URL=$(gh pr create --draft \
     --title "$REQUEST" \
     --body "$_PR_BODY" \
