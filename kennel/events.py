@@ -71,10 +71,11 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         if not _is_allowed(user, payload, config):
             log.debug("ignoring comment on PR #%s by %s (not allowed)", number, user)
             return None
-        body_preview = (comment.get("body", "") or "")[:80]
-        log.info("comment on PR #%s by %s: %s", number, user, body_preview)
+        comment_body = comment.get("body", "") or ""
+        log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
+        is_bot = user.endswith("[bot]")
         return Action(
-            prompt=f"Review comment on PR #{number} by {user}: {body_preview}",
+            prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
             reply_to={"repo": repo, "pr": number, "comment_id": comment_id},
         )
 
@@ -160,9 +161,17 @@ def update_task_list(prompt: str, config: Config) -> None:
     env = {**os.environ, "CLAUDE_CODE_TASK_LIST_ID": config.project}
     full_prompt = (
         f"{prompt}\n\n"
-        "Add a task for this event. Do NOT edit the PR body, "
-        "do NOT post comments, do NOT run any git commands. "
-        "Only update the task list."
+        "Triage this event and update the task list. Do NOT edit the PR body, "
+        "do NOT post comments, do NOT run any git commands. Only update the task list.\n\n"
+        "For human (repo owner) comments, triage as:\n"
+        "- ACT — you know what to do: create a task\n"
+        "- ASK — unclear what to do: create a task prefixed 'ASK: ' so work.sh asks a follow-up\n"
+        "- ANSWER — it's a question, not a code change: create a task prefixed 'ANSWER: '\n\n"
+        "For bot comments, triage as:\n"
+        "- DO — worth implementing: create a task\n"
+        "- DEFER — useful but out of scope: create a task prefixed 'DEFER: '\n"
+        "- DUMP — not applicable: skip, no task needed\n\n"
+        "For non-comment events (reviews, CI failures, merges): always create a task."
     )
     log.info("updating task list: %s", prompt[:100])
     try:
