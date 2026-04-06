@@ -110,6 +110,14 @@ if not cfg.get('hooks'): cfg.pop('hooks', None)
 p.write_text(json.dumps(cfg, indent=2))
 " "$SETTINGS_LOCAL" "$HOOK_CMD" "$SYNC_CMD" 2>/dev/null || true
 }
+die() {
+  local code=$?
+  local line=${BASH_LINENO[0]}
+  log "FATAL: exit $code at line $line"
+  cleanup
+  exit $code
+}
+trap die ERR
 trap cleanup EXIT INT TERM
 
 # ── Sub-Claude helpers ─────────────────────────────────────────────────────
