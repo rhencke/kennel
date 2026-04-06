@@ -20,6 +20,7 @@ class Action:
     review_comments: dict[str, Any] | None = None  # {repo, pr, review_id}
     comment_body: str | None = None
     is_bot: bool = False
+    context: dict[str, Any] | None = None  # {pr_title, file, diff_hunk, line, pr_body}
 
 
 def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
@@ -88,6 +89,13 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
             reply_to={"repo": repo, "pr": number, "comment_id": comment_id},
             comment_body=comment_body,
             is_bot=is_bot,
+            context={
+                "pr_title": pr.get("title", ""),
+                "pr_body": (pr.get("body", "") or "")[:500],
+                "file": comment.get("path", ""),
+                "line": comment.get("line"),
+                "diff_hunk": comment.get("diff_hunk", ""),
+            },
         )
 
     if event == "check_run" and action == "completed":
@@ -134,11 +142,24 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
     comment = action.comment_body
 
     # Step 1: Haiku triage
-    category, title = _triage(comment, action.is_bot)
+    category, title = _triage(comment, action.is_bot, action.context)
     log.info("triage: %s — %s", category, title)
 
     # Step 2: Opus reply based on triage
-    context = f"Comment: {comment}\n\nYour plan: {title}"
+    # Build rich context for Opus
+    ctx = action.context or {}
+    context_parts = []
+    if ctx.get("pr_title"):
+        context_parts.append(f"PR: {ctx['pr_title']}")
+    if ctx.get("file"):
+        context_parts.append(f"File: {ctx['file']}")
+        if ctx.get("line"):
+            context_parts.append(f"Line: {ctx['line']}")
+    if ctx.get("diff_hunk"):
+        context_parts.append(f"Diff:\n```\n{ctx['diff_hunk']}\n```")
+    context_parts.append(f"Comment: {comment}")
+    context_parts.append(f"Your plan: {title}")
+    context = "\n\n".join(context_parts)
     if category == "ACT" or category == "DO":
         reply_instruction = (
             f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
@@ -255,16 +276,26 @@ def reply_to_review(action: Action, config: Config) -> None:
         )
 
 
-def _triage(comment_body: str, is_bot: bool) -> tuple[str, str]:
+def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = None) -> tuple[str, str]:
     """Ask Haiku to triage a comment. Returns (prefix, title)."""
     if is_bot:
         categories = "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
     else:
         categories = "ACT (code change needed), ASK (unclear, need clarification), ANSWER (question, not a code change)"
 
+    ctx = context or {}
+    ctx_parts = []
+    if ctx.get("pr_title"):
+        ctx_parts.append(f"PR: {ctx['pr_title']}")
+    if ctx.get("file"):
+        ctx_parts.append(f"File: {ctx['file']}")
+    if ctx.get("diff_hunk"):
+        ctx_parts.append(f"Diff:\n{ctx['diff_hunk']}")
+    ctx_str = "\n".join(ctx_parts)
+
     prompt = (
         f"Triage this PR comment into exactly one category: {categories}\n\n"
-        f"Comment: {comment_body}\n\n"
+        f"{ctx_str}\n\nComment: {comment_body}\n\n"
         "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short task title. "
         "Example: ACT: add unit tests for parser"
     )
