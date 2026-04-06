@@ -248,8 +248,8 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   # Check if PR has any tasks — if empty, run setup instead of resume
   _HAS_TASKS=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body 2>/dev/null \
     | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
-    | { grep -c '^- \[' || echo "0"; })
-  if [[ "$_HAS_TASKS" == "0" ]]; then
+    | { grep '^- \[' || true; } | wc -l)
+  if [[ "$_HAS_TASKS" -eq 0 ]]; then
     log "PR #$PR has no tasks — running setup"
     build_prompt setup \
 "Request: $REQUEST
