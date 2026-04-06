@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+# fido/work.sh — one step of the fido loop
+# exit 0: no more eligible issues (all done)
+# exit 1: did work (re-run immediately via exec tail-call)
+# exit 2: waiting (re-run after ~2 minutes)
+set -euo pipefail
+
+WORK_DIR="${1:-$PWD}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$WORK_DIR"
+
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+# ── Lock (prevent duplicate workers) ──────────────────────────────────────
+FIDO_DIR_EARLY="$(git rev-parse --git-dir)/fido"
+mkdir -p "$FIDO_DIR_EARLY"
+LOCK_FILE="$FIDO_DIR_EARLY/lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { log "another fido is running — exiting"; exit 2; }
+
+# ── Repo context ───────────────────────────────────────────────────────────
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+OWNER=${REPO%/*}
+REPO_NAME=${REPO#*/}
+GH_USER=$(gh api user --jq .login)
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+
+FORK_REMOTE=origin
+UPSTREAM_REMOTE=origin
+
+log "repo=$REPO user=$GH_USER fork=$FORK_REMOTE upstream=$UPSTREAM_REMOTE/$DEFAULT_BRANCH"
+
+# ── Fido dir inside .git (all ephemeral files live here) ───────────────────
+FIDO_DIR="$(git rev-parse --git-dir)/fido"
+mkdir -p "$FIDO_DIR"
+STATE_FILE="$FIDO_DIR/state.json"
+
+# ── PostCompact hook so sub-Claude re-reads skill instructions after compression
+mkdir -p "$WORK_DIR/.claude"
+grep -qxF '.claude/settings.local.json' "$(git rev-parse --git-dir)/info/exclude" 2>/dev/null \
+  || echo '.claude/settings.local.json' >> "$(git rev-parse --git-dir)/info/exclude"
+SETTINGS_LOCAL="$WORK_DIR/.claude/settings.local.json"
+COMPACT_SCRIPT="$FIDO_DIR/compact.sh"
+cat > "$COMPACT_SCRIPT" <<COMPACTEOF
+#!/usr/bin/env bash
+printf '[fido PostCompact] Re-reading skill instructions after context compression.\n\n'
+for f in "$SCRIPT_DIR/sub/"*.md; do
+  printf '## %s\n\n' "\$(basename "\$f")"
+  cat "\$f"
+  printf '\n\n'
+done
+COMPACTEOF
+chmod +x "$COMPACT_SCRIPT"
+HOOK_CMD="bash $COMPACT_SCRIPT"
+
+python3 -c "
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+cfg = json.loads(p.read_text()) if p.exists() else {}
+cfg.setdefault('hooks', {}).setdefault('PostCompact', [])
+entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': sys.argv[2]}]}
+if entry not in cfg['hooks']['PostCompact']:
+    cfg['hooks']['PostCompact'].append(entry)
+p.write_text(json.dumps(cfg, indent=2))
+" "$SETTINGS_LOCAL" "$HOOK_CMD" 2>/dev/null || true
+
+PROMPT="$FIDO_DIR/prompt"
+STREAM="$FIDO_DIR/stream"
+
+cleanup() {
+  rm -f "$COMPACT_SCRIPT" "$PROMPT" "$STREAM"
+  python3 -c "
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+if not p.exists(): exit()
+cfg = json.loads(p.read_text())
+cmd = sys.argv[2]
+hooks = cfg.get('hooks', {}).get('PostCompact', [])
+cfg['hooks']['PostCompact'] = [h for h in hooks if not any(e.get('command') == cmd for e in h.get('hooks', []))]
+if not cfg['hooks']['PostCompact']: del cfg['hooks']['PostCompact']
+if not cfg.get('hooks'): cfg.pop('hooks', None)
+p.write_text(json.dumps(cfg, indent=2))
+" "$SETTINGS_LOCAL" "$HOOK_CMD" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# ── Sub-Claude helpers ─────────────────────────────────────────────────────
+STREAM_FILTER='
+  if .type == "assistant" then
+    (.message.content // [])[] |
+    if .type == "text" then "[claude] \(.text)"
+    elif .type == "tool_use" then "[tool]  \(.name) \(.input | tostring | .[0:120])\n"
+    else empty end
+  elif .type == "result" then
+    "[done]  session=\(.session_id // "?")\n"
+  else empty end
+'
+
+build_prompt() {   # build_prompt <subskill> <context-string>
+  printf '%s\n\n%s\n\n%s\n' "$2" "$(cat "$SCRIPT_DIR/sub/persona.md")" "$(cat "$SCRIPT_DIR/sub/$1.md")" > "$PROMPT"
+}
+
+claude_start() {   # start new session; prints session_id to stdout, progress to stderr
+  claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
+    --dangerously-skip-permissions --print < "$PROMPT" \
+    | tee "$STREAM" | stdbuf -oL jq -rj "$STREAM_FILTER" >&2
+  jq -r 'select(.type=="result") | .session_id // empty' "$STREAM" | tail -1
+}
+
+claude_run() {     # continue session; progress to stdout
+  claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
+    --dangerously-skip-permissions --resume "$SESSION_ID" --print < "$PROMPT" \
+    | stdbuf -oL jq -rj "$STREAM_FILTER"
+}
+
+# ── Find current issue ─────────────────────────────────────────────────────
+CURRENT_ISSUE=""
+if [[ -f "$STATE_FILE" ]]; then
+  CURRENT_ISSUE=$(jq -r '.issue // empty' "$STATE_FILE")
+fi
+
+if [[ -n "$CURRENT_ISSUE" ]]; then
+  ISSUE_STATE=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json state --jq .state 2>/dev/null || echo "OPEN")
+  if [[ "$ISSUE_STATE" == "CLOSED" ]]; then
+    log "issue #$CURRENT_ISSUE: closed — advancing"
+    rm -f "$STATE_FILE"
+    CURRENT_ISSUE=""
+  fi
+fi
+
+# ── Find next issue if needed ──────────────────────────────────────────────
+if [[ -z "$CURRENT_ISSUE" ]]; then
+  log "finding next eligible issue"
+  _QUERY_RAW=$(gh api graphql \
+    -F owner="$OWNER" -F repo="$REPO_NAME" -F login="$GH_USER" \
+    -f query='query($owner:String!,$repo:String!,$login:String!){
+      repository(owner:$owner,name:$repo){
+        issues(
+          first:50, states:[OPEN],
+          filterBy:{assignee:$login},
+          orderBy:{field:CREATED_AT,direction:ASC}
+        ){
+          nodes{
+            number title
+            subIssues(first:10){ nodes{ state } }
+          }
+        }
+      }
+    }' 2>&1) || {
+    log "issue query failed (gh exit:$?) — retrying"
+    exit 2
+  }
+  NEXT=$(printf '%s' "$_QUERY_RAW" | jq -r '[
+        .data.repository.issues.nodes[]
+        | select(
+            (.subIssues.nodes | length) == 0
+            or (.subIssues.nodes | all(.state == "CLOSED"))
+          )
+      ] | .[0] | "\(.number)\t\(.title)"' 2>/dev/null || echo "")
+
+  if [[ -z "$NEXT" || "$NEXT" == "null	null" ]]; then
+    log "no eligible issues assigned to $GH_USER in $REPO"
+    exit 0
+  fi
+
+  CURRENT_ISSUE=$(echo "$NEXT" | cut -f1)
+  NEXT_TITLE=$(echo "$NEXT" | cut -f2-)
+  log "starting issue #$CURRENT_ISSUE: $NEXT_TITLE"
+  jq -n --argjson issue "$CURRENT_ISSUE" '{issue: $issue}' > "$STATE_FILE"
+  _PICKUP_PLAIN="Picking up issue: $NEXT_TITLE"
+  _PICKUP_MSG=$(printf '%s\n\nRewrite the following GitHub issue comment in character as Fido. Keep it to 1-2 sentences. Output only the comment text, no quotes, no explanation.\n\n%s' \
+    "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PICKUP_PLAIN" \
+    | claude --model claude-opus-4-6 --print 2>/dev/null | head -3)
+  : "${_PICKUP_MSG:=$_PICKUP_PLAIN}"
+  gh issue comment "$CURRENT_ISSUE" --repo "$REPO" \
+    --body "$_PICKUP_MSG" 2>/dev/null || true
+fi
+
+# ── Load issue title ───────────────────────────────────────────────────────
+ISSUE_TITLE=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json title --jq .title 2>/dev/null || echo "issue #$CURRENT_ISSUE")
+REQUEST="$ISSUE_TITLE (closes #$CURRENT_ISSUE)"
+
+# ── Find or create branch + PR ─────────────────────────────────────────────
+_PR_JSON=$(gh pr list --repo "$REPO" --state all --json number,headRefName,state \
+  --search "#$CURRENT_ISSUE in:body" 2>/dev/null | jq -r '.[0] // empty')
+EXISTING_PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
+EXISTING_PR_STATE=$(printf '%s' "$_PR_JSON" | jq -r '.state // empty')
+EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
+
+if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
+  log "PR #$EXISTING_PR already merged — advancing to next issue"
+  rm -f "$STATE_FILE"
+  git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
+  git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
+  [[ -n "$EXISTING_SLUG" ]] && git branch -d "$EXISTING_SLUG" 2>/dev/null || true
+  exec bash "$0" "$WORK_DIR"
+fi
+
+if [[ -n "$EXISTING_SLUG" ]]; then
+  SLUG="$EXISTING_SLUG"
+  PR="$EXISTING_PR"
+  log "resuming PR #$PR on branch $SLUG"
+  git fetch "$UPSTREAM_REMOTE"
+  git checkout "$SLUG" 2>/dev/null \
+    || git checkout -b "$SLUG" --track "$FORK_REMOTE/$SLUG"
+  build_prompt resume \
+"PR: $PR
+Repo: $REPO
+Branch: $SLUG"
+  SESSION_ID=$(claude_start)
+  log "session: $SESSION_ID"
+else
+  # Generate slug via Haiku
+  _SLUG_RAW=$(printf 'Output ONLY a git branch name: 2-4 lowercase words separated by hyphens, no issue numbers, summarising this request. No explanation, no punctuation, just the branch name.\n\nRequest: %s' "$REQUEST" \
+    | claude --model claude-haiku-4-5-20251001 --print 2>/dev/null | head -1 \
+    | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//' | cut -c1-40)
+  if [[ -z "$_SLUG_RAW" || ${#_SLUG_RAW} -lt 3 ]]; then
+    _SLUG_RAW=$(printf '%s' "$REQUEST" \
+      | sed 's/(closes #[0-9]*)//g' \
+      | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' \
+      | sed 's/^-*//;s/-*$//' | cut -c1-40)
+  fi
+  SLUG="$_SLUG_RAW"
+  log "new branch: $SLUG"
+  git fetch "$UPSTREAM_REMOTE"
+  git checkout -b "$SLUG" "$UPSTREAM_REMOTE/$DEFAULT_BRANCH" 2>/dev/null \
+    || git checkout "$SLUG"
+  git commit --allow-empty -m "wip: start"
+  git push -u "$FORK_REMOTE" "$SLUG"
+  _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
+  _PR_BODY_TEXT=$(printf '%s\n\nWrite a short, friendly pull request description (2-3 sentences) for the following work. No headers, no bullet points. Output only the description text.\n\n%s' \
+    "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PR_BODY_PLAIN" \
+    | claude --model claude-opus-4-6 --print 2>/dev/null | head -10)
+  : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
+  _PR_BODY="$(printf '%s\n\nFixes #%s' "$_PR_BODY_TEXT" "$CURRENT_ISSUE")"
+  PR_URL=$(gh pr create --draft \
+    --title "$REQUEST" \
+    --body "$_PR_BODY" \
+    --base "$DEFAULT_BRANCH" \
+    --head "$SLUG" \
+    --repo "$REPO")
+  PR=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
+  log "PR: #$PR opened — starting setup"
+  build_prompt setup \
+"Request: $REQUEST
+Repo: $REPO
+Branch: $SLUG
+PR: $PR
+Fork remote: $FORK_REMOTE
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
+  SESSION_ID=$(claude_start)
+  log "session: $SESSION_ID"
+fi
+log "PR: #$PR  https://github.com/$REPO/pull/$PR"
+
+# ── CI ─────────────────────────────────────────────────────────────────────
+log "checking: ci"
+FAILING=$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null \
+  | jq -r '[.[] | select(.state == "FAILURE" or .state == "ERROR")] | .[0].name // empty' \
+  || true)
+
+if [[ -n "$FAILING" ]]; then
+  log "CI failing: $FAILING"
+  RUN_URL=$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null \
+    | jq -r --arg n "$FAILING" '.[] | select(.name == $n) | .link' || true)
+  RUN_ID=$(printf '%s' "$RUN_URL" | grep -oP 'runs/\K[0-9]+' \
+           || printf '%s' "$RUN_URL" | sed 's|.*/runs/\([0-9]*\).*|\1|')
+  FAILURE_LOG=$(gh run view "$RUN_ID" --log-failed 2>&1 | tail -200)
+  CI_THREADS=$(gh api graphql \
+    -F owner="$OWNER" -F repo="$REPO_NAME" -F pr="$PR" \
+    -f query='query($owner:String!,$repo:String!,$pr:Int!){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$pr){
+          reviewThreads(first:100){
+            nodes{
+              id isResolved
+              comments(first:50){
+                nodes{author{login} body url createdAt databaseId}
+              }
+            }
+          }
+        }
+      }
+    }' \
+    | jq --arg user "$GH_USER" --arg check "$FAILING" '[
+        .data.repository.pullRequest.reviewThreads.nodes[]
+        | select(.isResolved == false)
+        | select(
+            (.comments.nodes | last | .author.login) != $user
+          )
+        | select(
+            (.comments.nodes[].body | ascii_downcase | contains($check | ascii_downcase))
+            or (.comments.nodes[].body | ascii_downcase | contains("ci"))
+            or (.comments.nodes[].body | ascii_downcase | contains("lint"))
+            or (.comments.nodes[].body | ascii_downcase | contains("format"))
+          )
+        | {
+            first_author: .comments.nodes[0].author.login,
+            first_body:   .comments.nodes[0].body,
+            last_author:  (.comments.nodes | last | .author.login),
+            last_body:    (.comments.nodes | last | .body),
+            url:          .comments.nodes[0].url
+          }
+      ]' 2>/dev/null || echo "[]")
+  build_prompt ci \
+"PR: $PR
+Repo: $REPO
+Branch: $SLUG
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
+Failing check: $FAILING
+
+Failure log (last 200 lines):
+$FAILURE_LOG
+
+Review threads related to this CI failure (JSON — may be empty):
+$CI_THREADS"
+  claude_run
+  log "CI fix done"
+  exec bash "$0" "$WORK_DIR"
+fi
+
+# ── Review-level feedback (non-inline "Request changes" body) ─────────────
+log "checking: review feedback"
+REVIEW_FEEDBACK=$(gh pr view "$PR" --repo "$REPO" --json reviews \
+  | jq -r --arg user "$GH_USER" --arg owner "$OWNER" '
+    [ .reviews[]
+      | select(.author.login == $owner)
+      | select(.state == "CHANGES_REQUESTED")
+      | select(.body != "")
+    ] | last | .body // empty')
+
+if [[ -n "$REVIEW_FEEDBACK" ]]; then
+  log "review feedback from $OWNER"
+  build_prompt task \
+"PR: $PR
+Repo: $REPO
+Branch: $SLUG
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
+
+Task title: Address review feedback from $OWNER
+Task description: $OWNER submitted a review requesting changes with the following feedback. Address it, commit, and push.
+
+Review feedback:
+$REVIEW_FEEDBACK"
+  claude_run
+  log "review feedback done"
+  exec bash "$0" "$WORK_DIR"
+fi
+
+# ── Threads ────────────────────────────────────────────────────────────────
+log "checking: threads"
+THREADS=$(gh api graphql \
+  -F owner="$OWNER" -F repo="$REPO_NAME" -F pr="$PR" \
+  -f query='query($owner:String!,$repo:String!,$pr:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$pr){
+        reviewThreads(first:100){
+          nodes{
+            id isResolved
+            comments(first:50){
+              nodes{author{login} body url createdAt databaseId}
+            }
+          }
+        }
+      }
+    }
+  }' \
+  | jq --arg user "$GH_USER" '{
+      threads: [
+        .data.repository.pullRequest.reviewThreads.nodes[]
+        | select(.isResolved == false)
+        | select(
+            (.comments.nodes | last | .author.login) != $user
+          )
+        | {
+            id,
+            is_bot: (.comments.nodes[0].author.login | endswith("[bot]")),
+            first_author: .comments.nodes[0].author.login,
+            first_db_id:  .comments.nodes[0].databaseId,
+            first_body:   .comments.nodes[0].body,
+            last_author:  (.comments.nodes | last | .author.login),
+            last_body:    (.comments.nodes | last | .body),
+            url:          .comments.nodes[0].url,
+            total:        (.comments.nodes | length)
+          }
+      ]
+    }')
+
+THREAD_COUNT=$(printf '%s' "$THREADS" | jq '.threads | length')
+if [[ "$THREAD_COUNT" -gt 0 ]]; then
+  log "unresolved threads: $THREAD_COUNT"
+  build_prompt comments \
+"PR: $PR
+Repo: $REPO
+Owner: $OWNER
+Repo name: $REPO_NAME
+Branch: $SLUG
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
+GitHub user: $GH_USER
+
+Unresolved threads (JSON):
+$THREADS"
+  claude_run
+  log "threads done"
+  exec bash "$0" "$WORK_DIR"
+fi
+
+# ── Task ───────────────────────────────────────────────────────────────────
+log "checking: tasks"
+_QUEUE_BODY=$(gh pr view "$PR" --repo "$REPO" --json body \
+  | jq -r '.body' \
+  | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
+  | { grep '^- \[ \]' || true; } \
+  | sed 's/^- \[ \] //; s/ \*\*→ next\*\*//')
+# Prioritise: Fix CI: → PR comment: → everything else
+PENDING=$(printf '%s' "$_QUEUE_BODY" | { grep '^\[PR comment:' || true; } | head -1)
+[[ -z "$PENDING" ]] && PENDING=$(printf '%s' "$_QUEUE_BODY" | head -1)
+
+if [[ -n "$PENDING" ]]; then
+  log "task: $PENDING"
+  build_prompt task \
+"PR: $PR
+Repo: $REPO
+Branch: $SLUG
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
+
+Task title: $PENDING"
+  claude_run
+  log "task done"
+  exec bash "$0" "$WORK_DIR"
+fi
+
+# ── Promote or merge ───────────────────────────────────────────────────────
+log "checking: review status"
+IS_DRAFT=$(gh pr view "$PR" --repo "$REPO" --json isDraft --jq .isDraft)
+
+if [[ "$IS_DRAFT" == "true" ]]; then
+  log "PR #$PR work complete — marking ready, requesting review from $OWNER"
+  gh pr ready "$PR" --repo "$REPO"
+  gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
+  exit 2
+fi
+
+_REVIEWS_JSON=$(gh pr view "$PR" --repo "$REPO" --json reviews)
+APPROVED=$(printf '%s' "$_REVIEWS_JSON" \
+  | jq -r --arg owner "$OWNER" \
+    '[.reviews[] | select(.author.login == $owner and .state == "APPROVED")] | length > 0')
+
+if [[ "$APPROVED" == "true" ]]; then
+  log "PR #$PR approved by $OWNER — merging"
+  gh pr merge "$PR" --repo "$REPO" --squash --auto 2>/dev/null \
+    || gh pr merge "$PR" --repo "$REPO" --squash
+  log "PR #$PR merged — cleaning up"
+  rm -f "$STATE_FILE"
+  git checkout "$DEFAULT_BRANCH"
+  git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
+  git branch -d "$SLUG" 2>/dev/null || true
+  exec bash "$0" "$WORK_DIR"
+fi
+
+LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
+  | jq -r --arg owner "$OWNER" \
+    '[.reviews[] | select(.author.login == $owner)] | last | .state // "NONE"')
+
+if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
+  log "PR #$PR: changes requested by $OWNER — all addressed, re-requesting review"
+  gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
+  exit 2
+fi
+
+# ── No work ────────────────────────────────────────────────────────────────
+log "no work"
+exit 2

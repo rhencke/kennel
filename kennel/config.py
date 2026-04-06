@@ -33,7 +33,8 @@ class Config:
             work_dir=Path(os.environ["KENNEL_WORK_DIR"]).expanduser().resolve(),
             work_script=Path(
                 os.environ.get(
-                    "KENNEL_WORK_SCRIPT", "~/.claude/skills/fido/work.sh"
+                    "KENNEL_WORK_SCRIPT",
+                    str(Path(__file__).resolve().parent.parent / "work.sh"),
                 )
             )
             .expanduser()
