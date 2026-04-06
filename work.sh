@@ -173,7 +173,9 @@ if [[ -n "$CURRENT_ISSUE" ]]; then
 fi
 
 # ── Find next issue if needed ──────────────────────────────────────────────
+_NEW_ISSUE=false
 if [[ -z "$CURRENT_ISSUE" ]]; then
+  _NEW_ISSUE=true
   log "finding next eligible issue"
   _QUERY_RAW=$(gh api graphql \
     -F owner="$OWNER" -F repo="$REPO_NAME" -F login="$GH_USER" \
@@ -211,13 +213,18 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
   NEXT_TITLE=$(echo "$NEXT" | cut -f2-)
   log "starting issue #$CURRENT_ISSUE: $NEXT_TITLE"
   jq -n --argjson issue "$CURRENT_ISSUE" '{issue: $issue}' > "$STATE_FILE"
-  _PICKUP_PLAIN="Picking up issue: $NEXT_TITLE"
-  _PICKUP_MSG=$(printf '%s\n\nRewrite the following GitHub issue comment in character as Fido. Keep it to 1-2 sentences. Output only the comment text, no quotes, no explanation.\n\n%s' \
-    "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PICKUP_PLAIN" \
-    | claude --model claude-opus-4-6 --print 2>/dev/null | head -3)
-  : "${_PICKUP_MSG:=$_PICKUP_PLAIN}"
-  gh issue comment "$CURRENT_ISSUE" --repo "$REPO" \
-    --body "$_PICKUP_MSG" 2>/dev/null || true
+  # Only post pickup comment for genuinely new issues (not restarts)
+  _ALREADY_COMMENTED=$(gh api "repos/$REPO/issues/$CURRENT_ISSUE/comments" \
+    --jq "[.[] | select(.user.login == \"$GH_USER\")] | length" 2>/dev/null || echo "0")
+  if [[ "$_ALREADY_COMMENTED" == "0" ]]; then
+    _PICKUP_PLAIN="Picking up issue: $NEXT_TITLE"
+    _PICKUP_MSG=$(printf '%s\n\nRewrite the following GitHub issue comment in character as Fido. Keep it to 1-2 sentences. Output only the comment text, no quotes, no explanation.\n\n%s' \
+      "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PICKUP_PLAIN" \
+      | claude --model claude-opus-4-6 --print 2>/dev/null | head -3)
+    : "${_PICKUP_MSG:=$_PICKUP_PLAIN}"
+    gh issue comment "$CURRENT_ISSUE" --repo "$REPO" \
+      --body "$_PICKUP_MSG" 2>/dev/null || true
+  fi
 fi
 
 # ── Load issue title ───────────────────────────────────────────────────────
@@ -232,7 +239,11 @@ EXISTING_PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
 EXISTING_PR_STATE=$(printf '%s' "$_PR_JSON" | jq -r '.state // empty')
 EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
 
-if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
+if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "CLOSED" ]]; then
+  log "PR #$EXISTING_PR closed without merge — creating fresh PR"
+  EXISTING_PR=""
+  EXISTING_SLUG=""
+elif [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
   log "PR #$EXISTING_PR already merged — closing issue #$CURRENT_ISSUE"
   gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
