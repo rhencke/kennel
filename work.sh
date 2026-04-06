@@ -574,7 +574,7 @@ if [[ "$IS_DRAFT" == "true" ]]; then
   log "PR #$PR work complete — marking ready, requesting review from $OWNER"
   gh pr ready "$PR" --repo "$REPO"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  break
+  continue  # re-check — approval may already exist
 fi
 
 # ── No work ────────────────────────────────────────────────────────────────
