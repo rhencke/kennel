@@ -245,10 +245,9 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   git fetch "$UPSTREAM_REMOTE"
   git checkout "$SLUG" 2>/dev/null \
     || git checkout -b "$SLUG" --track "$FORK_REMOTE/$SLUG"
-  # Check if PR has any tasks — if empty, run setup instead of resume
-  _HAS_TASKS=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body 2>/dev/null \
-    | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
-    | { grep '^- \[' || true; } | wc -l)
+  # Check if tasks.json has pending tasks — if empty, run setup
+  _HAS_TASKS=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+    | jq -r '[.[] | select(.status == "pending")] | length' 2>/dev/null || echo "0")
   if [[ "$_HAS_TASKS" -eq 0 ]]; then
     log "PR #$PR has no tasks — running setup"
     build_prompt setup \
@@ -258,14 +257,9 @@ Branch: $SLUG
 PR: $PR
 Fork remote: $FORK_REMOTE
 Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
-  else
-    build_prompt resume \
-"PR: $PR
-Repo: $REPO
-Branch: $SLUG"
+    SESSION_ID=$(claude_start)
+    log "session: $SESSION_ID"
   fi
-  SESSION_ID=$(claude_start)
-  log "session: $SESSION_ID"
 else
   # Generate slug via Haiku
   _SLUG_RAW=$(printf 'Output ONLY a git branch name: 2-4 lowercase words separated by hyphens, no issue numbers, summarising this request. No explanation, no punctuation, just the branch name.\n\nRequest: %s' "$REQUEST" \
@@ -497,14 +491,12 @@ fi
 
 # ── Task ───────────────────────────────────────────────────────────────────
 log "checking: tasks"
-_QUEUE_BODY=$(gh pr view "$PR" --repo "$REPO" --json body \
-  | jq -r '.body' \
-  | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
-  | { grep '^- \[ \]' || true; } \
-  | sed 's/^- \[ \] //; s/ \*\*→ next\*\*//')
-# Prioritise: Fix CI: → PR comment: → everything else
-PENDING=$(printf '%s' "$_QUEUE_BODY" | { grep '^\[PR comment:' || true; } | head -1)
-[[ -z "$PENDING" ]] && PENDING=$(printf '%s' "$_QUEUE_BODY" | head -1)
+_TASK_JSON=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null || echo "[]")
+# Prioritise: PR comment: → everything else
+PENDING=$(printf '%s' "$_TASK_JSON" | jq -r '
+  [.[] | select(.status == "pending")] |
+  (map(select(.title | startswith("[PR comment:"))) | .[0].title // empty) //
+  (.[0].title // empty)' 2>/dev/null || true)
 
 if [[ -n "$PENDING" ]]; then
   log "task: $PENDING"
