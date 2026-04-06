@@ -73,7 +73,7 @@ if entry not in cfg['hooks']['PostCompact']:
 
 # PostToolUse hook for task mutations → sync work queue
 sync_entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': sys.argv[3]}]}
-for tool in ('TaskCreate', 'TaskUpdate', 'TaskDelete'):
+for tool in ('TaskCreate', 'TaskUpdate', 'TaskDelete', 'TodoWrite', 'TodoRead'):
     key = 'PostToolUse'
     cfg.setdefault('hooks', {}).setdefault(key, [])
     tool_entry = {'matcher': tool, 'hooks': [{'type': 'command', 'command': sys.argv[3]}]}
