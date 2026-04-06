@@ -291,6 +291,22 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
 fi
 log "PR: #$PR  https://github.com/$REPO/pull/$PR"
 
+# ── Seed tasks.json from PR body work queue ───────────────────────────────
+log "seeding tasks.json from PR body"
+_SEED_BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body 2>/dev/null || true)
+_SEED_TASKS=$(printf '%s' "$_SEED_BODY" \
+  | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
+  | { grep '^- \[ \]' || true; } \
+  | sed 's/^- \[ \] //; s/ \*\*→ next\*\*//')
+if [[ -n "$_SEED_TASKS" ]]; then
+  while IFS= read -r task_title; do
+    [[ -z "$task_title" ]] && continue
+    bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" add "$task_title" 2>/dev/null || true
+  done <<< "$_SEED_TASKS"
+  bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
+  log "seeded $(echo "$_SEED_TASKS" | wc -l) tasks"
+fi
+
 # ── CI ─────────────────────────────────────────────────────────────────────
 log "checking: ci"
 FAILING=$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null \

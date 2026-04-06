@@ -27,6 +27,8 @@ case "$CMD" in
 import json, sys, time
 title, desc = sys.argv[1], sys.argv[2]
 with open(sys.argv[3]) as f: tasks = json.load(f)
+if any(t['title'] == title and t['status'] != 'completed' for t in tasks):
+    sys.exit(0)  # already exists
 tasks.append({
     'id': str(int(time.time() * 1000)),
     'title': title,
