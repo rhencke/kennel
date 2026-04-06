@@ -301,7 +301,7 @@ def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = No
     )
     try:
         result = subprocess.run(
-            ["claude", "--model", "claude-haiku-4-5-20251001", "--print", "-p", prompt],
+            ["claude", "--model", "claude-opus-4-6", "--print", "-p", prompt],
             capture_output=True,
             text=True,
             timeout=15,
