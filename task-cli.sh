@@ -26,12 +26,6 @@ case "$CMD" in
       python3 -c "
 import json, sys, time
 title, desc = sys.argv[1], sys.argv[2]
-# Reject garbage titles
-skip_prefixes = ('PR #', 'New issue #', 'Review on PR', 'CI failure:')
-if any(title.startswith(p) for p in skip_prefixes):
-    sys.exit(0)
-if len(title.strip()) < 5:
-    sys.exit(0)
 with open(sys.argv[3]) as f: tasks = json.load(f)
 if any(t['title'] == title and t['status'] != 'completed' for t in tasks):
     sys.exit(0)  # already exists
