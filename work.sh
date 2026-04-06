@@ -400,16 +400,16 @@ fi
 
 # ── Review-level feedback (non-inline "Request changes" body) ─────────────
 log "checking: review feedback"
-REVIEW_FEEDBACK=$(gh pr view "$PR" --repo "$REPO" --json reviews \
+REVIEW_FEEDBACK=$(gh pr view "$PR" --repo "$REPO" --json reviews,commits \
   | jq -r --arg owner "$OWNER" '
-    ([ .reviews[] | select(.author.login == $owner) ] | last | .state // "NONE") as $latest
-    | if $latest != "CHANGES_REQUESTED" then empty
+    ([ .reviews[] | select(.author.login == $owner) ] | last) as $review
+    | if $review.state != "CHANGES_REQUESTED" then empty
       else
-        [ .reviews[]
-          | select(.author.login == $owner)
-          | select(.state == "CHANGES_REQUESTED")
-          | select(.body != "")
-        ] | last | .body // empty
+        # Skip if there are commits after the review
+        (.commits | last | .committedDate // "") as $last_commit
+        | if ($last_commit > ($review.submittedAt // "")) then empty
+          else $review.body // empty
+          end
       end' 2>/dev/null || true)
 
 if [[ -n "$REVIEW_FEEDBACK" ]]; then
