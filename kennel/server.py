@@ -8,7 +8,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from kennel.config import Config
-from kennel.events import dispatch, launch_worker, update_task_list
+from kennel.events import dispatch, launch_worker, reply_to_comment, update_task_list
 
 log = logging.getLogger("kennel")
 
@@ -52,10 +52,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Respond immediately — don't block on dispatch
         self._respond(200, "ok")
 
-        # Dispatch: update task list + launch worker
-        prompt = dispatch(event, payload, self.config)
-        if prompt:
-            update_task_list(prompt, self.config)
+        # Dispatch: reply (if comment), update task list, launch worker
+        action = dispatch(event, payload, self.config)
+        if action:
+            if action.reply_to:
+                reply_to_comment(action, self.config)
+            update_task_list(action.prompt, self.config)
             launch_worker(self.config)
 
     def do_GET(self) -> None:
