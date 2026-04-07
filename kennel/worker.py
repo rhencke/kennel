@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from kennel import hooks
+from kennel.github import GitHub
+
 log = logging.getLogger("kennel")
 
 
@@ -17,11 +20,32 @@ class LockHeld(Exception):
 
 
 @dataclass
+class RepoContext:
+    """GitHub repo metadata discovered at worker startup."""
+
+    repo: str  # "owner/repo"
+    owner: str
+    repo_name: str
+    gh_user: str  # authenticated GitHub username
+    default_branch: str
+
+
+@dataclass
 class WorkerContext:
     work_dir: Path
     git_dir: Path
     fido_dir: Path
     lock_fd: IO[str]
+
+
+def _sub_dir() -> Path:
+    """Return the path to the sub/ skill-instructions directory."""
+    return Path(__file__).parent.parent / "sub"
+
+
+def _sync_script() -> Path:
+    """Return the path to sync-tasks.sh."""
+    return Path(__file__).parent.parent / "sync-tasks.sh"
 
 
 def resolve_git_dir(work_dir: Path) -> Path:
@@ -69,6 +93,66 @@ def create_context(work_dir: Path) -> WorkerContext:
     )
 
 
+def discover_repo_context(work_dir: Path, gh: GitHub) -> RepoContext:
+    """Discover repo metadata for work_dir using the GitHub API."""
+    repo = gh.get_repo_info(cwd=work_dir)
+    owner, repo_name = repo.split("/", 1)
+    gh_user = gh.get_user()
+    default_branch = gh.get_default_branch(cwd=work_dir)
+    return RepoContext(
+        repo=repo,
+        owner=owner,
+        repo_name=repo_name,
+        gh_user=gh_user,
+        default_branch=default_branch,
+    )
+
+
+def create_compact_script(fido_dir: Path) -> Path:
+    """Write the PostCompact hook script that re-reads skill instructions.
+
+    Returns the path to the created script.
+    """
+    sub_dir = _sub_dir()
+    script_path = fido_dir / "compact.sh"
+    script_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '[fido PostCompact] Re-reading skill instructions"
+        " after context compression.\\n\\n'\n"
+        f'for f in "{sub_dir}"/*.md; do\n'
+        '  printf \'## %s\\n\\n\' "$(basename "$f")"\n'
+        '  cat "$f"\n'
+        "  printf '\\n\\n'\n"
+        "done\n"
+    )
+    script_path.chmod(0o755)
+    return script_path
+
+
+def setup_hooks(work_dir: Path, fido_dir: Path) -> tuple[str, str]:
+    """Set up PostCompact and PostToolUse hooks for a fido session.
+
+    Creates the compact script, registers hooks in settings.local.json,
+    and ensures the file is git-excluded.
+
+    Returns (compact_cmd, sync_cmd).
+    """
+    hooks.ensure_gitexcluded(work_dir)
+    compact_script = create_compact_script(fido_dir)
+    compact_cmd = f"bash {compact_script}"
+    sync_cmd = f"bash {_sync_script()} {work_dir} &"
+    hooks.add_hooks(work_dir, compact_cmd, sync_cmd)
+    return compact_cmd, sync_cmd
+
+
+def teardown_hooks(
+    work_dir: Path, fido_dir: Path, compact_cmd: str, sync_cmd: str
+) -> None:
+    """Remove hooks and the compact script created by setup_hooks."""
+    hooks.remove_hooks(work_dir, compact_cmd, sync_cmd)
+    (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+
 def run(work_dir: Path) -> int:
     """Run one iteration of the worker loop.
 
@@ -82,5 +166,21 @@ def run(work_dir: Path) -> int:
         log.warning("another fido is running — exiting")
         return 2
     log.info("worker started for %s (git_dir=%s)", work_dir, ctx.git_dir)
-    # TODO: main loop implemented in subsequent tasks
+
+    gh = GitHub()
+    repo_ctx = discover_repo_context(work_dir, gh)
+    log.info(
+        "repo=%s user=%s default_branch=%s",
+        repo_ctx.repo,
+        repo_ctx.gh_user,
+        repo_ctx.default_branch,
+    )
+
+    compact_cmd, sync_cmd = setup_hooks(work_dir, ctx.fido_dir)
+    try:
+        # TODO: main loop implemented in subsequent tasks
+        pass
+    finally:
+        teardown_hooks(work_dir, ctx.fido_dir, compact_cmd, sync_cmd)
+
     return 0
