@@ -7,66 +7,74 @@ import json
 import sys
 from pathlib import Path
 
-from kennel import github, tasks
+from kennel import github as _github_mod
+from kennel import tasks as _tasks_mod
 
 
-def _resolve_thread_if_ours(thread: dict) -> None:
-    """Resolve the review thread if the last reply came from us."""
-    repo = thread.get("repo", "")
-    pr = thread.get("pr")
-    comment_id = thread.get("comment_id")
-    if not (repo and pr and comment_id):
-        return
+class Cmd:
+    """CLI command handler with injectable dependencies for testability."""
 
-    try:
-        us = github.get_user()
-        comments = github.get_pull_comments(repo, pr)
-        thread_comments = sorted(
-            [
-                c
-                for c in comments
-                if c.get("id") == comment_id or c.get("in_reply_to_id") == comment_id
-            ],
-            key=lambda c: c.get("created_at", ""),
-        )
-        if not thread_comments:
+    def __init__(self, *, github=_github_mod, tasks=_tasks_mod) -> None:
+        self._github = github
+        self._tasks = tasks
+
+    def _resolve_thread_if_ours(self, thread: dict) -> None:
+        """Resolve the review thread if the last reply came from us."""
+        repo = thread.get("repo", "")
+        pr = thread.get("pr")
+        comment_id = thread.get("comment_id")
+        if not (repo and pr and comment_id):
             return
-        last_author = thread_comments[-1].get("user", {}).get("login", "")
-        if last_author != us:
-            print(
-                f"thread has new replies from {last_author} — not resolving",
-                file=sys.stderr,
+
+        try:
+            us = self._github.get_user()
+            comments = self._github.get_pull_comments(repo, pr)
+            thread_comments = sorted(
+                [
+                    c
+                    for c in comments
+                    if c.get("id") == comment_id
+                    or c.get("in_reply_to_id") == comment_id
+                ],
+                key=lambda c: c.get("created_at", ""),
             )
-            return
-
-        owner, repo_name = repo.split("/", 1)
-        data = github.get_review_threads(owner, repo_name, pr)
-        threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-        for t in threads:
-            if t.get("isResolved"):
-                continue
-            nodes = t.get("comments", {}).get("nodes", [])
-            if nodes and nodes[0].get("databaseId") == comment_id:
-                github.resolve_thread(t["id"])
-                print(f"thread resolved: {t['id']}", file=sys.stderr)
+            if not thread_comments:
                 return
-    except Exception as exc:  # noqa: BLE001
-        print(f"thread resolution skipped: {exc}", file=sys.stderr)
+            last_author = thread_comments[-1].get("user", {}).get("login", "")
+            if last_author != us:
+                print(
+                    f"thread has new replies from {last_author} — not resolving",
+                    file=sys.stderr,
+                )
+                return
 
+            owner, repo_name = repo.split("/", 1)
+            data = self._github.get_review_threads(owner, repo_name, pr)
+            threads = data["data"]["repository"]["pullRequest"]["reviewThreads"][
+                "nodes"
+            ]
+            for t in threads:
+                if t.get("isResolved"):
+                    continue
+                nodes = t.get("comments", {}).get("nodes", [])
+                if nodes and nodes[0].get("databaseId") == comment_id:
+                    self._github.resolve_thread(t["id"])
+                    print(f"thread resolved: {t['id']}", file=sys.stderr)
+                    return
+        except Exception as exc:  # noqa: BLE001
+            print(f"thread resolution skipped: {exc}", file=sys.stderr)
 
-def cmd_add(work_dir: Path, title: str, description: str) -> None:
-    tasks.add_task(work_dir, title=title, description=description)
+    def add(self, work_dir: Path, title: str, description: str) -> None:
+        self._tasks.add_task(work_dir, title=title, description=description)
 
+    def complete(self, work_dir: Path, title: str) -> None:
+        thread = self._tasks.complete_by_title(work_dir, title)
+        if thread:
+            self._resolve_thread_if_ours(thread)
 
-def cmd_complete(work_dir: Path, title: str) -> None:
-    thread = tasks.complete_by_title(work_dir, title)
-    if thread:
-        _resolve_thread_if_ours(thread)
-
-
-def cmd_list(work_dir: Path) -> None:
-    result = tasks.list_tasks(work_dir)
-    print(json.dumps(result, indent=2))
+    def list(self, work_dir: Path) -> None:
+        result = self._tasks.list_tasks(work_dir)
+        print(json.dumps(result, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,10 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    cmd = Cmd()
 
     if args.command == "add":
-        cmd_add(args.work_dir, args.title, args.description)
+        cmd.add(args.work_dir, args.title, args.description)
     elif args.command == "complete":
-        cmd_complete(args.work_dir, args.title)
+        cmd.complete(args.work_dir, args.title)
     elif args.command == "list":
-        cmd_list(args.work_dir)
+        cmd.list(args.work_dir)

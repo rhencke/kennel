@@ -13,7 +13,7 @@ class TestMain:
         git_dir = tmp_path / ".git" / "fido"
         git_dir.mkdir(parents=True)
 
-        with patch("kennel.cli.tasks.add_task") as mock_add:
+        with patch("kennel.tasks.add_task") as mock_add:
             main(["task", str(tmp_path), "add", "my task"])
 
         mock_add.assert_called_once()
@@ -49,6 +49,6 @@ class TestMain:
 
         with (
             patch("sys.argv", ["kennel", "task", str(tmp_path), "list"]),
-            patch("kennel.cli.tasks.list_tasks", return_value=[]),
+            patch("kennel.tasks.list_tasks", return_value=[]),
         ):
             main()  # should not raise
