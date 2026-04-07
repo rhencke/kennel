@@ -101,10 +101,10 @@ class GH:
 
     def get_review_comments(
         self, repo: str, pr: int | str, review_id: int | str
-    ) -> list[int]:
-        """Return list of comment IDs from a review."""
+    ) -> list[tuple[int, str]]:
+        """Return list of (comment_id, body) pairs from a review."""
         data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
-        return [c["id"] for c in data]
+        return [(c["id"], c.get("body", "")) for c in data]
 
     def find_pr(
         self, repo: str, issue_number: int | str, user: str
@@ -451,8 +451,8 @@ class GitHub:
 
     def get_review_comments(
         self, repo: str, pr: int | str, review_id: int | str
-    ) -> list[int]:
-        """Return list of comment IDs from a review."""
+    ) -> list[tuple[int, str]]:
+        """Return list of (comment_id, body) pairs from a review."""
         return self._gh.get_review_comments(repo, pr, review_id)
 
     def reply_to_review_comment(

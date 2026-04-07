@@ -231,15 +231,16 @@ def maybe_react(
 
 def reply_to_comment(
     action: Action, config: Config, repo_cfg: RepoConfig
-) -> tuple[str, str]:
+) -> tuple[bool, str, str]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (triage_category, task_title) so the caller can create the right task.
+    Returns (posted, triage_category, task_title).
+    posted is True only when the reply was successfully sent to GitHub.
     Uses a per-comment lockfile to prevent races with work.sh.
     """
     info = action.reply_to
     if not info or not action.comment_body:
-        return ("ACT", action.comment_body or action.prompt)
+        return (False, "ACT", action.comment_body or action.prompt)
 
     # Per-comment lock — prevents kennel and work.sh from both replying
     import fcntl
@@ -253,7 +254,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return ("ACT", action.comment_body[:80])
+            return (False, "ACT", action.comment_body[:80])
     else:
         lock_fd = None
 
@@ -305,10 +306,12 @@ def reply_to_comment(
         )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+    posted = False
     try:
         get_github().reply_to_review_comment(
             info["repo"], info["pr"], body, info["comment_id"]
         )
+        posted = True
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
@@ -324,7 +327,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (category, title)
+    return (posted, category, title)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -348,28 +351,32 @@ def reply_to_review(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
     try:
-        comment_ids = get_github().get_review_comments(
+        comments = get_github().get_review_comments(
             info["repo"], info["pr"], info["review_id"]
         )
     except Exception:
         log.exception("failed to fetch review comments")
         return
 
-    if not comment_ids:
+    if not comments:
         log.info("no inline comments in review")
         return
 
-    skipped = [cid for cid in comment_ids if already_replied and cid in already_replied]
+    skipped = [
+        cid for cid, _body in comments if already_replied and cid in already_replied
+    ]
     todo = [
-        cid for cid in comment_ids if not already_replied or cid not in already_replied
+        (cid, body)
+        for cid, body in comments
+        if not already_replied or cid not in already_replied
     ]
     if skipped:
         log.info("skipping %d already-replied comments", len(skipped))
     if not todo:
         return
     log.info("replying to %d review comments", len(todo))
-    for cid in todo:
-        reply_to_comment(
+    for cid, body in todo:
+        posted, *_ = reply_to_comment(
             Action(
                 prompt=action.prompt,
                 reply_to={
@@ -377,11 +384,12 @@ def reply_to_review(
                     "pr": info["pr"],
                     "comment_id": cid,
                 },
+                comment_body=body,
             ),
             config,
             repo_cfg,
         )
-        if already_replied is not None:
+        if posted and already_replied is not None:
             already_replied.add(cid)
 
 

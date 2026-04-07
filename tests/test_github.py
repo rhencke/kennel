@@ -308,9 +308,15 @@ class TestGitHubClass:
     def test_get_review_comments_delegates(self) -> None:
         gh = self._github()
         mock_resp = MagicMock()
-        mock_resp.json.return_value = [{"id": 1}, {"id": 2}]
+        mock_resp.json.return_value = [
+            {"id": 1, "body": "fix this"},
+            {"id": 2, "body": "nit"},
+        ]
         with patch.object(gh._gh._s, "get", return_value=mock_resp):
-            assert gh.get_review_comments("o/r", 10, 99) == [1, 2]
+            assert gh.get_review_comments("o/r", 10, 99) == [
+                (1, "fix this"),
+                (2, "nit"),
+            ]
 
     def test_reply_to_review_comment_delegates(self) -> None:
         gh = self._github()
@@ -544,10 +550,13 @@ class TestGHClass:
     def test_get_review_comments(self) -> None:
         gh = self._gh()
         mock_resp = MagicMock()
-        mock_resp.json.return_value = [{"id": 101}, {"id": 102}]
+        mock_resp.json.return_value = [
+            {"id": 101, "body": "nit"},
+            {"id": 102, "body": "fix"},
+        ]
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_review_comments("o/r", 10, 99)
-        assert result == [101, 102]
+        assert result == [(101, "nit"), (102, "fix")]
 
     def test_get_review_comments_empty(self) -> None:
         gh = self._gh()

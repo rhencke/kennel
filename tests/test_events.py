@@ -404,7 +404,8 @@ class TestReplyToComment:
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert not posted
         assert cat == "ACT"
 
     def test_no_comment_body_returns_act(self, tmp_path: Path) -> None:
@@ -413,7 +414,8 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert not posted
         assert cat == "ACT"
 
     def test_full_flow_act(self, tmp_path: Path) -> None:
@@ -443,7 +445,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ACT"
         assert "logging" in title.lower()
 
@@ -468,7 +471,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ASK"
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
@@ -492,7 +496,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ANSWER"
 
     def test_full_flow_defer(self, tmp_path: Path) -> None:
@@ -516,7 +521,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "DEFER"
 
     def test_full_flow_dump(self, tmp_path: Path) -> None:
@@ -540,7 +546,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "DUMP"
 
     def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
@@ -565,7 +572,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
     def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
@@ -591,7 +599,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ACT"
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
@@ -611,7 +620,8 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            assert not posted  # locked — no reply sent
             assert cat == "ACT"  # returns without posting
         finally:
             lock_fd.close()
@@ -638,7 +648,8 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
         assert cat == "ACT"
 
 
@@ -679,7 +690,7 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [100, 200]
+        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
@@ -700,7 +711,7 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [100, 200]
+        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
@@ -1235,7 +1246,10 @@ class TestReplyToCommentElseBranch:
                 patch("subprocess.run", side_effect=fake_run),
                 patch("kennel.events.get_github", return_value=MagicMock()),
             ):
-                cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+                posted, cat, title = reply_to_comment(
+                    action, cfg, self._repo_cfg(tmp_path)
+                )
+        assert posted
         assert cat == "UNKNOWN_CAT"
 
     def test_gh_post_exception_caught(self, tmp_path: Path) -> None:
@@ -1262,9 +1276,10 @@ class TestReplyToCommentElseBranch:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
-            cat, title = reply_to_comment(
+            posted, cat, title = reply_to_comment(
                 action, cfg, self._repo_cfg(tmp_path)
             )  # must not raise
+        assert not posted  # post failed
         assert cat == "ACT"
 
 
@@ -1301,7 +1316,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [500]
+        mock_gh.get_review_comments.return_value = [(500, "please fix")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
@@ -1310,3 +1325,34 @@ class TestReplyToReviewAlreadyRepliedTracking:
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
             )
         assert 500 in already
+
+    def test_does_not_add_to_already_replied_on_post_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Dedup set is NOT updated when the GitHub post fails."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="review",
+            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 901},
+        )
+        already: set[int] = set()
+
+        def fake_run(args, **kwargs):
+            if "claude" in args:
+                text = args[-1]
+                if "Triage" in text:
+                    return _make_completed_run("ACT: fix it\n")
+                return _make_completed_run("Will fix.\n")
+            return _make_completed_run("")
+
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = [(501, "please fix")]
+        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
+            reply_to_review(
+                action, cfg, self._repo_cfg(tmp_path), already_replied=already
+            )
+        assert 501 not in already  # post failed — should not be marked as replied
