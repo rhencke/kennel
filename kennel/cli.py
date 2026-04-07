@@ -10,7 +10,7 @@ from pathlib import Path
 from kennel import tasks as _tasks_mod
 from kennel.github import GitHub
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 
 class Cmd:

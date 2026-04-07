@@ -21,7 +21,7 @@ from kennel.events import (
     reply_to_review,
 )
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 
 _replied_comments: set[int] = set()

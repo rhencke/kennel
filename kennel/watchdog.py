@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 _STALE_MINUTES = 10
 _KILL_WAIT = 2.0
