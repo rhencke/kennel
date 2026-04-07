@@ -585,7 +585,10 @@ APPROVED=$(printf '%s' "$_REVIEWS_JSON" \
   | jq -r --arg owner "$OWNER" \
     '[.reviews[] | select(.author.login == $owner and .state == "APPROVED")] | length > 0')
 
-if [[ "$APPROVED" == "true" ]]; then
+# Merge only if: approved + not draft + no pending tasks + all threads resolved
+_PENDING_COUNT=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+  | jq -r '[.[] | select(.status == "pending")] | length' 2>/dev/null || echo "0")
+if [[ "$APPROVED" == "true" && "$IS_DRAFT" == "false" && "$_PENDING_COUNT" -eq 0 ]]; then
   MERGE_STATE=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
   if [[ "$MERGE_STATE" == "BLOCKED" ]]; then
     log "PR #$PR approved but merge blocked (CI pending) — enabling auto-merge"
