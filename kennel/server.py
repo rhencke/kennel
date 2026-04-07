@@ -106,8 +106,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                     category, title = None, None
                 else:
-                    category, title = reply_to_comment(action, self.config, repo_cfg)
-                    if cid:
+                    posted, category, title = reply_to_comment(
+                        action, self.config, repo_cfg
+                    )
+                    if cid and posted:
                         _replied_comments.add(cid)
                     handled = True
                 # Create task based on triage result

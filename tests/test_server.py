@@ -210,7 +210,8 @@ class TestProcessAction:
         }
         with (
             patch(
-                "kennel.server.reply_to_comment", return_value=("ACT", "add logging")
+                "kennel.server.reply_to_comment",
+                return_value=(True, "ACT", "add logging"),
             ) as mock_reply,
             patch("kennel.server.create_task") as mock_task,
             patch("kennel.server.launch_worker"),
@@ -239,7 +240,7 @@ class TestProcessAction:
         }
         with (
             patch(
-                "kennel.server.reply_to_comment", return_value=("DUMP", "nope")
+                "kennel.server.reply_to_comment", return_value=(True, "DUMP", "nope")
             ) as mock_reply,
             patch("kennel.server.create_task") as mock_task,
             patch("kennel.server.launch_worker"),
@@ -273,7 +274,8 @@ class TestProcessAction:
 
         with (
             patch(
-                "kennel.server.reply_to_comment", return_value=("DEFER", "big refactor")
+                "kennel.server.reply_to_comment",
+                return_value=(True, "DEFER", "big refactor"),
             ),
             patch("kennel.server.create_task", side_effect=capture_task),
             patch("kennel.server.launch_worker"),

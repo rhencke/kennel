@@ -231,15 +231,16 @@ def maybe_react(
 
 def reply_to_comment(
     action: Action, config: Config, repo_cfg: RepoConfig
-) -> tuple[str, str]:
+) -> tuple[bool, str, str]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (triage_category, task_title) so the caller can create the right task.
+    Returns (posted, triage_category, task_title).
+    posted is True only when the reply was successfully sent to GitHub.
     Uses a per-comment lockfile to prevent races with work.sh.
     """
     info = action.reply_to
     if not info or not action.comment_body:
-        return ("ACT", action.comment_body or action.prompt)
+        return (False, "ACT", action.comment_body or action.prompt)
 
     # Per-comment lock — prevents kennel and work.sh from both replying
     import fcntl
@@ -253,7 +254,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return ("ACT", action.comment_body[:80])
+            return (False, "ACT", action.comment_body[:80])
     else:
         lock_fd = None
 
@@ -305,10 +306,12 @@ def reply_to_comment(
         )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+    posted = False
     try:
         get_github().reply_to_review_comment(
             info["repo"], info["pr"], body, info["comment_id"]
         )
+        posted = True
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
@@ -324,7 +327,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (category, title)
+    return (posted, category, title)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -373,7 +376,7 @@ def reply_to_review(
         return
     log.info("replying to %d review comments", len(todo))
     for cid, body in todo:
-        reply_to_comment(
+        posted, *_ = reply_to_comment(
             Action(
                 prompt=action.prompt,
                 reply_to={
@@ -386,7 +389,7 @@ def reply_to_review(
             config,
             repo_cfg,
         )
-        if already_replied is not None:
+        if posted and already_replied is not None:
             already_replied.add(cid)
 
 
