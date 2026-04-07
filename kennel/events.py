@@ -123,7 +123,8 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
             reply_to=None,  # top-level comments use issues API, not pulls
             comment_body=comment_body,
             is_bot=is_bot,
-            context={"pr_title": issue.get("title", ""), "pr_body": (issue.get("body", "") or "")[:500]},
+            context={"pr_title": issue.get("title", ""), "pr_body": (issue.get("body", "") or "")[:500],
+                      "comment_id": comment_id},
         )
 
     if event == "check_run" and action == "completed":
@@ -157,6 +158,50 @@ def _comment_lock(work_dir: Path, comment_id: int) -> Path:
     lock_dir = work_dir / ".git" / "fido" / "comments"
     lock_dir.mkdir(parents=True, exist_ok=True)
     return lock_dir / f"{comment_id}.lock"
+
+
+def maybe_react(comment_body: str, comment_id: int | str, comment_type: str,
+                 repo: str, config: Config) -> None:
+    """Let Fido decide whether to react to a comment with an emoji.
+
+    comment_type: 'pulls' for review comments, 'issues' for issue comments.
+    """
+    persona_path = Path(config.work_script).parent / "sub" / "persona.md"
+    try:
+        persona = persona_path.read_text()
+    except FileNotFoundError:
+        persona = ""
+
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "claude-opus-4-6", "--print", "-p",
+             f"{persona}\n\n"
+             f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
+             "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
+             "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
+             "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
+             "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
+             "If you wouldn't react, reply NONE."],
+            capture_output=True, text=True, timeout=15,
+        )
+        reaction = result.stdout.strip().lower().split('\n')[0].strip() if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return
+
+    valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
+    if reaction not in valid:
+        log.debug("fido chose not to react (got: %s)", reaction)
+        return
+
+    log.info("fido reacts with %s to comment %s", reaction, comment_id)
+    endpoint = f"repos/{repo}/{comment_type}/comments/{comment_id}/reactions"
+    try:
+        subprocess.run(
+            ["gh", "api", endpoint, "-X", "POST", "-f", f"content={reaction}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        log.exception("failed to post reaction")
 
 
 def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
@@ -275,6 +320,10 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
+
+    # Maybe react
+    maybe_react(comment, info["comment_id"], "pulls",
+                info.get("repo", ""), config)
 
     # For DUMP: also resolve the thread
     if category == "DUMP" and info.get("comment_id"):
@@ -445,6 +494,21 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
         log.info("reply posted")
     except Exception:
         log.exception("failed to post issue comment reply")
+
+    # Maybe react (extract comment_id from context)
+    _issue_comment_id = None
+    if "#" in action.prompt:
+        import re
+        m = re.search(r"#(\d+)", action.prompt)
+        number = m.group(1) if m else ""
+    # Get comment_id from the dispatch payload (stored in context)
+    _cid = (action.context or {}).get("comment_id")
+    if _cid:
+        repo_full = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            capture_output=True, text=True, timeout=10, cwd=str(config.work_dir),
+        ).stdout.strip()
+        maybe_react(comment, _cid, "issues", repo_full, config)
 
     return (category, title)
 
