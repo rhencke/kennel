@@ -73,6 +73,67 @@ class TestTriageContextBlock:
         assert "unknown_key" not in result
         assert "PR: hi" in result
 
+    def test_sibling_threads_rendered(self) -> None:
+        result = triage_context_block(
+            {
+                "sibling_threads": [
+                    {
+                        "path": "src/foo.py",
+                        "line": 10,
+                        "comments": [
+                            {"author": "alice", "body": "why is this here?"},
+                            {"author": "fido", "body": "good catch!"},
+                        ],
+                    }
+                ]
+            }
+        )
+        assert "Sibling threads:" in result
+        assert "src/foo.py:10" in result
+        assert "alice: why is this here?" in result
+        assert "fido: good catch!" in result
+
+    def test_sibling_threads_no_line(self) -> None:
+        result = triage_context_block(
+            {
+                "sibling_threads": [
+                    {
+                        "path": "README.md",
+                        "line": None,
+                        "comments": [{"author": "bob", "body": "typo"}],
+                    }
+                ]
+            }
+        )
+        assert "README.md" in result
+        assert "bob: typo" in result
+
+    def test_sibling_threads_multiple(self) -> None:
+        result = triage_context_block(
+            {
+                "sibling_threads": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "comments": [{"author": "x", "body": "first"}],
+                    },
+                    {
+                        "path": "b.py",
+                        "line": 2,
+                        "comments": [{"author": "y", "body": "second"}],
+                    },
+                ]
+            }
+        )
+        assert "a.py:1" in result
+        assert "b.py:2" in result
+        assert "x: first" in result
+        assert "y: second" in result
+
+    def test_empty_sibling_threads_omitted(self) -> None:
+        result = triage_context_block({"sibling_threads": []})
+        assert "Sibling threads:" not in result
+
 
 # ── triage_prompt ─────────────────────────────────────────────────────────────
 
