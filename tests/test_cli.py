@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -88,7 +89,7 @@ class TestCmdComplete:
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
-    def test_completes_task_with_thread_resolves(self, tmp_path: Path) -> None:
+    def test_completes_task_with_thread_resolves(self, tmp_path: Path, caplog) -> None:
         _task_file(tmp_path)
         from kennel.tasks import add_task
 
@@ -129,11 +130,15 @@ class TestCmdComplete:
             }
         }
 
-        Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Cmd(github=mock_github).complete(tmp_path, "threaded task")
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
+        assert "thread resolved: thread_node_abc" in caplog.text
 
-    def test_completes_task_with_thread_skips_if_not_last(self, tmp_path: Path) -> None:
+    def test_completes_task_with_thread_skips_if_not_last(
+        self, tmp_path: Path, caplog
+    ) -> None:
         _task_file(tmp_path)
         from kennel.tasks import add_task
 
@@ -157,9 +162,11 @@ class TestCmdComplete:
             },
         ]
 
-        Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Cmd(github=mock_github).complete(tmp_path, "threaded task")
 
         mock_github.resolve_thread.assert_not_called()
+        assert "not resolving" in caplog.text
 
     def test_completes_task_with_thread_no_matching_comments(
         self, tmp_path: Path
@@ -179,7 +186,7 @@ class TestCmdComplete:
         mock_github.resolve_thread.assert_not_called()
 
     def test_completes_task_with_thread_exception_silenced(
-        self, tmp_path: Path
+        self, tmp_path: Path, caplog
     ) -> None:
         _task_file(tmp_path)
         from kennel.tasks import add_task
@@ -190,8 +197,10 @@ class TestCmdComplete:
         mock_github = MagicMock()
         mock_github.get_user.side_effect = RuntimeError("network error")
 
-        # Should not raise; exception is swallowed
-        Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        # Should not raise; exception is swallowed and logged
+        with caplog.at_level(logging.WARNING, logger="kennel"):
+            Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
         _task_file(tmp_path)

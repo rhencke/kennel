@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import logging
 from pathlib import Path
 
 from kennel import tasks as _tasks_mod
 from kennel.github import GitHub
+
+log = logging.getLogger(__name__)
 
 
 class Cmd:
@@ -45,10 +47,7 @@ class Cmd:
                 return
             last_author = thread_comments[-1].get("user", {}).get("login", "")
             if last_author != us:
-                print(
-                    f"thread has new replies from {last_author} — not resolving",
-                    file=sys.stderr,
-                )
+                log.info("thread has new replies from %s — not resolving", last_author)
                 return
 
             owner, repo_name = repo.split("/", 1)
@@ -62,10 +61,10 @@ class Cmd:
                 nodes = t.get("comments", {}).get("nodes", [])
                 if nodes and nodes[0].get("databaseId") == comment_id:
                     self._github.resolve_thread(t["id"])
-                    print(f"thread resolved: {t['id']}", file=sys.stderr)
+                    log.info("thread resolved: %s", t["id"])
                     return
         except Exception as exc:  # noqa: BLE001
-            print(f"thread resolution skipped: {exc}", file=sys.stderr)
+            log.warning("thread resolution skipped: %s", exc)
 
     def add(self, work_dir: Path, title: str, description: str) -> None:
         self._tasks.add_task(work_dir, title=title, description=description)

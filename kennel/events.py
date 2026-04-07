@@ -17,7 +17,7 @@ from kennel.prompts import (
 )
 from kennel.tasks import add_task
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 
 @dataclass

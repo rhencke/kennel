@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 
 def _task_file(work_dir: Path) -> Path:

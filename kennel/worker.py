@@ -17,7 +17,7 @@ from kennel.prompts import Prompts
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
-log = logging.getLogger("kennel")
+log = logging.getLogger(__name__)
 
 
 class LockHeld(Exception):
