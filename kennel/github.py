@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -106,15 +107,10 @@ class GH:
         self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
 
 
-_shared_gh: GH | None = None
-
-
+@functools.cache
 def _get_gh() -> GH:
     """Return the shared GH instance, creating it on first call."""
-    global _shared_gh
-    if _shared_gh is None:
-        _shared_gh = GH(_gh_token())
-    return _shared_gh
+    return GH(_gh_token())
 
 
 def _gh(

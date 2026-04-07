@@ -182,8 +182,8 @@ class TestGhToken:
 class TestGetGh:
     def test_creates_instance_lazily(self) -> None:
         mock_instance = MagicMock()
+        _get_gh.cache_clear()
         with (
-            patch("kennel.github._shared_gh", None),
             patch("kennel.github._gh_token", return_value="tok"),
             patch("kennel.github.GH", return_value=mock_instance) as mock_cls,
         ):
@@ -192,14 +192,16 @@ class TestGetGh:
         assert result is mock_instance
 
     def test_returns_cached_instance(self) -> None:
-        existing = MagicMock()
+        mock_instance = MagicMock()
+        _get_gh.cache_clear()
         with (
-            patch("kennel.github._shared_gh", existing),
-            patch("kennel.github.GH") as mock_cls,
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_instance) as mock_cls,
         ):
-            result = _get_gh()
-        assert result is existing
-        mock_cls.assert_not_called()
+            first = _get_gh()
+            second = _get_gh()
+        mock_cls.assert_called_once()
+        assert first is second is mock_instance
 
 
 class TestGHClass:
