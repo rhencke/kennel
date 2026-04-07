@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -30,7 +29,7 @@ def _gh_token() -> str:
 
 
 class GH:
-    """GitHub client: requests-based REST API calls plus gh CLI subprocess helper."""
+    """GitHub client: requests-based REST and GraphQL API calls."""
 
     BASE = "https://api.github.com"
 
@@ -44,21 +43,6 @@ class GH:
             }
         )
 
-    def _gh(
-        self,
-        *args: str,
-        cwd: Path | str | None = None,
-        timeout: int = 30,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run a gh CLI subcommand and return the CompletedProcess."""
-        return subprocess.run(
-            ["gh", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-        )
-
     def _get(self, path: str) -> Any:
         resp = self._s.get(f"{self.BASE}{path}")
         resp.raise_for_status()
@@ -67,6 +51,30 @@ class GH:
     def _post(self, path: str, **payload: Any) -> None:
         resp = self._s.post(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
+
+    def _post_json(self, path: str, **payload: Any) -> Any:
+        resp = self._s.post(f"{self.BASE}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _patch(self, path: str, **payload: Any) -> Any:
+        resp = self._s.patch(f"{self.BASE}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _put(self, path: str, **payload: Any) -> Any:
+        resp = self._s.put(f"{self.BASE}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _graphql(self, query: str, **variables: Any) -> Any:
+        """Execute a GraphQL query/mutation against the GitHub API."""
+        resp = self._s.post(
+            f"{self.BASE}/graphql",
+            json={"query": query, "variables": variables},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def add_reaction(
         self, repo: str, comment_type: str, comment_id: int | str, content: str
@@ -121,6 +129,218 @@ class GH:
         """Post a comment on an issue."""
         self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
 
+    def get_user(self) -> str:
+        """Return the authenticated GitHub username."""
+        data = self._get("/user")
+        return data["login"]
+
+    def get_repo_info(self, cwd: Path | str | None = None) -> str:
+        """Return 'owner/repo' for the repo at cwd, parsed from the git remote."""
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=cwd,
+        )
+        url = result.stdout.strip().removesuffix(".git")
+        if url.startswith("https://github.com/"):
+            return url[len("https://github.com/") :]
+        if url.startswith("git@github.com:"):
+            return url[len("git@github.com:") :]
+        raise ValueError(f"Cannot parse GitHub remote URL: {url!r}")
+
+    def get_default_branch(self, repo: str) -> str:
+        """Return the default branch name for the given repo."""
+        data = self._get(f"/repos/{repo}")
+        return data["default_branch"]
+
+    def set_user_status(self, msg: str, emoji: str, busy: bool = True) -> None:
+        """Set the authenticated user's GitHub status."""
+        query = (
+            "mutation($msg:String!,$emoji:String!,$busy:Boolean!)"
+            "{ changeUserStatus(input: {message: $msg, emoji: $emoji,"
+            " limitedAvailability: $busy})"
+            "{ status { message emoji indicatesLimitedAvailability } } }"
+        )
+        self._graphql(query, msg=msg, emoji=emoji, busy=busy)
+
+    def find_issues(self, owner: str, repo: str, login: str) -> list[dict[str, Any]]:
+        """Return open issues assigned to login (oldest first) with sub-issue states."""
+        query = (
+            "query($owner:String!,$repo:String!,$login:String!){"
+            "repository(owner:$owner,name:$repo){"
+            "issues(first:50,states:[OPEN],filterBy:{assignee:$login},"
+            "orderBy:{field:CREATED_AT,direction:ASC}){"
+            "nodes{number title subIssues(first:10){nodes{state}}}}}}"
+        )
+        data = self._graphql(query, owner=owner, repo=repo, login=login)
+        return data["data"]["repository"]["issues"]["nodes"]
+
+    def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
+        """Return issue data (state, title, body)."""
+        data = self._get(f"/repos/{repo}/issues/{number}")
+        return {
+            "state": data["state"].upper(),
+            "title": data["title"],
+            "body": data["body"] or "",
+        }
+
+    def close_issue(self, repo: str, number: int | str) -> None:
+        """Close an issue."""
+        self._patch(f"/repos/{repo}/issues/{number}", state="closed")
+
+    def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
+        """Return all comments on an issue."""
+        return self._get(f"/repos/{repo}/issues/{number}/comments")
+
+    def create_pr(self, repo: str, title: str, body: str, base: str, head: str) -> str:
+        """Create a draft PR and return its URL."""
+        data = self._post_json(
+            f"/repos/{repo}/pulls",
+            title=title,
+            body=body,
+            base=base,
+            head=head,
+            draft=True,
+        )
+        return data["html_url"]
+
+    def edit_pr_body(self, repo: str, pr: int | str, body: str) -> None:
+        """Edit a PR's body."""
+        self._patch(f"/repos/{repo}/pulls/{pr}", body=body)
+
+    def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
+        """Add a reviewer to a PR."""
+        self._post(
+            f"/repos/{repo}/pulls/{pr}/requested_reviewers",
+            reviewers=[reviewer],
+        )
+
+    def pr_checks(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return check statuses for a PR."""
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        sha = pr_data["head"]["sha"]
+        data = self._get(f"/repos/{repo}/commits/{sha}/check-runs")
+        result = []
+        for run in data.get("check_runs", []):
+            if run["status"] == "completed":
+                state = (run["conclusion"] or "").upper()
+            else:
+                state = run["status"].upper()
+            result.append(
+                {"name": run["name"], "state": state, "link": run["html_url"]}
+            )
+        return result
+
+    def pr_ready(self, repo: str, pr: int | str) -> None:
+        """Mark a PR ready for review."""
+        self._patch(f"/repos/{repo}/pulls/{pr}", draft=False)
+
+    def pr_merge(
+        self, repo: str, pr: int | str, squash: bool = True, auto: bool = False
+    ) -> None:
+        """Merge a PR."""
+        if auto:
+            pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+            node_id = pr_data["node_id"]
+            merge_method = "SQUASH" if squash else "MERGE"
+            query = (
+                "mutation($prId:ID!,$mergeMethod:PullRequestMergeMethod!){"
+                "enablePullRequestAutoMerge(input:{pullRequestId:$prId,"
+                "mergeMethod:$mergeMethod})"
+                "{pullRequest{autoMergeRequest{mergeMethod}}}}"
+            )
+            self._graphql(query, prId=node_id, mergeMethod=merge_method)
+        else:
+            merge_method = "squash" if squash else "merge"
+            self._put(
+                f"/repos/{repo}/pulls/{pr}/merge",
+                merge_method=merge_method,
+            )
+
+    def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
+        """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
+        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
+        reviews = [
+            {
+                "author": {"login": r["user"]["login"]},
+                "state": r["state"],
+                "submittedAt": r["submitted_at"],
+            }
+            for r in reviews_data
+        ]
+        commits = [
+            {
+                "messageHeadline": c["commit"]["message"].split("\n")[0],
+                "oid": c["sha"],
+            }
+            for c in commits_data
+        ]
+        return {
+            "reviews": reviews,
+            "isDraft": pr_data["draft"],
+            "mergeStateStatus": (pr_data.get("mergeable_state") or "").upper(),
+            "body": pr_data["body"] or "",
+            "commits": commits,
+        }
+
+    def get_reviews(self, repo: str, pr: int | str) -> dict[str, Any]:
+        """Return reviews and isDraft for a PR."""
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
+        reviews = [
+            {
+                "author": {"login": r["user"]["login"]},
+                "state": r["state"],
+                "submittedAt": r["submitted_at"],
+            }
+            for r in reviews_data
+        ]
+        return {
+            "reviews": reviews,
+            "isDraft": pr_data["draft"],
+        }
+
+    def get_review_threads(
+        self, owner: str, repo: str, pr: int | str
+    ) -> dict[str, Any]:
+        """Return full review-thread data for a PR (GraphQL)."""
+        query = (
+            "query($owner:String!,$repo:String!,$pr:Int!){"
+            "repository(owner:$owner,name:$repo){"
+            "pullRequest(number:$pr){"
+            "reviewThreads(first:100){"
+            "nodes{id isResolved"
+            " comments(first:50){nodes{author{login} body url createdAt databaseId}}"
+            "}}}}}"
+        )
+        return self._graphql(query, owner=owner, repo=repo, pr=int(pr))
+
+    def resolve_thread(self, thread_id: str) -> None:
+        """Resolve a review thread via GraphQL mutation."""
+        query = (
+            "mutation($id:ID!)"
+            "{resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}"
+        )
+        self._graphql(query, id=thread_id)
+
+    def get_run_log(self, repo: str, run_id: str | int) -> str:
+        """Return the failed log output for a CI run."""
+        jobs_data = self._get(f"/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest")
+        parts = []
+        for job in jobs_data.get("jobs", []):
+            if job.get("conclusion") not in ("failure", "timed_out"):
+                continue
+            resp = self._s.get(
+                f"{self.BASE}/repos/{repo}/actions/jobs/{job['id']}/logs"
+            )
+            resp.raise_for_status()
+            parts.append(resp.text)
+        return "".join(parts)
+
 
 @functools.cache
 def _get_gh() -> GH:
@@ -133,58 +353,23 @@ def _get_gh() -> GH:
 
 def get_repo_info(cwd: Path | str | None = None) -> str:
     """Return 'owner/repo' for the repo at cwd."""
-    result = _get_gh()._gh(
-        "repo",
-        "view",
-        "--json",
-        "nameWithOwner",
-        "--jq",
-        ".nameWithOwner",
-        cwd=cwd,
-    )
-    return result.stdout.strip()
+    return _get_gh().get_repo_info(cwd=cwd)
 
 
 def get_user() -> str:
     """Return the authenticated GitHub username."""
-    result = _get_gh()._gh("api", "user", "--jq", ".login")
-    return result.stdout.strip()
+    return _get_gh().get_user()
 
 
 def get_default_branch(cwd: Path | str | None = None) -> str:
     """Return the default branch name for the repo at cwd."""
-    result = _get_gh()._gh(
-        "repo",
-        "view",
-        "--json",
-        "defaultBranchRef",
-        "--jq",
-        ".defaultBranchRef.name",
-        cwd=cwd,
-    )
-    return result.stdout.strip()
+    repo = _get_gh().get_repo_info(cwd=cwd)
+    return _get_gh().get_default_branch(repo)
 
 
 def set_user_status(msg: str, emoji: str, busy: bool = True) -> None:
     """Set the authenticated user's GitHub status."""
-    query = (
-        "mutation($msg:String!,$emoji:String!,$busy:Boolean!)"
-        "{ changeUserStatus(input: {message: $msg, emoji: $emoji,"
-        " limitedAvailability: $busy})"
-        "{ status { message emoji indicatesLimitedAvailability } } }"
-    )
-    _get_gh()._gh(
-        "api",
-        "graphql",
-        "-F",
-        f"msg={msg}",
-        "-F",
-        f"emoji={emoji}",
-        "-F",
-        f"busy={'true' if busy else 'false'}",
-        "-f",
-        f"query={query}",
-    )
+    _get_gh().set_user_status(msg, emoji, busy)
 
 
 # ── Issues ────────────────────────────────────────────────────────────────────
@@ -192,46 +377,17 @@ def set_user_status(msg: str, emoji: str, busy: bool = True) -> None:
 
 def find_issues(owner: str, repo: str, login: str) -> list[dict[str, Any]]:
     """Return open issues assigned to login (oldest first) with sub-issue states."""
-    query = (
-        "query($owner:String!,$repo:String!,$login:String!){"
-        "repository(owner:$owner,name:$repo){"
-        "issues(first:50,states:[OPEN],filterBy:{assignee:$login},"
-        "orderBy:{field:CREATED_AT,direction:ASC}){"
-        "nodes{number title subIssues(first:10){nodes{state}}}}}}"
-    )
-    result = _get_gh()._gh(
-        "api",
-        "graphql",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"repo={repo}",
-        "-F",
-        f"login={login}",
-        "-f",
-        f"query={query}",
-    )
-    data = json.loads(result.stdout)
-    return data["data"]["repository"]["issues"]["nodes"]
+    return _get_gh().find_issues(owner, repo, login)
 
 
 def view_issue(repo: str, number: int | str) -> dict[str, Any]:
     """Return issue data (state, title, body)."""
-    result = _get_gh()._gh(
-        "issue",
-        "view",
-        str(number),
-        "--repo",
-        repo,
-        "--json",
-        "state,title,body",
-    )
-    return json.loads(result.stdout)
+    return _get_gh().view_issue(repo, number)
 
 
 def close_issue(repo: str, number: int | str) -> None:
     """Close an issue."""
-    _get_gh()._gh("issue", "close", str(number), "--repo", repo)
+    _get_gh().close_issue(repo, number)
 
 
 def comment_issue(repo: str, number: int | str, body: str) -> None:
@@ -241,8 +397,7 @@ def comment_issue(repo: str, number: int | str, body: str) -> None:
 
 def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
     """Return all comments on an issue."""
-    result = _get_gh()._gh("api", f"repos/{repo}/issues/{number}/comments")
-    return json.loads(result.stdout)
+    return _get_gh().get_issue_comments(repo, number)
 
 
 # ── Pull requests ─────────────────────────────────────────────────────────────
@@ -266,89 +421,42 @@ def create_pr(
     head: str,
 ) -> str:
     """Create a draft PR and return its URL."""
-    result = _get_gh()._gh(
-        "pr",
-        "create",
-        "--draft",
-        "--title",
-        title,
-        "--body",
-        body,
-        "--base",
-        base,
-        "--head",
-        head,
-        "--repo",
-        repo,
-    )
-    return result.stdout.strip()
+    return _get_gh().create_pr(repo, title, body, base, head)
 
 
 def edit_pr_body(repo: str, pr: int | str, body: str) -> None:
     """Edit a PR's body."""
-    _get_gh()._gh("pr", "edit", str(pr), "--repo", repo, "--body", body)
+    _get_gh().edit_pr_body(repo, pr, body)
 
 
 def add_pr_reviewer(repo: str, pr: int | str, reviewer: str) -> None:
     """Add a reviewer to a PR."""
-    _get_gh()._gh("pr", "edit", str(pr), "--repo", repo, "--add-reviewer", reviewer)
+    _get_gh().add_pr_reviewer(repo, pr, reviewer)
 
 
 def pr_checks(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return check statuses for a PR."""
-    result = _get_gh()._gh(
-        "pr",
-        "checks",
-        str(pr),
-        "--repo",
-        repo,
-        "--json",
-        "name,state,link",
-    )
-    return json.loads(result.stdout)
+    return _get_gh().pr_checks(repo, pr)
 
 
 def pr_ready(repo: str, pr: int | str) -> None:
     """Mark a PR ready for review."""
-    _get_gh()._gh("pr", "ready", str(pr), "--repo", repo)
+    _get_gh().pr_ready(repo, pr)
 
 
 def pr_merge(repo: str, pr: int | str, squash: bool = True, auto: bool = False) -> None:
     """Merge a PR."""
-    args = ["pr", "merge", str(pr), "--repo", repo]
-    if squash:
-        args.append("--squash")
-    if auto:
-        args.append("--auto")
-    _get_gh()._gh(*args)
+    _get_gh().pr_merge(repo, pr, squash=squash, auto=auto)
 
 
 def get_pr(repo: str, pr: int | str) -> dict[str, Any]:
     """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
-    result = _get_gh()._gh(
-        "pr",
-        "view",
-        str(pr),
-        "--repo",
-        repo,
-        "--json",
-        "reviews,isDraft,mergeStateStatus,body,commits",
-    )
-    return json.loads(result.stdout)
+    return _get_gh().get_pr(repo, pr)
 
 
 def get_reviews(repo: str, pr: int | str) -> dict[str, Any]:
     """Return reviews and isDraft for a PR."""
-    result = _get_gh()._gh(
-        "pr",
-        "view",
-        str(pr),
-        "--repo",
-        repo,
-        "--json",
-        "reviews,isDraft",
-    )
-    return json.loads(result.stdout)
+    return _get_gh().get_reviews(repo, pr)
 
 
 def get_review_comments(repo: str, pr: int | str, review_id: int | str) -> list[int]:
@@ -381,50 +489,17 @@ def add_reaction(
 
 def get_review_threads(owner: str, repo: str, pr: int | str) -> dict[str, Any]:
     """Return full review-thread data for a PR (GraphQL)."""
-    query = (
-        "query($owner:String!,$repo:String!,$pr:Int!){"
-        "repository(owner:$owner,name:$repo){"
-        "pullRequest(number:$pr){"
-        "reviewThreads(first:100){"
-        "nodes{id isResolved"
-        " comments(first:50){nodes{author{login} body url createdAt databaseId}}"
-        "}}}}}"
-    )
-    result = _get_gh()._gh(
-        "api",
-        "graphql",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"repo={repo}",
-        "-F",
-        f"pr={pr}",
-        "-f",
-        f"query={query}",
-    )
-    return json.loads(result.stdout)
+    return _get_gh().get_review_threads(owner, repo, pr)
 
 
 def resolve_thread(thread_id: str) -> None:
     """Resolve a review thread via GraphQL mutation."""
-    query = (
-        "mutation($id:ID!)"
-        "{resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}"
-    )
-    _get_gh()._gh(
-        "api",
-        "graphql",
-        "-F",
-        f"id={thread_id}",
-        "-f",
-        f"query={query}",
-    )
+    _get_gh().resolve_thread(thread_id)
 
 
 # ── CI runs ───────────────────────────────────────────────────────────────────
 
 
-def get_run_log(run_id: str | int) -> str:
+def get_run_log(repo: str, run_id: str | int) -> str:
     """Return the failed log output for a CI run."""
-    result = _get_gh()._gh("run", "view", str(run_id), "--log-failed", timeout=60)
-    return result.stdout
+    return _get_gh().get_run_log(repo, run_id)

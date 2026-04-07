@@ -768,7 +768,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: fix the bug\n")
                 return _make_completed_run("I'll fix that.\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -789,7 +789,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ASK: unclear\n")
                 return _make_completed_run("What do you mean?\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -810,7 +810,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ANSWER: it works this way\n")
                 return _make_completed_run("Yes, because...\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -831,7 +831,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("DUMP: nope\n")
                 return _make_completed_run("That won't work here.\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -852,7 +852,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("DEFER: later\n")
                 return _make_completed_run("Out of scope.\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -873,7 +873,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: do it\n")
                 return _make_completed_run("")  # empty reply triggers fallback
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -894,7 +894,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: do it\n")
                 raise subprocess.TimeoutExpired("claude", 30)
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
@@ -945,7 +945,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: do it\n")
                 return _make_completed_run("ok\n")
-            return _make_completed_run("owner/repo\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
 
         with (
             patch("subprocess.run", side_effect=fake_run),
