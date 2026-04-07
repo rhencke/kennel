@@ -87,7 +87,7 @@ PROMPT="$FIDO_DIR/prompt"
 STREAM="$FIDO_DIR/stream"
 
 cleanup() {
-  rm -f "$COMPACT_SCRIPT" "$PROMPT" "$STREAM"
+  rm -f "$COMPACT_SCRIPT" "$PROMPT" "$STREAM" "$SYSTEM_FILE"
   python3 -c "
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
@@ -132,13 +132,21 @@ STREAM_FILTER='
   else empty end
 '
 
+PERSONA="$(cat "$SCRIPT_DIR/sub/persona.md")"
+SYSTEM_FILE="$FIDO_DIR/system"
+
 build_prompt() {   # build_prompt <subskill> <context-string>
-  printf '%s\n\n%s\n\n%s\n' "$2" "$(cat "$SCRIPT_DIR/sub/persona.md")" "$(cat "$SCRIPT_DIR/sub/$1.md")" > "$PROMPT"
+  # System prompt: persona + task instructions (guardrails)
+  printf '%s\n\n%s\n' "$PERSONA" "$(cat "$SCRIPT_DIR/sub/$1.md")" > "$SYSTEM_FILE"
+  # User prompt: just the context
+  printf '%s\n' "$2" > "$PROMPT"
 }
 
 claude_start() {   # start new session; prints session_id to stdout, progress to stderr
   claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
-    --dangerously-skip-permissions --print < "$PROMPT" \
+    --dangerously-skip-permissions \
+    --system-prompt-file "$SYSTEM_FILE" \
+    --print < "$PROMPT" \
     | tee "$STREAM" | stdbuf -oL jq -rj "$STREAM_FILTER" >&2
   jq -r 'select(.type=="result") | .session_id // empty' "$STREAM" | tail -1
 }
@@ -146,7 +154,8 @@ claude_start() {   # start new session; prints session_id to stdout, progress to
 claude_run() {     # continue or start session; progress to stdout
   if [[ -n "$SESSION_ID" ]]; then
     claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
-      --dangerously-skip-permissions --resume "$SESSION_ID" --print < "$PROMPT" \
+      --dangerously-skip-permissions --resume "$SESSION_ID" \
+      --print < "$PROMPT" \
       | stdbuf -oL jq -rj "$STREAM_FILTER"
   else
     SESSION_ID=$(claude_start)
