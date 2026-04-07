@@ -1,3 +1,3 @@
-from kennel.server import run
+from kennel.main import main
 
-run()
+main()

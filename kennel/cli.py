@@ -1,4 +1,4 @@
-"""kennel-task CLI — add/complete/list tasks in the shared task file."""
+"""kennel task CLI — add/complete/list tasks in the shared task file."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def cmd_list(work_dir: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kennel-task",
+        prog="kennel task",
         description="Manage kennel task list for a git repo.",
     )
     parser.add_argument("work_dir", type=Path, help="Path to the git working directory")
