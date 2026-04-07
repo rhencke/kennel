@@ -13,7 +13,7 @@ from typing import IO, Any
 
 from kennel import claude, hooks, tasks
 from kennel.github import GitHub
-from kennel.prompts import Prompts, status_system_prompt
+from kennel.prompts import Prompts
 
 log = logging.getLogger("kennel")
 
@@ -287,7 +287,7 @@ class Worker:
         prompts = Prompts(persona)
         raw = claude.generate_status(
             prompt=prompts.status_prompt(what),
-            system_prompt=status_system_prompt(),
+            system_prompt=prompts.status_system_prompt(),
         )
         if not raw:
             log.warning("set_status: claude returned empty — skipping")

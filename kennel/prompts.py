@@ -145,19 +145,6 @@ def issue_reply_instruction(
     return f"Write a short GitHub PR reply.\n\n{context_str}"
 
 
-# ── Status system prompt ───────────────────────────────────────────────────────
-
-
-def status_system_prompt() -> str:
-    """Return the system prompt for GitHub status generation."""
-    return (
-        "You are writing your GitHub profile status as Fido the dog. "
-        "Output exactly two lines. "
-        "Line 1: a single emoji for the status icon. "
-        "Line 2: the status text (under 80 chars, no quotes, no preamble)."
-    )
-
-
 # ── Prompts DI class ──────────────────────────────────────────────────────────
 
 
@@ -212,6 +199,15 @@ class Prompts:
     def status_prompt(self, what: str) -> str:
         """Build the user prompt for GitHub status generation."""
         return f"{self.persona}\n\nWhat you're doing right now: {what}"
+
+    def status_system_prompt(self) -> str:
+        """Return the system prompt for GitHub status generation."""
+        return (
+            "You are writing your GitHub profile status as Fido the dog. "
+            "Output exactly two lines. "
+            "Line 1: a single emoji for the status icon. "
+            "Line 2: the status text (under 80 chars, no quotes, no preamble)."
+        )
 
     def react_prompt(self, comment_body: str) -> str:
         """Build the reaction-decision prompt for Fido.

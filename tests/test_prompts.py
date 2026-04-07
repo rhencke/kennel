@@ -9,7 +9,6 @@ from kennel.prompts import (
     issue_reply_instruction,
     reply_context_block,
     reply_instruction,
-    status_system_prompt,
     triage_categories,
     triage_context_block,
     triage_prompt,
@@ -212,24 +211,24 @@ class TestIssueReplyInstruction:
         assert "Comment: do something" in result
 
 
-# ── status_system_prompt ──────────────────────────────────────────────────────
+# ── Prompts.status_system_prompt ─────────────────────────────────────────────
 
 
 class TestStatusSystemPrompt:
     def test_returns_string(self) -> None:
-        result = status_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert isinstance(result, str)
 
     def test_mentions_two_lines(self) -> None:
-        result = status_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "two lines" in result
 
     def test_mentions_emoji(self) -> None:
-        result = status_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "emoji" in result
 
     def test_mentions_fido(self) -> None:
-        result = status_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "Fido" in result
 
 
