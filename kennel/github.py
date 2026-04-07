@@ -348,28 +348,178 @@ def _get_gh() -> GH:
     return GH(_gh_token())
 
 
-# ── Repo / user context ───────────────────────────────────────────────────────
+class GitHub:
+    """Facade that stores a single GH client as self._gh and exposes named methods."""
+
+    def __init__(self, token: str | None = None) -> None:
+        self._gh = GH(token if token is not None else _gh_token())
+
+    # ── Repo / user context ───────────────────────────────────────────────────
+
+    def get_repo_info(self, cwd: Path | str | None = None) -> str:
+        """Return 'owner/repo' for the repo at cwd."""
+        return self._gh.get_repo_info(cwd=cwd)
+
+    def get_user(self) -> str:
+        """Return the authenticated GitHub username."""
+        return self._gh.get_user()
+
+    def get_default_branch(self, cwd: Path | str | None = None) -> str:
+        """Return the default branch name for the repo at cwd."""
+        repo = self._gh.get_repo_info(cwd=cwd)
+        return self._gh.get_default_branch(repo)
+
+    def set_user_status(self, msg: str, emoji: str, busy: bool = True) -> None:
+        """Set the authenticated user's GitHub status."""
+        self._gh.set_user_status(msg, emoji, busy)
+
+    # ── Issues ────────────────────────────────────────────────────────────────
+
+    def find_issues(self, owner: str, repo: str, login: str) -> list[dict[str, Any]]:
+        """Return open issues assigned to login (oldest first) with sub-issue states."""
+        return self._gh.find_issues(owner, repo, login)
+
+    def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
+        """Return issue data (state, title, body)."""
+        return self._gh.view_issue(repo, number)
+
+    def close_issue(self, repo: str, number: int | str) -> None:
+        """Close an issue."""
+        self._gh.close_issue(repo, number)
+
+    def comment_issue(self, repo: str, number: int | str, body: str) -> None:
+        """Post a comment on an issue."""
+        self._gh.comment_issue(repo, number, body)
+
+    def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
+        """Return all comments on an issue."""
+        return self._gh.get_issue_comments(repo, number)
+
+    # ── Pull requests ─────────────────────────────────────────────────────────
+
+    def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return all inline review comments on a pull request."""
+        return self._gh.get_pull_comments(repo, pr)
+
+    def find_pr(
+        self, repo: str, issue_number: int | str, user: str
+    ) -> dict[str, Any] | None:
+        """Find the most recent PR linked to issue_number authored by user, or None."""
+        return self._gh.find_pr(repo, issue_number, user)
+
+    def create_pr(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        base: str,
+        head: str,
+    ) -> str:
+        """Create a draft PR and return its URL."""
+        return self._gh.create_pr(repo, title, body, base, head)
+
+    def edit_pr_body(self, repo: str, pr: int | str, body: str) -> None:
+        """Edit a PR's body."""
+        self._gh.edit_pr_body(repo, pr, body)
+
+    def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
+        """Add a reviewer to a PR."""
+        self._gh.add_pr_reviewer(repo, pr, reviewer)
+
+    def pr_checks(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return check statuses for a PR."""
+        return self._gh.pr_checks(repo, pr)
+
+    def pr_ready(self, repo: str, pr: int | str) -> None:
+        """Mark a PR ready for review."""
+        self._gh.pr_ready(repo, pr)
+
+    def pr_merge(
+        self, repo: str, pr: int | str, squash: bool = True, auto: bool = False
+    ) -> None:
+        """Merge a PR."""
+        self._gh.pr_merge(repo, pr, squash=squash, auto=auto)
+
+    def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
+        """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
+        return self._gh.get_pr(repo, pr)
+
+    def get_reviews(self, repo: str, pr: int | str) -> dict[str, Any]:
+        """Return reviews and isDraft for a PR."""
+        return self._gh.get_reviews(repo, pr)
+
+    def get_review_comments(
+        self, repo: str, pr: int | str, review_id: int | str
+    ) -> list[int]:
+        """Return list of comment IDs from a review."""
+        return self._gh.get_review_comments(repo, pr, review_id)
+
+    def reply_to_review_comment(
+        self,
+        repo: str,
+        pr: int | str,
+        body: str,
+        in_reply_to: int | str,
+    ) -> None:
+        """Post a reply to an inline review comment."""
+        self._gh.reply_to_review_comment(repo, pr, body, in_reply_to)
+
+    def add_reaction(
+        self,
+        repo: str,
+        comment_type: str,
+        comment_id: int | str,
+        content: str,
+    ) -> None:
+        """Add a reaction to a comment. comment_type: 'pulls' or 'issues'."""
+        self._gh.add_reaction(repo, comment_type, comment_id, content)
+
+    # ── Review threads ────────────────────────────────────────────────────────
+
+    def get_review_threads(
+        self, owner: str, repo: str, pr: int | str
+    ) -> dict[str, Any]:
+        """Return full review-thread data for a PR (GraphQL)."""
+        return self._gh.get_review_threads(owner, repo, pr)
+
+    def resolve_thread(self, thread_id: str) -> None:
+        """Resolve a review thread via GraphQL mutation."""
+        self._gh.resolve_thread(thread_id)
+
+    # ── CI runs ───────────────────────────────────────────────────────────────
+
+    def get_run_log(self, repo: str, run_id: str | int) -> str:
+        """Return the failed log output for a CI run."""
+        return self._gh.get_run_log(repo, run_id)
+
+
+@functools.cache
+def _get_github() -> GitHub:
+    """Return the shared GitHub facade instance, creating it on first call."""
+    return GitHub()
+
+
+# ── Module-level shims (delegate to the shared GitHub instance) ───────────────
 
 
 def get_repo_info(cwd: Path | str | None = None) -> str:
     """Return 'owner/repo' for the repo at cwd."""
-    return _get_gh().get_repo_info(cwd=cwd)
+    return _get_github().get_repo_info(cwd=cwd)
 
 
 def get_user() -> str:
     """Return the authenticated GitHub username."""
-    return _get_gh().get_user()
+    return _get_github().get_user()
 
 
 def get_default_branch(cwd: Path | str | None = None) -> str:
     """Return the default branch name for the repo at cwd."""
-    repo = _get_gh().get_repo_info(cwd=cwd)
-    return _get_gh().get_default_branch(repo)
+    return _get_github().get_default_branch(cwd=cwd)
 
 
 def set_user_status(msg: str, emoji: str, busy: bool = True) -> None:
     """Set the authenticated user's GitHub status."""
-    _get_gh().set_user_status(msg, emoji, busy)
+    _get_github().set_user_status(msg, emoji, busy)
 
 
 # ── Issues ────────────────────────────────────────────────────────────────────
@@ -377,27 +527,27 @@ def set_user_status(msg: str, emoji: str, busy: bool = True) -> None:
 
 def find_issues(owner: str, repo: str, login: str) -> list[dict[str, Any]]:
     """Return open issues assigned to login (oldest first) with sub-issue states."""
-    return _get_gh().find_issues(owner, repo, login)
+    return _get_github().find_issues(owner, repo, login)
 
 
 def view_issue(repo: str, number: int | str) -> dict[str, Any]:
     """Return issue data (state, title, body)."""
-    return _get_gh().view_issue(repo, number)
+    return _get_github().view_issue(repo, number)
 
 
 def close_issue(repo: str, number: int | str) -> None:
     """Close an issue."""
-    _get_gh().close_issue(repo, number)
+    _get_github().close_issue(repo, number)
 
 
 def comment_issue(repo: str, number: int | str, body: str) -> None:
     """Post a comment on an issue."""
-    _get_gh().comment_issue(repo, number, body)
+    _get_github().comment_issue(repo, number, body)
 
 
 def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
     """Return all comments on an issue."""
-    return _get_gh().get_issue_comments(repo, number)
+    return _get_github().get_issue_comments(repo, number)
 
 
 # ── Pull requests ─────────────────────────────────────────────────────────────
@@ -405,12 +555,12 @@ def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
 
 def get_pull_comments(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return all inline review comments on a pull request."""
-    return _get_gh().get_pull_comments(repo, pr)
+    return _get_github().get_pull_comments(repo, pr)
 
 
 def find_pr(repo: str, issue_number: int | str, user: str) -> dict[str, Any] | None:
     """Find the most recent PR linked to issue_number authored by user, or None."""
-    return _get_gh().find_pr(repo, issue_number, user)
+    return _get_github().find_pr(repo, issue_number, user)
 
 
 def create_pr(
@@ -421,47 +571,47 @@ def create_pr(
     head: str,
 ) -> str:
     """Create a draft PR and return its URL."""
-    return _get_gh().create_pr(repo, title, body, base, head)
+    return _get_github().create_pr(repo, title, body, base, head)
 
 
 def edit_pr_body(repo: str, pr: int | str, body: str) -> None:
     """Edit a PR's body."""
-    _get_gh().edit_pr_body(repo, pr, body)
+    _get_github().edit_pr_body(repo, pr, body)
 
 
 def add_pr_reviewer(repo: str, pr: int | str, reviewer: str) -> None:
     """Add a reviewer to a PR."""
-    _get_gh().add_pr_reviewer(repo, pr, reviewer)
+    _get_github().add_pr_reviewer(repo, pr, reviewer)
 
 
 def pr_checks(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return check statuses for a PR."""
-    return _get_gh().pr_checks(repo, pr)
+    return _get_github().pr_checks(repo, pr)
 
 
 def pr_ready(repo: str, pr: int | str) -> None:
     """Mark a PR ready for review."""
-    _get_gh().pr_ready(repo, pr)
+    _get_github().pr_ready(repo, pr)
 
 
 def pr_merge(repo: str, pr: int | str, squash: bool = True, auto: bool = False) -> None:
     """Merge a PR."""
-    _get_gh().pr_merge(repo, pr, squash=squash, auto=auto)
+    _get_github().pr_merge(repo, pr, squash=squash, auto=auto)
 
 
 def get_pr(repo: str, pr: int | str) -> dict[str, Any]:
     """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
-    return _get_gh().get_pr(repo, pr)
+    return _get_github().get_pr(repo, pr)
 
 
 def get_reviews(repo: str, pr: int | str) -> dict[str, Any]:
     """Return reviews and isDraft for a PR."""
-    return _get_gh().get_reviews(repo, pr)
+    return _get_github().get_reviews(repo, pr)
 
 
 def get_review_comments(repo: str, pr: int | str, review_id: int | str) -> list[int]:
     """Return list of comment IDs from a review."""
-    return _get_gh().get_review_comments(repo, pr, review_id)
+    return _get_github().get_review_comments(repo, pr, review_id)
 
 
 def reply_to_review_comment(
@@ -471,7 +621,7 @@ def reply_to_review_comment(
     in_reply_to: int | str,
 ) -> None:
     """Post a reply to an inline review comment."""
-    _get_gh().reply_to_review_comment(repo, pr, body, in_reply_to)
+    _get_github().reply_to_review_comment(repo, pr, body, in_reply_to)
 
 
 def add_reaction(
@@ -481,7 +631,7 @@ def add_reaction(
     content: str,
 ) -> None:
     """Add a reaction to a comment. comment_type: 'pulls' or 'issues'."""
-    _get_gh().add_reaction(repo, comment_type, comment_id, content)
+    _get_github().add_reaction(repo, comment_type, comment_id, content)
 
 
 # ── Review threads ────────────────────────────────────────────────────────────
@@ -489,12 +639,12 @@ def add_reaction(
 
 def get_review_threads(owner: str, repo: str, pr: int | str) -> dict[str, Any]:
     """Return full review-thread data for a PR (GraphQL)."""
-    return _get_gh().get_review_threads(owner, repo, pr)
+    return _get_github().get_review_threads(owner, repo, pr)
 
 
 def resolve_thread(thread_id: str) -> None:
     """Resolve a review thread via GraphQL mutation."""
-    _get_gh().resolve_thread(thread_id)
+    _get_github().resolve_thread(thread_id)
 
 
 # ── CI runs ───────────────────────────────────────────────────────────────────
@@ -502,4 +652,4 @@ def resolve_thread(thread_id: str) -> None:
 
 def get_run_log(repo: str, run_id: str | int) -> str:
     """Return the failed log output for a CI run."""
-    return _get_gh().get_run_log(repo, run_id)
+    return _get_github().get_run_log(repo, run_id)

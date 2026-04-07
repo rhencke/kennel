@@ -7,14 +7,17 @@ import json
 import sys
 from pathlib import Path
 
-from kennel import github as _github_mod
 from kennel import tasks as _tasks_mod
+from kennel.github import GitHub
 
 
 class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
-    def __init__(self, *, github=_github_mod, tasks=_tasks_mod) -> None:
+    def __init__(self, *, github: GitHub | None = None, tasks=_tasks_mod) -> None:
+        if github is None:
+            github = GitHub()
+
         self._github = github
         self._tasks = tasks
 
