@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kennel import github
 from kennel.config import Config, RepoConfig
 from kennel.prompts import (
     issue_reply_instruction,
@@ -222,14 +223,8 @@ def maybe_react(
         return
 
     log.info("fido reacts with %s to comment %s", reaction, comment_id)
-    endpoint = f"repos/{repo}/{comment_type}/comments/{comment_id}/reactions"
     try:
-        subprocess.run(
-            ["gh", "api", endpoint, "-X", "POST", "-f", f"content={reaction}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        github.add_reaction(repo, comment_type, comment_id, reaction)
     except Exception:
         log.exception("failed to post reaction")
 
@@ -310,21 +305,8 @@ def reply_to_comment(
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
     try:
-        subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{info['repo']}/pulls/{info['pr']}/comments",
-                "-X",
-                "POST",
-                "-f",
-                f"body={body}",
-                "-F",
-                f"in_reply_to={info['comment_id']}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        github.reply_to_review_comment(
+            info["repo"], info["pr"], body, info["comment_id"]
         )
         log.info("reply posted")
     except Exception:
@@ -365,21 +347,9 @@ def reply_to_review(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
     try:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{info['repo']}/pulls/{info['pr']}/reviews/{info['review_id']}/comments",
-                "--jq",
-                ".[] | .id",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        comment_ids = github.get_review_comments(
+            info["repo"], info["pr"], info["review_id"]
         )
-        comment_ids = [
-            cid.strip() for cid in result.stdout.strip().splitlines() if cid.strip()
-        ]
     except Exception:
         log.exception("failed to fetch review comments")
         return
@@ -388,13 +358,9 @@ def reply_to_review(
         log.info("no inline comments in review")
         return
 
-    skipped = [
-        cid for cid in comment_ids if already_replied and int(cid) in already_replied
-    ]
+    skipped = [cid for cid in comment_ids if already_replied and cid in already_replied]
     todo = [
-        cid
-        for cid in comment_ids
-        if not already_replied or int(cid) not in already_replied
+        cid for cid in comment_ids if not already_replied or cid not in already_replied
     ]
     if skipped:
         log.info("skipping %d already-replied comments", len(skipped))
@@ -408,14 +374,14 @@ def reply_to_review(
                 reply_to={
                     "repo": info["repo"],
                     "pr": info["pr"],
-                    "comment_id": int(cid),
+                    "comment_id": cid,
                 },
             ),
             config,
             repo_cfg,
         )
         if already_replied is not None:
-            already_replied.add(int(cid))
+            already_replied.add(cid)
 
 
 def _triage(
@@ -489,34 +455,13 @@ def reply_to_issue_comment(
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     try:
-        repo_full = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(repo_cfg.work_dir),
-        ).stdout.strip()
-        subprocess.run(
-            [
-                "gh",
-                "issue",
-                "comment",
-                str(number),
-                "--repo",
-                repo_full,
-                "--body",
-                body,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        repo_full = github.get_repo_info(cwd=repo_cfg.work_dir)
+        github.comment_issue(repo_full, number, body)
         log.info("reply posted")
     except Exception:
         log.exception("failed to post issue comment reply")
 
     # Maybe react (extract comment_id from context)
-    _issue_comment_id = None
     if "#" in action.prompt:
         import re
 
@@ -525,13 +470,7 @@ def reply_to_issue_comment(
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
     if _cid:
-        repo_full = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(repo_cfg.work_dir),
-        ).stdout.strip()
+        repo_full = github.get_repo_info(cwd=repo_cfg.work_dir)
         maybe_react(comment, _cid, "issues", repo_full, config)
 
     return (category, title)
