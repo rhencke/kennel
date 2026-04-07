@@ -53,115 +53,6 @@ def _sync_script() -> Path:
     return Path(__file__).parent.parent / "sync-tasks.sh"
 
 
-def resolve_git_dir(work_dir: Path) -> Path:
-    """Return the absolute .git directory for the repo at work_dir."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--absolute-git-dir"],
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return Path(result.stdout.strip())
-
-
-def acquire_lock(fido_dir: Path) -> IO[str]:
-    """Acquire the fido lock file exclusively (non-blocking).
-
-    Returns the open file object (must stay open to hold the lock).
-    Raises LockHeld if another fido is already running.
-    """
-    fido_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = fido_dir / "lock"
-    fd = open(lock_path, "w")  # noqa: SIM115
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fd.close()
-        raise LockHeld("another fido is running")
-    return fd
-
-
-def create_context(work_dir: Path) -> WorkerContext:
-    """Build a WorkerContext for work_dir, acquiring the fido lock.
-
-    Raises LockHeld if the lock is already held.
-    """
-    git_dir = resolve_git_dir(work_dir)
-    fido_dir = git_dir / "fido"
-    lock_fd = acquire_lock(fido_dir)
-    return WorkerContext(
-        work_dir=work_dir,
-        git_dir=git_dir,
-        fido_dir=fido_dir,
-        lock_fd=lock_fd,
-    )
-
-
-def create_compact_script(fido_dir: Path) -> Path:
-    """Write the PostCompact hook script that re-reads skill instructions.
-
-    Returns the path to the created script.
-    """
-    sub_dir = _sub_dir()
-    script_path = fido_dir / "compact.sh"
-    script_path.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf '[fido PostCompact] Re-reading skill instructions"
-        " after context compression.\\n\\n'\n"
-        f'for f in "{sub_dir}"/*.md; do\n'
-        '  printf \'## %s\\n\\n\' "$(basename "$f")"\n'
-        '  cat "$f"\n'
-        "  printf '\\n\\n'\n"
-        "done\n"
-    )
-    script_path.chmod(0o755)
-    return script_path
-
-
-def setup_hooks(work_dir: Path, fido_dir: Path) -> tuple[str, str]:
-    """Set up PostCompact and PostToolUse hooks for a fido session.
-
-    Creates the compact script, registers hooks in settings.local.json,
-    and ensures the file is git-excluded.
-
-    Returns (compact_cmd, sync_cmd).
-    """
-    hooks.ensure_gitexcluded(work_dir)
-    compact_script = create_compact_script(fido_dir)
-    compact_cmd = f"bash {compact_script}"
-    # TODO: replace with Python sync once sync-tasks.sh is removed
-    sync_cmd = f"bash {_sync_script()} {work_dir} &"
-    hooks.add_hooks(work_dir, compact_cmd, sync_cmd)
-    return compact_cmd, sync_cmd
-
-
-def teardown_hooks(
-    work_dir: Path, fido_dir: Path, compact_cmd: str, sync_cmd: str
-) -> None:
-    """Remove hooks and the compact script created by setup_hooks."""
-    hooks.remove_hooks(work_dir, compact_cmd, sync_cmd)
-    (fido_dir / "compact.sh").unlink(missing_ok=True)
-
-
-def load_state(fido_dir: Path) -> dict[str, Any]:
-    """Load state.json from fido_dir, returning an empty dict if absent."""
-    state_path = fido_dir / "state.json"
-    if not state_path.exists():
-        return {}
-    return json.loads(state_path.read_text())
-
-
-def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-    """Write state to state.json in fido_dir."""
-    (fido_dir / "state.json").write_text(json.dumps(state))
-
-
-def clear_state(fido_dir: Path) -> None:
-    """Remove state.json from fido_dir (no-op if absent)."""
-    (fido_dir / "state.json").unlink(missing_ok=True)
-
-
 class Worker:
     """Fido worker for a single repository.
 
@@ -173,6 +64,121 @@ class Worker:
     def __init__(self, work_dir: Path, gh: GitHub) -> None:
         self.work_dir = work_dir
         self.gh = gh
+
+    # ------------------------------------------------------------------
+    # Static utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def acquire_lock(fido_dir: Path) -> IO[str]:
+        """Acquire the fido lock file exclusively (non-blocking).
+
+        Returns the open file object (must stay open to hold the lock).
+        Raises LockHeld if another fido is already running.
+        """
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = fido_dir / "lock"
+        fd = open(lock_path, "w")  # noqa: SIM115
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fd.close()
+            raise LockHeld("another fido is running")
+        return fd
+
+    @staticmethod
+    def create_compact_script(fido_dir: Path) -> Path:
+        """Write the PostCompact hook script that re-reads skill instructions.
+
+        Returns the path to the created script.
+        """
+        sub_dir = _sub_dir()
+        script_path = fido_dir / "compact.sh"
+        script_path.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '[fido PostCompact] Re-reading skill instructions"
+            " after context compression.\\n\\n'\n"
+            f'for f in "{sub_dir}"/*.md; do\n'
+            '  printf \'## %s\\n\\n\' "$(basename "$f")"\n'
+            '  cat "$f"\n'
+            "  printf '\\n\\n'\n"
+            "done\n"
+        )
+        script_path.chmod(0o755)
+        return script_path
+
+    @staticmethod
+    def load_state(fido_dir: Path) -> dict[str, Any]:
+        """Load state.json from fido_dir, returning an empty dict if absent."""
+        state_path = fido_dir / "state.json"
+        if not state_path.exists():
+            return {}
+        return json.loads(state_path.read_text())
+
+    @staticmethod
+    def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
+        """Write state to state.json in fido_dir."""
+        (fido_dir / "state.json").write_text(json.dumps(state))
+
+    @staticmethod
+    def clear_state(fido_dir: Path) -> None:
+        """Remove state.json from fido_dir (no-op if absent)."""
+        (fido_dir / "state.json").unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Instance methods that use self.work_dir
+    # ------------------------------------------------------------------
+
+    def resolve_git_dir(self) -> Path:
+        """Return the absolute .git directory for self.work_dir."""
+        result = subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=self.work_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+
+    def create_context(self) -> WorkerContext:
+        """Build a WorkerContext for self.work_dir, acquiring the fido lock.
+
+        Raises LockHeld if the lock is already held.
+        """
+        git_dir = self.resolve_git_dir()
+        fido_dir = git_dir / "fido"
+        lock_fd = self.acquire_lock(fido_dir)
+        return WorkerContext(
+            work_dir=self.work_dir,
+            git_dir=git_dir,
+            fido_dir=fido_dir,
+            lock_fd=lock_fd,
+        )
+
+    def setup_hooks(self, fido_dir: Path) -> tuple[str, str]:
+        """Set up PostCompact and PostToolUse hooks for a fido session.
+
+        Creates the compact script, registers hooks in settings.local.json,
+        and ensures the file is git-excluded.
+
+        Returns (compact_cmd, sync_cmd).
+        """
+        hooks.ensure_gitexcluded(self.work_dir)
+        compact_script = self.create_compact_script(fido_dir)
+        compact_cmd = f"bash {compact_script}"
+        # TODO: replace with Python sync once sync-tasks.sh is removed
+        sync_cmd = f"bash {_sync_script()} {self.work_dir} &"
+        hooks.add_hooks(self.work_dir, compact_cmd, sync_cmd)
+        return compact_cmd, sync_cmd
+
+    def teardown_hooks(self, fido_dir: Path, compact_cmd: str, sync_cmd: str) -> None:
+        """Remove hooks and the compact script created by setup_hooks."""
+        hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
+        (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Business logic
+    # ------------------------------------------------------------------
 
     def discover_repo_context(self) -> RepoContext:
         """Discover repo metadata for self.work_dir using the GitHub API."""
@@ -194,14 +200,14 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state = load_state(fido_dir)
+        state = self.load_state(fido_dir)
         issue = state.get("issue")
         if issue is None:
             return None
         issue_data = self.gh.view_issue(repo, issue)
         if issue_data["state"] == "CLOSED":
             log.info("issue #%s: closed — advancing", issue)
-            clear_state(fido_dir)
+            self.clear_state(fido_dir)
             return None
         return int(issue)
 
@@ -256,7 +262,7 @@ class Worker:
                 number = issue["number"]
                 title = issue["title"]
                 log.info("starting issue #%s: %s", number, title)
-                save_state(fido_dir, {"issue": number})
+                self.save_state(fido_dir, {"issue": number})
                 self.set_status(f"Picking up issue #{number}: {title}")
                 return number
 
@@ -305,7 +311,7 @@ class Worker:
             2 — lock held / transient failure (retry later)
         """
         try:
-            ctx = create_context(self.work_dir)
+            ctx = self.create_context()
         except LockHeld:
             log.warning("another fido is running — exiting")
             return 2
@@ -319,7 +325,7 @@ class Worker:
             repo_ctx.default_branch,
         )
 
-        compact_cmd, sync_cmd = setup_hooks(self.work_dir, ctx.fido_dir)
+        compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
         try:
             issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
             if issue is None:
@@ -334,7 +340,7 @@ class Worker:
             )
             # TODO: PR management, CI checks, task execution, and merge
         finally:
-            teardown_hooks(self.work_dir, ctx.fido_dir, compact_cmd, sync_cmd)
+            self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
         return 0
 

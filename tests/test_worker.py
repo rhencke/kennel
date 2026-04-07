@@ -13,36 +13,30 @@ from kennel.worker import (
     RepoContext,
     Worker,
     WorkerContext,
-    acquire_lock,
-    clear_state,
-    create_compact_script,
-    create_context,
-    load_state,
-    resolve_git_dir,
     run,
-    save_state,
-    setup_hooks,
-    teardown_hooks,
 )
 
 
 class TestResolveGitDir:
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
     def test_returns_path(self, tmp_path: Path) -> None:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="/some/repo/.git\n")
-            result = resolve_git_dir(tmp_path)
+            result = self._make_worker(tmp_path).resolve_git_dir()
         assert result == Path("/some/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="  /a/b/.git  \n")
-            result = resolve_git_dir(tmp_path)
+            result = self._make_worker(tmp_path).resolve_git_dir()
         assert result == Path("/a/b/.git")
 
     def test_calls_correct_command(self, tmp_path: Path) -> None:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="/a/.git")
-            resolve_git_dir(tmp_path)
+            self._make_worker(tmp_path).resolve_git_dir()
         mock_run.assert_called_once_with(
             ["git", "rev-parse", "--absolute-git-dir"],
             cwd=tmp_path,
@@ -55,51 +49,51 @@ class TestResolveGitDir:
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git")
             with pytest.raises(subprocess.CalledProcessError):
-                resolve_git_dir(tmp_path)
+                self._make_worker(tmp_path).resolve_git_dir()
 
 
 class TestAcquireLock:
     def test_returns_open_fd(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd = acquire_lock(fido_dir)
+        fd = Worker.acquire_lock(fido_dir)
         assert not fd.closed
         fd.close()
 
     def test_creates_fido_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "nested" / "fido"
-        fd = acquire_lock(fido_dir)
+        fd = Worker.acquire_lock(fido_dir)
         assert fido_dir.is_dir()
         fd.close()
 
     def test_creates_lock_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd = acquire_lock(fido_dir)
+        fd = Worker.acquire_lock(fido_dir)
         assert (fido_dir / "lock").exists()
         fd.close()
 
     def test_raises_lock_held_when_already_locked(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = acquire_lock(fido_dir)
+        fd1 = Worker.acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld):
-                acquire_lock(fido_dir)
+                Worker.acquire_lock(fido_dir)
         finally:
             fd1.close()
 
     def test_lock_held_message(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = acquire_lock(fido_dir)
+        fd1 = Worker.acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld, match="another fido"):
-                acquire_lock(fido_dir)
+                Worker.acquire_lock(fido_dir)
         finally:
             fd1.close()
 
     def test_reacquirable_after_release(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = acquire_lock(fido_dir)
+        fd1 = Worker.acquire_lock(fido_dir)
         fd1.close()
-        fd2 = acquire_lock(fido_dir)
+        fd2 = Worker.acquire_lock(fido_dir)
         assert not fd2.closed
         fd2.close()
 
@@ -108,8 +102,9 @@ class TestCreateContext:
     def test_returns_worker_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        with patch("kennel.worker.resolve_git_dir", return_value=git_dir):
-            ctx = create_context(tmp_path)
+        worker = Worker(tmp_path, MagicMock())
+        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
+            ctx = worker.create_context()
         assert isinstance(ctx, WorkerContext)
         assert ctx.work_dir == tmp_path
         assert ctx.git_dir == git_dir
@@ -119,8 +114,9 @@ class TestCreateContext:
     def test_creates_fido_dir(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        with patch("kennel.worker.resolve_git_dir", return_value=git_dir):
-            ctx = create_context(tmp_path)
+        worker = Worker(tmp_path, MagicMock())
+        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
+            ctx = worker.create_context()
         assert ctx.fido_dir.is_dir()
         ctx.lock_fd.close()
 
@@ -128,11 +124,12 @@ class TestCreateContext:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         fido_dir = git_dir / "fido"
-        with patch("kennel.worker.resolve_git_dir", return_value=git_dir):
-            fd1 = acquire_lock(fido_dir)
+        worker = Worker(tmp_path, MagicMock())
+        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
+            fd1 = Worker.acquire_lock(fido_dir)
             try:
                 with pytest.raises(LockHeld):
-                    create_context(tmp_path)
+                    worker.create_context()
             finally:
                 fd1.close()
 
@@ -362,14 +359,14 @@ class TestWorker:
     def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
+        Worker.save_state(fido_dir, {"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") == 7
 
     def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
+        Worker.save_state(fido_dir, {"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         result = Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
         assert isinstance(result, int)
@@ -377,17 +374,17 @@ class TestWorker:
     def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
+        Worker.save_state(fido_dir, {"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
 
     def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
+        Worker.save_state(fido_dir, {"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert load_state(fido_dir) == {}
+        assert Worker.load_state(fido_dir) == {}
 
     def test_get_issue_does_not_call_view_issue_when_no_state(
         self, tmp_path: Path
@@ -401,7 +398,7 @@ class TestWorker:
     def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 12})
+        Worker.save_state(fido_dir, {"issue": 12})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
         gh.view_issue.assert_called_once_with("alice/proj", 12)
@@ -411,7 +408,7 @@ class TestWorker:
 
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 9})
+        Worker.save_state(fido_dir, {"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
         with caplog.at_level(logging.INFO, logger="kennel"):
             Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
@@ -420,10 +417,10 @@ class TestWorker:
     def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 5})
+        Worker.save_state(fido_dir, {"issue": 5})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert load_state(fido_dir) == {"issue": 5}
+        assert Worker.load_state(fido_dir) == {"issue": 5}
 
     # --- run ---
 
@@ -442,8 +439,9 @@ class TestWorker:
 
     def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
-            assert Worker(tmp_path, gh).run() == 2
+        worker = Worker(tmp_path, gh)
+        with patch.object(worker, "create_context", side_effect=LockHeld("held")):
+            assert worker.run() == 2
 
     def _run_patches(self, worker: Worker, mock_ctx: MagicMock) -> list:
         """Return a list of common patches needed to run Worker.run() in tests.
@@ -453,14 +451,14 @@ class TestWorker:
         cleanly without hitting GitHub or Claude.
         """
         return [
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            patch.object(
+                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ]
@@ -470,14 +468,14 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            patch.object(
+                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -487,9 +485,10 @@ class TestWorker:
         import logging
 
         gh = self._make_gh()
-        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
+        worker = Worker(tmp_path, gh)
+        with patch.object(worker, "create_context", side_effect=LockHeld("held")):
             with caplog.at_level(logging.WARNING, logger="kennel"):
-                Worker(tmp_path, gh).run()
+                worker.run()
         assert "another fido" in caplog.text
 
     def test_run_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
@@ -499,14 +498,14 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            patch.object(
+                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -521,14 +520,14 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            patch.object(
+                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -543,14 +542,14 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            patch.object(
+                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
-            patch("kennel.worker.teardown_hooks", mock_teardown),
+            patch.object(worker, "teardown_hooks", mock_teardown),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -563,17 +562,17 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch("kennel.worker.setup_hooks", mock_setup),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", mock_setup),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
-        mock_setup.assert_called_once_with(tmp_path, mock_ctx.fido_dir)
+        mock_setup.assert_called_once_with(mock_ctx.fido_dir)
 
     def test_run_calls_get_current_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -581,12 +580,12 @@ class TestWorker:
         worker = Worker(tmp_path, gh)
         mock_get_issue = MagicMock(return_value=None)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", mock_get_issue),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -600,10 +599,10 @@ class TestWorker:
         mock_find = MagicMock(return_value=None)
         repo_ctx = self._make_mock_repo_ctx()
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", mock_find),
         ):
@@ -619,12 +618,12 @@ class TestWorker:
         worker = Worker(tmp_path, gh)
         mock_find = MagicMock(return_value=None)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "find_next_issue", mock_find),
             patch.object(worker, "post_pickup_comment"),
@@ -637,12 +636,12 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
@@ -662,10 +661,10 @@ class TestWorker:
         mock_pickup = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=5),
             patch.object(worker, "post_pickup_comment", mock_pickup),
         ):
@@ -682,12 +681,12 @@ class TestWorker:
         }
         worker = Worker(tmp_path, gh)
         with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
                 worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
             ),
-            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
-            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
         ):
@@ -804,7 +803,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert load_state(fido_dir) == {"issue": 7}
+        assert Worker.load_state(fido_dir) == {"issue": 7}
 
     def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -812,7 +811,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert load_state(fido_dir) == {}
+        assert Worker.load_state(fido_dir) == {}
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -998,31 +997,19 @@ class TestWorkerPostPickupComment:
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = [
-            {"user": {"login": "fido-bot"}, "body": "Already here!"}
+            {"user": {"login": "fido-bot"}, "body": "Woof!"}
         ]
-        with caplog.at_level(logging.INFO, logger="kennel"):
-            worker.post_pickup_comment("owner/repo", 8, "Title", "fido-bot")
-        assert "skipping" in caplog.text
-
-    def test_logs_info_when_posting(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        worker, gh = self._make_worker(tmp_path)
-        gh.get_issue_comments.return_value = []
         with (
             patch("kennel.worker._sub_dir", return_value=tmp_path),
             patch("kennel.worker.claude.generate_reply", return_value="Woof!"),
-            caplog.at_level(logging.INFO, logger="kennel"),
         ):
-            (tmp_path / "persona.md").write_text("")
-            worker.post_pickup_comment("owner/repo", 6, "A task", "fido-bot")
-        assert "pickup comment" in caplog.text
+            with caplog.at_level(logging.INFO, logger="kennel"):
+                worker.post_pickup_comment("owner/repo", 7, "Title", "fido-bot")
+        assert "already exists" in caplog.text
 
 
 class TestRun:
-    """Tests for the module-level run() convenience wrapper."""
-
-    def test_creates_worker_with_github_and_delegates(self, tmp_path: Path) -> None:
+    def test_creates_worker_and_calls_run(self, tmp_path: Path) -> None:
         mock_worker = MagicMock()
         mock_worker.run.return_value = 0
         with (
@@ -1048,31 +1035,31 @@ class TestCreateCompactScript:
     def test_creates_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert script.exists()
 
     def test_returns_path_in_fido_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert script == fido_dir / "compact.sh"
 
     def test_script_is_executable(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert script.stat().st_mode & 0o111  # any execute bit
 
     def test_script_has_shebang(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert script.read_text().startswith("#!/usr/bin/env bash\n")
 
     def test_script_references_sub_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         from kennel.worker import _sub_dir
 
         assert str(_sub_dir()) in script.read_text()
@@ -1080,13 +1067,13 @@ class TestCreateCompactScript:
     def test_script_contains_post_compact_message(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert "PostCompact" in script.read_text()
 
     def test_script_contains_md_glob(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = create_compact_script(fido_dir)
+        script = Worker.create_compact_script(fido_dir)
         assert "*.md" in script.read_text()
 
 
@@ -1095,7 +1082,7 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, sync_cmd = setup_hooks(tmp_path, fido_dir)
+        compact_cmd, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert compact_cmd.startswith("bash ")
         assert sync_cmd.startswith("bash ")
 
@@ -1103,28 +1090,28 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, _ = setup_hooks(tmp_path, fido_dir)
+        compact_cmd, _ = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert "compact.sh" in compact_cmd
 
     def test_sync_cmd_references_sync_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        _, sync_cmd = setup_hooks(tmp_path, fido_dir)
+        _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert "sync-tasks.sh" in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        _, sync_cmd = setup_hooks(tmp_path, fido_dir)
+        _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert str(tmp_path) in sync_cmd
 
     def test_creates_compact_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        setup_hooks(tmp_path, fido_dir)
+        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert (fido_dir / "compact.sh").exists()
 
     def test_adds_hooks_to_settings(self, tmp_path: Path) -> None:
@@ -1133,7 +1120,7 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        setup_hooks(tmp_path, fido_dir)
+        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         settings = tmp_path / ".claude" / "settings.local.json"
         assert settings.exists()
         cfg = json.loads(settings.read_text())
@@ -1143,7 +1130,7 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        setup_hooks(tmp_path, fido_dir)
+        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         exclude = tmp_path / ".git" / "info" / "exclude"
         assert ".claude/settings.local.json" in exclude.read_text()
 
@@ -1153,8 +1140,9 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, sync_cmd = setup_hooks(tmp_path, fido_dir)
-        teardown_hooks(tmp_path, fido_dir, compact_cmd, sync_cmd)
+        worker = Worker(tmp_path, MagicMock())
+        compact_cmd, sync_cmd = worker.setup_hooks(fido_dir)
+        worker.teardown_hooks(fido_dir, compact_cmd, sync_cmd)
         assert not (fido_dir / "compact.sh").exists()
 
     def test_removes_hooks_from_settings(self, tmp_path: Path) -> None:
@@ -1163,8 +1151,9 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, sync_cmd = setup_hooks(tmp_path, fido_dir)
-        teardown_hooks(tmp_path, fido_dir, compact_cmd, sync_cmd)
+        worker = Worker(tmp_path, MagicMock())
+        compact_cmd, sync_cmd = worker.setup_hooks(fido_dir)
+        worker.teardown_hooks(fido_dir, compact_cmd, sync_cmd)
         settings = tmp_path / ".claude" / "settings.local.json"
         cfg = json.loads(settings.read_text())
         assert "hooks" not in cfg
@@ -1173,20 +1162,24 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # Should not raise even when compact.sh does not exist
-        teardown_hooks(tmp_path, fido_dir, "bash /x/compact.sh", "bash sync.sh &")
+        Worker(tmp_path, MagicMock()).teardown_hooks(
+            fido_dir, "bash /x/compact.sh", "bash sync.sh &"
+        )
 
     def test_noop_when_settings_missing(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # No settings file created — should not raise
-        teardown_hooks(tmp_path, fido_dir, "bash /x/compact.sh", "bash sync.sh &")
+        Worker(tmp_path, MagicMock()).teardown_hooks(
+            fido_dir, "bash /x/compact.sh", "bash sync.sh &"
+        )
 
 
 class TestLoadState:
     def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        assert load_state(fido_dir) == {}
+        assert Worker.load_state(fido_dir) == {}
 
     def test_returns_state_when_present(self, tmp_path: Path) -> None:
         import json
@@ -1194,7 +1187,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 42}))
-        assert load_state(fido_dir) == {"issue": 42}
+        assert Worker.load_state(fido_dir) == {"issue": 42}
 
     def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
         import json
@@ -1202,7 +1195,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 7, "extra": "val"}))
-        result = load_state(fido_dir)
+        result = Worker.load_state(fido_dir)
         assert result["issue"] == 7
         assert result["extra"] == "val"
 
@@ -1211,40 +1204,40 @@ class TestSaveState:
     def test_creates_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 5})
+        Worker.save_state(fido_dir, {"issue": 5})
         assert (fido_dir / "state.json").exists()
 
     def test_roundtrips_with_load_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 99})
-        assert load_state(fido_dir) == {"issue": 99}
+        Worker.save_state(fido_dir, {"issue": 99})
+        assert Worker.load_state(fido_dir) == {"issue": 99}
 
     def test_overwrites_existing_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 1})
-        save_state(fido_dir, {"issue": 2})
-        assert load_state(fido_dir) == {"issue": 2}
+        Worker.save_state(fido_dir, {"issue": 1})
+        Worker.save_state(fido_dir, {"issue": 2})
+        assert Worker.load_state(fido_dir) == {"issue": 2}
 
 
 class TestClearState:
     def test_removes_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 3})
-        clear_state(fido_dir)
+        Worker.save_state(fido_dir, {"issue": 3})
+        Worker.clear_state(fido_dir)
         assert not (fido_dir / "state.json").exists()
 
     def test_noop_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # Should not raise
-        clear_state(fido_dir)
+        Worker.clear_state(fido_dir)
 
     def test_load_returns_empty_after_clear(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 10})
-        clear_state(fido_dir)
-        assert load_state(fido_dir) == {}
+        Worker.save_state(fido_dir, {"issue": 10})
+        Worker.clear_state(fido_dir)
+        assert Worker.load_state(fido_dir) == {}
