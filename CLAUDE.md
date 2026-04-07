@@ -56,7 +56,7 @@ uv run ruff format --check .
 |--------|---------|
 | `work.sh` | Main fido worker loop |
 | `sync-tasks.sh` | Sync tasks.json → PR body |
-| `task-cli.sh` | Bash task CLI (add/complete/list) — superseded by `kennel-task`, pending removal |
+| `task-cli.sh` | Bash task CLI (add/complete/list) — superseded by `kennel task`; obsolete once shell scripts are removed |
 | `watchdog.sh` | Kill stale workers, restart |
 | `start.sh` | Env setup + exec kennel |
 
