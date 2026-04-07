@@ -12,7 +12,7 @@ from typing import IO, Any
 
 from kennel import claude, hooks
 from kennel.github import GitHub
-from kennel.prompts import status_prompt, status_system_prompt
+from kennel.prompts import pickup_comment_prompt, status_prompt, status_system_prompt
 
 log = logging.getLogger("kennel")
 
@@ -236,6 +236,65 @@ class Worker:
         self.gh.set_user_status(text, emoji, busy=busy)
         log.info("set_status: %s %s", emoji, text)
 
+    def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
+        """Find the next eligible open issue assigned to gh_user.
+
+        An issue is eligible if it has no sub-issues or all sub-issues are CLOSED.
+
+        On success: saves the issue number to state, sets the GitHub status, and
+        returns the issue number.  When no eligible issue exists: sets a "done"
+        status and returns None.
+        """
+        log.info("finding next eligible issue")
+        issues = self.gh.find_issues(
+            repo_ctx.owner, repo_ctx.repo_name, repo_ctx.gh_user
+        )
+        for issue in issues:
+            sub_issues = issue.get("subIssues", {}).get("nodes", [])
+            if not sub_issues or all(si["state"] == "CLOSED" for si in sub_issues):
+                number = issue["number"]
+                title = issue["title"]
+                log.info("starting issue #%s: %s", number, title)
+                save_state(fido_dir, {"issue": number})
+                self.set_status(f"Picking up issue #{number}: {title}")
+                return number
+
+        log.info(
+            "no eligible issues assigned to %s in %s",
+            repo_ctx.gh_user,
+            repo_ctx.repo,
+        )
+        self.set_status("All done — no issues to fetch", busy=False)
+        return None
+
+    def post_pickup_comment(
+        self, repo: str, issue: int, issue_title: str, gh_user: str
+    ) -> None:
+        """Post a Fido-flavoured pickup comment on the issue if not already posted.
+
+        Checks whether gh_user has already commented; if so, skips.  Otherwise
+        generates the comment via Claude (Opus, using the Fido persona) and posts it.
+        Falls back to a plain-text comment if Claude returns nothing.
+        """
+        comments = self.gh.get_issue_comments(repo, issue)
+        if any(c.get("user", {}).get("login") == gh_user for c in comments):
+            log.info("issue #%s: pickup comment already exists — skipping", issue)
+            return
+
+        persona_path = _sub_dir() / "persona.md"
+        try:
+            persona = persona_path.read_text()
+        except OSError:
+            persona = ""
+
+        prompt = pickup_comment_prompt(persona, issue_title)
+        msg = claude.generate_reply(prompt)
+        if not msg:
+            msg = f"Picking up issue: {issue_title}"
+
+        self.gh.comment_issue(repo, issue, msg)
+        log.info("posted pickup comment on issue #%s", issue)
+
     def run(self) -> int:
         """Run one iteration of the worker loop.
 
@@ -260,8 +319,18 @@ class Worker:
 
         compact_cmd, sync_cmd = setup_hooks(self.work_dir, ctx.fido_dir)
         try:
-            # TODO: main loop implemented in subsequent tasks
-            pass
+            issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
+            if issue is None:
+                issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
+            if issue is None:
+                return 0
+
+            issue_data = self.gh.view_issue(repo_ctx.repo, issue)
+            issue_title = issue_data["title"]
+            self.post_pickup_comment(
+                repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
+            )
+            # TODO: PR management, CI checks, task execution, and merge
         finally:
             teardown_hooks(self.work_dir, ctx.fido_dir, compact_cmd, sync_cmd)
 

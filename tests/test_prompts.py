@@ -7,6 +7,7 @@ import pytest
 from kennel.prompts import (
     issue_reply_instruction,
     persona_wrap,
+    pickup_comment_prompt,
     react_prompt,
     reply_context_block,
     reply_instruction,
@@ -302,6 +303,38 @@ class TestStatusPrompt:
         assert "What you're doing right now" in result
         assert "fixing a bug" in result
 
+
+# ── pickup_comment_prompt ─────────────────────────────────────────────────────
+
+
+class TestPickupCommentPrompt:
+    def test_includes_persona(self) -> None:
+        result = pickup_comment_prompt("I am Fido.", "Fix the thing")
+        assert "I am Fido." in result
+
+    def test_includes_issue_title(self) -> None:
+        result = pickup_comment_prompt("persona", "Refactor auth module")
+        assert "Refactor auth module" in result
+
+    def test_includes_plain_text(self) -> None:
+        result = pickup_comment_prompt("persona", "Add caching")
+        assert "Picking up issue: Add caching" in result
+
+    def test_instructs_fido_character(self) -> None:
+        result = pickup_comment_prompt("persona", "title")
+        assert "Fido" in result
+
+    def test_requests_short_output(self) -> None:
+        result = pickup_comment_prompt("persona", "title")
+        assert "1-2 sentences" in result
+
+    def test_output_constraint_present(self) -> None:
+        result = pickup_comment_prompt("persona", "title")
+        assert "Output only the comment text" in result
+
     def test_empty_persona(self) -> None:
-        result = status_prompt("", "napping")
-        assert "napping" in result
+        result = pickup_comment_prompt("", "Some issue")
+        assert "Picking up issue: Some issue" in result
+
+    def test_returns_string(self) -> None:
+        assert isinstance(pickup_comment_prompt("persona", "title"), str)

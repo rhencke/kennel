@@ -445,6 +445,26 @@ class TestWorker:
         with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
             assert Worker(tmp_path, gh).run() == 2
 
+    def _run_patches(self, worker: Worker, mock_ctx: MagicMock) -> list:
+        """Return a list of common patches needed to run Worker.run() in tests.
+
+        Patches create_context, discover_repo_context, setup_hooks, teardown_hooks,
+        get_current_issue (→ None), and find_next_issue (→ None) so the loop exits
+        cleanly without hitting GitHub or Claude.
+        """
+        return [
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch(
+                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            ),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ]
+
     def test_run_returns_0_on_success(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
@@ -458,6 +478,8 @@ class TestWorker:
                 "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
             patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
         ):
             assert worker.run() == 0
 
@@ -485,6 +507,8 @@ class TestWorker:
                 "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
             patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
         ):
             with caplog.at_level(logging.INFO, logger="kennel"):
                 worker.run()
@@ -505,6 +529,8 @@ class TestWorker:
                 "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
             patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
         ):
             with caplog.at_level(logging.INFO, logger="kennel"):
                 worker.run()
@@ -525,6 +551,8 @@ class TestWorker:
                 "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
             ),
             patch("kennel.worker.teardown_hooks", mock_teardown),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
         mock_teardown.assert_called_once()
@@ -541,9 +569,454 @@ class TestWorker:
             ),
             patch("kennel.worker.setup_hooks", mock_setup),
             patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
         mock_setup.assert_called_once_with(tmp_path, mock_ctx.fido_dir)
+
+    def test_run_calls_get_current_issue(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_get_issue = MagicMock(return_value=None)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", mock_get_issue),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+        mock_get_issue.assert_called_once_with(mock_ctx.fido_dir, "owner/repo")
+
+    def test_run_calls_find_next_issue_when_no_current(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_find = MagicMock(return_value=None)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", mock_find),
+        ):
+            worker.run()
+        mock_find.assert_called_once_with(mock_ctx.fido_dir, repo_ctx)
+
+    def test_run_skips_find_next_when_current_issue_exists(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix bug", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_find = MagicMock(return_value=None)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "find_next_issue", mock_find),
+            patch.object(worker, "post_pickup_comment"),
+        ):
+            worker.run()
+        mock_find.assert_not_called()
+
+    def test_run_returns_0_when_no_issue(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            assert worker.run() == 0
+
+    def test_run_calls_post_pickup_comment_when_issue_found(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {
+            "title": "Test issue",
+            "body": "",
+            "state": "OPEN",
+        }
+        worker = Worker(tmp_path, gh)
+        mock_pickup = MagicMock()
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=5),
+            patch.object(worker, "post_pickup_comment", mock_pickup),
+        ):
+            worker.run()
+        mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
+
+    def test_run_views_issue_for_title(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {
+            "title": "Some title",
+            "body": "",
+            "state": "OPEN",
+        }
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch("kennel.worker.setup_hooks", return_value=("c", "s")),
+            patch("kennel.worker.teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=3),
+            patch.object(worker, "post_pickup_comment"),
+        ):
+            worker.run()
+        gh.view_issue.assert_called_once_with("owner/repo", 3)
+
+
+class TestWorkerFindNextIssue:
+    """Tests for Worker.find_next_issue."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _make_repo_ctx(
+        self,
+        owner: str = "alice",
+        repo_name: str = "proj",
+        repo: str = "alice/proj",
+        gh_user: str = "fido-bot",
+    ) -> RepoContext:
+        return RepoContext(
+            repo=repo,
+            owner=owner,
+            repo_name=repo_name,
+            gh_user=gh_user,
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "fido"
+        d.mkdir()
+        return d
+
+    def test_returns_none_when_no_issues(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result is None
+
+    def test_returns_issue_number_when_eligible_no_subissues(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {"number": 42, "title": "Do the thing", "subIssues": {"nodes": []}}
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result == 42
+
+    def test_returns_issue_number_when_all_subissues_closed(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {
+                "number": 10,
+                "title": "Parent task",
+                "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "CLOSED"}]},
+            }
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result == 10
+
+    def test_skips_issue_with_open_subissue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {
+                "number": 3,
+                "title": "Blocked",
+                "subIssues": {"nodes": [{"state": "OPEN"}]},
+            }
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result is None
+
+    def test_picks_first_eligible_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {
+                "number": 1,
+                "title": "Blocked",
+                "subIssues": {"nodes": [{"state": "OPEN"}]},
+            },
+            {
+                "number": 2,
+                "title": "Ready",
+                "subIssues": {"nodes": []},
+            },
+            {
+                "number": 3,
+                "title": "Also ready",
+                "subIssues": {"nodes": []},
+            },
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result == 2
+
+    def test_saves_state_when_issue_found(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {"number": 7, "title": "Fetch!", "subIssues": {"nodes": []}}
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert load_state(fido_dir) == {"issue": 7}
+
+    def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert load_state(fido_dir) == {}
+
+    def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_status = MagicMock()
+        with patch.object(worker, "set_status", mock_status):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        mock_status.assert_called_once_with("Picking up issue #5: Add tests")
+
+    def test_calls_set_status_done_when_no_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        mock_status = MagicMock()
+        with patch.object(worker, "set_status", mock_status):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        mock_status.assert_called_once_with("All done — no issues to fetch", busy=False)
+
+    def test_passes_correct_args_to_find_issues(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        repo_ctx = self._make_repo_ctx(owner="org", repo_name="myrepo", gh_user="bot")
+        with patch.object(worker, "set_status"):
+            worker.find_next_issue(fido_dir, repo_ctx)
+        gh.find_issues.assert_called_once_with("org", "myrepo", "bot")
+
+    def test_logs_info_when_starting_issue(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {"number": 9, "title": "Chase squirrel", "subIssues": {"nodes": []}}
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert "9" in caplog.text
+
+    def test_logs_info_when_no_eligible_issues(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert "no eligible" in caplog.text
+
+    def test_mixed_closed_and_open_subissues_skips(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_issues.return_value = [
+            {
+                "number": 11,
+                "title": "Partial",
+                "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "OPEN"}]},
+            }
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result is None
+
+
+class TestWorkerPostPickupComment:
+    """Tests for Worker.post_pickup_comment."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def test_skips_when_already_commented(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"user": {"login": "fido-bot"}, "body": "Woof!"}
+        ]
+        worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        gh.comment_issue.assert_not_called()
+
+    def test_posts_comment_when_no_previous_comment(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"user": {"login": "other-user"}, "body": "Hi"}
+        ]
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value="Woof! On it!"),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        gh.comment_issue.assert_called_once_with("owner/repo", 1, "Woof! On it!")
+
+    def test_posts_comment_when_no_existing_comments(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value="I am on it!"),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            worker.post_pickup_comment("owner/repo", 3, "Some task", "fido-bot")
+        gh.comment_issue.assert_called_once()
+
+    def test_falls_back_to_plain_text_when_claude_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value=""),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
+        gh.comment_issue.assert_called_once_with(
+            "owner/repo", 5, "Picking up issue: A task"
+        )
+
+    def test_uses_persona_from_sub_dir(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch(
+                "kennel.worker.claude.generate_reply", return_value="Fetched!"
+            ) as mock_gen,
+        ):
+            (tmp_path / "persona.md").write_text("I am a very good dog.")
+            worker.post_pickup_comment("owner/repo", 2, "Some work", "fido-bot")
+        prompt_arg = mock_gen.call_args[0][0]
+        assert "I am a very good dog." in prompt_arg
+
+    def test_falls_back_to_empty_persona_on_oserror(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        missing = tmp_path / "no_such_dir"
+        with (
+            patch("kennel.worker._sub_dir", return_value=missing),
+            patch(
+                "kennel.worker.claude.generate_reply", return_value="On it!"
+            ) as mock_gen,
+        ):
+            worker.post_pickup_comment("owner/repo", 2, "Work item", "fido-bot")
+        prompt_arg = mock_gen.call_args[0][0]
+        assert "Picking up issue: Work item" in prompt_arg
+
+    def test_prompt_includes_issue_title(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch(
+                "kennel.worker.claude.generate_reply", return_value="On it!"
+            ) as mock_gen,
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker.post_pickup_comment("owner/repo", 4, "Refactor auth", "fido-bot")
+        prompt_arg = mock_gen.call_args[0][0]
+        assert "Refactor auth" in prompt_arg
+
+    def test_checks_comments_for_correct_repo_and_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value="Arf!"),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker.post_pickup_comment("org/myrepo", 99, "Title", "fido-bot")
+        gh.get_issue_comments.assert_called_once_with("org/myrepo", 99)
+
+    def test_logs_info_when_skipping(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"user": {"login": "fido-bot"}, "body": "Already here!"}
+        ]
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            worker.post_pickup_comment("owner/repo", 8, "Title", "fido-bot")
+        assert "skipping" in caplog.text
+
+    def test_logs_info_when_posting(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value="Woof!"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker.post_pickup_comment("owner/repo", 6, "A task", "fido-bot")
+        assert "pickup comment" in caplog.text
 
 
 class TestRun:

@@ -159,6 +159,25 @@ def persona_wrap(persona: str, instruction: str) -> str:
     )
 
 
+# ── Pickup comment ────────────────────────────────────────────────────────────
+
+
+def pickup_comment_prompt(persona: str, issue_title: str) -> str:
+    """Build the prompt for generating a Fido-flavoured pickup comment on an issue.
+
+    The plain text ``"Picking up issue: <title>"`` is rewritten in character
+    by Claude using the provided persona.
+    """
+    plain = f"Picking up issue: {issue_title}"
+    return (
+        f"{persona}\n\n"
+        "Rewrite the following GitHub issue comment in character as Fido. "
+        "Keep it to 1-2 sentences. "
+        "Output only the comment text, no quotes, no explanation.\n\n"
+        f"{plain}"
+    )
+
+
 # ── Reaction ──────────────────────────────────────────────────────────────────
 
 
