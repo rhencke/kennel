@@ -326,34 +326,23 @@ class TestMaybeReact:
 
     def test_reacts_when_valid(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        calls = []
 
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            if "claude" in args:
-                return _make_completed_run("heart\n")
-            return _make_completed_run("")
-
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", return_value=_make_completed_run("heart\n")),
+            patch("kennel.github.add_reaction") as mock_react,
+        ):
             maybe_react("great work!", 99, "pulls", "owner/repo", cfg)
-        assert any("gh" in " ".join(a) for a in calls)
-        assert any("heart" in " ".join(a) for a in calls)
+        mock_react.assert_called_once_with("owner/repo", "pulls", 99, "heart")
 
     def test_no_reaction_for_none(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        calls = []
 
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            if "claude" in args:
-                return _make_completed_run("NONE\n")
-            return _make_completed_run("")
-
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", return_value=_make_completed_run("NONE\n")),
+            patch("kennel.github.add_reaction") as mock_react,
+        ):
             maybe_react("ok", 99, "pulls", "owner/repo", cfg)
-        # gh api should not be called with reactions endpoint
-        reaction_calls = [a for a in calls if "reactions" in " ".join(a)]
-        assert reaction_calls == []
+        mock_react.assert_not_called()
 
     def test_timeout_silently_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -387,7 +376,10 @@ class TestMaybeReact:
                 captured["prompt"] = args[-1]
             return _make_completed_run("eyes\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.add_reaction"),
+        ):
             maybe_react("look at this", 1, "pulls", "owner/repo", cfg)
         assert "you are fido" in captured.get("prompt", "")
 
@@ -445,7 +437,11 @@ class TestReplyToComment:
                 return _make_completed_run("I will add logging.\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
         assert "logging" in title.lower()
@@ -467,7 +463,11 @@ class TestReplyToComment:
                 return _make_completed_run("What specifically?\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ASK"
 
@@ -488,7 +488,11 @@ class TestReplyToComment:
                 return _make_completed_run("I did this because...\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ANSWER"
 
@@ -509,7 +513,11 @@ class TestReplyToComment:
                 return _make_completed_run("That's out of scope for this PR.\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DEFER"
 
@@ -530,7 +538,11 @@ class TestReplyToComment:
                 return _make_completed_run("Not applicable here.\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DUMP"
 
@@ -552,7 +564,11 @@ class TestReplyToComment:
                 return _make_completed_run("")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"  # still succeeds with fallback body
 
@@ -575,7 +591,11 @@ class TestReplyToComment:
                 raise subprocess.TimeoutExpired("claude", 30)
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
@@ -619,7 +639,11 @@ class TestReplyToComment:
                 return _make_completed_run("ok\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
@@ -653,18 +677,19 @@ class TestReplyToReview:
         )
 
         def fake_run(args, **kwargs):
-            # gh api call to fetch comment ids
-            if "gh" in args and "reviews" in " ".join(args):
-                return _make_completed_run("100\n200\n")
             if "claude" in args:
                 text = args[-1]
                 if "Triage" in text:
                     return _make_completed_run("ACT: fix it\n")
                 return _make_completed_run("Will fix.\n")
-            # gh post reply
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.get_review_comments", return_value=[100, 200]),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))
 
     def test_skips_already_replied(self, tmp_path: Path) -> None:
@@ -677,12 +702,13 @@ class TestReplyToReview:
         calls = []
 
         def fake_run(args, **kwargs):
-            if "gh" in args and "reviews" in " ".join(args):
-                return _make_completed_run("100\n200\n")
             calls.append(args)
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.get_review_comments", return_value=[100, 200]),
+        ):
             reply_to_review(
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
             )
@@ -695,7 +721,9 @@ class TestReplyToReview:
             prompt="review",
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 779},
         )
-        with patch("subprocess.run", side_effect=Exception("network fail")):
+        with patch(
+            "kennel.github.get_review_comments", side_effect=Exception("network fail")
+        ):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # should not raise
 
     def test_no_inline_comments(self, tmp_path: Path) -> None:
@@ -704,7 +732,7 @@ class TestReplyToReview:
             prompt="review",
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 780},
         )
-        with patch("subprocess.run", return_value=_make_completed_run("")):
+        with patch("kennel.github.get_review_comments", return_value=[]):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # empty → no replies
 
 
@@ -740,11 +768,13 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: fix the bug\n")
                 return _make_completed_run("I'll fix that.\n")
-            if "repo" in args:
-                return _make_completed_run("owner/repo\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
             )
@@ -761,7 +791,11 @@ class TestReplyToIssueComment:
                 return _make_completed_run("What do you mean?\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action("unclear"), cfg, self._repo_cfg(tmp_path)
             )
@@ -778,7 +812,11 @@ class TestReplyToIssueComment:
                 return _make_completed_run("Yes, because...\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action("why?"), cfg, self._repo_cfg(tmp_path)
             )
@@ -795,7 +833,11 @@ class TestReplyToIssueComment:
                 return _make_completed_run("That won't work here.\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action("do it differently"), cfg, self._repo_cfg(tmp_path)
             )
@@ -812,7 +854,11 @@ class TestReplyToIssueComment:
                 return _make_completed_run("Out of scope.\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
             )
@@ -829,7 +875,11 @@ class TestReplyToIssueComment:
                 return _make_completed_run("")  # empty reply triggers fallback
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
             )
@@ -846,14 +896,18 @@ class TestReplyToIssueComment:
                 raise subprocess.TimeoutExpired("claude", 30)
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
             )
         assert cat == "ACT"
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
-        """gh post failure is caught and does not propagate."""
+        """comment_issue failure is caught and does not propagate."""
         cfg = self._cfg(tmp_path)
         # Use action without comment_id so react block is skipped
         action = Action(
@@ -869,6 +923,7 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: do it\n")
                 return _make_completed_run("ok\n")
+            # get_repo_info still uses subprocess — raise to hit except block
             raise Exception("gh fail")
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -892,7 +947,10 @@ class TestReplyToIssueComment:
                 return _make_completed_run("ok\n")
             return _make_completed_run("owner/repo\n")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.comment_issue"),
+        ):
             cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
@@ -1133,18 +1191,14 @@ class TestMaybeReactGhException:
             self_repo=None,
             sub_dir=tmp_path / "sub",
         )
-        call_count = [0]
-
-        def fake_run(args, **kwargs):
-            call_count[0] += 1
-            if "claude" in args:
-                return _make_completed_run("heart\n")
-            # gh api call → raise to hit except block
-            raise RuntimeError("network down")
-
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", return_value=_make_completed_run("heart\n")),
+            patch(
+                "kennel.github.add_reaction",
+                side_effect=RuntimeError("network down"),
+            ),
+        ):
             maybe_react("great job", 77, "pulls", "owner/repo", cfg)  # must not raise
-        assert call_count[0] >= 2  # claude called, then gh called
 
 
 class TestReplyToCommentElseBranch:
@@ -1183,12 +1237,16 @@ class TestReplyToCommentElseBranch:
                     return _make_completed_run("I'll look into this.\n")
                 return _make_completed_run("")
 
-            with patch("subprocess.run", side_effect=fake_run):
+            with (
+                patch("subprocess.run", side_effect=fake_run),
+                patch("kennel.github.reply_to_review_comment"),
+                patch("kennel.github.add_reaction"),
+            ):
                 cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "UNKNOWN_CAT"
 
     def test_gh_post_exception_caught(self, tmp_path: Path) -> None:
-        """Exception in gh post reply is caught (lines 368-369)."""
+        """Exception in reply_to_review_comment is caught."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -1203,10 +1261,16 @@ class TestReplyToCommentElseBranch:
                 if "Triage" in text:
                     return _make_completed_run("ACT: fix it\n")
                 return _make_completed_run("I'll fix it.\n")
-            # gh post → exception to hit lines 368-369
-            raise RuntimeError("gh down")
+            return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch(
+                "kennel.github.reply_to_review_comment",
+                side_effect=RuntimeError("network down"),
+            ),
+            patch("kennel.github.add_reaction"),
+        ):
             cat, title = reply_to_comment(
                 action, cfg, self._repo_cfg(tmp_path)
             )  # must not raise
@@ -1238,8 +1302,6 @@ class TestReplyToReviewAlreadyRepliedTracking:
         already: set[int] = set()
 
         def fake_run(args, **kwargs):
-            if "gh" in args and "reviews" in " ".join(args):
-                return _make_completed_run("500\n")
             if "claude" in args:
                 text = args[-1]
                 if "Triage" in text:
@@ -1247,7 +1309,12 @@ class TestReplyToReviewAlreadyRepliedTracking:
                 return _make_completed_run("Will fix.\n")
             return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.github.get_review_comments", return_value=[500]),
+            patch("kennel.github.reply_to_review_comment"),
+            patch("kennel.github.add_reaction"),
+        ):
             reply_to_review(
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
             )

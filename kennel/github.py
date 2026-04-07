@@ -3,9 +3,83 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import requests as _requests
+
+# ── Requests-based GitHub API client ─────────────────────────────────────────
+
+
+def _gh_token() -> str:
+    """Return a GitHub token from env or the gh CLI."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        token = result.stdout.strip()
+    return token
+
+
+class GH:
+    """Thin requests-based wrapper for GitHub REST API calls."""
+
+    BASE = "https://api.github.com"
+
+    def __init__(self, token: str) -> None:
+        self._s = _requests.Session()
+        self._s.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        )
+
+    def _get(self, path: str) -> Any:
+        resp = self._s.get(f"{self.BASE}{path}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post(self, path: str, **payload: Any) -> None:
+        resp = self._s.post(f"{self.BASE}{path}", json=payload)
+        resp.raise_for_status()
+
+    def add_reaction(
+        self, repo: str, comment_type: str, comment_id: int | str, content: str
+    ) -> None:
+        """Add a reaction to a comment. comment_type: 'pulls' or 'issues'."""
+        self._post(
+            f"/repos/{repo}/{comment_type}/comments/{comment_id}/reactions",
+            content=content,
+        )
+
+    def reply_to_review_comment(
+        self, repo: str, pr: int | str, body: str, in_reply_to: int | str
+    ) -> None:
+        """Post a reply to an inline review comment."""
+        self._post(
+            f"/repos/{repo}/pulls/{pr}/comments",
+            body=body,
+            in_reply_to=int(in_reply_to),
+        )
+
+    def get_review_comments(
+        self, repo: str, pr: int | str, review_id: int | str
+    ) -> list[int]:
+        """Return list of comment IDs from a review."""
+        data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
+        return [c["id"] for c in data]
+
+    def comment_issue(self, repo: str, number: int | str, body: str) -> None:
+        """Post a comment on an issue."""
+        self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
 
 
 def _gh(
@@ -130,7 +204,7 @@ def close_issue(repo: str, number: int | str) -> None:
 
 def comment_issue(repo: str, number: int | str, body: str) -> None:
     """Post a comment on an issue."""
-    _gh("issue", "comment", str(number), "--repo", repo, "--body", body)
+    GH(_gh_token()).comment_issue(repo, number, body)
 
 
 def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
@@ -262,15 +336,7 @@ def get_reviews(repo: str, pr: int | str) -> dict[str, Any]:
 
 def get_review_comments(repo: str, pr: int | str, review_id: int | str) -> list[int]:
     """Return list of comment IDs from a review."""
-    result = _gh(
-        "api",
-        f"repos/{repo}/pulls/{pr}/reviews/{review_id}/comments",
-        "--jq",
-        ".[].id",
-    )
-    return [
-        int(line.strip()) for line in result.stdout.strip().splitlines() if line.strip()
-    ]
+    return GH(_gh_token()).get_review_comments(repo, pr, review_id)
 
 
 def reply_to_review_comment(
@@ -280,16 +346,7 @@ def reply_to_review_comment(
     in_reply_to: int | str,
 ) -> None:
     """Post a reply to an inline review comment."""
-    _gh(
-        "api",
-        f"repos/{repo}/pulls/{pr}/comments",
-        "-X",
-        "POST",
-        "-f",
-        f"body={body}",
-        "-F",
-        f"in_reply_to={in_reply_to}",
-    )
+    GH(_gh_token()).reply_to_review_comment(repo, pr, body, in_reply_to)
 
 
 def add_reaction(
@@ -299,8 +356,7 @@ def add_reaction(
     content: str,
 ) -> None:
     """Add a reaction to a comment. comment_type: 'pulls' or 'issues'."""
-    endpoint = f"repos/{repo}/{comment_type}/comments/{comment_id}/reactions"
-    _gh("api", endpoint, "-X", "POST", "-f", f"content={content}")
+    GH(_gh_token()).add_reaction(repo, comment_type, comment_id, content)
 
 
 # ── Review threads ────────────────────────────────────────────────────────────

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from kennel.github import (
+    GH,
     _gh,
+    _gh_token,
     add_pr_reviewer,
     add_reaction,
     close_issue,
@@ -156,21 +158,160 @@ class TestCloseIssue:
         assert cmd == ["gh", "issue", "close", "3", "--repo", "o/r"]
 
 
+class TestGhToken:
+    def test_uses_env_var(self) -> None:
+        with patch("os.environ.get", return_value="mytoken"):
+            assert _gh_token() == "mytoken"
+
+    def test_falls_back_to_gh_cli(self) -> None:
+        with (
+            patch("os.environ.get", return_value=""),
+            patch("subprocess.run", return_value=_completed("ghp_abc\n")),
+        ):
+            assert _gh_token() == "ghp_abc"
+
+    def test_gh_cli_strips_whitespace(self) -> None:
+        with (
+            patch("os.environ.get", return_value=""),
+            patch("subprocess.run", return_value=_completed("  tok  \n")),
+        ):
+            assert _gh_token() == "tok"
+
+
+class TestGHClass:
+    def _gh(self) -> GH:
+        return GH("test-token")
+
+    def test_sets_auth_header(self) -> None:
+        gh = self._gh()
+        assert gh._s.headers["Authorization"] == "Bearer test-token"
+
+    def test_sets_accept_header(self) -> None:
+        gh = self._gh()
+        assert gh._s.headers["Accept"] == "application/vnd.github+json"
+
+    def test_get_calls_session(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"id": 1}]
+        with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
+            result = gh._get("/repos/o/r/issues")
+        mock_get.assert_called_once_with("https://api.github.com/repos/o/r/issues")
+        assert result == [{"id": 1}]
+
+    def test_get_raises_on_error(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = Exception("404")
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            try:
+                gh._get("/bad")
+                assert False, "should have raised"
+            except Exception as e:
+                assert "404" in str(e)
+
+    def test_post_calls_session(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh._post("/repos/o/r/issues/1/comments", body="hi")
+        mock_post.assert_called_once_with(
+            "https://api.github.com/repos/o/r/issues/1/comments",
+            json={"body": "hi"},
+        )
+
+    def test_post_raises_on_error(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = Exception("422")
+        with patch.object(gh._s, "post", return_value=mock_resp):
+            try:
+                gh._post("/bad")
+                assert False, "should have raised"
+            except Exception as e:
+                assert "422" in str(e)
+
+    def test_add_reaction_pulls(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh.add_reaction("o/r", "pulls", 42, "rocket")
+        url = mock_post.call_args.args[0]
+        assert "repos/o/r/pulls/comments/42/reactions" in url
+        assert mock_post.call_args.kwargs["json"]["content"] == "rocket"
+
+    def test_add_reaction_issues(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh.add_reaction("o/r", "issues", 7, "+1")
+        url = mock_post.call_args.args[0]
+        assert "repos/o/r/issues/comments/7/reactions" in url
+
+    def test_reply_to_review_comment(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh.reply_to_review_comment("o/r", 10, "lgtm", 55)
+        url = mock_post.call_args.args[0]
+        assert "repos/o/r/pulls/10/comments" in url
+        body = mock_post.call_args.kwargs["json"]
+        assert body["body"] == "lgtm"
+        assert body["in_reply_to"] == 55
+
+    def test_reply_to_review_comment_converts_in_reply_to(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh.reply_to_review_comment("o/r", 10, "ok", "99")
+        body = mock_post.call_args.kwargs["json"]
+        assert body["in_reply_to"] == 99
+
+    def test_get_review_comments(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"id": 101}, {"id": 102}]
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_review_comments("o/r", 10, 99)
+        assert result == [101, 102]
+
+    def test_get_review_comments_empty(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_review_comments("o/r", 10, 99)
+        assert result == []
+
+    def test_get_review_comments_url(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
+            gh.get_review_comments("o/r", 10, 99)
+        url = mock_get.call_args.args[0]
+        assert "repos/o/r/pulls/10/reviews/99/comments" in url
+
+    def test_comment_issue(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            gh.comment_issue("o/r", 7, "hello")
+        url = mock_post.call_args.args[0]
+        assert "repos/o/r/issues/7/comments" in url
+        assert mock_post.call_args.kwargs["json"]["body"] == "hello"
+
+
 class TestCommentIssue:
-    def test_calls_gh(self) -> None:
-        with patch("subprocess.run", return_value=_completed()) as mock:
+    def test_calls_gh_class(self) -> None:
+        mock_gh = MagicMock()
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
+        ):
             comment_issue("o/r", 7, "hello")
-        cmd = mock.call_args.args[0]
-        assert cmd == [
-            "gh",
-            "issue",
-            "comment",
-            "7",
-            "--repo",
-            "o/r",
-            "--body",
-            "hello",
-        ]
+        mock_cls.assert_called_once_with("tok")
+        mock_gh.comment_issue.assert_called_once_with("o/r", 7, "hello")
 
 
 class TestGetIssueComments:
@@ -355,46 +496,57 @@ class TestGetReviews:
 
 
 class TestGetReviewComments:
-    def test_returns_ids(self) -> None:
-        with patch("subprocess.run", return_value=_completed("101\n102\n103\n")):
+    def test_delegates_to_gh_class(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = [101, 102, 103]
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             assert get_review_comments("o/r", 10, 99) == [101, 102, 103]
+        mock_gh.get_review_comments.assert_called_once_with("o/r", 10, 99)
 
-    def test_empty_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("")):
+    def test_empty_result(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = []
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             assert get_review_comments("o/r", 10, 99) == []
-
-    def test_uses_correct_endpoint(self) -> None:
-        with patch("subprocess.run", return_value=_completed("1")) as mock:
-            get_review_comments("o/r", 10, 99)
-        cmd = mock.call_args.args[0]
-        assert "repos/o/r/pulls/10/reviews/99/comments" in cmd
 
 
 class TestReplyToReviewComment:
-    def test_calls_gh(self) -> None:
-        with patch("subprocess.run", return_value=_completed()) as mock:
+    def test_delegates_to_gh_class(self) -> None:
+        mock_gh = MagicMock()
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
+        ):
             reply_to_review_comment("o/r", 10, "lgtm", 55)
-        cmd = mock.call_args.args[0]
-        assert "repos/o/r/pulls/10/comments" in cmd
-        assert "-X" in cmd
-        assert "POST" in cmd
-        assert "body=lgtm" in cmd
-        assert "in_reply_to=55" in cmd
+        mock_cls.assert_called_once_with("tok")
+        mock_gh.reply_to_review_comment.assert_called_once_with("o/r", 10, "lgtm", 55)
 
 
 class TestAddReaction:
-    def test_calls_gh_pulls(self) -> None:
-        with patch("subprocess.run", return_value=_completed()) as mock:
+    def test_delegates_to_gh_class_pulls(self) -> None:
+        mock_gh = MagicMock()
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
+        ):
             add_reaction("o/r", "pulls", 42, "rocket")
-        cmd = mock.call_args.args[0]
-        assert "repos/o/r/pulls/comments/42/reactions" in cmd
-        assert "content=rocket" in cmd
+        mock_cls.assert_called_once_with("tok")
+        mock_gh.add_reaction.assert_called_once_with("o/r", "pulls", 42, "rocket")
 
-    def test_calls_gh_issues(self) -> None:
-        with patch("subprocess.run", return_value=_completed()) as mock:
+    def test_delegates_to_gh_class_issues(self) -> None:
+        mock_gh = MagicMock()
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             add_reaction("o/r", "issues", 7, "+1")
-        cmd = mock.call_args.args[0]
-        assert "repos/o/r/issues/comments/7/reactions" in cmd
+        mock_gh.add_reaction.assert_called_once_with("o/r", "issues", 7, "+1")
 
 
 class TestGetReviewThreads:
