@@ -246,18 +246,20 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
   log "starting issue #$CURRENT_ISSUE: $NEXT_TITLE"
   set_status "Picking up issue #$CURRENT_ISSUE: $NEXT_TITLE"
   jq -n --argjson issue "$CURRENT_ISSUE" '{issue: $issue}' > "$STATE_FILE"
-  # Only post pickup comment for genuinely new issues (not restarts)
-  _ALREADY_COMMENTED=$(gh api "repos/$REPO/issues/$CURRENT_ISSUE/comments" \
-    --jq "[.[] | select(.user.login == \"$GH_USER\")] | length" 2>/dev/null || echo "0")
-  if [[ "$_ALREADY_COMMENTED" == "0" ]]; then
-    _PICKUP_PLAIN="Picking up issue: $NEXT_TITLE"
-    _PICKUP_MSG=$(printf '%s\n\nRewrite the following GitHub issue comment in character as Fido. Keep it to 1-2 sentences. Output only the comment text, no quotes, no explanation.\n\n%s' \
-      "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PICKUP_PLAIN" \
-      | claude --model claude-opus-4-6 --print 2>/dev/null | head -3)
-    : "${_PICKUP_MSG:=$_PICKUP_PLAIN}"
-    gh issue comment "$CURRENT_ISSUE" --repo "$REPO" \
-      --body "$_PICKUP_MSG" 2>/dev/null || true
-  fi
+fi
+
+# ── Ensure pickup comment exists ──────────────────────────────────────────
+_ALREADY_COMMENTED=$(gh api "repos/$REPO/issues/$CURRENT_ISSUE/comments" \
+  --jq "[.[] | select(.user.login == \"$GH_USER\")] | length" 2>/dev/null || echo "0")
+if [[ "$_ALREADY_COMMENTED" == "0" ]]; then
+  ISSUE_TITLE_FOR_COMMENT=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json title --jq .title 2>/dev/null || echo "issue #$CURRENT_ISSUE")
+  _PICKUP_PLAIN="Picking up issue: $ISSUE_TITLE_FOR_COMMENT"
+  _PICKUP_MSG=$(printf '%s\n\nRewrite the following GitHub issue comment in character as Fido. Keep it to 1-2 sentences. Output only the comment text, no quotes, no explanation.\n\n%s' \
+    "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PICKUP_PLAIN" \
+    | claude --model claude-opus-4-6 --print 2>/dev/null || true)
+  : "${_PICKUP_MSG:=$_PICKUP_PLAIN}"
+  gh issue comment "$CURRENT_ISSUE" --repo "$REPO" \
+    --body "$_PICKUP_MSG" 2>/dev/null || true
 fi
 
 # ── Load issue title ───────────────────────────────────────────────────────
