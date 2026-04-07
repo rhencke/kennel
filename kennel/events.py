@@ -393,7 +393,7 @@ def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = No
     if is_bot:
         categories = "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
     else:
-        categories = "ACT (code change needed), ASK (unclear, need clarification), ANSWER (question, not a code change)"
+        categories = "ACT (code change needed), ASK (unclear what code change is needed), ANSWER (question, casual/playful comment, or anything that isn't a code change request — just respond naturally)"
 
     ctx = context or {}
     ctx_parts = []
