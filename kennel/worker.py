@@ -12,7 +12,7 @@ from typing import IO, Any
 
 from kennel import claude, hooks
 from kennel.github import GitHub
-from kennel.prompts import pickup_comment_prompt, status_prompt, status_system_prompt
+from kennel.prompts import Prompts, status_system_prompt
 
 log = logging.getLogger("kennel")
 
@@ -218,8 +218,9 @@ class Worker:
         except OSError:
             persona = ""
 
+        prompts = Prompts(persona)
         raw = claude.generate_status(
-            prompt=status_prompt(persona, what),
+            prompt=prompts.status_prompt(what),
             system_prompt=status_system_prompt(),
         )
         if not raw:
@@ -287,7 +288,8 @@ class Worker:
         except OSError:
             persona = ""
 
-        prompt = pickup_comment_prompt(persona, issue_title)
+        prompts = Prompts(persona)
+        prompt = prompts.pickup_comment_prompt(issue_title)
         msg = claude.generate_reply(prompt)
         if not msg:
             msg = f"Picking up issue: {issue_title}"

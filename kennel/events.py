@@ -10,9 +10,8 @@ from typing import Any
 from kennel.config import Config, RepoConfig
 from kennel.github import get_github
 from kennel.prompts import (
+    Prompts,
     issue_reply_instruction,
-    persona_wrap,
-    react_prompt,
     reply_instruction,
     triage_prompt,
 )
@@ -195,6 +194,7 @@ def maybe_react(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     try:
         result = subprocess.run(
             [
@@ -203,7 +203,7 @@ def maybe_react(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                react_prompt(persona, comment_body),
+                prompts.react_prompt(comment_body),
             ],
             capture_output=True,
             text=True,
@@ -263,6 +263,7 @@ def reply_to_comment(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     comment = action.comment_body
 
     # Step 1: Haiku triage
@@ -286,7 +287,7 @@ def reply_to_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                persona_wrap(persona, instr),
+                prompts.persona_wrap(instr),
             ],
             capture_output=True,
             text=True,
@@ -427,6 +428,7 @@ def reply_to_issue_comment(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     category, title = _triage(comment, action.is_bot, action.context)
     log.info("issue comment triage: %s — %s", category, title)
 
@@ -441,7 +443,7 @@ def reply_to_issue_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                persona_wrap(persona, instr),
+                prompts.persona_wrap(instr),
             ],
             capture_output=True,
             text=True,

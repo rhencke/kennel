@@ -1,4 +1,4 @@
-"""Prompt builders — pure functions that assemble text for Claude."""
+"""Prompt builders — pure functions and a DI class that assembles text for Claude."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def reply_instruction(
 
     Used by ``reply_to_comment`` in events.py.  Returns a plain instruction
     string (no persona wrapper) so the caller can compose it with
-    :func:`persona_wrap`.
+    :meth:`Prompts.persona_wrap`.
     """
     ctx = reply_context_block(context, comment_body, title)
     if category in ("ACT", "DO"):
@@ -145,40 +145,7 @@ def issue_reply_instruction(
     return f"Write a short GitHub PR reply.\n\n{context_str}"
 
 
-# ── Persona wrap ──────────────────────────────────────────────────────────────
-
-
-def persona_wrap(persona: str, instruction: str) -> str:
-    """Wrap an instruction with the Fido persona and output constraint.
-
-    The result is ready to pass as the ``-p`` argument to ``claude --print``.
-    """
-    return (
-        f"{persona}\n\n{instruction}\n\n"
-        "Output only the comment text, no quotes, no explanation. Keep it brief."
-    )
-
-
-# ── Pickup comment ────────────────────────────────────────────────────────────
-
-
-def pickup_comment_prompt(persona: str, issue_title: str) -> str:
-    """Build the prompt for generating a Fido-flavoured pickup comment on an issue.
-
-    The plain text ``"Picking up issue: <title>"`` is rewritten in character
-    by Claude using the provided persona.
-    """
-    plain = f"Picking up issue: {issue_title}"
-    return (
-        f"{persona}\n\n"
-        "Rewrite the following GitHub issue comment in character as Fido. "
-        "Keep it to 1-2 sentences. "
-        "Output only the comment text, no quotes, no explanation.\n\n"
-        f"{plain}"
-    )
-
-
-# ── Reaction ──────────────────────────────────────────────────────────────────
+# ── Status system prompt ───────────────────────────────────────────────────────
 
 
 def status_system_prompt() -> str:
@@ -191,22 +158,72 @@ def status_system_prompt() -> str:
     )
 
 
-def status_prompt(persona: str, what: str) -> str:
-    """Build the user prompt for GitHub status generation."""
-    return f"{persona}\n\nWhat you're doing right now: {what}"
+# ── Prompts DI class ──────────────────────────────────────────────────────────
 
 
-def react_prompt(persona: str, comment_body: str) -> str:
-    """Build the reaction-decision prompt for Fido.
+class Prompts:
+    """Persona-aware prompt builder.
 
-    Asks the model whether to react to *comment_body* and which emoji to use.
+    Accepts a ``persona`` string via the constructor so callers need only read
+    the persona file once and inject it — rather than re-reading it inside
+    every prompt function.  Follows the dependency injection pattern described
+    in CLAUDE.md.
+
+    Stateless helpers that do not depend on the persona remain as module-level
+    functions above (e.g. :func:`triage_prompt`, :func:`reply_instruction`).
+
+    Usage::
+
+        p = Prompts(persona)
+        prompt = p.persona_wrap(instruction)
+        prompt = p.react_prompt(comment_body)
+        prompt = p.pickup_comment_prompt(issue_title)
+        prompt = p.status_prompt(what)
     """
-    return (
-        f"{persona}\n\n"
-        f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
-        "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
-        "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
-        "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
-        "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
-        "If you wouldn't react, reply NONE."
-    )
+
+    def __init__(self, persona: str) -> None:
+        self.persona = persona
+
+    def persona_wrap(self, instruction: str) -> str:
+        """Wrap an instruction with the Fido persona and output constraint.
+
+        The result is ready to pass as the ``-p`` argument to ``claude --print``.
+        """
+        return (
+            f"{self.persona}\n\n{instruction}\n\n"
+            "Output only the comment text, no quotes, no explanation. Keep it brief."
+        )
+
+    def pickup_comment_prompt(self, issue_title: str) -> str:
+        """Build the prompt for generating a Fido-flavoured pickup comment on an issue.
+
+        The plain text ``"Picking up issue: <title>"`` is rewritten in character
+        by Claude using the stored persona.
+        """
+        plain = f"Picking up issue: {issue_title}"
+        return (
+            f"{self.persona}\n\n"
+            "Rewrite the following GitHub issue comment in character as Fido. "
+            "Keep it to 1-2 sentences. "
+            "Output only the comment text, no quotes, no explanation.\n\n"
+            f"{plain}"
+        )
+
+    def status_prompt(self, what: str) -> str:
+        """Build the user prompt for GitHub status generation."""
+        return f"{self.persona}\n\nWhat you're doing right now: {what}"
+
+    def react_prompt(self, comment_body: str) -> str:
+        """Build the reaction-decision prompt for Fido.
+
+        Asks the model whether to react to *comment_body* and which emoji to use.
+        """
+        return (
+            f"{self.persona}\n\n"
+            f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
+            "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
+            "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
+            "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
+            "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
+            "If you wouldn't react, reply NONE."
+        )
