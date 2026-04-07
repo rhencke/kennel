@@ -10,10 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - run: uv sync --group dev
+      - uses: ./.github/actions/setup
       - run: uv run ruff check .
       - run: uv run ruff format --check .
 
@@ -21,8 +18,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - run: uv sync --group dev
+      - uses: ./.github/actions/setup
       - run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=100
