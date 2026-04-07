@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from kennel import hooks
+from kennel import claude, hooks
 from kennel.github import GitHub
+from kennel.prompts import status_prompt, status_system_prompt
 
 log = logging.getLogger("kennel")
 
@@ -151,6 +152,38 @@ def teardown_hooks(
     """Remove hooks and the compact script created by setup_hooks."""
     hooks.remove_hooks(work_dir, compact_cmd, sync_cmd)
     (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+
+def set_status(gh: GitHub, what: str, busy: bool = True) -> None:
+    """Set the authenticated user's GitHub status using Claude-generated text.
+
+    Reads the persona from sub/persona.md, asks Claude to generate a two-line
+    status (emoji + text), then updates the GitHub user status via GraphQL.
+    Silently skips if Claude returns an empty or malformed response.
+    """
+    persona_path = _sub_dir() / "persona.md"
+    try:
+        persona = persona_path.read_text()
+    except OSError:
+        persona = ""
+
+    raw = claude.generate_status(
+        prompt=status_prompt(persona, what),
+        system_prompt=status_system_prompt(),
+    )
+    if not raw:
+        log.warning("set_status: claude returned empty — skipping")
+        return
+
+    lines = raw.splitlines()
+    if len(lines) < 2:
+        log.warning("set_status: expected 2 lines, got %d — skipping", len(lines))
+        return
+
+    emoji = lines[0].strip()
+    text = lines[1].strip()[:80]
+    gh.set_user_status(text, emoji, busy=busy)
+    log.info("set_status: %s %s", emoji, text)
 
 
 def run(work_dir: Path) -> int:

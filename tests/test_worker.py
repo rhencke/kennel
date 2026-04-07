@@ -18,6 +18,7 @@ from kennel.worker import (
     discover_repo_context,
     resolve_git_dir,
     run,
+    set_status,
     setup_hooks,
     teardown_hooks,
 )
@@ -469,3 +470,130 @@ class TestRun:
         ):
             run(tmp_path)
         mock_setup.assert_called_once_with(tmp_path, mock_ctx.fido_dir)
+
+
+class TestSetStatus:
+    def _make_gh(self) -> MagicMock:
+        return MagicMock()
+
+    def test_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nwriting tests"
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "writing tests")
+        gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
+
+    def test_busy_false_forwarded(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="😴\nnapping"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "napping", busy=False)
+        gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
+
+    def test_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "idle")
+        gh.set_user_status.assert_not_called()
+
+    def test_skips_when_only_one_line(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "idle")
+        gh.set_user_status.assert_not_called()
+
+    def test_text_truncated_to_80_chars(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        long_text = "x" * 100
+        with (
+            patch(
+                "kennel.worker.claude.generate_status",
+                return_value=f"🐕\n{long_text}",
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "something")
+        called_text = gh.set_user_status.call_args[0][0]
+        assert len(called_text) == 80
+
+    def test_logs_warning_on_empty_response(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.WARNING, logger="kennel"):
+                set_status(gh, "idle")
+        assert "empty" in caplog.text
+
+    def test_logs_warning_on_single_line(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.WARNING, logger="kennel"):
+                set_status(gh, "idle")
+        assert "expected 2 lines" in caplog.text
+
+    def test_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕\nfetching"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.INFO, logger="kennel"):
+                set_status(gh, "fetching")
+        assert "set_status" in caplog.text
+
+    def test_falls_back_to_empty_persona_on_oserror(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        missing_dir = tmp_path / "no_such_dir"
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+            ) as mock_gen,
+            patch("kennel.worker._sub_dir", return_value=missing_dir),
+        ):
+            set_status(gh, "working")
+        # persona file missing — generate_status still called with empty persona
+        prompt_arg = mock_gen.call_args[1]["prompt"]
+        assert "What you're doing right now: working" in prompt_arg
+
+    def test_passes_system_prompt_to_generate_status(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+            ) as mock_gen,
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            set_status(gh, "working")
+        assert mock_gen.call_args[1]["system_prompt"] is not None

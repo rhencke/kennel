@@ -162,6 +162,21 @@ def persona_wrap(persona: str, instruction: str) -> str:
 # ── Reaction ──────────────────────────────────────────────────────────────────
 
 
+def status_system_prompt() -> str:
+    """Return the system prompt for GitHub status generation."""
+    return (
+        "You are writing your GitHub profile status as Fido the dog. "
+        "Output exactly two lines. "
+        "Line 1: a single emoji for the status icon. "
+        "Line 2: the status text (under 80 chars, no quotes, no preamble)."
+    )
+
+
+def status_prompt(persona: str, what: str) -> str:
+    """Build the user prompt for GitHub status generation."""
+    return f"{persona}\n\nWhat you're doing right now: {what}"
+
+
 def react_prompt(persona: str, comment_body: str) -> str:
     """Build the reaction-decision prompt for Fido.
 

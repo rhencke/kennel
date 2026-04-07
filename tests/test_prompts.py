@@ -10,6 +10,8 @@ from kennel.prompts import (
     react_prompt,
     reply_context_block,
     reply_instruction,
+    status_prompt,
+    status_system_prompt,
     triage_categories,
     triage_context_block,
     triage_prompt,
@@ -260,3 +262,46 @@ class TestReactPrompt:
         result = react_prompt("", "hi")
         assert "hi" in result
         assert "emoji" in result
+
+
+# ── status_system_prompt ──────────────────────────────────────────────────────
+
+
+class TestStatusSystemPrompt:
+    def test_returns_string(self) -> None:
+        result = status_system_prompt()
+        assert isinstance(result, str)
+
+    def test_mentions_two_lines(self) -> None:
+        result = status_system_prompt()
+        assert "two lines" in result
+
+    def test_mentions_emoji(self) -> None:
+        result = status_system_prompt()
+        assert "emoji" in result
+
+    def test_mentions_fido(self) -> None:
+        result = status_system_prompt()
+        assert "Fido" in result
+
+
+# ── status_prompt ─────────────────────────────────────────────────────────────
+
+
+class TestStatusPrompt:
+    def test_includes_persona(self) -> None:
+        result = status_prompt("I am Fido.", "writing tests")
+        assert "I am Fido." in result
+
+    def test_includes_what(self) -> None:
+        result = status_prompt("persona", "reviewing PRs")
+        assert "reviewing PRs" in result
+
+    def test_what_is_framed_as_doing(self) -> None:
+        result = status_prompt("persona", "fixing a bug")
+        assert "What you're doing right now" in result
+        assert "fixing a bug" in result
+
+    def test_empty_persona(self) -> None:
+        result = status_prompt("", "napping")
+        assert "napping" in result
