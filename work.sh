@@ -310,7 +310,7 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
   # Build PR body with tasks already populated
   _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
   _PR_BODY_TEXT=$(claude --model claude-opus-4-6 --print \
-    --system "You are a GitHub PR description writer. Output ONLY the description text — no preamble, no thinking, no quotes, no markdown headers. Your first word is the first word of the description." \
+    --system-prompt "You are a GitHub PR description writer. Output ONLY the description text — no preamble, no thinking, no quotes, no markdown headers. Your first word is the first word of the description." \
     -p "$(cat "$SCRIPT_DIR/sub/persona.md")
 
 Write a 2-3 sentence pull request description for: $_PR_BODY_PLAIN" 2>/dev/null)
