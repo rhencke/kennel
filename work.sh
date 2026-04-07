@@ -309,9 +309,11 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
 
   # Build PR body with tasks already populated
   _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
-  _PR_BODY_TEXT=$(printf '%s\n\n<pr-description-task>\nWrite a 2-3 sentence GitHub pull request description.\nTopic: %s\nRules: Output ONLY the description. No preamble. No "Here is". No test output. No bullet points. No markdown headers. Just start writing the description directly.\n</pr-description-task>' \
-    "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PR_BODY_PLAIN" \
-    | claude --model claude-opus-4-6 --print 2>/dev/null | tail -3 | head -3)
+  _PR_BODY_TEXT=$(claude --model claude-opus-4-6 --print \
+    --system "You are a GitHub PR description writer. Output ONLY the description text — no preamble, no thinking, no quotes, no markdown headers. Your first word is the first word of the description." \
+    -p "$(cat "$SCRIPT_DIR/sub/persona.md")
+
+Write a 2-3 sentence pull request description for: $_PR_BODY_PLAIN" 2>/dev/null)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
 
   # Format tasks from tasks.json into work queue
