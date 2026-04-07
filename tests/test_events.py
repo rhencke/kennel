@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from kennel.config import Config
+from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
@@ -25,12 +25,16 @@ def _config(tmp_path: Path) -> Config:
     return Config(
         port=9000,
         secret=b"test",
-        work_dir=tmp_path,
-        work_script=Path("/fake/work.sh"),
+        repos={},
         allowed_bots=frozenset({"copilot[bot]"}),
-        project="test",
         log_level="WARNING",
+        self_repo=None,
+        sub_dir=tmp_path / "sub",
     )
+
+
+def _repo_cfg(tmp_path: Path) -> RepoConfig:
+    return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
 
 def _payload(repo_owner: str = "owner") -> dict:
@@ -62,7 +66,9 @@ class TestIsAllowed:
 class TestDispatchPing:
     def test_returns_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch("ping", {"hook_id": 123, **_payload()}, cfg)
+        result = dispatch(
+            "ping", {"hook_id": 123, **_payload()}, cfg, _repo_cfg(tmp_path)
+        )
         assert result is None
 
 
@@ -75,7 +81,7 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 1, "title": "test issue"},
         }
-        result = dispatch("issues", payload, cfg)
+        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "#1" in result.prompt
 
@@ -87,7 +93,7 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"title": "test"},
         }
-        result = dispatch("issues", payload, cfg)
+        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
@@ -108,7 +114,9 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "pr title", "body": "pr body"},
         }
-        result = dispatch("pull_request_review_comment", payload, cfg)
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
         assert result is not None
         assert result.reply_to is not None
         assert result.comment_body == "fix this"
@@ -121,7 +129,9 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "done", "user": {"login": "FidoCanCode"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch("pull_request_review_comment", payload, cfg)
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
         assert result is None
 
     def test_unallowed_user_ignored(self, tmp_path: Path) -> None:
@@ -132,7 +142,9 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "rando"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch("pull_request_review_comment", payload, cfg)
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
         assert result is None
 
 
@@ -148,7 +160,7 @@ class TestDispatchCheckRun:
                 "pull_requests": [{"number": 3}],
             },
         }
-        result = dispatch("check_run", payload, cfg)
+        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "CI failure" in result.prompt
 
@@ -159,7 +171,7 @@ class TestDispatchCheckRun:
             "action": "completed",
             "check_run": {"conclusion": "success", "name": "lint", "pull_requests": []},
         }
-        result = dispatch("check_run", payload, cfg)
+        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
@@ -171,7 +183,7 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
-        result = dispatch("pull_request", payload, cfg)
+        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "merged" in result.prompt
 
@@ -182,7 +194,7 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": False},
         }
-        result = dispatch("pull_request", payload, cfg)
+        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
@@ -200,7 +212,7 @@ class TestDispatchIssueComment:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg)
+        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert result.comment_body == "looks good"
 
@@ -212,14 +224,19 @@ class TestDispatchIssueComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "owner"}},
             "issue": {"number": 10, "title": "issue"},
         }
-        result = dispatch("issue_comment", payload, cfg)
+        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
 class TestDispatchUnknown:
     def test_unknown_event(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch("unknown_event", {**_payload(), "action": "whatever"}, cfg)
+        result = dispatch(
+            "unknown_event",
+            {**_payload(), "action": "whatever"},
+            cfg,
+            _repo_cfg(tmp_path),
+        )
         assert result is None
 
 
@@ -300,11 +317,11 @@ class TestMaybeReact:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
 
     def test_reacts_when_valid(self, tmp_path: Path) -> None:
@@ -357,11 +374,11 @@ class TestMaybeReact:
         cfg = Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=sub_dir,
         )
         captured = {}
 
@@ -380,17 +397,20 @@ class TestReplyToComment:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        cat, title = reply_to_comment(action, cfg)
+        cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_no_comment_body_returns_act(self, tmp_path: Path) -> None:
@@ -399,7 +419,7 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        cat, title = reply_to_comment(action, cfg)
+        cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_full_flow_act(self, tmp_path: Path) -> None:
@@ -426,7 +446,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
         assert "logging" in title.lower()
 
@@ -448,7 +468,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ASK"
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
@@ -469,7 +489,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ANSWER"
 
     def test_full_flow_defer(self, tmp_path: Path) -> None:
@@ -490,7 +510,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DEFER"
 
     def test_full_flow_dump(self, tmp_path: Path) -> None:
@@ -511,7 +531,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DUMP"
 
     def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
@@ -533,7 +553,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"  # still succeeds with fallback body
 
     def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
@@ -556,7 +576,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
@@ -576,7 +596,7 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
             assert cat == "ACT"  # returns without posting
         finally:
             lock_fd.close()
@@ -600,7 +620,7 @@ class TestReplyToComment:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)
+            cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
 
@@ -609,18 +629,21 @@ class TestReplyToReview:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_no_review_comments_returns_early(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="review", review_comments=None)
         # should return without error
-        reply_to_review(action, cfg)
+        reply_to_review(action, cfg, self._repo_cfg(tmp_path))
 
     def test_fetches_and_replies(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -642,7 +665,7 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            reply_to_review(action, cfg)
+            reply_to_review(action, cfg, self._repo_cfg(tmp_path))
 
     def test_skips_already_replied(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -660,7 +683,9 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            reply_to_review(action, cfg, already_replied=already)
+            reply_to_review(
+                action, cfg, self._repo_cfg(tmp_path), already_replied=already
+            )
         # no claude calls since all comments already replied
         assert not any("claude" in a for a in calls)
 
@@ -671,7 +696,7 @@ class TestReplyToReview:
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 779},
         )
         with patch("subprocess.run", side_effect=Exception("network fail")):
-            reply_to_review(action, cfg)  # should not raise
+            reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # should not raise
 
     def test_no_inline_comments(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -680,7 +705,7 @@ class TestReplyToReview:
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 780},
         )
         with patch("subprocess.run", return_value=_make_completed_run("")):
-            reply_to_review(action, cfg)  # empty → no replies
+            reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # empty → no replies
 
 
 class TestReplyToIssueComment:
@@ -688,12 +713,15 @@ class TestReplyToIssueComment:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def _action(self, comment="please fix", is_bot=False, cid=42):
         return Action(
@@ -717,7 +745,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action(), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action(), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ACT"
 
     def test_ask_reply(self, tmp_path: Path) -> None:
@@ -732,7 +762,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action("unclear"), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action("unclear"), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ASK"
 
     def test_answer_reply(self, tmp_path: Path) -> None:
@@ -747,7 +779,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action("why?"), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action("why?"), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ANSWER"
 
     def test_dump_reply(self, tmp_path: Path) -> None:
@@ -762,7 +796,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action("do it differently"), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action("do it differently"), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "DUMP"
 
     def test_defer_reply(self, tmp_path: Path) -> None:
@@ -777,7 +813,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action("big refactor"), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "DEFER"
 
     def test_empty_body_fallback(self, tmp_path: Path) -> None:
@@ -792,7 +830,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action(), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action(), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ACT"
 
     def test_timeout_fallback(self, tmp_path: Path) -> None:
@@ -807,7 +847,9 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(self._action(), cfg)
+            cat, title = reply_to_issue_comment(
+                self._action(), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ACT"
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
@@ -830,7 +872,7 @@ class TestReplyToIssueComment:
             raise Exception("gh fail")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(action, cfg)
+            cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
@@ -851,7 +893,7 @@ class TestReplyToIssueComment:
             return _make_completed_run("owner/repo\n")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_issue_comment(action, cfg)
+            cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
 
@@ -860,36 +902,38 @@ class TestCreateTask:
         cfg = Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         with (
             patch("kennel.events.add_task") as mock_add,
             patch("kennel.events.launch_sync") as mock_sync,
         ):
-            create_task("do something", cfg)
+            create_task("do something", cfg, repo_cfg)
         mock_add.assert_called_once_with(tmp_path, title="do something", thread=None)
-        mock_sync.assert_called_once_with(cfg)
+        mock_sync.assert_called_once_with(cfg, repo_cfg)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
         with (
             patch("kennel.events.add_task") as mock_add,
             patch("kennel.events.launch_sync"),
         ):
-            create_task("do something", cfg, thread=thread)
+            create_task("do something", cfg, repo_cfg, thread=thread)
         mock_add.assert_called_once_with(tmp_path, title="do something", thread=thread)
 
 
@@ -898,18 +942,21 @@ class TestLaunchSync:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_launches_popen(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_proc = MagicMock()
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            launch_sync(cfg)
+            launch_sync(cfg, self._repo_cfg(tmp_path))
         assert mock_popen.called
         args = mock_popen.call_args[0][0]
         assert "bash" in args
@@ -918,7 +965,7 @@ class TestLaunchSync:
     def test_popen_exception_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("subprocess.Popen", side_effect=Exception("fail")):
-            launch_sync(cfg)  # should not raise
+            launch_sync(cfg, self._repo_cfg(tmp_path))  # should not raise
 
 
 class TestLaunchWorker:
@@ -926,25 +973,28 @@ class TestLaunchWorker:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_returns_pid(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_proc = MagicMock()
         mock_proc.pid = 12345
         with patch("subprocess.Popen", return_value=mock_proc):
-            pid = launch_worker(cfg)
+            pid = launch_worker(cfg, self._repo_cfg(tmp_path))
         assert pid == 12345
 
     def test_exception_returns_none(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("subprocess.Popen", side_effect=Exception("fail")):
-            pid = launch_worker(cfg)
+            pid = launch_worker(cfg, self._repo_cfg(tmp_path))
         assert pid is None
 
 
@@ -961,7 +1011,7 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg)
+        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert result.review_comments is not None
         assert result.review_comments["review_id"] == 55
@@ -974,7 +1024,7 @@ class TestDispatchPullRequestReview:
             "review": {"state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg)
+        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert result.review_comments is None
 
@@ -986,7 +1036,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {},
         }
-        result = dispatch("pull_request_review", payload, cfg)
+        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
     def test_not_allowed_user_ignored(self, tmp_path: Path) -> None:
@@ -997,7 +1047,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "stranger"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg)
+        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
@@ -1013,7 +1063,7 @@ class TestDispatchCheckRunNoPrs:
                 "pull_requests": [],
             },
         }
-        result = dispatch("check_run", payload, cfg)
+        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "unknown PR" in result.prompt
 
@@ -1031,7 +1081,7 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg)
+        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
     def test_unallowed_user_ignored(self, tmp_path: Path) -> None:
@@ -1046,7 +1096,7 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg)
+        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
 
 
@@ -1065,7 +1115,9 @@ class TestDispatchReviewCommentNoNumber:
             },
             "pull_request": {},  # no number
         }
-        result = dispatch("pull_request_review_comment", payload, cfg)
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
         assert result is None
 
 
@@ -1075,11 +1127,11 @@ class TestMaybeReactGhException:
         cfg = Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
         call_count = [0]
 
@@ -1100,12 +1152,15 @@ class TestReplyToCommentElseBranch:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_unknown_category_uses_else_reply(self, tmp_path: Path) -> None:
         """Triage returns a known category not in the explicit branches → else branch (line 313)."""
@@ -1129,7 +1184,7 @@ class TestReplyToCommentElseBranch:
                 return _make_completed_run("")
 
             with patch("subprocess.run", side_effect=fake_run):
-                cat, title = reply_to_comment(action, cfg)
+                cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "UNKNOWN_CAT"
 
     def test_gh_post_exception_caught(self, tmp_path: Path) -> None:
@@ -1152,7 +1207,9 @@ class TestReplyToCommentElseBranch:
             raise RuntimeError("gh down")
 
         with patch("subprocess.run", side_effect=fake_run):
-            cat, title = reply_to_comment(action, cfg)  # must not raise
+            cat, title = reply_to_comment(
+                action, cfg, self._repo_cfg(tmp_path)
+            )  # must not raise
         assert cat == "ACT"
 
 
@@ -1161,12 +1218,15 @@ class TestReplyToReviewAlreadyRepliedTracking:
         return Config(
             port=9000,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=tmp_path / "work.sh",
+            repos={},
             allowed_bots=frozenset(),
-            project="p",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_adds_to_already_replied_set(self, tmp_path: Path) -> None:
         """When already_replied set is passed, processed comment ids are added (line 452)."""
@@ -1188,5 +1248,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
             return _make_completed_run("")
 
         with patch("subprocess.run", side_effect=fake_run):
-            reply_to_review(action, cfg, already_replied=already)
+            reply_to_review(
+                action, cfg, self._repo_cfg(tmp_path), already_replied=already
+            )
         assert 500 in already

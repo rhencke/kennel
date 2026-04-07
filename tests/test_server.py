@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kennel.config import Config
+from kennel.config import Config, RepoConfig
 from kennel.server import WebhookHandler
 
 
@@ -21,11 +21,11 @@ def _config(tmp_path: Path) -> Config:
     return Config(
         port=0,  # will bind to random port
         secret=b"test-secret",
-        work_dir=tmp_path,
-        work_script=Path("/fake/work.sh"),
+        repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
         allowed_bots=frozenset({"copilot[bot]"}),
-        project="test",
         log_level="WARNING",
+        self_repo=None,
+        sub_dir=tmp_path / "sub",
     )
 
 
@@ -407,17 +407,17 @@ class TestRun:
     """Tests for the run() entry point."""
 
     def test_run_starts_server(self, tmp_path: Path) -> None:
-        from kennel.config import Config
+        from kennel.config import Config, RepoConfig
         from kennel.server import run
 
         fake_cfg = Config(
             port=0,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=Path("/fake/work.sh"),
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
             allowed_bots=frozenset(),
-            project="test",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
 
         mock_server = MagicMock()
@@ -426,7 +426,7 @@ class TestRun:
         tmp_path / "log"
 
         with (
-            patch("kennel.server.Config.from_env", return_value=fake_cfg),
+            patch("kennel.server.Config.from_args", return_value=fake_cfg),
             patch("kennel.server.HTTPServer", return_value=mock_server),
             patch("pathlib.Path.home", return_value=tmp_path),
         ):
@@ -436,23 +436,24 @@ class TestRun:
         mock_server.server_close.assert_called_once()
 
     def test_run_stderr_tty_adds_stream_handler(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
         from kennel.server import run
 
         fake_cfg = Config(
             port=0,
             secret=b"test",
-            work_dir=tmp_path,
-            work_script=Path("/fake/work.sh"),
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
             allowed_bots=frozenset(),
-            project="test",
             log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
         )
 
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
         with (
-            patch("kennel.server.Config.from_env", return_value=fake_cfg),
+            patch("kennel.server.Config.from_args", return_value=fake_cfg),
             patch("kennel.server.HTTPServer", return_value=mock_server),
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("sys.stderr") as mock_stderr,
@@ -461,3 +462,43 @@ class TestRun:
             run()
 
         mock_server.serve_forever.assert_called_once()
+
+
+class TestSelfRestart:
+    """Tests for the self-restart flow (self_repo merge triggers exec)."""
+
+    def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
+        cfg = Config(
+            port=0,
+            secret=b"test-secret",
+            repos={"owner/kennel": RepoConfig(name="owner/kennel", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo="owner/kennel",
+            sub_dir=tmp_path / "sub",
+        )
+        WebhookHandler.config = cfg
+        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        url = f"http://127.0.0.1:{port}"
+        try:
+            payload = {
+                "repository": {
+                    "full_name": "owner/kennel",
+                    "owner": {"login": "owner"},
+                },
+                "action": "closed",
+                "pull_request": {"number": 1, "merged": True},
+            }
+            with (
+                patch("kennel.server.subprocess.run"),
+                patch("kennel.server.os.execv") as mock_exec,
+            ):
+                status = _post_webhook(url, cfg, "pull_request", payload)
+                assert status == 200
+                time.sleep(0.2)
+                mock_exec.assert_called_once()
+        finally:
+            srv.shutdown()

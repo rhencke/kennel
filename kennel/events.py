@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kennel.config import Config
+from kennel.config import Config, RepoConfig
 from kennel.tasks import add_task
 
 log = logging.getLogger("kennel")
@@ -29,7 +29,9 @@ def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
     return user == owner or user in config.allowed_bots
 
 
-def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | None:
+def dispatch(
+    event: str, payload: dict[str, Any], config: Config, repo_cfg: RepoConfig
+) -> Action | None:
     """Map a GitHub webhook event to an action. Returns None if ignored."""
     action = payload.get("action", "")
     repo = payload.get("repository", {}).get("full_name", "")
@@ -179,7 +181,7 @@ def maybe_react(
 
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
-    persona_path = Path(config.work_script).parent / "sub" / "persona.md"
+    persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
     except FileNotFoundError:
@@ -231,7 +233,9 @@ def maybe_react(
         log.exception("failed to post reaction")
 
 
-def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
+def reply_to_comment(
+    action: Action, config: Config, repo_cfg: RepoConfig
+) -> tuple[str, str]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
     Returns (triage_category, task_title) so the caller can create the right task.
@@ -246,7 +250,7 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
 
     cid = info.get("comment_id")
     if cid:
-        lock_path = _comment_lock(config.work_dir, cid)
+        lock_path = _comment_lock(repo_cfg.work_dir, cid)
         lock_fd = open(lock_path, "w")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -257,7 +261,7 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
     else:
         lock_fd = None
 
-    persona_path = Path(config.work_script).parent / "sub" / "persona.md"
+    persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
     except FileNotFoundError:
@@ -389,7 +393,10 @@ def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
 
 
 def reply_to_review(
-    action: Action, config: Config, already_replied: set[int] | None = None
+    action: Action,
+    config: Config,
+    repo_cfg: RepoConfig,
+    already_replied: set[int] | None = None,
 ) -> None:
     """Fetch inline comments from a review and reply to each."""
     info = action.review_comments
@@ -447,6 +454,7 @@ def reply_to_review(
                 },
             ),
             config,
+            repo_cfg,
         )
         if already_replied is not None:
             already_replied.add(int(cid))
@@ -499,7 +507,9 @@ def _triage(
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
 
-def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
+def reply_to_issue_comment(
+    action: Action, config: Config, repo_cfg: RepoConfig
+) -> tuple[str, str]:
     """Triage and reply to a top-level PR comment (issue_comment event)."""
     comment = action.comment_body or ""
     ctx = action.context or {}
@@ -510,7 +520,7 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
-    persona_path = Path(config.work_script).parent / "sub" / "persona.md"
+    persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
     except FileNotFoundError:
@@ -567,7 +577,7 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(config.work_dir),
+            cwd=str(repo_cfg.work_dir),
         ).stdout.strip()
         subprocess.run(
             [
@@ -603,7 +613,7 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(config.work_dir),
+            cwd=str(repo_cfg.work_dir),
         ).stdout.strip()
         maybe_react(comment, _cid, "issues", repo_full, config)
 
@@ -611,20 +621,23 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
 
 
 def create_task(
-    prompt: str, config: Config, thread: dict[str, Any] | None = None
+    prompt: str,
+    config: Config,
+    repo_cfg: RepoConfig,
+    thread: dict[str, Any] | None = None,
 ) -> None:
     """Write a task to the shared task file, then trigger sync."""
     log.info("creating task: %s", prompt[:100])
-    add_task(config.work_dir, title=prompt, thread=thread)
-    launch_sync(config)
+    add_task(repo_cfg.work_dir, title=prompt, thread=thread)
+    launch_sync(config, repo_cfg)
 
 
-def launch_sync(config: Config) -> None:
+def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
     """Launch sync-tasks.sh in background."""
-    sync_script = config.work_script.parent / "sync-tasks.sh"
+    sync_script = config.sub_dir.parent / "sync-tasks.sh"
     try:
         subprocess.Popen(
-            ["bash", str(sync_script), str(config.work_dir)],
+            ["bash", str(sync_script), str(repo_cfg.work_dir)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -634,21 +647,21 @@ def launch_sync(config: Config) -> None:
         log.exception("failed to launch sync-tasks")
 
 
-def launch_worker(config: Config) -> int | None:
+def launch_worker(config: Config, repo_cfg: RepoConfig) -> int | None:
     """Launch work.sh in background (disowned). Returns PID."""
-    env = {**os.environ, "CLAUDE_CODE_TASK_LIST_ID": config.project}
-    log_path = config.work_dir / ".git" / "fido" / "fido.log"
+    work_script = config.sub_dir.parent / "work.sh"
+    log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log.info("launching work.sh → %s", config.work_dir)
+    log.info("launching work.sh → %s", repo_cfg.work_dir)
     try:
         with open(log_path, "a") as log_file:
             proc = subprocess.Popen(
-                ["bash", str(config.work_script), str(config.work_dir)],
+                ["bash", str(work_script), str(repo_cfg.work_dir)],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
-                env=env,
+                env=os.environ.copy(),
             )
         log.info("work.sh launched — pid=%d", proc.pid)
         return proc.pid
