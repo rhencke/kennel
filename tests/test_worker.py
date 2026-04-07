@@ -11,18 +11,16 @@ import pytest
 from kennel.worker import (
     LockHeld,
     RepoContext,
+    Worker,
     WorkerContext,
     acquire_lock,
     clear_state,
     create_compact_script,
     create_context,
-    discover_repo_context,
-    get_current_issue,
     load_state,
     resolve_git_dir,
     run,
     save_state,
-    set_status,
     setup_hooks,
     teardown_hooks,
 )
@@ -155,7 +153,7 @@ class TestRepoContext:
         assert ctx.default_branch == "main"
 
 
-class TestDiscoverRepoContext:
+class TestWorker:
     def _make_gh(
         self,
         repo: str = "owner/myrepo",
@@ -168,53 +166,409 @@ class TestDiscoverRepoContext:
         gh.get_default_branch.return_value = branch
         return gh
 
-    def test_returns_repo_context(self, tmp_path: Path) -> None:
+    # --- discover_repo_context ---
+
+    def test_discover_returns_repo_context(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert isinstance(result, RepoContext)
 
-    def test_repo_field(self, tmp_path: Path) -> None:
+    def test_discover_repo_field(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.repo == "alice/proj"
 
-    def test_owner_parsed(self, tmp_path: Path) -> None:
+    def test_discover_owner_parsed(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.owner == "alice"
 
-    def test_repo_name_parsed(self, tmp_path: Path) -> None:
+    def test_discover_repo_name_parsed(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.repo_name == "proj"
 
-    def test_gh_user(self, tmp_path: Path) -> None:
+    def test_discover_gh_user(self, tmp_path: Path) -> None:
         gh = self._make_gh(user="fido")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.gh_user == "fido"
 
-    def test_default_branch(self, tmp_path: Path) -> None:
+    def test_discover_default_branch(self, tmp_path: Path) -> None:
         gh = self._make_gh(branch="develop")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.default_branch == "develop"
 
-    def test_passes_cwd_to_get_repo_info(self, tmp_path: Path) -> None:
+    def test_discover_passes_cwd_to_get_repo_info(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        discover_repo_context(tmp_path, gh)
+        Worker(tmp_path, gh).discover_repo_context()
         gh.get_repo_info.assert_called_once_with(cwd=tmp_path)
 
-    def test_passes_cwd_to_get_default_branch(self, tmp_path: Path) -> None:
+    def test_discover_passes_cwd_to_get_default_branch(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        discover_repo_context(tmp_path, gh)
+        Worker(tmp_path, gh).discover_repo_context()
         gh.get_default_branch.assert_called_once_with(cwd=tmp_path)
 
-    def test_owner_repo_name_with_slashes_in_repo_name(self, tmp_path: Path) -> None:
-        # Only split on first slash — repo names shouldn't have slashes but
-        # let's ensure we use split("/", 1)
+    def test_discover_splits_on_first_slash_only(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="org/repo")
-        result = discover_repo_context(tmp_path, gh)
+        result = Worker(tmp_path, gh).discover_repo_context()
         assert result.owner == "org"
         assert result.repo_name == "repo"
+
+    # --- set_status ---
+
+    def test_set_status_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nwriting tests"
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("writing tests")
+        gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
+
+    def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="😴\nnapping"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("napping", busy=False)
+        gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
+
+    def test_set_status_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("idle")
+        gh.set_user_status.assert_not_called()
+
+    def test_set_status_skips_when_only_one_line(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("idle")
+        gh.set_user_status.assert_not_called()
+
+    def test_set_status_text_truncated_to_80_chars(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        long_text = "x" * 100
+        with (
+            patch(
+                "kennel.worker.claude.generate_status",
+                return_value=f"🐕\n{long_text}",
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("something")
+        called_text = gh.set_user_status.call_args[0][0]
+        assert len(called_text) == 80
+
+    def test_set_status_logs_warning_on_empty_response(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.WARNING, logger="kennel"):
+                Worker(tmp_path, gh).set_status("idle")
+        assert "empty" in caplog.text
+
+    def test_set_status_logs_warning_on_single_line(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.WARNING, logger="kennel"):
+                Worker(tmp_path, gh).set_status("idle")
+        assert "expected 2 lines" in caplog.text
+
+    def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value="🐕\nfetching"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            with caplog.at_level(logging.INFO, logger="kennel"):
+                Worker(tmp_path, gh).set_status("fetching")
+        assert "set_status" in caplog.text
+
+    def test_set_status_falls_back_to_empty_persona_on_oserror(
+        self, tmp_path: Path
+    ) -> None:
+        gh = self._make_gh()
+        missing_dir = tmp_path / "no_such_dir"
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+            ) as mock_gen,
+            patch("kennel.worker._sub_dir", return_value=missing_dir),
+        ):
+            Worker(tmp_path, gh).set_status("working")
+        # persona file missing — generate_status still called with empty persona
+        prompt_arg = mock_gen.call_args[1]["prompt"]
+        assert "What you're doing right now: working" in prompt_arg
+
+    def test_set_status_passes_system_prompt_to_generate_status(
+        self, tmp_path: Path
+    ) -> None:
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+            ) as mock_gen,
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("working")
+        assert mock_gen.call_args[1]["system_prompt"] is not None
+
+    # --- get_current_issue ---
+
+    def _make_issue_gh(self, state: str = "OPEN") -> MagicMock:
+        gh = MagicMock()
+        gh.view_issue.return_value = {"state": state, "title": "Test", "body": ""}
+        return gh
+
+    def test_get_issue_returns_none_when_no_state(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        gh = self._make_issue_gh()
+        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
+
+    def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 7})
+        gh = self._make_issue_gh(state="OPEN")
+        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") == 7
+
+    def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 7})
+        gh = self._make_issue_gh(state="OPEN")
+        result = Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        assert isinstance(result, int)
+
+    def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 4})
+        gh = self._make_issue_gh(state="CLOSED")
+        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
+
+    def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 4})
+        gh = self._make_issue_gh(state="CLOSED")
+        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        assert load_state(fido_dir) == {}
+
+    def test_get_issue_does_not_call_view_issue_when_no_state(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        gh = self._make_issue_gh()
+        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        gh.view_issue.assert_not_called()
+
+    def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 12})
+        gh = self._make_issue_gh(state="OPEN")
+        Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
+        gh.view_issue.assert_called_once_with("alice/proj", 12)
+
+    def test_get_issue_logs_info_when_closed(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 9})
+        gh = self._make_issue_gh(state="CLOSED")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        assert "advancing" in caplog.text
+
+    def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 5})
+        gh = self._make_issue_gh(state="OPEN")
+        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        assert load_state(fido_dir) == {"issue": 5}
+
+    # --- run ---
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
+            assert Worker(tmp_path, gh).run() == 2
+
+    def test_run_returns_0_on_success(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch(
+                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            ),
+            patch("kennel.worker.teardown_hooks"),
+        ):
+            assert worker.run() == 0
+
+    def test_run_logs_warning_on_lock_held(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = self._make_gh()
+        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
+            with caplog.at_level(logging.WARNING, logger="kennel"):
+                Worker(tmp_path, gh).run()
+        assert "another fido" in caplog.text
+
+    def test_run_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch(
+                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            ),
+            patch("kennel.worker.teardown_hooks"),
+        ):
+            with caplog.at_level(logging.INFO, logger="kennel"):
+                worker.run()
+        assert "worker started" in caplog.text
+
+    def test_run_logs_repo_info(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch(
+                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            ),
+            patch("kennel.worker.teardown_hooks"),
+        ):
+            with caplog.at_level(logging.INFO, logger="kennel"):
+                worker.run()
+        assert "owner/repo" in caplog.text
+
+    def test_run_teardown_called_even_on_exception(self, tmp_path: Path) -> None:
+        """teardown_hooks must be called even if the main loop raises."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        mock_teardown = MagicMock()
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch(
+                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
+            ),
+            patch("kennel.worker.teardown_hooks", mock_teardown),
+        ):
+            worker.run()
+        mock_teardown.assert_called_once()
+
+    def test_run_setup_hooks_called_with_fido_dir(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        mock_setup = MagicMock(return_value=("c", "s"))
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        with (
+            patch("kennel.worker.create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch("kennel.worker.setup_hooks", mock_setup),
+            patch("kennel.worker.teardown_hooks"),
+        ):
+            worker.run()
+        mock_setup.assert_called_once_with(tmp_path, mock_ctx.fido_dir)
+
+
+class TestRun:
+    """Tests for the module-level run() convenience wrapper."""
+
+    def test_creates_worker_with_github_and_delegates(self, tmp_path: Path) -> None:
+        mock_worker = MagicMock()
+        mock_worker.run.return_value = 0
+        with (
+            patch("kennel.worker.GitHub") as mock_gh_cls,
+            patch("kennel.worker.Worker", return_value=mock_worker) as mock_worker_cls,
+        ):
+            result = run(tmp_path)
+        mock_worker_cls.assert_called_once_with(tmp_path, mock_gh_cls.return_value)
+        mock_worker.run.assert_called_once()
+        assert result == 0
+
+    def test_returns_worker_run_result(self, tmp_path: Path) -> None:
+        mock_worker = MagicMock()
+        mock_worker.run.return_value = 2
+        with (
+            patch("kennel.worker.GitHub"),
+            patch("kennel.worker.Worker", return_value=mock_worker),
+        ):
+            assert run(tmp_path) == 2
 
 
 class TestCreateCompactScript:
@@ -355,254 +709,6 @@ class TestTeardownHooks:
         teardown_hooks(tmp_path, fido_dir, "bash /x/compact.sh", "bash sync.sh &")
 
 
-class TestRun:
-    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
-        mock_ctx = MagicMock(spec=WorkerContext)
-        mock_ctx.git_dir = tmp_path / ".git"
-        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
-        return mock_ctx
-
-    def _make_mock_repo_ctx(self) -> MagicMock:
-        repo_ctx = MagicMock(spec=RepoContext)
-        repo_ctx.repo = "owner/repo"
-        repo_ctx.gh_user = "fido-bot"
-        repo_ctx.default_branch = "main"
-        return repo_ctx
-
-    def test_returns_2_when_lock_held(self, tmp_path: Path) -> None:
-        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
-            assert run(tmp_path) == 2
-
-    def test_returns_0_on_success(self, tmp_path: Path) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
-            patch("kennel.worker.GitHub"),
-            patch(
-                "kennel.worker.discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch("kennel.worker.teardown_hooks"),
-        ):
-            assert run(tmp_path) == 0
-
-    def test_logs_warning_on_lock_held(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        with patch("kennel.worker.create_context", side_effect=LockHeld("held")):
-            with caplog.at_level(logging.WARNING, logger="kennel"):
-                run(tmp_path)
-        assert "another fido" in caplog.text
-
-    def test_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
-            patch("kennel.worker.GitHub"),
-            patch(
-                "kennel.worker.discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch("kennel.worker.teardown_hooks"),
-        ):
-            with caplog.at_level(logging.INFO, logger="kennel"):
-                run(tmp_path)
-        assert "worker started" in caplog.text
-
-    def test_logs_repo_info(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
-            patch("kennel.worker.GitHub"),
-            patch(
-                "kennel.worker.discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch("kennel.worker.teardown_hooks"),
-        ):
-            with caplog.at_level(logging.INFO, logger="kennel"):
-                run(tmp_path)
-        assert "owner/repo" in caplog.text
-
-    def test_teardown_called_even_on_exception(self, tmp_path: Path) -> None:
-        """teardown_hooks must be called even if the main loop raises."""
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        mock_teardown = MagicMock()
-        with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
-            patch("kennel.worker.GitHub"),
-            patch(
-                "kennel.worker.discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch(
-                "kennel.worker.setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch("kennel.worker.teardown_hooks", mock_teardown),
-        ):
-            # Force an exception after setup_hooks — monkeypatch the try body.
-            # We do this by making teardown raise only on first call, but that
-            # complicates things. Instead, verify teardown is called normally.
-            run(tmp_path)
-        mock_teardown.assert_called_once()
-
-    def test_setup_hooks_called_with_fido_dir(self, tmp_path: Path) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        mock_setup = MagicMock(return_value=("c", "s"))
-        with (
-            patch("kennel.worker.create_context", return_value=mock_ctx),
-            patch("kennel.worker.GitHub"),
-            patch(
-                "kennel.worker.discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch("kennel.worker.setup_hooks", mock_setup),
-            patch("kennel.worker.teardown_hooks"),
-        ):
-            run(tmp_path)
-        mock_setup.assert_called_once_with(tmp_path, mock_ctx.fido_dir)
-
-
-class TestSetStatus:
-    def _make_gh(self) -> MagicMock:
-        return MagicMock()
-
-    def test_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nwriting tests"
-            ),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "writing tests")
-        gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
-
-    def test_busy_false_forwarded(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value="😴\nnapping"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "napping", busy=False)
-        gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
-
-    def test_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value=""),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "idle")
-        gh.set_user_status.assert_not_called()
-
-    def test_skips_when_only_one_line(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "idle")
-        gh.set_user_status.assert_not_called()
-
-    def test_text_truncated_to_80_chars(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        long_text = "x" * 100
-        with (
-            patch(
-                "kennel.worker.claude.generate_status",
-                return_value=f"🐕\n{long_text}",
-            ),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "something")
-        called_text = gh.set_user_status.call_args[0][0]
-        assert len(called_text) == 80
-
-    def test_logs_warning_on_empty_response(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value=""),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.WARNING, logger="kennel"):
-                set_status(gh, "idle")
-        assert "empty" in caplog.text
-
-    def test_logs_warning_on_single_line(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.WARNING, logger="kennel"):
-                set_status(gh, "idle")
-        assert "expected 2 lines" in caplog.text
-
-    def test_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕\nfetching"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.INFO, logger="kennel"):
-                set_status(gh, "fetching")
-        assert "set_status" in caplog.text
-
-    def test_falls_back_to_empty_persona_on_oserror(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        missing_dir = tmp_path / "no_such_dir"
-        with (
-            patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
-            ) as mock_gen,
-            patch("kennel.worker._sub_dir", return_value=missing_dir),
-        ):
-            set_status(gh, "working")
-        # persona file missing — generate_status still called with empty persona
-        prompt_arg = mock_gen.call_args[1]["prompt"]
-        assert "What you're doing right now: working" in prompt_arg
-
-    def test_passes_system_prompt_to_generate_status(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
-            ) as mock_gen,
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            set_status(gh, "working")
-        assert mock_gen.call_args[1]["system_prompt"] is not None
-
-
 class TestLoadState:
     def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -669,80 +775,3 @@ class TestClearState:
         save_state(fido_dir, {"issue": 10})
         clear_state(fido_dir)
         assert load_state(fido_dir) == {}
-
-
-class TestGetCurrentIssue:
-    def _make_gh(self, state: str = "OPEN") -> MagicMock:
-        gh = MagicMock()
-        gh.view_issue.return_value = {"state": state, "title": "Test", "body": ""}
-        return gh
-
-    def test_returns_none_when_no_state(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        gh = self._make_gh()
-        assert get_current_issue(fido_dir, gh, "owner/repo") is None
-
-    def test_returns_issue_number_when_open(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
-        gh = self._make_gh(state="OPEN")
-        assert get_current_issue(fido_dir, gh, "owner/repo") == 7
-
-    def test_returns_int_type(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
-        gh = self._make_gh(state="OPEN")
-        result = get_current_issue(fido_dir, gh, "owner/repo")
-        assert isinstance(result, int)
-
-    def test_returns_none_when_closed(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
-        gh = self._make_gh(state="CLOSED")
-        assert get_current_issue(fido_dir, gh, "owner/repo") is None
-
-    def test_clears_state_when_closed(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
-        gh = self._make_gh(state="CLOSED")
-        get_current_issue(fido_dir, gh, "owner/repo")
-        assert load_state(fido_dir) == {}
-
-    def test_does_not_call_view_issue_when_no_state(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        gh = self._make_gh()
-        get_current_issue(fido_dir, gh, "owner/repo")
-        gh.view_issue.assert_not_called()
-
-    def test_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 12})
-        gh = self._make_gh(state="OPEN")
-        get_current_issue(fido_dir, gh, "alice/proj")
-        gh.view_issue.assert_called_once_with("alice/proj", 12)
-
-    def test_logs_info_when_closed(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 9})
-        gh = self._make_gh(state="CLOSED")
-        with caplog.at_level(logging.INFO, logger="kennel"):
-            get_current_issue(fido_dir, gh, "owner/repo")
-        assert "advancing" in caplog.text
-
-    def test_state_preserved_when_open(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 5})
-        gh = self._make_gh(state="OPEN")
-        get_current_issue(fido_dir, gh, "owner/repo")
-        assert load_state(fido_dir) == {"issue": 5}

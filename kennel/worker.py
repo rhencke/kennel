@@ -98,21 +98,6 @@ def create_context(work_dir: Path) -> WorkerContext:
     )
 
 
-def discover_repo_context(work_dir: Path, gh: GitHub) -> RepoContext:
-    """Discover repo metadata for work_dir using the GitHub API."""
-    repo = gh.get_repo_info(cwd=work_dir)
-    owner, repo_name = repo.split("/", 1)
-    gh_user = gh.get_user()
-    default_branch = gh.get_default_branch(cwd=work_dir)
-    return RepoContext(
-        repo=repo,
-        owner=owner,
-        repo_name=repo_name,
-        gh_user=gh_user,
-        default_branch=default_branch,
-    )
-
-
 def create_compact_script(fido_dir: Path) -> Path:
     """Write the PostCompact hook script that re-reads skill instructions.
 
@@ -177,84 +162,117 @@ def clear_state(fido_dir: Path) -> None:
     (fido_dir / "state.json").unlink(missing_ok=True)
 
 
-def get_current_issue(fido_dir: Path, gh: GitHub, repo: str) -> int | None:
-    """Return the current issue number from state, or None if there is none.
+class Worker:
+    """Fido worker for a single repository.
 
-    If state.json records an issue that has been CLOSED on GitHub, the state
-    is cleared (advancing to the next issue) and None is returned.
+    Accepts ``work_dir`` and a :class:`~kennel.github.GitHub` client via the
+    constructor so that tests can inject a mock without patching module-level
+    names.  See :ref:`dependency-injection` in CLAUDE.md.
     """
-    state = load_state(fido_dir)
-    issue = state.get("issue")
-    if issue is None:
-        return None
-    issue_data = gh.view_issue(repo, issue)
-    if issue_data["state"] == "CLOSED":
-        log.info("issue #%s: closed — advancing", issue)
-        clear_state(fido_dir)
-        return None
-    return int(issue)
 
+    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+        self.work_dir = work_dir
+        self.gh = gh
 
-def set_status(gh: GitHub, what: str, busy: bool = True) -> None:
-    """Set the authenticated user's GitHub status using Claude-generated text.
+    def discover_repo_context(self) -> RepoContext:
+        """Discover repo metadata for self.work_dir using the GitHub API."""
+        repo = self.gh.get_repo_info(cwd=self.work_dir)
+        owner, repo_name = repo.split("/", 1)
+        gh_user = self.gh.get_user()
+        default_branch = self.gh.get_default_branch(cwd=self.work_dir)
+        return RepoContext(
+            repo=repo,
+            owner=owner,
+            repo_name=repo_name,
+            gh_user=gh_user,
+            default_branch=default_branch,
+        )
 
-    Reads the persona from sub/persona.md, asks Claude to generate a two-line
-    status (emoji + text), then updates the GitHub user status via GraphQL.
-    Silently skips if Claude returns an empty or malformed response.
-    """
-    persona_path = _sub_dir() / "persona.md"
-    try:
-        persona = persona_path.read_text()
-    except OSError:
-        persona = ""
+    def get_current_issue(self, fido_dir: Path, repo: str) -> int | None:
+        """Return the current issue number from state, or None if there is none.
 
-    raw = claude.generate_status(
-        prompt=status_prompt(persona, what),
-        system_prompt=status_system_prompt(),
-    )
-    if not raw:
-        log.warning("set_status: claude returned empty — skipping")
-        return
+        If state.json records an issue that has been CLOSED on GitHub, the state
+        is cleared (advancing to the next issue) and None is returned.
+        """
+        state = load_state(fido_dir)
+        issue = state.get("issue")
+        if issue is None:
+            return None
+        issue_data = self.gh.view_issue(repo, issue)
+        if issue_data["state"] == "CLOSED":
+            log.info("issue #%s: closed — advancing", issue)
+            clear_state(fido_dir)
+            return None
+        return int(issue)
 
-    lines = raw.splitlines()
-    if len(lines) < 2:
-        log.warning("set_status: expected 2 lines, got %d — skipping", len(lines))
-        return
+    def set_status(self, what: str, busy: bool = True) -> None:
+        """Set the authenticated user's GitHub status using Claude-generated text.
 
-    emoji = lines[0].strip()
-    text = lines[1].strip()[:80]
-    gh.set_user_status(text, emoji, busy=busy)
-    log.info("set_status: %s %s", emoji, text)
+        Reads the persona from sub/persona.md, asks Claude to generate a two-line
+        status (emoji + text), then updates the GitHub user status via GraphQL.
+        Silently skips if Claude returns an empty or malformed response.
+        """
+        persona_path = _sub_dir() / "persona.md"
+        try:
+            persona = persona_path.read_text()
+        except OSError:
+            persona = ""
+
+        raw = claude.generate_status(
+            prompt=status_prompt(persona, what),
+            system_prompt=status_system_prompt(),
+        )
+        if not raw:
+            log.warning("set_status: claude returned empty — skipping")
+            return
+
+        lines = raw.splitlines()
+        if len(lines) < 2:
+            log.warning("set_status: expected 2 lines, got %d — skipping", len(lines))
+            return
+
+        emoji = lines[0].strip()
+        text = lines[1].strip()[:80]
+        self.gh.set_user_status(text, emoji, busy=busy)
+        log.info("set_status: %s %s", emoji, text)
+
+    def run(self) -> int:
+        """Run one iteration of the worker loop.
+
+        Returns:
+            0 — no more work (all done or idle)
+            2 — lock held / transient failure (retry later)
+        """
+        try:
+            ctx = create_context(self.work_dir)
+        except LockHeld:
+            log.warning("another fido is running — exiting")
+            return 2
+        log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
+
+        repo_ctx = self.discover_repo_context()
+        log.info(
+            "repo=%s user=%s default_branch=%s",
+            repo_ctx.repo,
+            repo_ctx.gh_user,
+            repo_ctx.default_branch,
+        )
+
+        compact_cmd, sync_cmd = setup_hooks(self.work_dir, ctx.fido_dir)
+        try:
+            # TODO: main loop implemented in subsequent tasks
+            pass
+        finally:
+            teardown_hooks(self.work_dir, ctx.fido_dir, compact_cmd, sync_cmd)
+
+        return 0
 
 
 def run(work_dir: Path) -> int:
     """Run one iteration of the worker loop.
 
-    Returns:
-        0 — no more work (all done or idle)
-        2 — lock held / transient failure (retry later)
+    Creates a :class:`Worker` with a live :class:`~kennel.github.GitHub` client
+    and delegates to :meth:`Worker.run`.  For testing, construct ``Worker``
+    directly with a mock ``gh`` instead of patching module-level names.
     """
-    try:
-        ctx = create_context(work_dir)
-    except LockHeld:
-        log.warning("another fido is running — exiting")
-        return 2
-    log.info("worker started for %s (git_dir=%s)", work_dir, ctx.git_dir)
-
-    gh = GitHub()
-    repo_ctx = discover_repo_context(work_dir, gh)
-    log.info(
-        "repo=%s user=%s default_branch=%s",
-        repo_ctx.repo,
-        repo_ctx.gh_user,
-        repo_ctx.default_branch,
-    )
-
-    compact_cmd, sync_cmd = setup_hooks(work_dir, ctx.fido_dir)
-    try:
-        # TODO: main loop implemented in subsequent tasks
-        pass
-    finally:
-        teardown_hooks(work_dir, ctx.fido_dir, compact_cmd, sync_cmd)
-
-    return 0
+    return Worker(work_dir, GitHub()).run()
