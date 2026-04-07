@@ -267,12 +267,23 @@ def reply_to_comment(
     prompts = Prompts(persona)
     comment = action.comment_body
 
+    # Enrich context with sibling threads when the comment is terse
+    context: dict[str, Any] = dict(action.context) if action.context else {}
+    if is_terse(comment) and info.get("repo") and info.get("pr"):
+        siblings = _fetch_sibling_threads(info["repo"], info["pr"])
+        if siblings:
+            context["sibling_threads"] = siblings
+            log.info(
+                "terse comment — fetched %d sibling thread(s) for context",
+                len(siblings),
+            )
+
     # Step 1: Haiku triage
-    category, title = _triage(comment, action.is_bot, action.context)
+    category, title = _triage(comment, action.is_bot, context)
     log.info("triage: %s — %s", category, title)
 
     # Step 2: Opus reply based on triage
-    instr = reply_instruction(category, comment, title, action.context)
+    instr = reply_instruction(category, comment, title, context)
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -334,6 +345,41 @@ def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
     """Best-effort resolve a review thread via GraphQL."""
     # We'd need the thread node_id — skip for now, work.sh will handle it
     pass
+
+
+def _fetch_sibling_threads(repo: str, pr: int | str) -> list[dict[str, Any]]:
+    """Return all review-comment threads for a PR as a structured list.
+
+    Each entry is {path, line, comments: [{author, body}, ...]}.
+    Root comments (no in_reply_to_id) start a new thread; replies are appended.
+    Returns [] on any error.
+    """
+    try:
+        raw = get_github().get_pull_comments(repo, pr)
+    except Exception:
+        log.exception("failed to fetch sibling threads for %s#%s", repo, pr)
+        return []
+
+    threads: dict[int, dict[str, Any]] = {}
+    for c in raw:
+        cid = c["id"]
+        parent_id = c.get("in_reply_to_id")
+        entry = {
+            "author": c.get("user", {}).get("login", ""),
+            "body": c.get("body", ""),
+        }
+        if parent_id is None:
+            threads[cid] = {
+                "path": c.get("path", ""),
+                "line": c.get("line"),
+                "comments": [entry],
+            }
+        else:
+            root = threads.get(parent_id)
+            if root is not None:
+                root["comments"].append(entry)
+
+    return list(threads.values())
 
 
 def reply_to_review(
