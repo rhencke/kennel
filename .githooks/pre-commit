@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo "==> checking format"
+uv run ruff format --check .
+
+echo "==> checking lint"
+uv run ruff check .
+
+echo "==> running tests"
+uv run pytest --cov --cov-report=term-missing --cov-fail-under=100

@@ -30,3 +30,4 @@ source = ["kennel"]
 
 [tool.coverage.report]
 fail_under = 100
+
