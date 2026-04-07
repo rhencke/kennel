@@ -61,16 +61,16 @@ exec 6>&-  # release comment lock
 ```
 
 ### 3. Mark complete
-After commit and push, mark the task complete via task-cli.sh (this handles thread resolution automatically):
+After commit and push, mark the task complete via kennel-task (this handles thread resolution automatically):
 ```bash
-bash /home/rhencke/workspace/kennel/task-cli.sh <work_dir> complete "<exact task title>"
+uv run --project /home/rhencke/workspace/kennel kennel-task <work_dir> complete "<exact task title>"
 ```
 
-Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only use `task-cli.sh`.
+Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only use `kennel-task`.
 Do NOT edit the PR body. `sync-tasks.sh` handles that automatically.
 
 ## Done when
-Task implemented, committed, pushed, and marked complete via task-cli.sh.
+Task implemented, committed, pushed, and marked complete via kennel-task.
 
 **Stop immediately after completing this one task. Do not start the next task. Your job is exactly one task per invocation.**
 
@@ -79,5 +79,5 @@ Task implemented, committed, pushed, and marked complete via task-cli.sh.
 - **Never** continue to another task after completing the current one. One task per invocation, period.
 - **Never** rebase, amend, or force-push. New commits only.
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
-- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, or TodoRead. Only `task-cli.sh`.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, or TodoRead. Only `kennel-task`.
 - **Never** edit the PR body directly. `sync-tasks.sh` owns the PR body work queue.

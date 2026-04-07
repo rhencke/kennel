@@ -297,7 +297,7 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   git checkout "$SLUG" 2>/dev/null \
     || git checkout -b "$SLUG" --track "$FORK_REMOTE/$SLUG"
   # Check if tasks.json has any tasks — run setup only if never planned
-  _ALL_TASKS=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+  _ALL_TASKS=$(uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" list 2>/dev/null \
     | jq -r 'length' 2>/dev/null || echo "0")
   SESSION_ID=""
   if [[ "$_ALL_TASKS" -eq 0 ]]; then
@@ -352,7 +352,7 @@ Write a 2-3 sentence pull request description for: $_PR_BODY_PLAIN" 2>/dev/null)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
 
   # Format tasks from tasks.json into work queue
-  _TASK_QUEUE=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+  _TASK_QUEUE=$(uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" list 2>/dev/null \
     | jq -r '[.[] | select(.status == "pending")] | to_entries | map("- [ ] \(.value.title)" + if .key == 0 then " **→ next**" else "" end) | .[]' 2>/dev/null || true)
   : "${_TASK_QUEUE:=<!-- no tasks yet -->}"
 
@@ -381,7 +381,7 @@ if [[ "$_EXISTING" == "[]" || "$_EXISTING" == "" ]]; then
   if [[ -n "$_SEED_TASKS" ]]; then
     while IFS= read -r task_title; do
       [[ -z "$task_title" ]] && continue
-      bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" add "$task_title" 2>/dev/null || true
+      uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" add "$task_title" 2>/dev/null || true
     done <<< "$_SEED_TASKS"
     bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
     log "seeded $(echo "$_SEED_TASKS" | wc -l) tasks"
@@ -452,7 +452,7 @@ Review threads related to this CI failure (JSON — may be empty):
 $CI_THREADS"
   claude_run
   log "CI fix done"
-  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "CI failure: $FAILING" 2>/dev/null || true
+  uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" complete "CI failure: $FAILING" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
@@ -486,7 +486,7 @@ Review feedback:
 $REVIEW_FEEDBACK"
   claude_run
   log "review feedback done"
-  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "Address review feedback from $OWNER" 2>/dev/null || true
+  uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" complete "Address review feedback from $OWNER" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
@@ -556,7 +556,7 @@ fi
 
 # ── Task ───────────────────────────────────────────────────────────────────
 log "checking: tasks"
-_TASK_JSON=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null || echo "[]")
+_TASK_JSON=$(uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" list 2>/dev/null || echo "[]")
 # Prioritise: CI fix → comment-originated (has thread) → rest (skip ASK/DEFER)
 PENDING=$(printf '%s' "$_TASK_JSON" | jq -r '
   [.[] | select(.status == "pending")
@@ -579,7 +579,7 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
 Task title: $PENDING"
   claude_run
   log "task done: $PENDING"
-  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
+  uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
@@ -595,7 +595,7 @@ APPROVED=$(printf '%s' "$_REVIEWS_JSON" \
     '[.reviews[] | select(.author.login == $owner and .state == "APPROVED")] | length > 0')
 
 # Merge only if: approved + not draft + no pending tasks + all threads resolved
-_PENDING_COUNT=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+_PENDING_COUNT=$(uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" list 2>/dev/null \
   | jq -r '[.[] | select(.status == "pending")] | length' 2>/dev/null || echo "0")
 if [[ "$APPROVED" == "true" && "$IS_DRAFT" == "false" && "$_PENDING_COUNT" -eq 0 ]]; then
   MERGE_STATE=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
@@ -629,7 +629,7 @@ if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
 fi
 
 if [[ "$IS_DRAFT" == "true" ]]; then
-  _COMPLETED=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+  _COMPLETED=$(uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" list 2>/dev/null \
     | jq -r '[.[] | select(.status == "completed")] | length' 2>/dev/null || echo "0")
   if [[ "$_COMPLETED" == "0" ]]; then
     log "PR #$PR: no tasks completed — not promoting (setup may have failed)"

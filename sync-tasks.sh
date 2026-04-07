@@ -6,6 +6,7 @@
 set -euo pipefail
 
 WORK_DIR="${1:-$PWD}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORK_DIR"
 
 mkdir -p "$HOME/log"
@@ -89,7 +90,7 @@ if [[ -n "$_ASK_TASKS" ]]; then
     [[ -z "$comment_id" ]] && continue
     if echo "$_RESOLVED_IDS" | grep -qx "$comment_id"; then
       log "ASK task $task_id: thread resolved — marking complete"
-      bash "$(dirname "$0")/task-cli.sh" "$WORK_DIR" complete "$(python3 -c "
+      uv run --project "$SCRIPT_DIR" kennel-task "$WORK_DIR" complete "$(python3 -c "
 import json, sys
 with open(sys.argv[1]) as f: tasks = json.load(f)
 for t in tasks:
