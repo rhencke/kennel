@@ -5,10 +5,11 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kennel.github import (
     GH,
     _get_gh,
-    _gh,
     _gh_token,
     add_pr_reviewer,
     add_reaction,
@@ -44,10 +45,21 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_gh_cache() -> None:
+    """Reset the _get_gh cache before each test and seed it with a real GH instance."""
+    _get_gh.cache_clear()
+    # Pre-populate cache with a real GH instance so module-level functions
+    # use a real _gh() method (backed by subprocess.run, which tests mock).
+    with patch("kennel.github._gh_token", return_value="test-token"):
+        _get_gh()
+
+
 class TestGhHelper:
     def test_calls_subprocess_run(self) -> None:
+        gh = GH("test-token")
         with patch("subprocess.run", return_value=_completed("out")) as mock:
-            result = _gh("api", "user", cwd="/tmp", timeout=5)
+            result = gh._gh("api", "user", cwd="/tmp", timeout=5)
         mock.assert_called_once_with(
             ["gh", "api", "user"],
             capture_output=True,
@@ -58,8 +70,9 @@ class TestGhHelper:
         assert result.stdout == "out"
 
     def test_defaults(self) -> None:
+        gh = GH("test-token")
         with patch("subprocess.run", return_value=_completed()) as mock:
-            _gh("version")
+            gh._gh("version")
         _, kwargs = mock.call_args
         assert kwargs["timeout"] == 30
         assert kwargs["cwd"] is None

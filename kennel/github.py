@@ -30,7 +30,7 @@ def _gh_token() -> str:
 
 
 class GH:
-    """Thin requests-based wrapper for GitHub REST API calls."""
+    """GitHub client: requests-based REST API calls plus gh CLI subprocess helper."""
 
     BASE = "https://api.github.com"
 
@@ -42,6 +42,21 @@ class GH:
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
+        )
+
+    def _gh(
+        self,
+        *args: str,
+        cwd: Path | str | None = None,
+        timeout: int = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a gh CLI subcommand and return the CompletedProcess."""
+        return subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
         )
 
     def _get(self, path: str) -> Any:
@@ -113,26 +128,12 @@ def _get_gh() -> GH:
     return GH(_gh_token())
 
 
-def _gh(
-    *args: str,
-    cwd: Path | str | None = None,
-    timeout: int = 30,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=cwd,
-    )
-
-
 # ── Repo / user context ───────────────────────────────────────────────────────
 
 
 def get_repo_info(cwd: Path | str | None = None) -> str:
     """Return 'owner/repo' for the repo at cwd."""
-    result = _gh(
+    result = _get_gh()._gh(
         "repo",
         "view",
         "--json",
@@ -146,13 +147,13 @@ def get_repo_info(cwd: Path | str | None = None) -> str:
 
 def get_user() -> str:
     """Return the authenticated GitHub username."""
-    result = _gh("api", "user", "--jq", ".login")
+    result = _get_gh()._gh("api", "user", "--jq", ".login")
     return result.stdout.strip()
 
 
 def get_default_branch(cwd: Path | str | None = None) -> str:
     """Return the default branch name for the repo at cwd."""
-    result = _gh(
+    result = _get_gh()._gh(
         "repo",
         "view",
         "--json",
@@ -172,7 +173,7 @@ def set_user_status(msg: str, emoji: str, busy: bool = True) -> None:
         " limitedAvailability: $busy})"
         "{ status { message emoji indicatesLimitedAvailability } } }"
     )
-    _gh(
+    _get_gh()._gh(
         "api",
         "graphql",
         "-F",
@@ -198,7 +199,7 @@ def find_issues(owner: str, repo: str, login: str) -> list[dict[str, Any]]:
         "orderBy:{field:CREATED_AT,direction:ASC}){"
         "nodes{number title subIssues(first:10){nodes{state}}}}}}"
     )
-    result = _gh(
+    result = _get_gh()._gh(
         "api",
         "graphql",
         "-F",
@@ -216,7 +217,7 @@ def find_issues(owner: str, repo: str, login: str) -> list[dict[str, Any]]:
 
 def view_issue(repo: str, number: int | str) -> dict[str, Any]:
     """Return issue data (state, title, body)."""
-    result = _gh(
+    result = _get_gh()._gh(
         "issue",
         "view",
         str(number),
@@ -230,7 +231,7 @@ def view_issue(repo: str, number: int | str) -> dict[str, Any]:
 
 def close_issue(repo: str, number: int | str) -> None:
     """Close an issue."""
-    _gh("issue", "close", str(number), "--repo", repo)
+    _get_gh()._gh("issue", "close", str(number), "--repo", repo)
 
 
 def comment_issue(repo: str, number: int | str, body: str) -> None:
@@ -240,7 +241,7 @@ def comment_issue(repo: str, number: int | str, body: str) -> None:
 
 def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
     """Return all comments on an issue."""
-    result = _gh("api", f"repos/{repo}/issues/{number}/comments")
+    result = _get_gh()._gh("api", f"repos/{repo}/issues/{number}/comments")
     return json.loads(result.stdout)
 
 
@@ -265,7 +266,7 @@ def create_pr(
     head: str,
 ) -> str:
     """Create a draft PR and return its URL."""
-    result = _gh(
+    result = _get_gh()._gh(
         "pr",
         "create",
         "--draft",
@@ -285,17 +286,17 @@ def create_pr(
 
 def edit_pr_body(repo: str, pr: int | str, body: str) -> None:
     """Edit a PR's body."""
-    _gh("pr", "edit", str(pr), "--repo", repo, "--body", body)
+    _get_gh()._gh("pr", "edit", str(pr), "--repo", repo, "--body", body)
 
 
 def add_pr_reviewer(repo: str, pr: int | str, reviewer: str) -> None:
     """Add a reviewer to a PR."""
-    _gh("pr", "edit", str(pr), "--repo", repo, "--add-reviewer", reviewer)
+    _get_gh()._gh("pr", "edit", str(pr), "--repo", repo, "--add-reviewer", reviewer)
 
 
 def pr_checks(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return check statuses for a PR."""
-    result = _gh(
+    result = _get_gh()._gh(
         "pr",
         "checks",
         str(pr),
@@ -309,7 +310,7 @@ def pr_checks(repo: str, pr: int | str) -> list[dict[str, Any]]:
 
 def pr_ready(repo: str, pr: int | str) -> None:
     """Mark a PR ready for review."""
-    _gh("pr", "ready", str(pr), "--repo", repo)
+    _get_gh()._gh("pr", "ready", str(pr), "--repo", repo)
 
 
 def pr_merge(repo: str, pr: int | str, squash: bool = True, auto: bool = False) -> None:
@@ -319,12 +320,12 @@ def pr_merge(repo: str, pr: int | str, squash: bool = True, auto: bool = False) 
         args.append("--squash")
     if auto:
         args.append("--auto")
-    _gh(*args)
+    _get_gh()._gh(*args)
 
 
 def get_pr(repo: str, pr: int | str) -> dict[str, Any]:
     """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
-    result = _gh(
+    result = _get_gh()._gh(
         "pr",
         "view",
         str(pr),
@@ -338,7 +339,7 @@ def get_pr(repo: str, pr: int | str) -> dict[str, Any]:
 
 def get_reviews(repo: str, pr: int | str) -> dict[str, Any]:
     """Return reviews and isDraft for a PR."""
-    result = _gh(
+    result = _get_gh()._gh(
         "pr",
         "view",
         str(pr),
@@ -389,7 +390,7 @@ def get_review_threads(owner: str, repo: str, pr: int | str) -> dict[str, Any]:
         " comments(first:50){nodes{author{login} body url createdAt databaseId}}"
         "}}}}}"
     )
-    result = _gh(
+    result = _get_gh()._gh(
         "api",
         "graphql",
         "-F",
@@ -410,7 +411,7 @@ def resolve_thread(thread_id: str) -> None:
         "mutation($id:ID!)"
         "{resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}"
     )
-    _gh(
+    _get_gh()._gh(
         "api",
         "graphql",
         "-F",
@@ -425,5 +426,5 @@ def resolve_thread(thread_id: str) -> None:
 
 def get_run_log(run_id: str | int) -> str:
     """Return the failed log output for a CI run."""
-    result = _gh("run", "view", str(run_id), "--log-failed", timeout=60)
+    result = _get_gh()._gh("run", "view", str(run_id), "--log-failed", timeout=60)
     return result.stdout
