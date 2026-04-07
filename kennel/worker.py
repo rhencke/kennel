@@ -125,6 +125,65 @@ class Worker:
         """Remove state.json from fido_dir (no-op if absent)."""
         (fido_dir / "state.json").unlink(missing_ok=True)
 
+    @staticmethod
+    def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
+        """Write system and prompt files for a sub-Claude session.
+
+        The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
+        blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``).
+        The prompt file contains the context string.
+
+        Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
+        """
+        sub = _sub_dir()
+        persona = (sub / "persona.md").read_text().rstrip()
+        skill = (sub / f"{subskill}.md").read_text().rstrip()
+        system_file = fido_dir / "system"
+        prompt_file = fido_dir / "prompt"
+        system_file.write_text(f"{persona}\n\n{skill}\n")
+        prompt_file.write_text(f"{context}\n")
+        return system_file, prompt_file
+
+    @staticmethod
+    def claude_start(
+        fido_dir: Path,
+        model: str = "claude-sonnet-4-6",
+        timeout: int = 300,
+    ) -> str:
+        """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
+
+        Returns the session_id string (empty string on failure).
+        """
+        system_file = fido_dir / "system"
+        prompt_file = fido_dir / "prompt"
+        output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+        return claude.extract_session_id(output)
+
+    @staticmethod
+    def claude_run(
+        fido_dir: Path,
+        session_id: str = "",
+        model: str = "claude-sonnet-4-6",
+        timeout: int = 300,
+    ) -> tuple[str, str]:
+        """Continue or start a sub-Claude session, streaming progress as JSON.
+
+        If *session_id* is non-empty the existing session is resumed via
+        ``claude --resume``.  Otherwise a new session is started from
+        *fido_dir/system* and *fido_dir/prompt*.
+
+        Returns ``(session_id, raw_output)`` where *raw_output* is the full
+        stream-json text produced by the claude CLI.
+        """
+        prompt_file = fido_dir / "prompt"
+        if session_id:
+            output = claude.resume_session(session_id, prompt_file, model, timeout)
+            return session_id, output
+        system_file = fido_dir / "system"
+        output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+        new_session_id = claude.extract_session_id(output)
+        return new_session_id, output
+
     # ------------------------------------------------------------------
     # Instance methods that use self.work_dir
     # ------------------------------------------------------------------

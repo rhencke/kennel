@@ -1241,3 +1241,339 @@ class TestClearState:
         Worker.save_state(fido_dir, {"issue": 10})
         Worker.clear_state(fido_dir)
         assert Worker.load_state(fido_dir) == {}
+
+
+class TestBuildPrompt:
+    """Tests for Worker.build_prompt."""
+
+    def _setup_sub_dir(self, tmp_path: Path) -> Path:
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "persona.md").write_text("I am Fido, a very good dog.")
+        (sub / "task.md").write_text("Implement the task carefully.")
+        return sub
+
+    def test_returns_system_and_prompt_paths(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, prompt_file = Worker.build_prompt(fido_dir, "task", "context")
+        assert sys_file == fido_dir / "system"
+        assert prompt_file == fido_dir / "prompt"
+
+    def test_system_file_contains_persona(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+        assert "I am Fido" in sys_file.read_text()
+
+    def test_system_file_contains_skill(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+        assert "Implement the task carefully." in sys_file.read_text()
+
+    def test_system_file_joins_with_blank_line(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+        content = sys_file.read_text()
+        assert "I am Fido, a very good dog.\n\nImplement the task carefully." in content
+
+    def test_prompt_file_contains_context(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            _, prompt_file = Worker.build_prompt(fido_dir, "task", "do the work")
+        assert "do the work" in prompt_file.read_text()
+
+    def test_system_file_ends_with_newline(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "task", "ctx")
+        assert sys_file.read_text().endswith("\n")
+
+    def test_prompt_file_ends_with_newline(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            _, prompt_file = Worker.build_prompt(fido_dir, "task", "ctx")
+        assert prompt_file.read_text().endswith("\n")
+
+    def test_uses_correct_subskill_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "ci.md").write_text("Fix the CI failure.")
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "ci", "ctx")
+        assert "Fix the CI failure." in sys_file.read_text()
+        assert "Implement the task carefully." not in sys_file.read_text()
+
+    def test_strips_trailing_whitespace_from_persona(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "persona.md").write_text("Persona text\n\n\n")
+        with patch("kennel.worker._sub_dir", return_value=sub):
+            sys_file, _ = Worker.build_prompt(fido_dir, "task", "ctx")
+        content = sys_file.read_text()
+        assert content.startswith("Persona text\n\n")
+        assert not content.startswith("Persona text\n\n\n\n")
+
+
+class TestClaudeStart:
+    """Tests for Worker.claude_start."""
+
+    def _setup_fido_dir(self, tmp_path: Path) -> Path:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "system").write_text("system prompt")
+        (fido_dir / "prompt").write_text("user prompt")
+        return fido_dir
+
+    def test_returns_session_id_on_success(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        output = '{"type":"result","session_id":"sess-abc"}'
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=output),
+            patch("kennel.worker.claude.extract_session_id", return_value="sess-abc"),
+        ):
+            result = Worker.claude_start(fido_dir)
+        assert result == "sess-abc"
+
+    def test_returns_empty_when_extract_fails(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            result = Worker.claude_start(fido_dir)
+        assert result == ""
+
+    def test_calls_print_prompt_from_file_with_correct_files(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_start(fido_dir)
+        mock_ppf.assert_called_once_with(
+            fido_dir / "system",
+            fido_dir / "prompt",
+            "claude-sonnet-4-6",
+            300,
+        )
+
+    def test_passes_custom_model(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_start(fido_dir, model="claude-opus-4-6")
+        assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
+
+    def test_passes_custom_timeout(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_start(fido_dir, timeout=600)
+        assert mock_ppf.call_args[0][3] == 600
+
+    def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_start(fido_dir)
+        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
+
+    def test_default_timeout_is_300(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_start(fido_dir)
+        assert mock_ppf.call_args[0][3] == 300
+
+    def test_passes_output_to_extract_session_id(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        raw = '{"type":"result","session_id":"xyz"}'
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
+            patch(
+                "kennel.worker.claude.extract_session_id", return_value="xyz"
+            ) as mock_ext,
+        ):
+            Worker.claude_start(fido_dir)
+        mock_ext.assert_called_once_with(raw)
+
+
+class TestClaudeRun:
+    """Tests for Worker.claude_run."""
+
+    def _setup_fido_dir(self, tmp_path: Path) -> Path:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "system").write_text("system")
+        (fido_dir / "prompt").write_text("prompt")
+        return fido_dir
+
+    # ── Resume path ────────────────────────────────────────────────────────
+
+    def test_resume_returns_existing_session_id(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch("kennel.worker.claude.resume_session", return_value="output text"):
+            session_id, _ = Worker.claude_run(fido_dir, session_id="existing-id")
+        assert session_id == "existing-id"
+
+    def test_resume_returns_output(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch("kennel.worker.claude.resume_session", return_value="stream output"):
+            _, output = Worker.claude_run(fido_dir, session_id="sid")
+        assert output == "stream output"
+
+    def test_resume_calls_resume_session_with_correct_args(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
+            Worker.claude_run(
+                fido_dir,
+                session_id="my-session",
+                model="claude-opus-4-6",
+                timeout=120,
+            )
+        mock_rs.assert_called_once_with(
+            "my-session", fido_dir / "prompt", "claude-opus-4-6", 120
+        )
+
+    def test_resume_does_not_call_print_prompt_from_file(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.claude.resume_session", return_value=""),
+            patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
+        ):
+            Worker.claude_run(fido_dir, session_id="sid")
+        mock_ppf.assert_not_called()
+
+    # ── Start path ─────────────────────────────────────────────────────────
+
+    def test_start_returns_new_session_id(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        raw = '{"type":"result","session_id":"new-sess"}'
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
+            patch("kennel.worker.claude.extract_session_id", return_value="new-sess"),
+        ):
+            session_id, _ = Worker.claude_run(fido_dir)
+        assert session_id == "new-sess"
+
+    def test_start_returns_raw_output(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        raw = '{"type":"result","session_id":"s"}'
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
+            patch("kennel.worker.claude.extract_session_id", return_value="s"),
+        ):
+            _, output = Worker.claude_run(fido_dir)
+        assert output == raw
+
+    def test_start_calls_print_prompt_from_file(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_run(fido_dir)
+        mock_ppf.assert_called_once_with(
+            fido_dir / "system",
+            fido_dir / "prompt",
+            "claude-sonnet-4-6",
+            300,
+        )
+
+    def test_start_does_not_call_resume_session(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.resume_session") as mock_rs,
+        ):
+            Worker.claude_run(fido_dir)
+        mock_rs.assert_not_called()
+
+    def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            session_id, _ = Worker.claude_run(fido_dir)
+        assert session_id == ""
+
+    def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_run(fido_dir)
+        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
+
+    def test_default_timeout_is_300(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_from_file", return_value=""
+            ) as mock_ppf,
+            patch("kennel.worker.claude.extract_session_id", return_value=""),
+        ):
+            Worker.claude_run(fido_dir)
+        assert mock_ppf.call_args[0][3] == 300
+
+    def test_passes_custom_model_to_resume(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
+            Worker.claude_run(
+                fido_dir, session_id="sid", model="claude-haiku-4-5-20251001"
+            )
+        assert mock_rs.call_args[0][2] == "claude-haiku-4-5-20251001"
+
+    def test_passes_custom_timeout_to_resume(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
+            Worker.claude_run(fido_dir, session_id="sid", timeout=90)
+        assert mock_rs.call_args[0][3] == 90
