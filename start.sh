@@ -2,8 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-export KENNEL_SECRET=$(cat ~/.kennel-secret)
-export KENNEL_WORK_DIR=/home/rhencke/workspace/confusio
-export KENNEL_PROJECT=confusio
-
-exec uv run kennel
+exec uv run kennel \
+  --port 9000 \
+  --secret-file ~/.kennel-secret \
+  --self-repo rhencke/kennel \
+  rhencke/confusio:/home/rhencke/workspace/confusio \
+  rhencke/kennel:/home/rhencke/workspace/kennel

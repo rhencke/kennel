@@ -4,12 +4,14 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from kennel.config import Config
+from kennel.config import Config, RepoConfig
 from kennel.events import (
     create_task,
     dispatch,
@@ -54,26 +56,46 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(400, "invalid json")
             return
 
+        # Route by repo
+        repo_name = payload.get("repository", {}).get("full_name", "")
+        repo_cfg = self.config.repos.get(repo_name)
+
         log.info(
-            "webhook: event=%s action=%s delivery=%s",
+            "webhook: event=%s action=%s repo=%s delivery=%s",
             event,
             payload.get("action", "-"),
+            repo_name,
             delivery,
         )
 
         # Respond immediately — don't block on dispatch
         self._respond(200, "ok")
 
+        # Check for self-restart (kennel repo merged)
+        if (
+            self.config.self_repo
+            and repo_name == self.config.self_repo
+            and event == "pull_request"
+            and payload.get("action") == "closed"
+            and payload.get("pull_request", {}).get("merged")
+        ):
+            self._self_restart(repo_name)
+            return
+
+        if not repo_cfg:
+            log.debug("ignoring webhook for unregistered repo: %s", repo_name)
+            return
+
         # Process in background thread so we don't block the server
-        action = dispatch(event, payload, self.config)
+        action = dispatch(event, payload, self.config, repo_cfg)
         if action:
             threading.Thread(
                 target=self._process_action,
-                args=(action,),
+                args=(action, repo_cfg),
                 daemon=True,
             ).start()
 
-    def _process_action(self, action) -> None:
+    def _process_action(self, action, repo_cfg: RepoConfig) -> None:
         try:
             handled = False
 
@@ -84,7 +106,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                     category, title = None, None
                 else:
-                    category, title = reply_to_comment(action, self.config)
+                    category, title = reply_to_comment(action, self.config, repo_cfg)
                     if cid:
                         _replied_comments.add(cid)
                     handled = True
@@ -93,24 +115,40 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     pass  # No task needed — ASK just posts a question
                 elif title:
                     prefix = f"{category}: " if category == "DEFER" else ""
-                    create_task(f"{prefix}{title}", self.config, thread=action.reply_to)
+                    create_task(
+                        f"{prefix}{title}",
+                        self.config,
+                        repo_cfg,
+                        thread=action.reply_to,
+                    )
 
             if action.review_comments:
-                reply_to_review(action, self.config, already_replied=_replied_comments)
+                reply_to_review(
+                    action, self.config, repo_cfg, already_replied=_replied_comments
+                )
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                category, title = reply_to_issue_comment(action, self.config)
+                category, title = reply_to_issue_comment(action, self.config, repo_cfg)
                 handled = True
                 if category not in ("DUMP", "ANSWER", "ASK") and title:
                     prefix = f"{category}: " if category == "DEFER" else ""
-                    create_task(f"{prefix}{title}", self.config)
+                    create_task(f"{prefix}{title}", self.config, repo_cfg)
 
             # Non-comment events just trigger work.sh — no task needed
-            launch_worker(self.config)
+            launch_worker(self.config, repo_cfg)
         except Exception:
             log.exception("error processing action")
+
+    def _self_restart(self, repo_name: str) -> None:
+        repo_cfg = self.config.repos.get(repo_name)
+        if repo_cfg:
+            log.info("kennel repo %s merged — pulling and restarting", repo_name)
+            subprocess.run(
+                ["git", "pull"], cwd=str(repo_cfg.work_dir), capture_output=True
+            )
+            os.execv(sys.argv[0], sys.argv)
 
     def do_GET(self) -> None:
         self._respond(200, "kennel is running")
@@ -131,12 +169,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.wfile.write(message.encode())
 
     def log_message(self, format: str, *args: object) -> None:
-        # Suppress default access log — we log ourselves
         pass
 
 
 def run() -> None:
-    config = Config.from_env()
+    config = Config.from_args()
 
     log_file = Path.home() / "log" / "kennel.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -155,12 +192,8 @@ def run() -> None:
     WebhookHandler.config = config
 
     server = HTTPServer(("", config.port), WebhookHandler)
-    log.info(
-        "kennel listening on :%d — project=%s work_dir=%s",
-        config.port,
-        config.project,
-        config.work_dir,
-    )
+    repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
+    log.info("kennel listening on :%d — repos: %s", config.port, repos_str)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
