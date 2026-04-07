@@ -70,6 +70,10 @@ class GH:
             in_reply_to=int(in_reply_to),
         )
 
+    def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return all inline review comments on a pull request."""
+        return self._get(f"/repos/{repo}/pulls/{pr}/comments")
+
     def get_review_comments(
         self, repo: str, pr: int | str, review_id: int | str
     ) -> list[int]:
@@ -218,8 +222,7 @@ def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
 
 def get_pull_comments(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return all inline review comments on a pull request."""
-    result = _gh("api", f"repos/{repo}/pulls/{pr}/comments")
-    return json.loads(result.stdout)
+    return GH(_gh_token()).get_pull_comments(repo, pr)
 
 
 def find_pr(repo: str, issue_number: int | str, user: str) -> dict[str, Any] | None:

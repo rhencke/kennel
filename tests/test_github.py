@@ -267,6 +267,24 @@ class TestGHClass:
         body = mock_post.call_args.kwargs["json"]
         assert body["in_reply_to"] == 99
 
+    def test_get_pull_comments(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        comments = [{"id": 42, "body": "looks good"}]
+        mock_resp.json.return_value = comments
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_pull_comments("o/r", 7)
+        assert result == comments
+
+    def test_get_pull_comments_url(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
+            gh.get_pull_comments("o/r", 7)
+        url = mock_get.call_args.args[0]
+        assert "repos/o/r/pulls/7/comments" in url
+
     def test_get_review_comments(self) -> None:
         gh = self._gh()
         mock_resp = MagicMock()
@@ -328,16 +346,16 @@ class TestGetIssueComments:
 
 
 class TestGetPullComments:
-    def test_returns_list(self) -> None:
+    def test_delegates_to_gh_class(self) -> None:
         comments = [{"id": 42, "body": "looks good"}]
-        with patch("subprocess.run", return_value=_completed(json.dumps(comments))):
+        mock_gh = MagicMock()
+        mock_gh.get_pull_comments.return_value = comments
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             assert get_pull_comments("o/r", 7) == comments
-
-    def test_uses_api_endpoint(self) -> None:
-        with patch("subprocess.run", return_value=_completed("[]")) as mock:
-            get_pull_comments("o/r", 7)
-        cmd = mock.call_args.args[0]
-        assert "repos/o/r/pulls/7/comments" in cmd
+        mock_gh.get_pull_comments.assert_called_once_with("o/r", 7)
 
 
 class TestFindPr:
