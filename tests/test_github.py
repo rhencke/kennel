@@ -319,6 +319,74 @@ class TestGHClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_post.call_args.kwargs["json"]["body"] == "hello"
 
+    def test_find_pr_returns_match(self) -> None:
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {
+            "items": [{"number": 1, "user": {"login": "fido"}}]
+        }
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {
+            "number": 1,
+            "head": {"ref": "feat"},
+            "state": "open",
+            "merged": False,
+            "user": {"login": "fido"},
+        }
+        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+            result = gh.find_pr("o/r", 5, "fido")
+        assert result == {
+            "number": 1,
+            "headRefName": "feat",
+            "state": "OPEN",
+            "author": {"login": "fido"},
+        }
+
+    def test_find_pr_merged_state(self) -> None:
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {
+            "items": [{"number": 3, "user": {"login": "fido"}}]
+        }
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {
+            "number": 3,
+            "head": {"ref": "fix"},
+            "state": "closed",
+            "merged": True,
+            "user": {"login": "fido"},
+        }
+        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+            result = gh.find_pr("o/r", 2, "fido")
+        assert result is not None
+        assert result["state"] == "MERGED"
+
+    def test_find_pr_filters_by_user(self) -> None:
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {
+            "items": [{"number": 1, "user": {"login": "other"}}]
+        }
+        with patch.object(gh._s, "get", return_value=search_resp):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
+    def test_find_pr_returns_none_on_empty(self) -> None:
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {"items": []}
+        with patch.object(gh._s, "get", return_value=search_resp):
+            assert gh.find_pr("o/r", 1, "fido") is None
+
+    def test_find_pr_search_url(self) -> None:
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {"items": []}
+        with patch.object(gh._s, "get", return_value=search_resp) as mock_get:
+            gh.find_pr("o/r", 5, "fido")
+        url = mock_get.call_args.args[0]
+        assert "/search/issues?q=" in url
+        assert "type%3Apr" in url or "type:pr" in url
+
 
 class TestCommentIssue:
     def test_calls_gh_class(self) -> None:
@@ -359,39 +427,30 @@ class TestGetPullComments:
 
 
 class TestFindPr:
-    def test_returns_matching_pr(self) -> None:
-        prs = [
-            {
-                "number": 1,
-                "headRefName": "feat",
-                "state": "OPEN",
-                "author": {"login": "fido"},
-            },
-            {
-                "number": 2,
-                "headRefName": "other",
-                "state": "OPEN",
-                "author": {"login": "other"},
-            },
-        ]
-        with patch("subprocess.run", return_value=_completed(json.dumps(prs))):
+    def test_delegates_to_gh_class(self) -> None:
+        expected = {
+            "number": 1,
+            "headRefName": "feat",
+            "state": "OPEN",
+            "author": {"login": "fido"},
+        }
+        mock_gh = MagicMock()
+        mock_gh.find_pr.return_value = expected
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             result = find_pr("o/r", 5, "fido")
-        assert result == prs[0]
+        mock_gh.find_pr.assert_called_once_with("o/r", 5, "fido")
+        assert result == expected
 
-    def test_returns_none_if_not_found(self) -> None:
-        prs = [
-            {
-                "number": 1,
-                "headRefName": "feat",
-                "state": "OPEN",
-                "author": {"login": "other"},
-            }
-        ]
-        with patch("subprocess.run", return_value=_completed(json.dumps(prs))):
-            assert find_pr("o/r", 5, "fido") is None
-
-    def test_returns_none_on_empty(self) -> None:
-        with patch("subprocess.run", return_value=_completed("[]")):
+    def test_returns_none_when_gh_returns_none(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.find_pr.return_value = None
+        with (
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_gh),
+        ):
             assert find_pr("o/r", 1, "fido") is None
 
 

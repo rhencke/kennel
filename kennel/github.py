@@ -7,6 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests as _requests
 
@@ -80,6 +81,25 @@ class GH:
         """Return list of comment IDs from a review."""
         data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
         return [c["id"] for c in data]
+
+    def find_pr(
+        self, repo: str, issue_number: int | str, user: str
+    ) -> dict[str, Any] | None:
+        """Find the most recent PR with issue_number in body by user."""
+        q = quote(f"#{issue_number} in:body repo:{repo} type:pr")
+        data = self._get(f"/search/issues?q={q}")
+        for item in data.get("items", []):
+            if item.get("user", {}).get("login") != user:
+                continue
+            pr = self._get(f"/repos/{repo}/pulls/{item['number']}")
+            state = "MERGED" if pr.get("merged") else pr["state"].upper()
+            return {
+                "number": pr["number"],
+                "headRefName": pr["head"]["ref"],
+                "state": state,
+                "author": {"login": pr["user"]["login"]},
+            }
+        return None
 
     def comment_issue(self, repo: str, number: int | str, body: str) -> None:
         """Post a comment on an issue."""
@@ -227,21 +247,7 @@ def get_pull_comments(repo: str, pr: int | str) -> list[dict[str, Any]]:
 
 def find_pr(repo: str, issue_number: int | str, user: str) -> dict[str, Any] | None:
     """Find the most recent PR linked to issue_number authored by user, or None."""
-    result = _gh(
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--json",
-        "number,headRefName,state,author",
-        "--search",
-        f"#{issue_number} in:body",
-    )
-    prs = json.loads(result.stdout)
-    user_prs = [p for p in prs if p.get("author", {}).get("login") == user]
-    return user_prs[0] if user_prs else None
+    return GH(_gh_token()).find_pr(repo, issue_number, user)
 
 
 def create_pr(
