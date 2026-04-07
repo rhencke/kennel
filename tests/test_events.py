@@ -12,6 +12,7 @@ from kennel.events import (
     _triage,
     create_task,
     dispatch,
+    is_terse,
     launch_sync,
     launch_worker,
     maybe_react,
@@ -44,6 +45,55 @@ def _payload(repo_owner: str = "owner") -> dict:
             "owner": {"login": repo_owner},
         },
     }
+
+
+class TestIsTerse:
+    def test_short_comment_is_terse(self) -> None:
+        assert is_terse("short")
+
+    def test_exactly_at_limit_is_terse(self) -> None:
+        # 19 chars — under the 20-char threshold
+        assert is_terse("a" * 19)
+
+    def test_at_limit_is_terse(self) -> None:
+        # exactly 20 chars — still under, since < 20 means len < 20
+        assert not is_terse("a" * 20)
+
+    def test_long_generic_comment_is_not_terse(self) -> None:
+        assert not is_terse("This looks fine to me, no changes needed here.")
+
+    def test_pattern_same(self) -> None:
+        assert is_terse("same")
+
+    def test_pattern_same_with_punctuation(self) -> None:
+        assert is_terse("same.")
+
+    def test_pattern_ditto(self) -> None:
+        assert is_terse("ditto")
+
+    def test_pattern_here_too(self) -> None:
+        assert is_terse("here too")
+
+    def test_pattern_this_too(self) -> None:
+        assert is_terse("this too")
+
+    def test_pattern_likewise(self) -> None:
+        assert is_terse("likewise")
+
+    def test_pattern_caret(self) -> None:
+        assert is_terse("^")
+
+    def test_pattern_same_here(self) -> None:
+        assert is_terse("same here")
+
+    def test_pattern_case_insensitive(self) -> None:
+        assert is_terse("SAME")
+
+    def test_pattern_with_leading_whitespace(self) -> None:
+        assert is_terse("  ditto  ")
+
+    def test_long_non_pattern_is_not_terse(self) -> None:
+        assert not is_terse("likewise this approach works well and I agree")
 
 
 class TestIsAllowed:

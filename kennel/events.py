@@ -393,6 +393,24 @@ def reply_to_review(
             already_replied.add(cid)
 
 
+_TERSE_PATTERNS = frozenset(
+    {"same", "here too", "this too", "ditto", "likewise", "^", "same here"}
+)
+_TERSE_MAX_LEN = 20
+
+
+def is_terse(comment_body: str) -> bool:
+    """Return True if the comment is too short or looks like a cross-reference.
+
+    Used to detect comments like "Here, too.", "Same.", "Ditto", "^" where
+    the reviewer is implicitly pointing at another thread.
+    """
+    body = comment_body.strip()
+    if len(body) < _TERSE_MAX_LEN:
+        return True
+    return body.lower().rstrip(".,!") in _TERSE_PATTERNS
+
+
 def _triage(
     comment_body: str, is_bot: bool, context: dict[str, Any] | None = None
 ) -> tuple[str, str]:
