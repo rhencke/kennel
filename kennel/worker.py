@@ -730,6 +730,44 @@ class Worker:
             )
         return result
 
+    def resolve_addressed_threads(
+        self,
+        repo_ctx: RepoContext,
+        pr_number: int,
+    ) -> bool:
+        """Resolve unresolved threads where gh_user posted the last reply.
+
+        These are threads fido already acknowledged; the work has since been
+        done, so the thread can be closed.
+
+        Returns ``True`` if at least one thread was resolved.
+        """
+        threads_data = self.gh.get_review_threads(
+            repo_ctx.owner, repo_ctx.repo_name, pr_number
+        )
+        nodes = (
+            threads_data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        resolved_any = False
+        for node in nodes:
+            if node.get("isResolved"):
+                continue
+            comments = node.get("comments", {}).get("nodes", [])
+            if not comments:
+                continue
+            last_author = comments[-1].get("author", {}).get("login", "")
+            if last_author != repo_ctx.gh_user:
+                continue
+            thread_id = node.get("id", "")
+            self.gh.resolve_thread(thread_id)
+            log.info("resolved thread %s", thread_id)
+            resolved_any = True
+        return resolved_any
+
     def handle_review_feedback(
         self,
         fido_dir: Path,

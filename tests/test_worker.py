@@ -3276,6 +3276,126 @@ class TestFilterThreads:
         assert result[0]["total"] == 3
 
 
+class TestResolveAddressedThreads:
+    """Tests for Worker.resolve_addressed_threads."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _make_threads_data(self, nodes: list) -> dict:
+        return {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+
+    def _make_node(
+        self,
+        *,
+        resolved: bool = False,
+        node_id: str = "thread-1",
+        last_author: str = "fido-bot",
+    ) -> dict:
+        return {
+            "id": node_id,
+            "isResolved": resolved,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": "owner"},
+                        "body": "please fix",
+                        "url": "https://example.com",
+                        "databaseId": 1,
+                    },
+                    {
+                        "author": {"login": last_author},
+                        "body": "done",
+                        "url": "https://example.com",
+                        "databaseId": 2,
+                    },
+                ]
+            },
+        }
+
+    def test_returns_false_when_no_threads(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = {}
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
+    def test_returns_false_when_all_threads_resolved(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._make_node(resolved=True)
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
+    def test_returns_false_when_last_author_is_not_gh_user(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._make_node(last_author="owner")
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
+    def test_returns_false_when_thread_has_no_comments(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = {"id": "t1", "isResolved": False, "comments": {"nodes": []}}
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
+    def test_resolves_thread_where_gh_user_is_last_author(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._make_node(node_id="tid-99", last_author="fido-bot")
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is True
+        gh.resolve_thread.assert_called_once_with("tid-99")
+
+    def test_resolves_multiple_threads(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        nodes = [
+            self._make_node(node_id="t1", last_author="fido-bot"),
+            self._make_node(node_id="t2", last_author="fido-bot"),
+        ]
+        gh.get_review_threads.return_value = self._make_threads_data(nodes)
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 5)
+        assert result is True
+        assert gh.resolve_thread.call_count == 2
+        gh.resolve_thread.assert_any_call("t1")
+        gh.resolve_thread.assert_any_call("t2")
+
+    def test_skips_already_resolved_among_mixed(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        nodes = [
+            self._make_node(node_id="t1", last_author="fido-bot", resolved=True),
+            self._make_node(node_id="t2", last_author="fido-bot"),
+        ]
+        gh.get_review_threads.return_value = self._make_threads_data(nodes)
+        worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        gh.resolve_thread.assert_called_once_with("t2")
+
+    def test_calls_get_review_threads_with_correct_args(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = {}
+        worker.resolve_addressed_threads(self._repo_ctx(), 42)
+        gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
+
+
 class TestHandleReviewFeedback:
     """Tests for Worker.handle_review_feedback."""
 
