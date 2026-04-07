@@ -105,9 +105,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     cmd = Cmd()
 
-    if args.command == "add":
-        cmd.add(args.work_dir, args.title, args.description)
-    elif args.command == "complete":
-        cmd.complete(args.work_dir, args.title)
-    elif args.command == "list":
-        cmd.list(args.work_dir)
+    match args.command:
+        case "add":
+            cmd.add(args.work_dir, args.title, args.description)
+        case "complete":
+            cmd.complete(args.work_dir, args.title)
+        case "list":
+            cmd.list(args.work_dir)
