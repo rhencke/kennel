@@ -170,6 +170,7 @@ class TestWorker:
         gh.get_repo_info.return_value = repo
         gh.get_user.return_value = user
         gh.get_default_branch.return_value = branch
+        gh.get_pr.return_value = {"body": ""}
         return gh
 
     # --- discover_repo_context ---
@@ -2298,3 +2299,219 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "42" in caplog.text
+
+
+class TestSeedTasksFromPrBody:
+    """Tests for Worker.seed_tasks_from_pr_body."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _pr_with_queue(self, *task_titles: str) -> dict:
+        lines = "\n".join(f"- [ ] {t}" for t in task_titles)
+        body = (
+            f"Description.\n\n"
+            f"<!-- WORK_QUEUE_START -->\n{lines}\n<!-- WORK_QUEUE_END -->"
+        )
+        return {"body": body}
+
+    def test_noop_when_tasks_exist(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        with patch("kennel.worker.tasks.list_tasks", return_value=[{"title": "t"}]):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        gh.get_pr.assert_not_called()
+
+    def test_fetches_pr_body_when_no_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"body": ""}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.seed_tasks_from_pr_body("owner/repo", 42)
+        gh.get_pr.assert_called_once_with("owner/repo", 42)
+
+    def test_noop_when_no_markers_in_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"body": "No markers here."}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        mock_add.assert_not_called()
+
+    def test_noop_when_no_unchecked_tasks_in_queue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "<!-- no tasks yet -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        mock_add.assert_not_called()
+
+    def test_adds_single_task_from_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_with_queue("Fix the bug")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        mock_add.assert_called_once_with(tmp_path, "Fix the bug")
+
+    def test_adds_multiple_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_with_queue(
+            "Task one", "Task two", "Task three"
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert mock_add.call_count == 3
+
+    def test_strips_next_marker(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "- [ ] First task **→ next**\n"
+                "- [ ] Second task\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        titles = [call.args[1] for call in mock_add.call_args_list]
+        assert titles[0] == "First task"
+        assert "**→ next**" not in titles[0]
+
+    def test_correct_task_titles_in_order(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_with_queue("Write the tests", "Fix the lint")
+        received: list[str] = []
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.add_task",
+                side_effect=lambda wd, t: received.append(t),
+            ),
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 5)
+        assert received == ["Write the tests", "Fix the lint"]
+
+    def test_noop_when_body_is_none(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"body": None}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        mock_add.assert_not_called()
+
+    def test_logs_info_with_task_count(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_with_queue("T1", "T2")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert "seeded" in caplog.text
+        assert "2" in caplog.text
+
+    def test_does_not_log_when_no_tasks_found(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": "<!-- WORK_QUEUE_START -->\n<!-- WORK_QUEUE_END -->"
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert "seeded" not in caplog.text
+
+
+class TestRunSeedTasksIntegration:
+    """Tests for seed_tasks_from_pr_body being called from Worker.run()."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_seed_called_after_find_or_create_pr(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "My task", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_seed = MagicMock()
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
+        ):
+            worker.run()
+        mock_seed.assert_called_once_with("owner/repo", 42)
+
+    def test_seed_not_called_when_find_or_create_pr_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_seed = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=3),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
+        ):
+            worker.run()
+        mock_seed.assert_not_called()

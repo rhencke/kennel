@@ -522,6 +522,37 @@ class Worker:
 
         return pr_number, slug
 
+    def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
+        """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
+
+        Extracts unchecked task items (``- [ ] ...``) between
+        ``WORK_QUEUE_START`` and ``WORK_QUEUE_END`` markers and adds them via
+        :func:`~kennel.tasks.add_task`.  No-op if tasks.json is already
+        non-empty, or if no markers / unchecked items are found.
+        """
+        if tasks.list_tasks(self.work_dir):
+            return  # already have tasks — nothing to seed
+        pr_data = self.gh.get_pr(repo, pr_number)
+        body = pr_data.get("body") or ""
+        match = re.search(
+            r"<!-- WORK_QUEUE_START -->(.*?)<!-- WORK_QUEUE_END -->",
+            body,
+            re.DOTALL,
+        )
+        if not match:
+            return
+        task_titles = []
+        for line in match.group(1).splitlines():
+            m = re.match(r"^- \[ \] (.+)$", line)
+            if m:
+                title = re.sub(r"\s*\*\*→ next\*\*\s*", "", m.group(1)).strip()
+                task_titles.append(title)
+        if not task_titles:
+            return
+        for title in task_titles:
+            tasks.add_task(self.work_dir, title)
+        log.info("seeded %d tasks from PR body", len(task_titles))
+
     def post_pickup_comment(
         self, repo: str, issue: int, issue_title: str, gh_user: str
     ) -> None:
@@ -586,11 +617,11 @@ class Worker:
             self.post_pickup_comment(
                 repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
             )
-            if (
-                self.find_or_create_pr(ctx.fido_dir, repo_ctx, issue, issue_title)
-                is None
-            ):
+            result = self.find_or_create_pr(ctx.fido_dir, repo_ctx, issue, issue_title)
+            if result is None:
                 return 0
+            pr_number, _slug = result
+            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             # TODO: CI checks, task execution, and merge
         finally:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
