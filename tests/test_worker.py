@@ -2515,3 +2515,584 @@ class TestRunSeedTasksIntegration:
         ):
             worker.run()
         mock_seed.assert_not_called()
+
+
+class TestExtractRunId:
+    """Tests for Worker._extract_run_id."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def test_extracts_id_from_standard_url(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert (
+            w._extract_run_id(
+                "https://github.com/owner/repo/actions/runs/123456789/job/987"
+            )
+            == "123456789"
+        )
+
+    def test_extracts_id_from_url_without_job(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert (
+            w._extract_run_id("https://github.com/owner/repo/actions/runs/42") == "42"
+        )
+
+    def test_returns_empty_when_no_run_id(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert w._extract_run_id("https://github.com/owner/repo/actions") == ""
+
+    def test_returns_empty_for_empty_link(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert w._extract_run_id("") == ""
+
+
+class TestFilterCiThreads:
+    """Tests for Worker._filter_ci_threads."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _make_threads_data(self, nodes: list) -> dict:
+        return {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+
+    def _make_node(
+        self,
+        *,
+        resolved: bool = False,
+        first_author: str = "reviewer",
+        first_body: str = "CI is failing",
+        last_author: str = "reviewer",
+        last_body: str = "CI is failing",
+        url: str = "https://example.com/comment",
+    ) -> dict:
+        return {
+            "isResolved": resolved,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": first_author},
+                        "body": first_body,
+                        "url": url,
+                    },
+                    {
+                        "author": {"login": last_author},
+                        "body": last_body,
+                        "url": url,
+                    },
+                ]
+            },
+        }
+
+    def test_returns_empty_when_no_threads(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert w._filter_ci_threads({}, "fido-bot", "test") == []
+
+    def test_excludes_resolved_threads(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(resolved=True, first_body="ci failing")
+        data = self._make_threads_data([node])
+        assert w._filter_ci_threads(data, "reviewer", "test") == []
+
+    def test_excludes_threads_where_last_author_is_gh_user(
+        self, tmp_path: Path
+    ) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(last_author="fido-bot", last_body="ci fix")
+        data = self._make_threads_data([node])
+        assert w._filter_ci_threads(data, "fido-bot", "test") == []
+
+    def test_excludes_threads_without_ci_keywords(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="style nit", last_body="please rename var")
+        data = self._make_threads_data([node])
+        assert w._filter_ci_threads(data, "fido-bot", "mycheck") == []
+
+    def test_includes_thread_matching_check_name(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="mycheck is red", last_body="please fix")
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "mycheck")
+        assert len(result) == 1
+
+    def test_includes_thread_mentioning_ci(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="CI broke after your commit")
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "unrelated-check")
+        assert len(result) == 1
+
+    def test_includes_thread_mentioning_lint(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="lint errors in this file")
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "check")
+        assert len(result) == 1
+
+    def test_includes_thread_mentioning_format(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="format issue here")
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "check")
+        assert len(result) == 1
+
+    def test_maps_fields_correctly(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(
+            first_author="alice",
+            first_body="CI is red",
+            last_author="bob",
+            last_body="still red",
+            url="https://github.com/x",
+        )
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "ci")
+        assert result[0] == {
+            "first_author": "alice",
+            "first_body": "CI is red",
+            "last_author": "bob",
+            "last_body": "still red",
+            "url": "https://github.com/x",
+        }
+
+    def test_case_insensitive_keyword_match(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_body="LINT errors found")
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "check")
+        assert len(result) == 1
+
+    def test_single_comment_node(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = {
+            "isResolved": False,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": "alice"},
+                        "body": "ci failed",
+                        "url": "https://example.com",
+                    }
+                ]
+            },
+        }
+        data = self._make_threads_data([node])
+        result = w._filter_ci_threads(data, "fido-bot", "check")
+        assert len(result) == 1
+        assert result[0]["first_author"] == "alice"
+        assert result[0]["last_author"] == "alice"
+
+    def test_skips_nodes_with_empty_comments(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = {"isResolved": False, "comments": {"nodes": []}}
+        data = self._make_threads_data([node])
+        assert w._filter_ci_threads(data, "fido-bot", "check") == []
+
+
+class TestHandleCi:
+    """Tests for Worker.handle_ci."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "sub").mkdir(exist_ok=True)
+        return d
+
+    def test_returns_false_when_no_checks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch") is False
+
+    def test_returns_false_when_all_checks_pass(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "SUCCESS", "link": ""},
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch") is False
+
+    def test_returns_true_on_failure(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": "runs/99"},
+        ]
+        gh.get_run_log.return_value = "line1\nline2"
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_returns_true_on_error_state(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "lint", "state": "ERROR", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_calls_set_status_with_check_name_and_pr(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "unit-tests", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status") as mock_status,
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 7, "branch")
+        mock_status.assert_called_once_with("Fixing CI: unit-tests on PR #7")
+
+    def test_fetches_run_log_when_run_id_present(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {
+                "name": "build",
+                "state": "FAILURE",
+                "link": "https://github.com/owner/repo/actions/runs/55555/job/1",
+            }
+        ]
+        gh.get_run_log.return_value = "some log output"
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        gh.get_run_log.assert_called_once_with("owner/repo", "55555")
+
+    def test_skips_run_log_fetch_when_no_run_id(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "build", "state": "FAILURE", "link": "no-run-id-here"},
+        ]
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        gh.get_run_log.assert_not_called()
+
+    def test_truncates_log_to_last_200_lines(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": "runs/1"},
+        ]
+        long_log = "\n".join(f"line {i}" for i in range(300))
+        gh.get_run_log.return_value = long_log
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        captured_context = {}
+        with (
+            patch.object(worker, "set_status"),
+            patch(
+                "kennel.worker.build_prompt",
+                side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
+            ),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        log_section = captured_context["ctx"].split("Failure log")[1]
+        assert "line 99\n" not in log_section  # line 99 is before the last 200
+        assert "line 100\n" in log_section  # line 100 starts the last 200
+
+    def test_fetches_review_threads_for_repo(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 42, "branch")
+        gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
+
+    def test_builds_ci_prompt(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "my-check", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 5, "fix-branch")
+        mock_bp.assert_called_once()
+        _, subskill, context = mock_bp.call_args[0]
+        assert subskill == "ci"
+        assert "my-check" in context
+        assert "fix-branch" in context
+        assert "PR: 5" in context
+
+    def test_runs_claude(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_cr.assert_called_once_with(fido_dir)
+
+    def test_completes_ci_task_by_title(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "my-check", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_complete.assert_called_once_with(tmp_path, "CI failure: my-check")
+
+    def test_spawns_sync_script(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_popen.assert_called_once()
+        popen_args = mock_popen.call_args[0][0]
+        assert popen_args[0] == "bash"
+        assert "sync-tasks.sh" in popen_args[1]
+
+    def test_picks_first_failing_check(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "pass-check", "state": "SUCCESS", "link": ""},
+            {"name": "fail-check", "state": "FAILURE", "link": ""},
+            {"name": "err-check", "state": "ERROR", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status") as mock_status,
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        # First failing check is "fail-check"
+        mock_status.assert_called_once_with("Fixing CI: fail-check on PR #1")
+
+    def test_logs_ci_failing(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "flaky", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert "flaky" in caplog.text
+
+
+class TestRunHandleCiIntegration:
+    """Tests that Worker.run() calls handle_ci and respects its return value."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_handle_ci_called_with_pr_and_slug(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_handle_ci = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", mock_handle_ci),
+        ):
+            worker.run()
+        mock_handle_ci.assert_called_once_with(
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+        )
+
+    def test_returns_1_when_ci_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=True),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_returns_0_when_ci_passes(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+        ):
+            result = worker.run()
+        assert result == 0
+
+    def test_handle_ci_not_called_when_find_or_create_pr_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_handle_ci = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=3),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", mock_handle_ci),
+        ):
+            worker.run()
+        mock_handle_ci.assert_not_called()

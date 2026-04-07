@@ -15,6 +15,8 @@ from kennel import claude, hooks, tasks
 from kennel.github import GitHub
 from kennel.prompts import Prompts
 
+_CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
+
 log = logging.getLogger("kennel")
 
 
@@ -522,6 +524,132 @@ class Worker:
 
         return pr_number, slug
 
+    # ------------------------------------------------------------------
+    # CI failure handling
+    # ------------------------------------------------------------------
+
+    def _extract_run_id(self, link: str) -> str:
+        """Extract the GitHub Actions run ID from a check URL.
+
+        Handles URLs like ``https://github.com/owner/repo/actions/runs/12345/job/67890``.
+        Returns an empty string if no run ID is found.
+        """
+        m = re.search(r"runs/(\d+)", link)
+        return m.group(1) if m else ""
+
+    def _filter_ci_threads(
+        self,
+        threads_data: dict[str, Any],
+        gh_user: str,
+        check_name: str,
+    ) -> list[dict[str, Any]]:
+        """Return unresolved review threads relevant to a CI failure.
+
+        A thread is included when:
+        - it is not resolved,
+        - the last commenter is not *gh_user* (i.e. awaiting a response), and
+        - at least one comment body contains the check name, "ci", "lint", or
+          "format" (case-insensitive).
+        """
+        keywords = {check_name.lower(), "ci", "lint", "format"}
+        nodes = (
+            threads_data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        result = []
+        for node in nodes:
+            if node.get("isResolved"):
+                continue
+            comments = node.get("comments", {}).get("nodes", [])
+            if not comments:
+                continue
+            last = comments[-1]
+            if last.get("author", {}).get("login") == gh_user:
+                continue
+            bodies = " ".join(c.get("body", "").lower() for c in comments)
+            if not any(kw in bodies for kw in keywords):
+                continue
+            result.append(
+                {
+                    "first_author": comments[0].get("author", {}).get("login", ""),
+                    "first_body": comments[0].get("body", ""),
+                    "last_author": last.get("author", {}).get("login", ""),
+                    "last_body": last.get("body", ""),
+                    "url": comments[0].get("url", ""),
+                }
+            )
+        return result
+
+    def handle_ci(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Check for failing CI checks and run the ci sub-Claude to fix them.
+
+        Returns ``True`` if a CI failure was detected and handled (the caller
+        should re-run the work loop immediately).  Returns ``False`` when all
+        checks are passing or no checks exist.
+
+        On a failure:
+        1. Sets the GitHub user status.
+        2. Fetches the run failure log (last ``_CI_LOG_TAIL`` lines).
+        3. Collects CI-related unresolved review threads.
+        4. Builds the ``ci`` sub-Claude prompt and runs Claude.
+        5. Marks the ``CI failure: <check>`` task complete.
+        6. Triggers a background sync of the work queue.
+        """
+        log.info("checking: ci")
+        checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+        failing = next(
+            (c for c in checks if c.get("state") in ("FAILURE", "ERROR")),
+            None,
+        )
+        if failing is None:
+            return False
+
+        check_name = failing["name"]
+        log.info("CI failing: %s", check_name)
+        self.set_status(f"Fixing CI: {check_name} on PR #{pr_number}")
+
+        run_id = self._extract_run_id(failing.get("link", ""))
+        if run_id:
+            raw_log = self.gh.get_run_log(repo_ctx.repo, run_id)
+            lines = raw_log.splitlines()
+            failure_log = "\n".join(lines[-_CI_LOG_TAIL:])
+        else:
+            failure_log = ""
+
+        threads_data = self.gh.get_review_threads(
+            repo_ctx.owner, repo_ctx.repo_name, pr_number
+        )
+        ci_threads = self._filter_ci_threads(threads_data, repo_ctx.gh_user, check_name)
+
+        context = (
+            f"PR: {pr_number}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Branch: {slug}\n"
+            f"Upstream: origin/{repo_ctx.default_branch}\n"
+            f"Failing check: {check_name}\n"
+            f"\nFailure log (last {_CI_LOG_TAIL} lines):\n{failure_log}\n"
+            f"\nReview threads related to this CI failure"
+            f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
+        )
+        build_prompt(fido_dir, "ci", context)
+        session_id, _ = claude_run(fido_dir)
+        log.info("CI fix done (session=%s)", session_id)
+
+        tasks.complete_by_title(self.work_dir, f"CI failure: {check_name}")
+        subprocess.Popen(  # noqa: S603
+            ["bash", str(_sync_script()), str(self.work_dir)],
+        )
+        return True
+
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
@@ -587,6 +715,7 @@ class Worker:
 
         Returns:
             0 — no more work (all done or idle)
+            1 — did work (caller should re-run immediately)
             2 — lock held / transient failure (retry later)
         """
         try:
@@ -620,9 +749,11 @@ class Worker:
             result = self.find_or_create_pr(ctx.fido_dir, repo_ctx, issue, issue_title)
             if result is None:
                 return 0
-            pr_number, _slug = result
+            pr_number, slug = result
             self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-            # TODO: CI checks, task execution, and merge
+            if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                return 1
+            # TODO: task execution and merge
         finally:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
