@@ -146,7 +146,7 @@ What you're doing: $what" 2>/dev/null | head -1)
   : "${msg:=$what}"
   # Truncate to 80 chars
   msg="${msg:0:80}"
-  gh api graphql -f query="mutation { changeUserStatus(input: {message: \"$(printf '%s' "$msg" | sed 's/"/\\"/g')\"}) { status { message } } }" 2>/dev/null || true
+  gh api graphql -F msg="$msg" -f query='mutation($msg:String!) { changeUserStatus(input: {message: $msg}) { status { message } } }' >/dev/null 2>&1 || true
   log "status: $msg"
 }
 
