@@ -279,11 +279,18 @@ class TestGitHubClass:
 
     def test_pr_ready_delegates(self) -> None:
         gh = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(gh._gh._s, "patch", return_value=mock_resp) as mock_patch:
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"node_id": "PR_xyz"}
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {"data": {}}
+        with (
+            patch.object(gh._gh._s, "get", return_value=pr_resp),
+            patch.object(gh._gh._s, "post", return_value=graphql_resp) as mock_post,
+        ):
             gh.pr_ready("o/r", 10)
-        assert mock_patch.call_args.kwargs["json"]["draft"] is False
+        body = mock_post.call_args.kwargs["json"]
+        assert "markPullRequestReadyForReview" in body["query"]
+        assert body["variables"]["prId"] == "PR_xyz"
 
     def test_pr_merge_delegates(self) -> None:
         gh = self._github()
@@ -877,13 +884,18 @@ class TestGHClass:
 
     def test_pr_ready(self) -> None:
         gh = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(gh._s, "patch", return_value=mock_resp) as mock_patch:
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"node_id": "PR_xyz"}
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {"data": {}}
+        with (
+            patch.object(gh._s, "get", return_value=pr_resp),
+            patch.object(gh._s, "post", return_value=graphql_resp) as mock_post,
+        ):
             gh.pr_ready("o/r", 10)
-        url = mock_patch.call_args.args[0]
-        assert "repos/o/r/pulls/10" in url
-        assert mock_patch.call_args.kwargs["json"]["draft"] is False
+        body = mock_post.call_args.kwargs["json"]
+        assert "markPullRequestReadyForReview" in body["query"]
+        assert body["variables"]["prId"] == "PR_xyz"
 
     def test_pr_merge_squash(self) -> None:
         gh = self._gh()
