@@ -108,45 +108,47 @@ def reply_instruction(
     :meth:`Prompts.persona_wrap`.
     """
     ctx = reply_context_block(context, comment_body, title)
-    if category in ("ACT", "DO"):
-        return (
-            f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-            f"and briefly explain your approach. "
-            f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
-        )
-    if category == "ASK":
-        return (
-            f"Write a short GitHub PR reply asking a focused clarifying question. "
-            f"You need more information before you can act.\n\n{ctx}"
-        )
-    if category == "ANSWER":
-        return (
-            f"Write a short GitHub PR reply directly answering this question. "
-            f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
-        )
-    if category == "TASK":
-        return (
-            f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
-            f"it's been added to the work queue for later. "
-            f"Do NOT say it will be done right now.\n\n{ctx}"
-        )
-    if category == "DEFER":
-        issue_line = (
-            f"An issue has been opened to track this: {issue_url}"
-            if issue_url
-            else "An issue will be opened to track this"
-        )
-        return (
-            f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-            f"out of scope for this PR. "
-            f"{issue_line} — mention it in your reply.\n\n{ctx}"
-        )
-    if category == "DUMP":
-        return (
-            f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-            f"explaining why it's not applicable.\n\n{ctx}"
-        )
-    return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
+    match category:
+        case "ACT" | "DO":
+            return (
+                f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
+                f"and briefly explain your approach. "
+                f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
+            )
+        case "ASK":
+            return (
+                f"Write a short GitHub PR reply asking a focused clarifying question. "
+                f"You need more information before you can act.\n\n{ctx}"
+            )
+        case "ANSWER":
+            return (
+                f"Write a short GitHub PR reply directly answering this question. "
+                f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
+            )
+        case "TASK":
+            return (
+                f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
+                f"it's been added to the work queue for later. "
+                f"Do NOT say it will be done right now.\n\n{ctx}"
+            )
+        case "DEFER":
+            issue_line = (
+                f"An issue has been opened to track this: {issue_url}"
+                if issue_url
+                else "An issue will be opened to track this"
+            )
+            return (
+                f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+                f"out of scope for this PR. "
+                f"{issue_line} — mention it in your reply.\n\n{ctx}"
+            )
+        case "DUMP":
+            return (
+                f"Write a short GitHub PR reply politely declining this suggestion and briefly "
+                f"explaining why it's not applicable.\n\n{ctx}"
+            )
+        case _:
+            return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
 
 
 def issue_reply_instruction(
@@ -168,35 +170,37 @@ def issue_reply_instruction(
     parts.append(f"Your plan: {title}")
     context_str = "\n\n".join(parts)
 
-    if category in ("ACT", "DO"):
-        return (
-            f"Write a short GitHub PR reply acknowledging and explaining your approach. "
-            f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
-        )
-    if category == "ASK":
-        return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
-    if category == "ANSWER":
-        return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
-    if category == "TASK":
-        return (
-            f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
-            f"it's been added to the work queue for later. "
-            f"Do NOT say it will be done right now.\n\n{context_str}"
-        )
-    if category == "DEFER":
-        issue_line = (
-            f"An issue has been opened to track this: {issue_url}"
-            if issue_url
-            else "An issue will be opened to track this"
-        )
-        return (
-            f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-            f"out of scope for this PR. "
-            f"{issue_line} — mention it in your reply.\n\n{context_str}"
-        )
-    if category == "DUMP":
-        return f"Write a short polite decline.\n\n{context_str}"
-    return f"Write a short GitHub PR reply.\n\n{context_str}"
+    match category:
+        case "ACT" | "DO":
+            return (
+                f"Write a short GitHub PR reply acknowledging and explaining your approach. "
+                f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
+            )
+        case "ASK":
+            return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
+        case "ANSWER":
+            return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
+        case "TASK":
+            return (
+                f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
+                f"it's been added to the work queue for later. "
+                f"Do NOT say it will be done right now.\n\n{context_str}"
+            )
+        case "DEFER":
+            issue_line = (
+                f"An issue has been opened to track this: {issue_url}"
+                if issue_url
+                else "An issue will be opened to track this"
+            )
+            return (
+                f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+                f"out of scope for this PR. "
+                f"{issue_line} — mention it in your reply.\n\n{context_str}"
+            )
+        case "DUMP":
+            return f"Write a short polite decline.\n\n{context_str}"
+        case _:
+            return f"Write a short GitHub PR reply.\n\n{context_str}"
 
 
 # ── Prompts DI class ──────────────────────────────────────────────────────────
