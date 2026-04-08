@@ -3726,6 +3726,58 @@ class TestResolveAddressedThreads:
         worker.resolve_addressed_threads(self._repo_ctx(), 42)
         gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
 
+    def test_skips_resolve_when_pending_sibling_tasks_remain(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel import tasks as tasks_mod
+
+        worker, gh = self._make_worker(tmp_path)
+        # node whose originating comment has databaseId=55
+        node = {
+            "id": "tid-skip",
+            "isResolved": False,
+            "comments": {
+                "nodes": [
+                    {"author": {"login": "owner"}, "databaseId": 55},
+                    {"author": {"login": "fido-bot"}, "databaseId": 56},
+                ]
+            },
+        }
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        tasks_mod.add_task(
+            tmp_path,
+            title="pending sibling",
+            thread={"repo": "owner/repo", "pr": 1, "comment_id": 55},
+        )
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
+    def test_resolves_when_all_sibling_tasks_complete(self, tmp_path: Path) -> None:
+        from kennel import tasks as tasks_mod
+
+        worker, gh = self._make_worker(tmp_path)
+        node = {
+            "id": "tid-resolve",
+            "isResolved": False,
+            "comments": {
+                "nodes": [
+                    {"author": {"login": "owner"}, "databaseId": 77},
+                    {"author": {"login": "fido-bot"}, "databaseId": 78},
+                ]
+            },
+        }
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        tasks_mod.add_task(
+            tmp_path,
+            title="completed sibling",
+            thread={"repo": "owner/repo", "pr": 1, "comment_id": 77},
+        )
+        tasks_mod.complete_by_title(tmp_path, "completed sibling")
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is True
+        gh.resolve_thread.assert_called_once_with("tid-resolve")
+
 
 class TestHandleReviewFeedback:
     """Tests for Worker.handle_review_feedback."""

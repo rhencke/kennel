@@ -137,6 +137,18 @@ def complete_by_title(work_dir: Path, title: str) -> dict[str, Any] | None:
     return None
 
 
+def has_pending_tasks_for_comment(work_dir: Path, comment_id: int | str) -> bool:
+    """Return True if any pending task references the given comment_id."""
+    cid = int(comment_id)
+    path = _task_file(work_dir)
+    with _locked(path) as lock:
+        for t in lock.read():
+            if t.get("status") == "pending":
+                if int((t.get("thread") or {}).get("comment_id", -1)) == cid:
+                    return True
+    return False
+
+
 def remove_task(work_dir: Path, task_id: str) -> bool:
     """Remove a task. Returns True if found."""
     path = _task_file(work_dir)

@@ -5,6 +5,7 @@ from pathlib import Path
 from kennel.tasks import (
     add_task,
     complete_by_title,
+    has_pending_tasks_for_comment,
     list_tasks,
     remove_task,
     update_task,
@@ -154,6 +155,53 @@ class TestCompleteByTitle:
         tasks = list_tasks(tmp_path)
         assert tasks[0]["status"] == "completed"
         assert tasks[1]["status"] == "pending"
+
+
+class TestHasPendingTasksForComment:
+    def test_returns_true_when_pending_task_exists(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 42})
+        assert has_pending_tasks_for_comment(tmp_path, 42)
+
+    def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
+        assert not has_pending_tasks_for_comment(tmp_path, 42)
+
+    def test_returns_false_when_task_completed(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 42})
+        complete_by_title(tmp_path, "t")
+        assert not has_pending_tasks_for_comment(tmp_path, 42)
+
+    def test_returns_false_for_different_comment_id(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 99})
+        assert not has_pending_tasks_for_comment(tmp_path, 42)
+
+    def test_accepts_string_comment_id(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 42})
+        assert has_pending_tasks_for_comment(tmp_path, "42")
+
+    def test_only_pending_tasks_count(self, tmp_path: Path) -> None:
+        import json
+
+        # Write two tasks with same comment_id directly (bypassing dedup)
+        task_file = _task_file(tmp_path)
+        task_file.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "1",
+                        "title": "first",
+                        "status": "completed",
+                        "thread": {"repo": "r/r", "pr": 1, "comment_id": 42},
+                    },
+                    {
+                        "id": "2",
+                        "title": "second",
+                        "status": "pending",
+                        "thread": {"repo": "r/r", "pr": 1, "comment_id": 42},
+                    },
+                ]
+            )
+        )
+        assert has_pending_tasks_for_comment(tmp_path, 42)
 
 
 class TestRemoveTask:
