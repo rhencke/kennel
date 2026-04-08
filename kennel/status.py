@@ -130,10 +130,14 @@ def _git_dir(work_dir: Path) -> Path | None:
 def _read_state(fido_dir: Path) -> dict[str, Any]:
     """Read state.json from fido_dir, returning {} if absent or unreadable."""
     path = fido_dir / "state.json"
-    if not path.exists():
-        return {}
+    lock_path = fido_dir / "state.lock"
     try:
-        return json.loads(path.read_text())
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:  # noqa: SIM115
+            fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            if not path.exists():
+                return {}
+            return json.loads(path.read_text())
     except json.JSONDecodeError, OSError:
         return {}
 

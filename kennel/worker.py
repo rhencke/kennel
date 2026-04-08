@@ -87,22 +87,34 @@ def create_compact_script(fido_dir: Path) -> Path:
     return script_path
 
 
+def _state_lock(fido_dir: Path, exclusive: bool = False) -> IO[str]:
+    """Open and flock state.lock in fido_dir. Caller must close the returned fd."""
+    lock_path = fido_dir / "state.lock"
+    lock_path.touch(exist_ok=True)
+    lock_fd = open(lock_path)  # noqa: SIM115
+    fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    return lock_fd
+
+
 def load_state(fido_dir: Path) -> dict[str, Any]:
     """Load state.json from fido_dir, returning an empty dict if absent."""
-    state_path = fido_dir / "state.json"
-    if not state_path.exists():
-        return {}
-    return json.loads(state_path.read_text())
+    with _state_lock(fido_dir):
+        state_path = fido_dir / "state.json"
+        if not state_path.exists():
+            return {}
+        return json.loads(state_path.read_text())
 
 
 def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
     """Write state to state.json in fido_dir."""
-    (fido_dir / "state.json").write_text(json.dumps(state))
+    with _state_lock(fido_dir, exclusive=True):
+        (fido_dir / "state.json").write_text(json.dumps(state))
 
 
 def clear_state(fido_dir: Path) -> None:
     """Remove state.json from fido_dir (no-op if absent)."""
-    (fido_dir / "state.json").unlink(missing_ok=True)
+    with _state_lock(fido_dir, exclusive=True):
+        (fido_dir / "state.json").unlink(missing_ok=True)
 
 
 def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
@@ -742,6 +754,9 @@ class Worker:
                     build_prompt(fido_dir, "setup", context)
                     session_id = claude_start(fido_dir)
                     log.info("setup session: %s", session_id)
+                    state = load_state(fido_dir)
+                    state["setup_session_id"] = session_id
+                    save_state(fido_dir, state)
                     if not tasks.list_tasks(self.work_dir):
                         log.warning(
                             "setup produced no tasks — skipping PR #%s, will retry",
@@ -791,6 +806,9 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         session_id = claude_start(fido_dir)
         log.info("setup session: %s", session_id)
+        state = load_state(fido_dir)
+        state["setup_session_id"] = session_id
+        save_state(fido_dir, state)
 
         if not tasks.list_tasks(self.work_dir):
             log.warning("setup produced no tasks — skipping PR creation, will retry")
@@ -1181,7 +1199,9 @@ class Worker:
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        session_id, output = claude_run(fido_dir)
+        state = load_state(fido_dir)
+        setup_session_id = state.get("setup_session_id", "")
+        session_id, output = claude_run(fido_dir, session_id=setup_session_id)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
@@ -1204,6 +1224,11 @@ class Worker:
                 session_id, output = claude_run(fido_dir)
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+        if session_id:
+            state = load_state(fido_dir)
+            state["setup_session_id"] = session_id
+            save_state(fido_dir, state)
 
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
