@@ -357,10 +357,14 @@ class GH:
             }
             for c in commits_data
         ]
+        requested_reviewers = [
+            u["login"] for u in pr_data.get("requested_reviewers", [])
+        ]
         return {
             "reviews": reviews,
             "commits": commits,
             "isDraft": pr_data["draft"],
+            "requestedReviewers": requested_reviewers,
         }
 
     def get_review_threads(

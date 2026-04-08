@@ -1002,7 +1002,10 @@ class TestGHClass:
     def test_get_reviews_returns_dict(self) -> None:
         gh = self._gh()
         pr_resp = MagicMock()
-        pr_resp.json.return_value = {"draft": True}
+        pr_resp.json.return_value = {
+            "draft": True,
+            "requested_reviewers": [{"login": "alice"}],
+        }
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = [
             {
@@ -1028,6 +1031,21 @@ class TestGHClass:
             }
         ]
         assert result["commits"] == [{"committedDate": "2024-01-02T00:00:00Z"}]
+        assert result["requestedReviewers"] == ["alice"]
+
+    def test_get_reviews_no_requested_reviewers(self) -> None:
+        gh = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"draft": False}
+        reviews_resp = MagicMock()
+        reviews_resp.json.return_value = []
+        commits_resp = MagicMock()
+        commits_resp.json.return_value = []
+        with patch.object(
+            gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
+        ):
+            result = gh.get_reviews("o/r", 10)
+        assert result["requestedReviewers"] == []
 
     def test_get_review_threads_graphql(self) -> None:
         gh = self._gh()
