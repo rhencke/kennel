@@ -5373,6 +5373,33 @@ class TestHandlePromoteMerge:
         gh.pr_merge.assert_called_once()
         gh.add_pr_reviewer.assert_not_called()
 
+    def test_latest_changes_requested_overrides_earlier_approved(
+        self, tmp_path: Path
+    ) -> None:
+        """Later CHANGES_REQUESTED overrides earlier APPROVED — must not merge."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "APPROVED",
+                    "submittedAt": "2024-01-01T10:00:00Z",
+                },
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-02T12:00:00Z",
+                },
+            ],
+            "commits": [{"committedDate": "2024-01-01T08:00:00Z"}],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        # CHANGES_REQUESTED is latest — must not merge
+        gh.pr_merge.assert_not_called()
+
     def test_changes_requested_newer_than_commit_skips_re_request(
         self, tmp_path: Path
     ) -> None:

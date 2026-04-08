@@ -1298,11 +1298,13 @@ class Worker:
         is_draft = reviews_data.get("isDraft", False)
         requested_reviewers = reviews_data.get("requestedReviewers", [])
 
-        is_approved = any(
-            r.get("author", {}).get("login") == repo_ctx.owner
-            and r.get("state") == "APPROVED"
-            for r in reviews
+        owner_reviews = [
+            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
+        ]
+        latest_state = (
+            owner_reviews[-1].get("state", "NONE") if owner_reviews else "NONE"
         )
+        is_approved = latest_state == "APPROVED"
         task_list = tasks.list_tasks(self.work_dir)
         pending = [t for t in task_list if t.get("status") == "pending"]
 
@@ -1329,13 +1331,6 @@ class Worker:
             self._git(["push", "origin", "--delete", slug], check=False)
             self.set_status(f"Merged PR #{pr_number}! Issue #{issue} done")
             return 1
-
-        owner_reviews = [
-            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
-        ]
-        latest_state = (
-            owner_reviews[-1].get("state", "NONE") if owner_reviews else "NONE"
-        )
 
         if latest_state == "CHANGES_REQUESTED":
             if not should_rerequest_review(owner_reviews, commits):
