@@ -74,3 +74,34 @@ class TestMain:
         from pathlib import Path
 
         assert mock_sync.call_args[0][0] == Path.cwd()
+
+    def test_status_subcommand_no_repos_prints_output(self) -> None:
+        """'kennel status' with no repos calls collect/format_status and prints."""
+        with (
+            patch("kennel.status.collect") as mock_collect,
+            patch(
+                "kennel.status.format_status", return_value="kennel: DOWN"
+            ) as mock_fmt,
+            patch("builtins.print") as mock_print,
+        ):
+            main(["status"])
+        mock_collect.assert_called_once()
+        mock_fmt.assert_called_once()
+        mock_print.assert_called_once_with("kennel: DOWN")
+
+    def test_status_subcommand_parses_repo_specs(self, tmp_path) -> None:
+        """'kennel status owner/repo:/path' passes repos to collect."""
+        from kennel.config import RepoConfig
+
+        with (
+            patch("kennel.status.collect") as mock_collect,
+            patch("kennel.status.format_status", return_value="ok"),
+            patch("builtins.print"),
+        ):
+            main(["status", f"owner/repo:{tmp_path}"])
+
+        cfg = mock_collect.call_args[0][0]
+        assert "owner/repo" in cfg.repos
+        assert cfg.repos["owner/repo"] == RepoConfig(
+            name="owner/repo", work_dir=tmp_path
+        )

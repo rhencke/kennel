@@ -13,6 +13,20 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.cli import main as task_main
 
         task_main(args[1:])
+    elif args and args[0] == "status":
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from kennel.config import RepoConfig
+        from kennel.status import collect, format_status
+
+        repos: dict[str, RepoConfig] = {}
+        for spec in args[1:]:
+            name, path_str = spec.split(":", 1)
+            repos[name] = RepoConfig(
+                name=name, work_dir=Path(path_str).expanduser().resolve()
+            )
+        print(format_status(collect(SimpleNamespace(repos=repos))))
     elif args and args[0] == "sync-tasks":
         from pathlib import Path
 
