@@ -433,6 +433,17 @@ class GH:
         )
         self._graphql(query, id=thread_id)
 
+    def get_required_checks(self, repo: str, branch: str) -> list[str]:
+        """Return required status check names for branch, or [] if unprotected."""
+        try:
+            data = self._get(f"/repos/{repo}/branches/{branch}/protection")
+        except _requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return []
+            raise
+        rsc = data.get("required_status_checks") or {}
+        return [c["context"] for c in rsc.get("checks", [])]
+
     def get_run_log(self, repo: str, run_id: str | int) -> str:
         """Return the failed log output for a CI run."""
         jobs_data = self._get(f"/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest")
@@ -601,6 +612,10 @@ class GitHub:
         self._gh.resolve_thread(thread_id)
 
     # ── CI runs ───────────────────────────────────────────────────────────────
+
+    def get_required_checks(self, repo: str, branch: str) -> list[str]:
+        """Return required status check names for branch, or [] if unprotected."""
+        return self._gh.get_required_checks(repo, branch)
 
     def get_run_log(self, repo: str, run_id: str | int) -> str:
         """Return the failed log output for a CI run."""

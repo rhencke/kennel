@@ -22,6 +22,7 @@ from kennel.worker import (
     _sanitize_slug,
     acquire_lock,
     build_prompt,
+    ci_ready_for_review,
     claude_run,
     claude_start,
     clear_state,
@@ -5216,6 +5217,53 @@ class TestShouldRerequestReview:
         assert should_rerequest_review(reviews, []) is False
 
 
+class TestCiReadyForReview:
+    """Tests for the ci_ready_for_review module-level helper."""
+
+    def _check(self, name: str, state: str) -> dict:
+        return {"name": name, "state": state, "link": "http://..."}
+
+    def test_no_required_checks_returns_true(self) -> None:
+        checks = [self._check("ci", "IN_PROGRESS")]
+        assert ci_ready_for_review(checks, []) is True
+
+    def test_no_required_checks_no_checks_returns_true(self) -> None:
+        assert ci_ready_for_review([], []) is True
+
+    def test_all_required_passing_returns_true(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "SUCCESS"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test", "ci / lint"]) is True
+
+    def test_required_check_in_progress_returns_false(self) -> None:
+        checks = [self._check("ci / test", "IN_PROGRESS")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_required_check_failing_returns_false(self) -> None:
+        checks = [self._check("ci / test", "FAILURE")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_required_check_missing_from_checks_returns_false(self) -> None:
+        checks = [self._check("ci / lint", "SUCCESS")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_partial_required_passing_returns_false(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "IN_PROGRESS"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test", "ci / lint"]) is False
+
+    def test_non_required_check_failing_does_not_block(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "FAILURE"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test"]) is True
+
+
 class TestHandlePromoteMerge:
     """Tests for Worker.handle_promote_merge."""
 
@@ -6002,12 +6050,185 @@ class TestHandlePromoteMerge:
         assert result == 1
         gh.pr_ready.assert_called_once()
 
-    # --- idle / no work ---
+    # --- CI gate on draft promotion ---
 
-    def test_not_draft_not_approved_idle_sets_status(self, tmp_path: Path) -> None:
+    def _completed_tasks(self) -> list:
+        return [{"id": "t1", "title": "Done", "status": "completed"}]
+
+    def _passing_checks(self, name: str = "ci / test") -> list:
+        return [{"name": name, "state": "SUCCESS", "link": "http://..."}]
+
+    def test_draft_promote_ci_passing_requests_review(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = self._passing_checks()
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_draft_promote_ci_not_passing_defers_review(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = [
+            {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
+        ]
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_draft_promote_ci_not_passing_still_calls_pr_ready(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = [
+            {"name": "ci / test", "state": "FAILURE", "link": "http://..."}
+        ]
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
+
+    def test_draft_promote_ci_not_passing_returns_1(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = [
+            {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
+        ]
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+
+    def test_draft_promote_no_required_checks_requests_review(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_draft_promote_uses_default_branch_for_required_checks(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        with patch(
+            "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.get_required_checks.assert_called_once_with("rhencke/myrepo", "main")
+
+    # --- CI gate for non-draft PRs with no review yet ---
+
+    def test_non_draft_no_review_ci_passing_requests_review(
+        self, tmp_path: Path
+    ) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        gh.pr_checks.return_value = self._passing_checks()
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_non_draft_no_review_ci_not_passing_skips_review(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        gh.pr_checks.return_value = [
+            {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
+        ]
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_non_draft_no_review_returns_0(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        gh.pr_checks.return_value = self._passing_checks()
+        gh.get_required_checks.return_value = ["ci / test"]
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_non_draft_review_already_requested_skips_ci_check(
+        self, tmp_path: Path
+    ) -> None:
+        """Owner already in requestedReviewers — don't poll CI, just nap."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": ["rhencke"],
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_checks.assert_not_called()
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_non_draft_commented_review_skips_ci_check(self, tmp_path: Path) -> None:
+        """COMMENTED review state (not NONE) — falls through to idle, no CI poll."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_checks.assert_not_called()
+        gh.add_pr_reviewer.assert_not_called()
+
+    # --- idle / no work ---
+
+    def test_not_draft_not_approved_idle_sets_status(self, tmp_path: Path) -> None:
+        """Review already requested — napping while waiting for it."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": ["rhencke"],
+        }
         mock_status = MagicMock()
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
@@ -6017,9 +6238,15 @@ class TestHandlePromoteMerge:
         mock_status.assert_called_once_with("Napping — waiting for work", busy=False)
 
     def test_not_draft_not_approved_idle_returns_0(self, tmp_path: Path) -> None:
+        """Review already requested — returns 0 (waiting for review)."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": ["rhencke"],
+        }
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),
@@ -6122,7 +6349,12 @@ class TestHandlePromoteMerge:
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": ["rhencke"],
+        }
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),

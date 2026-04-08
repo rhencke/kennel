@@ -288,6 +288,18 @@ class TestGitHubClass:
         with patch.object(gh._gh._s, "get", side_effect=[pr_resp, checks_resp]):
             assert gh.pr_checks("o/r", 10) == []
 
+    def test_get_required_checks_delegates(self) -> None:
+        gh = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "required_status_checks": {
+                "checks": [{"context": "ci / test", "app_id": 1}]
+            }
+        }
+        with patch.object(gh._gh._s, "get", return_value=mock_resp):
+            result = gh.get_required_checks("o/r", "main")
+        assert result == ["ci / test"]
+
     def test_pr_ready_delegates(self) -> None:
         gh = self._github()
         pr_resp = MagicMock()
@@ -987,6 +999,57 @@ class TestGHClass:
         with patch.object(gh._s, "get", side_effect=[pr_resp, checks_resp]):
             result = gh.pr_checks("o/r", 10)
         assert result[0]["state"] == "IN_PROGRESS"
+
+    def test_get_required_checks_returns_context_names(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "required_status_checks": {
+                "checks": [
+                    {"context": "ci / test", "app_id": 1},
+                    {"context": "ci / lint", "app_id": 1},
+                ]
+            }
+        }
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_required_checks("o/r", "main")
+        assert result == ["ci / test", "ci / lint"]
+
+    def test_get_required_checks_no_protection_returns_empty(self) -> None:
+        import requests
+
+        gh = self._gh()
+        err_resp = MagicMock()
+        err_resp.status_code = 404
+        exc = requests.HTTPError(response=err_resp)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = exc
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_required_checks("o/r", "main")
+        assert result == []
+
+    def test_get_required_checks_no_required_status_checks_returns_empty(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {}
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_required_checks("o/r", "main")
+        assert result == []
+
+    def test_get_required_checks_reraises_non_404(self) -> None:
+        import requests
+
+        gh = self._gh()
+        err_resp = MagicMock()
+        err_resp.status_code = 500
+        exc = requests.HTTPError(response=err_resp)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = exc
+        with (
+            patch.object(gh._s, "get", return_value=mock_resp),
+            pytest.raises(requests.HTTPError),
+        ):
+            gh.get_required_checks("o/r", "main")
 
     def test_pr_ready(self) -> None:
         gh = self._gh()
