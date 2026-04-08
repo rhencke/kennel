@@ -705,6 +705,15 @@ class TestGHClass:
         with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 9, "fido") is None
 
+    def test_find_pr_requires_closing_keyword(self) -> None:
+        """Bare #N in PR body (no closing keyword) must not match."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [self._cross_ref_event(7, "fido", "see #5 for context")]
+        )
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
     def test_find_pr_body_only_not_title(self) -> None:
         """Issue reference in PR title alone does not count — body only."""
         gh = self._gh()

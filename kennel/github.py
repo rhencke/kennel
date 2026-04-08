@@ -150,9 +150,10 @@ class GH:
 
         Uses the issue timeline cross-referenced events API to enumerate PRs
         that reference this issue, then confirms the reference appears in the
-        PR body (word-boundary match).
+        PR body as a closing keyword reference (e.g. "closes #N").
         """
-        pattern = re.compile(rf"#{issue_number}\b")
+        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
         url: str | None = (
             f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
         )
