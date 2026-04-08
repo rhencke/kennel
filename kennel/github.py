@@ -248,6 +248,11 @@ class GH:
         """Edit a PR's body."""
         self._patch(f"/repos/{repo}/pulls/{pr}", body=body)
 
+    def get_pr_body(self, repo: str, pr: int | str) -> str:
+        """Return just the PR body text."""
+        data = self._get(f"/repos/{repo}/pulls/{pr}")
+        return data.get("body") or ""
+
     def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
         """Add a reviewer to a PR."""
         self._post(
@@ -472,6 +477,10 @@ class GitHub:
     def edit_pr_body(self, repo: str, pr: int | str, body: str) -> None:
         """Edit a PR's body."""
         self._gh.edit_pr_body(repo, pr, body)
+
+    def get_pr_body(self, repo: str, pr: int | str) -> str:
+        """Return just the PR body text."""
+        return self._gh.get_pr_body(repo, pr)
 
     def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
         """Add a reviewer to a PR."""

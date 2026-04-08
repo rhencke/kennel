@@ -253,6 +253,14 @@ class TestGitHubClass:
             gh.edit_pr_body("o/r", 10, "new")
         assert mock_patch.call_args.kwargs["json"]["body"] == "new"
 
+    def test_get_pr_body_delegates(self) -> None:
+        gh = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"body": "some body"}
+        with patch.object(gh._gh._s, "get", return_value=mock_resp):
+            result = gh.get_pr_body("o/r", 10)
+        assert result == "some body"
+
     def test_add_pr_reviewer_delegates(self) -> None:
         gh = self._github()
         mock_resp = MagicMock()
@@ -801,6 +809,24 @@ class TestGHClass:
         url = mock_patch.call_args.args[0]
         assert "repos/o/r/pulls/10" in url
         assert mock_patch.call_args.kwargs["json"]["body"] == "new body"
+
+    def test_get_pr_body(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"body": "PR body text"}
+        with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
+            result = gh.get_pr_body("o/r", 10)
+        url = mock_get.call_args.args[0]
+        assert "repos/o/r/pulls/10" in url
+        assert result == "PR body text"
+
+    def test_get_pr_body_none_returns_empty_string(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"body": None}
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.get_pr_body("o/r", 10)
+        assert result == ""
 
     def test_add_pr_reviewer(self) -> None:
         gh = self._gh()

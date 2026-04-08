@@ -1,9 +1,8 @@
-"""Top-level kennel entry point — dispatches to 'serve', 'task', or 'worker'."""
+"""Top-level kennel entry point — dispatches to 'serve' or 'task'."""
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -14,16 +13,14 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.cli import main as task_main
 
         task_main(args[1:])
-    elif args and args[0] == "worker":
-        from kennel.worker import run
+    elif args and args[0] == "sync-tasks":
+        from pathlib import Path
+
+        from kennel.github import GitHub
+        from kennel.worker import sync_tasks
 
         work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
-        sys.exit(run(work_dir))
-    elif args and args[0] == "watchdog":
-        from kennel.watchdog import run
-
-        work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
-        sys.exit(run(work_dir))
+        sync_tasks(work_dir, GitHub())
     else:
         from kennel.server import run as server_run
 

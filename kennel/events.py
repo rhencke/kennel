@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from kennel.prompts import (
     reply_instruction,
     triage_prompt,
 )
+from kennel.registry import WorkerRegistry
 from kennel.tasks import add_task
 
 log = logging.getLogger(__name__)
@@ -568,60 +568,14 @@ def create_task(
 
 
 def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
-    """Launch sync-tasks.sh in background.
+    """Sync tasks.json → PR body in a background thread."""
+    from kennel.worker import sync_tasks_background
 
-    TODO: remove once sync-tasks.sh is rewritten to Python.
-    """
-    sync_script = config.sub_dir.parent / "sync-tasks.sh"
-    try:
-        subprocess.Popen(
-            ["bash", str(sync_script), str(repo_cfg.work_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        log.info("sync-tasks launched")
-    except Exception:
-        log.exception("failed to launch sync-tasks")
+    sync_tasks_background(repo_cfg.work_dir, get_github())
+    log.info("sync-tasks launched")
 
 
-_LIVENESS_WAIT = 0.5  # seconds to wait before polling whether the worker is alive
-
-
-def launch_worker(repo_cfg: RepoConfig) -> int | None:
-    """Launch kennel worker in background (disowned). Returns PID.
-
-    After launching, waits briefly and checks whether the process is still
-    alive.  If it has already exited, one retry is attempted before giving up.
-    """
-    log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    log.info("launching kennel worker → %s", repo_cfg.work_dir)
-    for attempt in range(2):
-        try:
-            with open(log_path, "a") as log_file:
-                proc = subprocess.Popen(
-                    ["uv", "run", "kennel", "worker", str(repo_cfg.work_dir)],
-                    stdout=log_file,
-                    stderr=log_file,
-                    start_new_session=True,
-                )
-        except Exception:
-            log.exception("failed to launch kennel worker")
-            return None
-
-        time.sleep(_LIVENESS_WAIT)
-        if proc.poll() is None:
-            log.info("kennel worker launched — pid=%d", proc.pid)
-            return proc.pid
-
-        log.warning(
-            "kennel worker exited immediately (attempt %d) — pid=%d rc=%d",
-            attempt + 1,
-            proc.pid,
-            proc.returncode,
-        )
-
-    log.error("kennel worker failed to stay alive after retry")
-    return None
+def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
+    """Wake the per-repo WorkerThread via the registry."""
+    log.info("waking worker thread for %s", repo_cfg.name)
+    registry.wake(repo_cfg.name)
