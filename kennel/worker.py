@@ -1113,19 +1113,19 @@ class Worker:
         sync_tasks_background(self.work_dir, self.gh)
         return True
 
-    def ensure_pushed(self, remote: str, slug: str) -> bool:
+    def ensure_pushed(self, remote: str, slug: str) -> bool | None:
         """Ensure the branch is pushed to *remote*.
 
         Compares the local HEAD SHA to ``remote/slug``.  If they already
-        match, returns ``True`` immediately (no push needed).  Otherwise
-        attempts ``git push`` and returns ``True`` on success, ``False`` if
-        the push fails.
+        match, returns ``None`` immediately (no push needed — already in sync).
+        Otherwise attempts ``git push`` and returns ``True`` on success,
+        ``False`` if the push fails.
         """
         local = self._git(["rev-parse", "HEAD"]).stdout.strip()
         remote_ref = f"{remote}/{slug}"
         result = self._git(["rev-parse", remote_ref], check=False)
         if result.returncode == 0 and result.stdout.strip() == local:
-            return True
+            return None
         log.info("pushing %s to %s", slug, remote)
         push = self._git(["push", "-u", remote, slug], check=False)
         if push.returncode != 0:
@@ -1165,12 +1165,17 @@ class Worker:
             f"\nTask title: {task_title}"
         )
         build_prompt(fido_dir, "task", context)
+        head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         session_id, _ = claude_run(fido_dir)
         log.info("task done (session=%s)", session_id)
-        if not self.ensure_pushed("origin", slug):
+        head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        if head_before == head_after:
+            log.warning("task produced no new commits — not marking complete")
             return True
-        tasks.complete_by_title(self.work_dir, task_title)
-        sync_tasks_background(self.work_dir, self.gh)
+        pushed = self.ensure_pushed("origin", slug)
+        if pushed is not False:
+            tasks.complete_by_title(self.work_dir, task_title)
+            sync_tasks_background(self.work_dir, self.gh)
         return True
 
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
