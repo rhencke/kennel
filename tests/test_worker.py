@@ -4241,7 +4241,7 @@ class TestEnsurePushed:
         r.stderr = stderr
         return r
 
-    def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
+    def test_returns_none_when_already_in_sync(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         sha = "abc123"
         with patch.object(
@@ -4253,7 +4253,7 @@ class TestEnsurePushed:
             ],
         ) as mock_git:
             result = worker.ensure_pushed("origin", "my-branch")
-        assert result is True
+        assert result is None
         assert mock_git.call_count == 2
         assert ["push", "-u", "origin", "my-branch"] not in [
             c[0][0] for c in mock_git.call_args_list
@@ -4360,6 +4360,35 @@ class TestExecuteTask:
     def _pending_task(self, title: str) -> dict:
         return {"id": "t1", "title": title, "status": "pending"}
 
+    @staticmethod
+    def _git_with_new_commits():
+        """Mock _git so rev-parse HEAD returns different SHAs before/after."""
+        shas = iter(["aaa", "bbb"])
+        orig = MagicMock()
+
+        def side_effect(args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        orig.side_effect = side_effect
+        return orig
+
+    @staticmethod
+    def _git_no_new_commits():
+        """Mock _git so rev-parse HEAD returns the same SHA before/after."""
+
+        def side_effect(args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        return MagicMock(side_effect=side_effect)
+
     def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -4376,6 +4405,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4392,6 +4422,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4408,6 +4439,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4425,6 +4457,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4445,6 +4478,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4462,6 +4496,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sess", "")) as mock_run,
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4478,6 +4513,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4494,6 +4530,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
             patch("kennel.worker.sync_tasks_background"),
@@ -4510,6 +4547,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
             patch("kennel.worker.sync_tasks_background"),
@@ -4526,6 +4564,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4542,12 +4581,64 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
+
+    def test_completes_when_already_in_sync(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=None),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_called_once_with(tmp_path, "A task")
+
+    def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=None),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+
+    def test_syncs_when_already_in_sync(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=None),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_sync.assert_called_once_with(tmp_path, gh)
 
     def test_syncs_work_queue_after_completion(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -4558,6 +4649,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background") as mock_sync,
@@ -4576,6 +4668,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4595,6 +4688,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("my-session", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("kennel.worker.sync_tasks_background"),
@@ -4602,6 +4696,78 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "my-session" in caplog.text
+
+    def test_skips_complete_when_no_new_commits(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch.object(worker, "ensure_pushed") as mock_push,
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_push.assert_not_called()
+        mock_complete.assert_not_called()
+
+    def test_returns_true_when_no_new_commits(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+
+    def test_skips_sync_when_no_new_commits(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_sync.assert_not_called()
+
+    def test_logs_warning_when_no_new_commits(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert "no new commits" in caplog.text
 
 
 class TestRunExecuteTaskIntegration:
