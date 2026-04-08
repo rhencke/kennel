@@ -457,6 +457,21 @@ def should_rerequest_review(
     return True
 
 
+def ci_ready_for_review(
+    checks: list[dict[str, Any]],
+    required_checks: list[str],
+) -> bool:
+    """Return True if CI is clear to request review.
+
+    True when ``required_checks`` is empty (no branch protection), or when
+    every required check name has a corresponding check with state ``SUCCESS``.
+    """
+    if not required_checks:
+        return True
+    states = {c["name"]: c["state"] for c in checks}
+    return all(states.get(name) == "SUCCESS" for name in required_checks)
+
+
 class Worker:
     """Fido worker for a single repository.
 

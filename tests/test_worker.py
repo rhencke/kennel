@@ -22,6 +22,7 @@ from kennel.worker import (
     _sanitize_slug,
     acquire_lock,
     build_prompt,
+    ci_ready_for_review,
     claude_run,
     claude_start,
     clear_state,
@@ -5214,6 +5215,53 @@ class TestShouldRerequestReview:
             self._review("APPROVED"),
         ]
         assert should_rerequest_review(reviews, []) is False
+
+
+class TestCiReadyForReview:
+    """Tests for the ci_ready_for_review module-level helper."""
+
+    def _check(self, name: str, state: str) -> dict:
+        return {"name": name, "state": state, "link": "http://..."}
+
+    def test_no_required_checks_returns_true(self) -> None:
+        checks = [self._check("ci", "IN_PROGRESS")]
+        assert ci_ready_for_review(checks, []) is True
+
+    def test_no_required_checks_no_checks_returns_true(self) -> None:
+        assert ci_ready_for_review([], []) is True
+
+    def test_all_required_passing_returns_true(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "SUCCESS"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test", "ci / lint"]) is True
+
+    def test_required_check_in_progress_returns_false(self) -> None:
+        checks = [self._check("ci / test", "IN_PROGRESS")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_required_check_failing_returns_false(self) -> None:
+        checks = [self._check("ci / test", "FAILURE")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_required_check_missing_from_checks_returns_false(self) -> None:
+        checks = [self._check("ci / lint", "SUCCESS")]
+        assert ci_ready_for_review(checks, ["ci / test"]) is False
+
+    def test_partial_required_passing_returns_false(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "IN_PROGRESS"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test", "ci / lint"]) is False
+
+    def test_non_required_check_failing_does_not_block(self) -> None:
+        checks = [
+            self._check("ci / test", "SUCCESS"),
+            self._check("ci / lint", "FAILURE"),
+        ]
+        assert ci_ready_for_review(checks, ["ci / test"]) is True
 
 
 class TestHandlePromoteMerge:
