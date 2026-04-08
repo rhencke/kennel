@@ -278,7 +278,14 @@ class GH:
 
     def pr_ready(self, repo: str, pr: int | str) -> None:
         """Mark a PR ready for review."""
-        self._patch(f"/repos/{repo}/pulls/{pr}", draft=False)
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        node_id = pr_data["node_id"]
+        query = (
+            "mutation($prId:ID!){"
+            "markPullRequestReadyForReview(input:{pullRequestId:$prId})"
+            "{pullRequest{isDraft}}}"
+        )
+        self._graphql(query, prId=node_id)
 
     def pr_merge(
         self, repo: str, pr: int | str, squash: bool = True, auto: bool = False
