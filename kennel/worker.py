@@ -1027,6 +1027,7 @@ class Worker:
         log.info("PR #%s: checking review status", pr_number)
         reviews_data = self.gh.get_reviews(repo_ctx.repo, pr_number)
         reviews = reviews_data.get("reviews", [])
+        commits = reviews_data.get("commits", [])
         is_draft = reviews_data.get("isDraft", False)
 
         is_approved = any(

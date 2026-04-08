@@ -317,7 +317,11 @@ class TestGitHubClass:
         pr_resp.json.return_value = {"draft": True}
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = []
-        with patch.object(gh._gh._s, "get", side_effect=[pr_resp, reviews_resp]):
+        commits_resp = MagicMock()
+        commits_resp.json.return_value = []
+        with patch.object(
+            gh._gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
+        ):
             result = gh.get_reviews("o/r", 10)
         assert result["isDraft"] is True
 
@@ -987,7 +991,13 @@ class TestGHClass:
                 "submitted_at": "2024-01-01T00:00:00Z",
             }
         ]
-        with patch.object(gh._s, "get", side_effect=[pr_resp, reviews_resp]):
+        commits_resp = MagicMock()
+        commits_resp.json.return_value = [
+            {"commit": {"committer": {"date": "2024-01-02T00:00:00Z"}}}
+        ]
+        with patch.object(
+            gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
+        ):
             result = gh.get_reviews("o/r", 10)
         assert result["isDraft"] is True
         assert result["reviews"] == [
@@ -997,6 +1007,7 @@ class TestGHClass:
                 "submittedAt": "2024-01-01T00:00:00Z",
             }
         ]
+        assert result["commits"] == [{"committedDate": "2024-01-02T00:00:00Z"}]
 
     def test_get_review_threads_graphql(self) -> None:
         gh = self._gh()

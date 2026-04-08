@@ -4655,9 +4655,11 @@ class TestHandlePromoteMerge:
         owner: str = "rhencke",
         state: str = "APPROVED",
         is_draft: bool = False,
+        commits: list | None = None,
     ) -> dict:
         return {
             "reviews": [{"author": {"login": owner}, "state": state}],
+            "commits": commits if commits is not None else [],
             "isDraft": is_draft,
         }
 
@@ -4666,7 +4668,7 @@ class TestHandlePromoteMerge:
     def test_calls_get_reviews_with_correct_args(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),
@@ -4933,6 +4935,7 @@ class TestHandlePromoteMerge:
                 {"author": {"login": "rhencke"}, "state": "CHANGES_REQUESTED"},
                 {"author": {"login": "rhencke"}, "state": "APPROVED"},
             ],
+            "commits": [],
             "isDraft": False,
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
@@ -4951,7 +4954,7 @@ class TestHandlePromoteMerge:
     def test_draft_no_completed_tasks_returns_0(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
@@ -4961,7 +4964,7 @@ class TestHandlePromoteMerge:
     def test_draft_no_completed_tasks_does_not_promote(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
@@ -4969,7 +4972,7 @@ class TestHandlePromoteMerge:
     def test_draft_with_completed_tasks_calls_pr_ready(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with patch("kennel.worker.tasks.list_tasks", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -4978,7 +4981,7 @@ class TestHandlePromoteMerge:
     def test_draft_with_completed_tasks_adds_reviewer(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with patch("kennel.worker.tasks.list_tasks", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -4987,7 +4990,7 @@ class TestHandlePromoteMerge:
     def test_draft_with_completed_tasks_returns_1(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with patch("kennel.worker.tasks.list_tasks", return_value=completed):
             result = worker.handle_promote_merge(
@@ -5001,7 +5004,7 @@ class TestHandlePromoteMerge:
         """Pending tasks don't prevent promote — only completed count matters."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         tasks_list = [
             {"id": "t1", "title": "Done", "status": "completed"},
             {"id": "t2", "title": "Next", "status": "pending"},
@@ -5018,7 +5021,7 @@ class TestHandlePromoteMerge:
     def test_not_draft_not_approved_idle_sets_status(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         mock_status = MagicMock()
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
@@ -5030,7 +5033,7 @@ class TestHandlePromoteMerge:
     def test_not_draft_not_approved_idle_returns_0(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),
@@ -5047,7 +5050,7 @@ class TestHandlePromoteMerge:
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),
@@ -5106,7 +5109,7 @@ class TestHandlePromoteMerge:
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -5119,7 +5122,7 @@ class TestHandlePromoteMerge:
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=completed),
@@ -5133,7 +5136,7 @@ class TestHandlePromoteMerge:
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),

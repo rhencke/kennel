@@ -331,9 +331,10 @@ class GH:
         }
 
     def get_reviews(self, repo: str, pr: int | str) -> dict[str, Any]:
-        """Return reviews and isDraft for a PR."""
+        """Return reviews, commits, and isDraft for a PR."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
         reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
+        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
         reviews = [
             {
                 "author": {"login": r["user"]["login"]},
@@ -342,8 +343,15 @@ class GH:
             }
             for r in reviews_data
         ]
+        commits = [
+            {
+                "committedDate": c["commit"].get("committer", {}).get("date", ""),
+            }
+            for c in commits_data
+        ]
         return {
             "reviews": reviews,
+            "commits": commits,
             "isDraft": pr_data["draft"],
         }
 
