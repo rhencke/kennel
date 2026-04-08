@@ -6,14 +6,17 @@ from unittest.mock import patch
 
 from kennel.claude import (
     _claude,
+    extract_result_text,
     extract_session_id,
     generate_branch_name,
     generate_reply,
     generate_status,
+    generate_status_with_session,
     print_prompt,
     print_prompt_from_file,
     print_prompt_json,
     resume_session,
+    resume_status,
     triage_comment,
 )
 
@@ -514,3 +517,192 @@ class TestExtractSessionId:
             '{"type":"result","session_id":"real-id"}\n'
         )
         assert extract_session_id(output) == "real-id"
+
+
+class TestExtractResultText:
+    def test_returns_text_from_result_line(self) -> None:
+        output = '{"type":"result","result":"🐶\\ncoding","session_id":"abc"}'
+        assert extract_result_text(output) == "🐶\ncoding"
+
+    def test_returns_empty_when_no_result_line(self) -> None:
+        output = '{"type":"assistant","message":{"content":[]}}'
+        assert extract_result_text(output) == ""
+
+    def test_returns_empty_on_empty_input(self) -> None:
+        assert extract_result_text("") == ""
+
+    def test_returns_empty_on_blank_lines_only(self) -> None:
+        assert extract_result_text("\n\n  \n") == ""
+
+    def test_returns_empty_on_malformed_json(self) -> None:
+        assert extract_result_text("not json") == ""
+
+    def test_skips_malformed_lines_and_finds_valid(self) -> None:
+        output = "bad json\n" + '{"type":"result","result":"woof"}'
+        assert extract_result_text(output) == "woof"
+
+    def test_returns_last_text_when_multiple_result_lines(self) -> None:
+        output = '{"type":"result","result":"first"}\n{"type":"result","result":"last"}'
+        assert extract_result_text(output) == "last"
+
+    def test_returns_empty_when_result_field_missing(self) -> None:
+        output = '{"type":"result","session_id":"abc"}'
+        assert extract_result_text(output) == ""
+
+    def test_returns_empty_when_result_is_empty_string(self) -> None:
+        output = '{"type":"result","result":""}'
+        assert extract_result_text(output) == ""
+
+    def test_returns_empty_when_result_is_not_string(self) -> None:
+        output = '{"type":"result","result":42}'
+        assert extract_result_text(output) == ""
+
+    def test_ignores_non_result_types(self) -> None:
+        output = '{"type":"system","result":"should-ignore"}'
+        assert extract_result_text(output) == ""
+
+    def test_handles_mixed_output(self) -> None:
+        output = (
+            '{"type":"system","result":"ignore"}\n'
+            '{"type":"assistant","message":{}}\n'
+            '{"type":"result","result":"🐕\\nworking","session_id":"sid"}\n'
+        )
+        assert extract_result_text(output) == "🐕\nworking"
+
+
+class TestGenerateStatusWithSession:
+    _RESULT_LINE = '{"type":"result","result":"🐶\\ncoding","session_id":"sess-42"}'
+
+    def test_returns_text_and_session_id_on_success(self) -> None:
+        with patch("subprocess.run", return_value=_completed(self._RESULT_LINE)):
+            text, sid = generate_status_with_session("doing stuff", "be fido")
+        assert text == "🐶\ncoding"
+        assert sid == "sess-42"
+
+    def test_returns_empty_pair_on_nonzero(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE, returncode=1)
+        ):
+            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+
+    def test_returns_empty_pair_on_timeout(self) -> None:
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired("claude", 15),
+        ):
+            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+
+    def test_returns_empty_pair_on_file_not_found(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+
+    def test_passes_correct_flags(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE)
+        ) as mock:
+            generate_status_with_session(
+                "working on #42",
+                "be a dog",
+                model="claude-sonnet-4-6",
+                timeout=10,
+            )
+        cmd = mock.call_args.args[0]
+        assert "--model" in cmd
+        assert "claude-sonnet-4-6" in cmd
+        assert "--output-format" in cmd
+        assert "stream-json" in cmd
+        assert "--verbose" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--system-prompt" in cmd
+        assert "be a dog" in cmd
+        assert "--print" in cmd
+        assert "-p" in cmd
+        assert "working on #42" in cmd
+        assert mock.call_args.kwargs["timeout"] == 10
+
+    def test_default_model_and_timeout(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE)
+        ) as mock:
+            generate_status_with_session("working", "sys")
+        cmd = mock.call_args.args[0]
+        assert "claude-opus-4-6" in cmd
+        assert mock.call_args.kwargs["timeout"] == 15
+
+    def test_returns_empty_text_when_no_result_field(self) -> None:
+        no_result = '{"type":"result","session_id":"sid"}'
+        with patch("subprocess.run", return_value=_completed(no_result)):
+            text, sid = generate_status_with_session("working", "sys")
+        assert text == ""
+        assert sid == "sid"
+
+    def test_returns_empty_session_when_no_session_id(self) -> None:
+        no_sid = '{"type":"result","result":"🐶\\nwoof"}'
+        with patch("subprocess.run", return_value=_completed(no_sid)):
+            text, sid = generate_status_with_session("working", "sys")
+        assert text == "🐶\nwoof"
+        assert sid == ""
+
+
+class TestResumeStatus:
+    _RESULT_LINE = '{"type":"result","result":"🐕\\nfetching","session_id":"s-1"}'
+
+    def test_returns_text_on_success(self) -> None:
+        with patch("subprocess.run", return_value=_completed(self._RESULT_LINE)):
+            result = resume_status("s-1", "please shorten")
+        assert result == "🐕\nfetching"
+
+    def test_returns_empty_on_nonzero(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE, returncode=1)
+        ):
+            assert resume_status("s-1", "shorten") == ""
+
+    def test_returns_empty_on_timeout(self) -> None:
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired("claude", 15),
+        ):
+            assert resume_status("s-1", "shorten") == ""
+
+    def test_returns_empty_on_file_not_found(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert resume_status("s-1", "shorten") == ""
+
+    def test_passes_correct_flags(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE)
+        ) as mock:
+            resume_status(
+                "my-session",
+                "shorten to 80 chars",
+                model="claude-sonnet-4-6",
+                timeout=20,
+            )
+        cmd = mock.call_args.args[0]
+        assert "--model" in cmd
+        assert "claude-sonnet-4-6" in cmd
+        assert "--output-format" in cmd
+        assert "stream-json" in cmd
+        assert "--verbose" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--resume" in cmd
+        assert "my-session" in cmd
+        assert "--print" in cmd
+        assert "-p" in cmd
+        assert "shorten to 80 chars" in cmd
+        assert mock.call_args.kwargs["timeout"] == 20
+
+    def test_default_model_and_timeout(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed(self._RESULT_LINE)
+        ) as mock:
+            resume_status("s-1", "shorten")
+        cmd = mock.call_args.args[0]
+        assert "claude-opus-4-6" in cmd
+        assert mock.call_args.kwargs["timeout"] == 15
+
+    def test_returns_empty_when_no_result_field(self) -> None:
+        no_result = '{"type":"result","session_id":"s-1"}'
+        with patch("subprocess.run", return_value=_completed(no_result)):
+            assert resume_status("s-1", "shorten") == ""
