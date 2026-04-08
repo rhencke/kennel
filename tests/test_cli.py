@@ -36,6 +36,32 @@ class TestBuildParser:
         args = parser.parse_args([str(tmp_path), "add", "title", "desc"])
         assert args.description == "desc"
 
+    def test_add_with_comment_id(self, tmp_path: Path) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                str(tmp_path),
+                "add",
+                "my task",
+                "--comment-id",
+                "42",
+                "--repo",
+                "a/b",
+                "--pr",
+                "7",
+            ]
+        )
+        assert args.comment_id == 42
+        assert args.repo == "a/b"
+        assert args.pr == 7
+
+    def test_add_without_comment_id_defaults_none(self, tmp_path: Path) -> None:
+        parser = build_parser()
+        args = parser.parse_args([str(tmp_path), "add", "my task"])
+        assert args.comment_id is None
+        assert args.repo is None
+        assert args.pr is None
+
     def test_complete_subcommand(self, tmp_path: Path) -> None:
         parser = build_parser()
         args = parser.parse_args([str(tmp_path), "complete", "my task"])
@@ -74,6 +100,33 @@ class TestCmdAdd:
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["description"] == ""
+
+    def test_adds_task_with_comment_id_builds_thread(self, tmp_path: Path) -> None:
+        _task_file(tmp_path)
+        Cmd().add(tmp_path, "threaded", "", comment_id=42, repo="a/b", pr=7)
+        from kennel.tasks import list_tasks
+
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["thread"] == {"comment_id": 42, "repo": "a/b", "pr": 7}
+
+    def test_adds_task_comment_id_only(self, tmp_path: Path) -> None:
+        """comment_id without repo/pr still sets a thread for dedup purposes."""
+        _task_file(tmp_path)
+        Cmd().add(tmp_path, "threaded", "", comment_id=99)
+        from kennel.tasks import list_tasks
+
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["thread"] == {"comment_id": 99}
+
+    def test_add_deduplicates_by_comment_id(self, tmp_path: Path) -> None:
+        _task_file(tmp_path)
+        Cmd().add(tmp_path, "first title", "", comment_id=42, repo="a/b", pr=7)
+        Cmd().add(tmp_path, "different title", "", comment_id=42, repo="a/b", pr=7)
+        from kennel.tasks import list_tasks
+
+        tasks = list_tasks(tmp_path)
+        assert len(tasks) == 1
+        assert tasks[0]["title"] == "first title"
 
 
 # ── Cmd.complete ──────────────────────────────────────────────────────────────
@@ -289,6 +342,26 @@ class TestMain:
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["title"] == "task title"
+
+    def test_add_via_main_with_comment_id(self, tmp_path: Path) -> None:
+        _task_file(tmp_path)
+        main(
+            [
+                str(tmp_path),
+                "add",
+                "task title",
+                "--comment-id",
+                "55",
+                "--repo",
+                "r/r",
+                "--pr",
+                "3",
+            ]
+        )
+        from kennel.tasks import list_tasks
+
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["thread"] == {"comment_id": 55, "repo": "r/r", "pr": 3}
 
     def test_complete_via_main(self, tmp_path: Path) -> None:
         _task_file(tmp_path)

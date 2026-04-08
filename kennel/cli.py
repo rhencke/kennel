@@ -66,8 +66,25 @@ class Cmd:
         except Exception as exc:  # noqa: BLE001
             log.warning("thread resolution skipped: %s", exc)
 
-    def add(self, work_dir: Path, title: str, description: str) -> None:
-        self._tasks.add_task(work_dir, title=title, description=description)
+    def add(
+        self,
+        work_dir: Path,
+        title: str,
+        description: str,
+        comment_id: int | None = None,
+        repo: str | None = None,
+        pr: int | None = None,
+    ) -> None:
+        thread: dict | None = None
+        if comment_id is not None:
+            thread = {"comment_id": comment_id}
+            if repo:
+                thread["repo"] = repo
+            if pr is not None:
+                thread["pr"] = pr
+        self._tasks.add_task(
+            work_dir, title=title, description=description, thread=thread
+        )
 
     def complete(self, work_dir: Path, title: str) -> None:
         thread = self._tasks.complete_by_title(work_dir, title)
@@ -93,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument(
         "description", nargs="?", default="", help="Optional description"
     )
+    p_add.add_argument(
+        "--comment-id", type=int, default=None, help="PR review comment database ID"
+    )
+    p_add.add_argument("--repo", default=None, help="Repo in owner/name form")
+    p_add.add_argument("--pr", type=int, default=None, help="PR number")
 
     p_complete = sub.add_parser("complete", help="Mark a task completed")
     p_complete.add_argument("title", help="Task title")
@@ -109,7 +131,14 @@ def main(argv: list[str] | None = None) -> None:
 
     match args.command:
         case "add":
-            cmd.add(args.work_dir, args.title, args.description)
+            cmd.add(
+                args.work_dir,
+                args.title,
+                args.description,
+                args.comment_id,
+                args.repo,
+                args.pr,
+            )
         case "complete":
             cmd.complete(args.work_dir, args.title)
         case "list":

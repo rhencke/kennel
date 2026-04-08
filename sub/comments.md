@@ -25,7 +25,7 @@ For each thread in the JSON that does not already have a task:
 **Bot threads** (`is_bot: true`):
 - **DO** — worth implementing:
   ```bash
-  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "PR comment: <short summary>"
+  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "PR comment: <short summary>" --comment-id <first_db_id> --repo <repo> --pr <pr>
   ```
   Post acknowledgement reply.
 - **DEFER** — useful but out of scope:
@@ -39,14 +39,14 @@ For each thread in the JSON that does not already have a task:
 **Human threads** (`is_bot: false`):
 - **ACT** — you know what to do:
   ```bash
-  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "PR comment: <short summary>"
+  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "PR comment: <short summary>" --comment-id <first_db_id> --repo <repo> --pr <pr>
   ```
   Post acknowledgement reply.
   **Do NOT implement here** — only queue the work.
 - **ASK** — unclear what to do:
   Post a focused clarifying question.
   ```bash
-  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "ASK: <short summary>"
+  uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add "ASK: <short summary>" --comment-id <first_db_id> --repo <repo> --pr <pr>
   ```
 - **ANSWER** — a question, not a code change request:
   Post a direct answer. Do NOT resolve. Do NOT create a task.
