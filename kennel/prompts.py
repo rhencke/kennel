@@ -104,7 +104,7 @@ def reply_instruction(
         return (
             f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
             f"and briefly explain your approach. "
-            f"Do NOT promise to open issues, create tasks, or do anything outside of code changes in this PR.\n\n{ctx}"
+            f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
         )
     if category == "ASK":
         return (
@@ -151,7 +151,7 @@ def issue_reply_instruction(
     if category in ("ACT", "DO"):
         return (
             f"Write a short GitHub PR reply acknowledging and explaining your approach. "
-            f"Do NOT promise to open issues, create tasks, or do anything outside of code changes in this PR.\n\n{context_str}"
+            f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
         )
     if category == "ASK":
         return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"

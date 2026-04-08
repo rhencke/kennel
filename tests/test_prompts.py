@@ -212,6 +212,20 @@ class TestReplyInstruction:
         assert "approach" in result
         assert "Do NOT promise" in result
 
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises_does_not_restrict_task_creation(
+        self, category: str
+    ) -> None:
+        """No-promises constraint governs reply *text* only.
+
+        ACT/DO triage always results in a task being created by server.py —
+        the constraint must not say 'create tasks' or it would misrepresent
+        what the system actually does.
+        """
+        result = reply_instruction(category, "please fix this", "fix: edge case", {})
+        assert "Do NOT promise" in result
+        assert "create tasks" not in result
+
     def test_ask_asks_question(self) -> None:
         result = reply_instruction("ASK", "unclear", "need info", {})
         assert "clarifying question" in result
@@ -253,6 +267,22 @@ class TestIssueReplyInstruction:
     def test_act_do_no_promises(self, category: str) -> None:
         result = issue_reply_instruction(category, "fix it", "will fix", {})
         assert "Do NOT promise to open issues" in result
+
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises_does_not_restrict_task_creation(
+        self, category: str
+    ) -> None:
+        """No-promises constraint governs reply *text* only.
+
+        ACT/DO triage always results in a task being created by server.py —
+        the constraint must not say 'create tasks' or it would misrepresent
+        what the system actually does.
+        """
+        result = issue_reply_instruction(
+            category, "please fix this", "fix: edge case", {}
+        )
+        assert "Do NOT promise" in result
+        assert "create tasks" not in result
 
     def test_ask_clarifying(self) -> None:
         result = issue_reply_instruction("ASK", "unclear", "need more info", {})
