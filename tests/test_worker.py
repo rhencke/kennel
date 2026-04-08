@@ -4076,6 +4076,116 @@ class TestPickNextTask:
         assert result is no_thread  # returned via fallthrough, not thread path
 
 
+class TestEnsurePushed:
+    """Tests for Worker.ensure_pushed."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _git_result(
+        self, returncode: int = 0, stdout: str = "", stderr: str = ""
+    ) -> MagicMock:
+        r = MagicMock()
+        r.returncode = returncode
+        r.stdout = stdout
+        r.stderr = stderr
+        return r
+
+    def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        sha = "abc123"
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._git_result(stdout=sha + "\n"),  # rev-parse HEAD
+                self._git_result(stdout=sha + "\n"),  # rev-parse remote/slug
+            ],
+        ) as mock_git:
+            result = worker.ensure_pushed("origin", "my-branch")
+        assert result is True
+        assert mock_git.call_count == 2
+        assert ["push", "-u", "origin", "my-branch"] not in [
+            c[0][0] for c in mock_git.call_args_list
+        ]
+
+    def test_pushes_when_remote_ref_missing(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._git_result(stdout="abc\n"),  # rev-parse HEAD
+                self._git_result(returncode=128),  # rev-parse remote/slug — not found
+                self._git_result(),  # push succeeds
+            ],
+        ):
+            result = worker.ensure_pushed("origin", "my-branch")
+        assert result is True
+
+    def test_pushes_when_shas_differ(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._git_result(stdout="local-sha\n"),
+                self._git_result(stdout="remote-sha\n"),
+                self._git_result(),
+            ],
+        ):
+            result = worker.ensure_pushed("origin", "my-branch")
+        assert result is True
+
+    def test_returns_false_when_push_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._git_result(stdout="local\n"),
+                self._git_result(returncode=128),
+                self._git_result(returncode=1, stderr="rejected"),
+            ],
+        ):
+            result = worker.ensure_pushed("origin", "my-branch")
+        assert result is False
+
+    def test_logs_warning_on_push_failure(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=[
+                    self._git_result(stdout="local\n"),
+                    self._git_result(returncode=128),
+                    self._git_result(returncode=1, stderr="push rejected"),
+                ],
+            ),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            worker.ensure_pushed("origin", "br")
+        assert "push failed" in caplog.text
+
+    def test_passes_correct_remote_and_slug(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._git_result(stdout="sha1\n"),
+                self._git_result(returncode=128),
+                self._git_result(),
+            ],
+        ) as mock_git:
+            worker.ensure_pushed("fork", "feature-branch")
+        push_call = mock_git.call_args_list[2][0][0]
+        assert push_call == ["push", "-u", "fork", "feature-branch"]
+
+
 class TestExecuteTask:
     """Tests for Worker.execute_task."""
 
@@ -4116,6 +4226,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
@@ -4131,6 +4242,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
@@ -4146,6 +4258,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
@@ -4162,6 +4275,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
@@ -4181,6 +4295,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
@@ -4197,11 +4312,28 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sess", "")) as mock_run,
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(fido_dir)
+
+    def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
+        mock_push.assert_called_once_with("origin", "my-slug")
 
     def test_completes_task_by_title(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -4212,11 +4344,60 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
             patch("subprocess.Popen"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(tmp_path, "My task title")
+
+    def test_skips_complete_when_push_fails(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_not_called()
+
+    def test_returns_true_when_push_fails(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+
+    def test_skips_sync_when_push_fails(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_popen.assert_not_called()
 
     def test_syncs_work_queue_after_completion(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -4227,6 +4408,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen") as mock_popen,
         ):
@@ -4247,6 +4429,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -4265,6 +4448,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("my-session", "")),
+            patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
             patch("subprocess.Popen"),
             caplog.at_level(logging.INFO, logger="kennel"),

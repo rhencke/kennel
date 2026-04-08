@@ -871,6 +871,26 @@ class Worker:
         )
         return True
 
+    def ensure_pushed(self, remote: str, slug: str) -> bool:
+        """Ensure the branch is pushed to *remote*.
+
+        Compares the local HEAD SHA to ``remote/slug``.  If they already
+        match, returns ``True`` immediately (no push needed).  Otherwise
+        attempts ``git push`` and returns ``True`` on success, ``False`` if
+        the push fails.
+        """
+        local = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        remote_ref = f"{remote}/{slug}"
+        result = self._git(["rev-parse", remote_ref], check=False)
+        if result.returncode == 0 and result.stdout.strip() == local:
+            return True
+        log.info("pushing %s to %s", slug, remote)
+        push = self._git(["push", "-u", remote, slug], check=False)
+        if push.returncode != 0:
+            log.warning("push failed: %s", push.stderr.strip())
+            return False
+        return True
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -905,6 +925,8 @@ class Worker:
         build_prompt(fido_dir, "task", context)
         session_id, _ = claude_run(fido_dir)
         log.info("task done (session=%s)", session_id)
+        if not self.ensure_pushed("origin", slug):
+            return True
         tasks.complete_by_title(self.work_dir, task_title)
         subprocess.Popen(  # noqa: S603
             ["bash", str(_sync_script()), str(self.work_dir)],
