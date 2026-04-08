@@ -149,11 +149,20 @@ def issue_reply_instruction(
     context_str = "\n\n".join(parts)
 
     if category in ("ACT", "DO"):
-        return f"Write a short GitHub PR reply acknowledging and explaining your approach.\n\n{context_str}"
+        return (
+            f"Write a short GitHub PR reply acknowledging and explaining your approach. "
+            f"Do NOT promise to open issues, create tasks, or do anything outside of code changes in this PR.\n\n{context_str}"
+        )
     if category == "ASK":
         return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
     if category == "ANSWER":
         return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
+    if category == "DEFER":
+        return (
+            f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+            f"out of scope for this PR. "
+            f"Do NOT promise to open issues or create tasks.\n\n{context_str}"
+        )
     if category == "DUMP":
         return f"Write a short polite decline.\n\n{context_str}"
     return f"Write a short GitHub PR reply.\n\n{context_str}"

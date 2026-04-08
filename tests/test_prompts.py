@@ -249,6 +249,11 @@ class TestIssueReplyInstruction:
         result = issue_reply_instruction(category, "fix it", "will fix", {})
         assert "acknowledging" in result
 
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises(self, category: str) -> None:
+        result = issue_reply_instruction(category, "fix it", "will fix", {})
+        assert "Do NOT promise to open issues" in result
+
     def test_ask_clarifying(self) -> None:
         result = issue_reply_instruction("ASK", "unclear", "need more info", {})
         assert "clarifying question" in result
@@ -256,6 +261,14 @@ class TestIssueReplyInstruction:
     def test_answer_direct(self) -> None:
         result = issue_reply_instruction("ANSWER", "what is X?", "explain", {})
         assert "Question: what is X?" in result
+
+    def test_defer_out_of_scope(self) -> None:
+        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        assert "out of scope" in result
+
+    def test_defer_no_promises(self) -> None:
+        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        assert "Do NOT promise to open issues or create tasks" in result
 
     def test_dump_decline(self) -> None:
         result = issue_reply_instruction("DUMP", "bad idea", "decline", {})
