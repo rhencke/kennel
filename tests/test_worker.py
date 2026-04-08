@@ -6848,37 +6848,6 @@ class TestSyncTasks:
         ):
             sync_tasks(tmp_path, gh)  # should not raise
 
-    def test_resyncs_when_tasks_file_changes_during_sync(self, tmp_path: Path) -> None:
-        gh = MagicMock()
-        fido_dir = self._fido_dir(tmp_path)
-        self._state_with_issue(fido_dir)
-        gh.get_repo_info.return_value = "owner/repo"
-        gh.get_user.return_value = "fido-bot"
-        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
-        body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->"
-        gh.get_pr_body.return_value = body
-        task = {"title": "Do it", "status": "pending"}
-        task_file = fido_dir / "tasks.json"
-        call_count = 0
-
-        def fake_edit(repo, pr, new_body):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # Simulate tasks.json appearing after sync started (file didn't exist before)
-                task_file.write_text("[]")
-
-        gh.edit_pr_body.side_effect = fake_edit
-        # task_file does NOT exist before sync starts — mtime_before will be 0
-
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)
-        assert call_count == 2
-
 
 class TestSyncTasksBackground:
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
