@@ -1293,6 +1293,7 @@ class Worker:
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False
             )
             self._git(["branch", "-d", slug], check=False)
+            self._git(["push", "origin", "--delete", slug], check=False)
             self.set_status(f"Merged PR #{pr_number}! Issue #{issue} done")
             return 1
 

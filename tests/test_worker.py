@@ -5099,6 +5099,23 @@ class TestHandlePromoteMerge:
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["branch", "-d", "fix-slug"] in calls
 
+    def test_approved_not_draft_no_pending_git_push_delete_remote_branch(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_git = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git", mock_git),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        calls = [c[0][0] for c in mock_git.call_args_list]
+        assert ["push", "origin", "--delete", "fix-slug"] in calls
+
     def test_approved_not_draft_no_pending_sets_merged_status(
         self, tmp_path: Path
     ) -> None:
