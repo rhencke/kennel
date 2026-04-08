@@ -725,6 +725,10 @@ class Worker:
                     self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
                 task_list = tasks.list_tasks(self.work_dir)
                 if not task_list:
+                    # Try seeding from PR body first (recovers from state reset)
+                    self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+                    task_list = tasks.list_tasks(self.work_dir)
+                if not task_list:
                     log.info("PR #%s has no tasks — running setup", pr_number)
                     context = (
                         f"Request: {request}\n"

@@ -2167,6 +2167,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", mock_start),
         ):
@@ -2182,6 +2183,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", return_value="sess"),
         ):
@@ -2196,11 +2198,40 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is None
+
+    def test_open_pr_seeds_from_pr_body_before_setup(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        # seed_tasks_from_pr_body populates tasks → setup not called
+        call_order = []
+        with (
+            patch.object(worker, "_git"),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                side_effect=[[], [{"id": "1", "title": "t", "status": "pending"}]],
+            ),
+            patch.object(
+                worker,
+                "seed_tasks_from_pr_body",
+                side_effect=lambda *a: call_order.append("seed"),
+            ),
+            patch(
+                "kennel.worker.build_prompt",
+                side_effect=lambda *a: call_order.append("setup"),
+            ),
+            patch("kennel.worker.claude_start", return_value="sess"),
+        ):
+            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert result == (20, "my-br")
+        assert "seed" in call_order
+        assert "setup" not in call_order
 
     def test_open_pr_setup_produces_tasks_returns_pr(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
