@@ -938,7 +938,7 @@ class Worker:
         log.info("CI fix done (session=%s)", session_id)
 
         tasks.complete_by_title(self.work_dir, f"CI failure: {check_name}")
-        sync_tasks_background(self.work_dir, self.gh)
+        sync_tasks(self.work_dir, self.gh)
         return True
 
     def _filter_threads(
@@ -1078,7 +1078,7 @@ class Worker:
         tasks.complete_by_title(
             self.work_dir, f"Address review feedback from {repo_ctx.owner}"
         )
-        sync_tasks_background(self.work_dir, self.gh)
+        sync_tasks(self.work_dir, self.gh)
         return True
 
     def handle_threads(
@@ -1208,7 +1208,7 @@ class Worker:
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)
-            sync_tasks_background(self.work_dir, self.gh)
+            sync_tasks(self.work_dir, self.gh)
         return True
 
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
