@@ -12,6 +12,7 @@ from kennel.claude import (
     generate_status,
     print_prompt,
     print_prompt_from_file,
+    print_prompt_json,
     resume_session,
     triage_comment,
 )
@@ -94,6 +95,92 @@ class TestPrintPrompt:
     def test_passes_timeout(self) -> None:
         with patch("subprocess.run", return_value=_completed("ok")) as mock:
             print_prompt("q", "claude-opus-4-6", timeout=7)
+        assert mock.call_args.kwargs["timeout"] == 7
+
+
+class TestPrintPromptJson:
+    def test_extracts_key_from_clean_json(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed('{"description": "Fixes bug."}')
+        ):
+            assert (
+                print_prompt_json("q", "description", "claude-opus-4-6") == "Fixes bug."
+            )
+
+    def test_extracts_key_when_preamble_present(self) -> None:
+        with patch(
+            "subprocess.run",
+            return_value=_completed(
+                'Sure! Here you go: {"description": "Adds feature."} Done.'
+            ),
+        ):
+            assert (
+                print_prompt_json("q", "description", "claude-opus-4-6")
+                == "Adds feature."
+            )
+
+    def test_returns_empty_when_key_missing(self) -> None:
+        with patch("subprocess.run", return_value=_completed('{"other": "value"}')):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_returns_empty_on_no_json(self) -> None:
+        with patch("subprocess.run", return_value=_completed("just plain text")):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_returns_empty_on_empty_output(self) -> None:
+        with patch("subprocess.run", return_value=_completed("")):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_returns_empty_on_nonzero(self) -> None:
+        with patch(
+            "subprocess.run",
+            return_value=_completed('{"description": "x"}', returncode=1),
+        ):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_returns_empty_on_timeout(self) -> None:
+        with patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 30)
+        ):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_returns_empty_on_file_not_found(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_appends_json_instruction_to_system_prompt(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed('{"description": "x"}')
+        ) as mock:
+            print_prompt_json(
+                "q", "description", "claude-opus-4-6", system_prompt="be helpful"
+            )
+        cmd = mock.call_args.args[0]
+        assert "--system-prompt" in cmd
+        idx = cmd.index("--system-prompt")
+        combined = cmd[idx + 1]
+        assert "be helpful" in combined
+        assert "description" in combined
+
+    def test_uses_json_instruction_as_only_system_prompt_when_none_given(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_completed('{"description": "x"}')
+        ) as mock:
+            print_prompt_json("q", "description", "claude-opus-4-6", system_prompt=None)
+        cmd = mock.call_args.args[0]
+        assert "--system-prompt" in cmd
+        idx = cmd.index("--system-prompt")
+        assert "description" in cmd[idx + 1]
+
+    def test_non_string_value_is_ignored(self) -> None:
+        with patch("subprocess.run", return_value=_completed('{"description": 42}')):
+            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+
+    def test_passes_model_and_timeout(self) -> None:
+        with patch("subprocess.run", return_value=_completed('{"k": "v"}')) as mock:
+            print_prompt_json("q", "k", "claude-haiku-4-5-20251001", timeout=7)
+        cmd = mock.call_args.args[0]
+        assert "claude-haiku-4-5-20251001" in cmd
         assert mock.call_args.kwargs["timeout"] == 7
 
 

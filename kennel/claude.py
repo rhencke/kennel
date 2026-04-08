@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -68,6 +69,43 @@ def print_prompt(
         return result.stdout.strip() if result.returncode == 0 else ""
     except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
+
+
+def print_prompt_json(
+    prompt: str,
+    key: str,
+    model: str,
+    system_prompt: str | None = None,
+    timeout: int = 30,
+) -> str:
+    """Run claude --print, parse JSON from output, return the string at *key*.
+
+    Appends a JSON-format instruction to *system_prompt* so Claude outputs
+    {"key": "..."}.  Scans the raw response for a JSON object, so preamble
+    or trailing text from Opus does not corrupt the result.
+
+    Returns the string value at *key*, or empty string on failure.
+    """
+    json_instruction = (
+        f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
+        " No other text before or after the JSON."
+    )
+    full_system = (
+        f"{system_prompt}\n\n{json_instruction}" if system_prompt else json_instruction
+    )
+    raw = print_prompt(prompt, model, system_prompt=full_system, timeout=timeout)
+    if not raw:
+        return ""
+    # Try parsing whole output, then scan for JSON objects (handles preamble).
+    candidates = [raw] + [m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)]
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj.get(key), str):
+                return obj[key]
+        except json.JSONDecodeError, AttributeError:
+            continue
+    return ""
 
 
 def print_prompt_from_file(
