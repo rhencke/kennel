@@ -348,7 +348,19 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
     -p "$(cat "$SCRIPT_DIR/sub/persona.md")
 
 Write a 2-3 sentence pull request description for: $_PR_BODY_PLAIN" 2>/dev/null || true)
-  _PR_BODY_TEXT=$(printf '%s' "$_PR_RAW" | jq -r '.description // empty' 2>/dev/null || true)
+  _PR_BODY_TEXT=$(printf '%s' "$_PR_RAW" | python3 -c "
+import json, re, sys
+raw = sys.stdin.read()
+candidates = [raw] + [m.group() for m in re.finditer(r'\{.*?\}', raw, re.DOTALL)]
+for c in candidates:
+    try:
+        obj = json.loads(c)
+        if isinstance(obj.get('description'), str):
+            print(obj['description'], end='')
+            break
+    except (json.JSONDecodeError, AttributeError):
+        pass
+" 2>/dev/null || true)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
 
   # Format tasks from tasks.json into work queue
