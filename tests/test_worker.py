@@ -4489,6 +4489,55 @@ class TestExecuteTask:
         _, _, context = mock_bp.call_args[0]
         assert "Task title: The special task" in context
 
+    def test_context_includes_thread_metadata(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "Fix the thing",
+            "status": "pending",
+            "thread": {
+                "repo": "owner/repo",
+                "pr": 42,
+                "comment_id": 12345,
+                "url": "https://github.com/owner/repo/pull/42#discussion_r12345",
+            },
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
+        _, _, context = mock_bp.call_args[0]
+        assert "comment_id: 12345" in context
+        assert "review comment" in context
+        assert "Thread URL:" in context
+
+    def test_context_omits_thread_when_no_thread(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Plain task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        _, _, context = mock_bp.call_args[0]
+        assert "comment_id" not in context
+        assert "review comment" not in context
+
     def test_calls_claude_run(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)

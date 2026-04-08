@@ -1158,13 +1158,23 @@ class Worker:
         task_title = task["title"]
         log.info("task: %s", task_title)
         self.set_status(f"Working on: {task_title}")
-        context = (
-            f"PR: {pr_number}\n"
-            f"Repo: {repo_ctx.repo}\n"
-            f"Branch: {slug}\n"
-            f"Upstream: origin/{repo_ctx.default_branch}\n"
-            f"\nTask title: {task_title}"
-        )
+        thread = task.get("thread") or {}
+        context_parts = [
+            f"PR: {pr_number}",
+            f"Repo: {repo_ctx.repo}",
+            f"Branch: {slug}",
+            f"Upstream: origin/{repo_ctx.default_branch}",
+            f"\nTask title: {task_title}",
+        ]
+        if thread.get("comment_id"):
+            context_parts.append(
+                f"\nThis task originated from a PR review comment."
+                f"\nThread comment_id: {thread['comment_id']}"
+                f"\nPR: {thread.get('pr', pr_number)}"
+            )
+            if thread.get("url"):
+                context_parts.append(f"Thread URL: {thread['url']}")
+        context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         session_id, output = claude_run(fido_dir)
