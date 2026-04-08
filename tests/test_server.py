@@ -528,8 +528,9 @@ class TestSelfRestart:
 
     def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
         cfg = _self_restart_cfg(tmp_path)
+        mock_registry = MagicMock()
         WebhookHandler.config = cfg
-        WebhookHandler.registry = MagicMock()
+        WebhookHandler.registry = mock_registry
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
         t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -545,6 +546,7 @@ class TestSelfRestart:
                 assert status == 200
                 time.sleep(0.2)
                 mock_exec.assert_called_once()
+                mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
                 calls = mock_run.call_args_list
                 cmds = [c.args[0] for c in calls]
                 assert ["git", "checkout", "main"] in cmds, (
@@ -567,10 +569,42 @@ class TestSelfRestart:
         finally:
             srv.shutdown()
 
+    def test_self_restart_stop_and_join_precedes_git(self, tmp_path: Path) -> None:
+        cfg = _self_restart_cfg(tmp_path)
+        call_order: list[str] = []
+        mock_registry = MagicMock()
+        mock_registry.stop_and_join.side_effect = lambda *_a, **_kw: call_order.append(
+            "stop_and_join"
+        )
+        WebhookHandler.config = cfg
+        WebhookHandler.registry = mock_registry
+        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        url = f"http://127.0.0.1:{port}"
+        try:
+            with (
+                patch("kennel.server.subprocess.run") as mock_run,
+                patch("kennel.server.os.execv"),
+            ):
+                mock_run.side_effect = lambda *_a, **_kw: (
+                    call_order.append("git") or MagicMock(returncode=0)
+                )
+                _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+                time.sleep(0.2)
+        finally:
+            srv.shutdown()
+        assert call_order[0] == "stop_and_join", (
+            "stop_and_join must come before any git command"
+        )
+        assert "git" in call_order[1:], "git commands must follow stop_and_join"
+
     def test_self_restart_aborts_on_git_failure(self, tmp_path: Path) -> None:
         cfg = _self_restart_cfg(tmp_path)
+        mock_registry = MagicMock()
         WebhookHandler.config = cfg
-        WebhookHandler.registry = MagicMock()
+        WebhookHandler.registry = mock_registry
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
         t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -586,6 +620,7 @@ class TestSelfRestart:
                 status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
                 assert status == 200
                 time.sleep(0.2)
+                mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
                 mock_run.assert_called_once()
                 mock_exec.assert_not_called()
         finally:

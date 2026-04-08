@@ -80,6 +80,25 @@ class TestWorkerRegistry:
         reg, _ = self._make_registry()
         reg.stop_all()  # must not raise
 
+    def test_stop_and_join_calls_stop_and_join_on_thread(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        reg.start(_repo("foo/bar", tmp_path))
+        reg.stop_and_join("foo/bar", timeout=5.0)
+        factory.return_value.stop.assert_called_once()
+        factory.return_value.join.assert_called_once_with(timeout=5.0)
+
+    def test_stop_and_join_unknown_repo_is_noop(self) -> None:
+        reg, factory = self._make_registry()
+        reg.stop_and_join("unknown/repo")  # must not raise
+        factory.return_value.stop.assert_not_called()
+        factory.return_value.join.assert_not_called()
+
+    def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        reg.start(_repo("foo/bar", tmp_path))
+        reg.stop_and_join("foo/bar")
+        factory.return_value.join.assert_called_once_with(timeout=30.0)
+
     def test_is_alive_true_when_thread_alive(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)

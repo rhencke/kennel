@@ -51,6 +51,16 @@ class WorkerRegistry:
         for thread in self._threads.values():
             thread.stop()
 
+    def stop_and_join(self, repo_name: str, timeout: float = 30.0) -> None:
+        """Stop the thread for *repo_name* and wait up to *timeout* seconds for it to exit.
+
+        No-op if no thread is registered for that repo.
+        """
+        thread = self._threads.get(repo_name)
+        if thread:
+            thread.stop()
+            thread.join(timeout=timeout)
+
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
         thread = self._threads.get(repo_name)
