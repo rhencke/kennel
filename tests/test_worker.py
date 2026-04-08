@@ -2355,6 +2355,22 @@ class TestFindOrCreatePr:
         assert slug == slug.lower()
         assert "!" not in slug
 
+    def test_no_pr_setup_no_tasks_returns_none(self, tmp_path: Path) -> None:
+        """New-PR path: setup produces no tasks → return None, skip PR creation."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert result is None
+        gh.create_pr.assert_not_called()
+
     # --- Closed PR (fall through) path ---
 
     def test_closed_pr_creates_fresh_pr(self, tmp_path: Path) -> None:
