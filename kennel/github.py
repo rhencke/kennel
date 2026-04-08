@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,23 @@ class GH:
         data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
         return [(c["id"], c.get("body", "")) for c in data]
 
+    def _paginate(self, url: str) -> Iterator[Any]:
+        """Yield each item from all pages of a paginated GitHub API endpoint."""
+        current: str | None = url
+        while current:
+            resp = self._s.get(current)
+            resp.raise_for_status()
+            yield from resp.json()
+            link = resp.headers.get("Link", "")
+            current = next(
+                (
+                    part.split(";")[0].strip().strip("<>")
+                    for part in link.split(",")
+                    if 'rel="next"' in part
+                ),
+                None,
+            )
+
     def find_pr(
         self, repo: str, issue_number: int | str, user: str
     ) -> dict[str, Any] | None:
@@ -154,40 +172,26 @@ class GH:
         """
         _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
         pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
-        url: str | None = (
-            f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
-        )
-        while url:
-            resp = self._s.get(url)
-            resp.raise_for_status()
-            for event in resp.json():
-                if event.get("event") != "cross-referenced":
-                    continue
-                source_issue = event.get("source", {}).get("issue", {})
-                if "pull_request" not in source_issue:
-                    continue
-                if source_issue.get("user", {}).get("login") != user:
-                    continue
-                if not pattern.search(source_issue.get("body", "") or ""):
-                    continue
-                pr_number = source_issue["number"]
-                pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
-                state = "MERGED" if pr.get("merged") else pr["state"].upper()
-                return {
-                    "number": pr["number"],
-                    "headRefName": pr["head"]["ref"],
-                    "state": state,
-                    "author": {"login": pr["user"]["login"]},
-                }
-            link = resp.headers.get("Link", "")
-            url = next(
-                (
-                    part.split(";")[0].strip().strip("<>")
-                    for part in link.split(",")
-                    if 'rel="next"' in part
-                ),
-                None,
-            )
+        url = f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
+        for event in self._paginate(url):
+            if event.get("event") != "cross-referenced":
+                continue
+            source_issue = event.get("source", {}).get("issue", {})
+            if "pull_request" not in source_issue:
+                continue
+            if source_issue.get("user", {}).get("login") != user:
+                continue
+            if not pattern.search(source_issue.get("body", "") or ""):
+                continue
+            pr_number = source_issue["number"]
+            pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
+            state = "MERGED" if pr.get("merged") else pr["state"].upper()
+            return {
+                "number": pr["number"],
+                "headRefName": pr["head"]["ref"],
+                "state": state,
+                "author": {"login": pr["user"]["login"]},
+            }
         return None
 
     def comment_issue(self, repo: str, number: int | str, body: str) -> None:

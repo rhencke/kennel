@@ -622,6 +622,30 @@ class TestGHClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_post.call_args.kwargs["json"]["body"] == "hello"
 
+    def test_paginate_single_page(self) -> None:
+        gh = self._gh()
+        resp = MagicMock()
+        resp.json.return_value = [{"id": 1}, {"id": 2}]
+        resp.headers = {}
+        with patch.object(gh._s, "get", return_value=resp):
+            result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert result == [{"id": 1}, {"id": 2}]
+
+    def test_paginate_follows_next_link(self) -> None:
+        gh = self._gh()
+        page1 = MagicMock()
+        page1.json.return_value = [{"id": 1}]
+        next_url = "https://api.github.com/repos/o/r/items?page=2"
+        page1.headers = {"Link": f'<{next_url}>; rel="next"'}
+        page2 = MagicMock()
+        page2.json.return_value = [{"id": 2}]
+        page2.headers = {}
+        with patch.object(gh._s, "get", side_effect=[page1, page2]) as mock_get:
+            result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert result == [{"id": 1}, {"id": 2}]
+        assert mock_get.call_count == 2
+        assert mock_get.call_args_list[1].args[0] == next_url
+
     def _timeline_resp(self, events: list[dict]) -> MagicMock:
         """Build a mock timeline response with no next-page Link header."""
         resp = MagicMock()
