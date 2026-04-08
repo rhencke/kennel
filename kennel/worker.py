@@ -410,15 +410,16 @@ class Worker:
 
         plain = f"Working on: {request}. Implementation in progress."
         system_prompt = (
-            "You are a GitHub PR description writer. Output ONLY the description"
-            " text — no preamble, no thinking, no quotes, no markdown headers."
-            " Your first word is the first word of the description."
+            "You are a GitHub PR description writer."
+            " Write a 2-3 sentence description suitable for a GitHub PR body."
+            " No markdown headers."
             f" The last line must be a blank line followed by 'Fixes #{issue}.'"
-            " on its own line, where N is the issue number."
+            " on its own line."
         )
-        desc = claude.print_prompt(
+        desc = claude.print_prompt_json(
             prompt=f"{persona}\n\nWrite a 2-3 sentence pull request description"
             f" for: {plain}",
+            key="description",
             model="claude-opus-4-6",
             system_prompt=system_prompt,
         )
