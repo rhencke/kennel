@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from kennel.prompts import (
     reply_instruction,
     triage_prompt,
 )
+from kennel.registry import WorkerRegistry
 from kennel.tasks import add_task
 
 log = logging.getLogger(__name__)
@@ -585,43 +585,7 @@ def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
         log.exception("failed to launch sync-tasks")
 
 
-_LIVENESS_WAIT = 0.5  # seconds to wait before polling whether the worker is alive
-
-
-def launch_worker(repo_cfg: RepoConfig) -> int | None:
-    """Launch kennel worker in background (disowned). Returns PID.
-
-    After launching, waits briefly and checks whether the process is still
-    alive.  If it has already exited, one retry is attempted before giving up.
-    """
-    log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    log.info("launching kennel worker → %s", repo_cfg.work_dir)
-    for attempt in range(2):
-        try:
-            with open(log_path, "a") as log_file:
-                proc = subprocess.Popen(
-                    ["uv", "run", "kennel", "worker", str(repo_cfg.work_dir)],
-                    stdout=log_file,
-                    stderr=log_file,
-                    start_new_session=True,
-                )
-        except Exception:
-            log.exception("failed to launch kennel worker")
-            return None
-
-        time.sleep(_LIVENESS_WAIT)
-        if proc.poll() is None:
-            log.info("kennel worker launched — pid=%d", proc.pid)
-            return proc.pid
-
-        log.warning(
-            "kennel worker exited immediately (attempt %d) — pid=%d rc=%d",
-            attempt + 1,
-            proc.pid,
-            proc.returncode,
-        )
-
-    log.error("kennel worker failed to stay alive after retry")
-    return None
+def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
+    """Wake the per-repo WorkerThread via the registry."""
+    log.info("waking worker thread for %s", repo_cfg.name)
+    registry.wake(repo_cfg.name)

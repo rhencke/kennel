@@ -37,6 +37,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 def server(tmp_path: Path):
     cfg = _config(tmp_path)
     WebhookHandler.config = cfg
+    WebhookHandler.registry = MagicMock()
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -461,6 +462,7 @@ class TestRun:
         with (
             patch("kennel.server.Config.from_args", return_value=fake_cfg),
             patch("kennel.server.HTTPServer", return_value=mock_server),
+            patch("kennel.server.make_registry"),
             patch("pathlib.Path.home", return_value=tmp_path),
         ):
             run()
@@ -488,6 +490,7 @@ class TestRun:
         with (
             patch("kennel.server.Config.from_args", return_value=fake_cfg),
             patch("kennel.server.HTTPServer", return_value=mock_server),
+            patch("kennel.server.make_registry"),
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("sys.stderr") as mock_stderr,
         ):
@@ -511,6 +514,7 @@ class TestSelfRestart:
             sub_dir=tmp_path / "sub",
         )
         WebhookHandler.config = cfg
+        WebhookHandler.registry = MagicMock()
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
         t = threading.Thread(target=srv.serve_forever, daemon=True)

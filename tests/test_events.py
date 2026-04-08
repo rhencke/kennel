@@ -1187,62 +1187,10 @@ class TestLaunchWorker:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def _alive_proc(self, pid: int = 12345) -> MagicMock:
-        """Return a mock Popen result whose poll() reports the process is alive."""
-        proc = MagicMock()
-        proc.pid = pid
-        proc.poll.return_value = None  # None → still running
-        return proc
-
-    def test_returns_pid(self, tmp_path: Path) -> None:
-        with (
-            patch("subprocess.Popen", return_value=self._alive_proc(12345)),
-            patch("time.sleep"),
-        ):
-            pid = launch_worker(self._repo_cfg(tmp_path))
-        assert pid == 12345
-
-    def test_launches_kennel_worker_subprocess(self, tmp_path: Path) -> None:
-        with (
-            patch("subprocess.Popen", return_value=self._alive_proc()) as mock_popen,
-            patch("time.sleep"),
-        ):
-            launch_worker(self._repo_cfg(tmp_path))
-        cmd = mock_popen.call_args[0][0]
-        assert cmd == ["uv", "run", "kennel", "worker", str(tmp_path)]
-
-    def test_exception_returns_none(self, tmp_path: Path) -> None:
-        with patch("subprocess.Popen", side_effect=Exception("fail")):
-            pid = launch_worker(self._repo_cfg(tmp_path))
-        assert pid is None
-
-    def test_dead_on_arrival_retries(self, tmp_path: Path) -> None:
-        """Worker that exits immediately triggers a retry."""
-        dead_proc = MagicMock()
-        dead_proc.pid = 1
-        dead_proc.poll.return_value = 1  # non-None → exited
-        dead_proc.returncode = 1
-        with (
-            patch("subprocess.Popen", return_value=dead_proc) as mock_popen,
-            patch("time.sleep"),
-        ):
-            result = launch_worker(self._repo_cfg(tmp_path))
-        assert result is None
-        assert mock_popen.call_count == 2  # original + one retry
-
-    def test_dead_on_arrival_retry_succeeds(self, tmp_path: Path) -> None:
-        """If the first attempt dies but the retry stays alive, return the retry PID."""
-        dead_proc = MagicMock()
-        dead_proc.pid = 1
-        dead_proc.poll.return_value = 1
-        dead_proc.returncode = 1
-        alive_proc = self._alive_proc(pid=2)
-        with (
-            patch("subprocess.Popen", side_effect=[dead_proc, alive_proc]),
-            patch("time.sleep"),
-        ):
-            pid = launch_worker(self._repo_cfg(tmp_path))
-        assert pid == 2
+    def test_wakes_registry_for_repo(self, tmp_path: Path) -> None:
+        registry = MagicMock()
+        launch_worker(self._repo_cfg(tmp_path), registry)
+        registry.wake.assert_called_once_with("owner/repo")
 
 
 class TestDispatchPullRequestReview:

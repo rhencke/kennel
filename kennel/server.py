@@ -20,6 +20,7 @@ from kennel.events import (
     reply_to_issue_comment,
     reply_to_review,
 )
+from kennel.registry import WorkerRegistry, make_registry
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ _replied_comments: set[int] = set()
 
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
+    registry: WorkerRegistry
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -140,7 +142,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     create_task(title, self.config, repo_cfg)
 
             # Non-comment events just trigger kennel worker — no task needed
-            launch_worker(repo_cfg)
+            launch_worker(repo_cfg, self.registry)
         except Exception:
             log.exception("error processing action")
 
@@ -193,6 +195,7 @@ def run() -> None:
     )
 
     WebhookHandler.config = config
+    WebhookHandler.registry = make_registry(config.repos)
 
     server = HTTPServer(("", config.port), WebhookHandler)
     repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
