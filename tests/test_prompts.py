@@ -21,16 +21,17 @@ class TestTriageCategories:
     def test_human_categories(self) -> None:
         result = triage_categories(is_bot=False)
         assert "ACT" in result
+        assert "DEFER" in result
         assert "ASK" in result
         assert "ANSWER" in result
         assert "DO" not in result
-        assert "DEFER" not in result
 
     def test_bot_categories(self) -> None:
         result = triage_categories(is_bot=True)
         assert "DO" in result
         assert "DEFER" in result
         assert "DUMP" in result
+        assert "TASK" not in result
         assert "ACT" not in result
 
 
@@ -146,6 +147,7 @@ class TestTriagePrompt:
     def test_includes_categories(self) -> None:
         result = triage_prompt("fix this", is_bot=False)
         assert "ACT" in result
+        assert "DEFER" in result
 
     def test_includes_bot_categories(self) -> None:
         result = triage_prompt("suggestion", is_bot=True)
@@ -210,6 +212,21 @@ class TestReplyInstruction:
         result = reply_instruction(category, "fix this", "will fix", {})
         assert "Acknowledge" in result or "acknowledge" in result
         assert "approach" in result
+        assert "Do NOT promise" in result
+
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises_does_not_restrict_task_creation(
+        self, category: str
+    ) -> None:
+        """No-promises constraint governs reply *text* only.
+
+        ACT/DO triage always results in a task being created by server.py —
+        the constraint must not say 'create tasks' or it would misrepresent
+        what the system actually does.
+        """
+        result = reply_instruction(category, "please fix this", "fix: edge case", {})
+        assert "Do NOT promise" in result
+        assert "create tasks" not in result
 
     def test_ask_asks_question(self) -> None:
         result = reply_instruction("ASK", "unclear", "need info", {})
@@ -223,6 +240,21 @@ class TestReplyInstruction:
     def test_defer_out_of_scope(self) -> None:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
+
+    def test_defer_issue_opened_with_url(self) -> None:
+        result = reply_instruction(
+            "DEFER",
+            "big refactor",
+            "defer",
+            {},
+            issue_url="https://github.com/x/y/issues/1",
+        )
+        assert "An issue has been opened" in result
+        assert "https://github.com/x/y/issues/1" in result
+
+    def test_defer_issue_will_be_opened_without_url(self) -> None:
+        result = reply_instruction("DEFER", "big refactor", "defer", {})
+        assert "An issue will be opened" in result
 
     def test_dump_politely_declines(self) -> None:
         result = reply_instruction("DUMP", "bad idea", "decline", {})
@@ -247,6 +279,27 @@ class TestIssueReplyInstruction:
         result = issue_reply_instruction(category, "fix it", "will fix", {})
         assert "acknowledging" in result
 
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises(self, category: str) -> None:
+        result = issue_reply_instruction(category, "fix it", "will fix", {})
+        assert "Do NOT promise to open issues" in result
+
+    @pytest.mark.parametrize("category", ["ACT", "DO"])
+    def test_act_do_no_promises_does_not_restrict_task_creation(
+        self, category: str
+    ) -> None:
+        """No-promises constraint governs reply *text* only.
+
+        ACT/DO triage always results in a task being created by server.py —
+        the constraint must not say 'create tasks' or it would misrepresent
+        what the system actually does.
+        """
+        result = issue_reply_instruction(
+            category, "please fix this", "fix: edge case", {}
+        )
+        assert "Do NOT promise" in result
+        assert "create tasks" not in result
+
     def test_ask_clarifying(self) -> None:
         result = issue_reply_instruction("ASK", "unclear", "need more info", {})
         assert "clarifying question" in result
@@ -254,6 +307,25 @@ class TestIssueReplyInstruction:
     def test_answer_direct(self) -> None:
         result = issue_reply_instruction("ANSWER", "what is X?", "explain", {})
         assert "Question: what is X?" in result
+
+    def test_defer_out_of_scope(self) -> None:
+        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        assert "out of scope" in result
+
+    def test_defer_issue_opened_with_url(self) -> None:
+        result = issue_reply_instruction(
+            "DEFER",
+            "add feature",
+            "defer",
+            {},
+            issue_url="https://github.com/x/y/issues/2",
+        )
+        assert "An issue has been opened" in result
+        assert "https://github.com/x/y/issues/2" in result
+
+    def test_defer_issue_will_be_opened_without_url(self) -> None:
+        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        assert "An issue will be opened" in result
 
     def test_dump_decline(self) -> None:
         result = issue_reply_instruction("DUMP", "bad idea", "decline", {})

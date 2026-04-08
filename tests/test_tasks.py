@@ -41,6 +41,21 @@ class TestAddTask:
         t2 = add_task(tmp_path, title="b")
         assert t1["id"] != t2["id"]
 
+    def test_appends_at_end(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="first")
+        add_task(tmp_path, title="second")
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["title"] == "first"
+        assert tasks[1]["title"] == "second"
+
+    def test_thread_task_appends_at_end(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="existing")
+        thread = {"repo": "r/r", "pr": 1, "comment_id": 42}
+        add_task(tmp_path, title="comment task", thread=thread)
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["title"] == "existing"
+        assert tasks[1]["title"] == "comment task"
+
 
 class TestUpdateTask:
     def test_updates_status(self, tmp_path: Path) -> None:

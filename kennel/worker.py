@@ -415,10 +415,11 @@ class Worker:
 
         task_list = tasks.list_tasks(self.work_dir)
         pending = [t for t in task_list if t.get("status") == "pending"]
+        next_task = _pick_next_task(task_list)
         if pending:
             lines = []
-            for i, t in enumerate(pending):
-                marker = " **→ next**" if i == 0 else ""
+            for t in pending:
+                marker = " **→ next**" if t is next_task else ""
                 lines.append(f"- [ ] {t['title']}{marker}")
             queue = "\n".join(lines)
         else:

@@ -66,6 +66,8 @@ def add_task(
     """Add a task to the shared task file. Returns the new task.
 
     thread: optional {repo, pr, comment_id} for comment-originated tasks.
+    Thread-originated tasks are prioritised by ``_pick_next_task`` (second only
+    to CI-failure tasks) without needing a special insert position here.
     """
     task: dict[str, Any] = {
         "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
@@ -78,9 +80,9 @@ def add_task(
         task["thread"] = thread
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
-        tasks = lock.read()
-        tasks.append(task)
-        lock.write(tasks)
+        existing = lock.read()
+        existing.append(task)
+        lock.write(existing)
     log.info("task added: %s", title[:80])
     return task
 

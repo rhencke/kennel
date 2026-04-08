@@ -251,7 +251,8 @@ class TestProcessAction:
             mock_reply.assert_called()
             mock_task.assert_not_called()
 
-    def test_reply_to_comment_defer_creates_prefixed_task(self, server: tuple) -> None:
+    def test_reply_to_comment_defer_skips_task(self, server: tuple) -> None:
+        """DEFER files a GitHub issue instead — no tasks.json entry."""
         url, cfg = server
         payload = {
             **self._payload(),
@@ -259,6 +260,36 @@ class TestProcessAction:
             "comment": {
                 "id": 202,
                 "body": "refactor the whole module",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        with (
+            patch(
+                "kennel.server.reply_to_comment",
+                return_value=(True, "DEFER", "big refactor"),
+            ),
+            patch("kennel.server.create_task") as mock_task,
+            patch("kennel.server.launch_worker"),
+        ):
+            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+            assert status == 200
+            time.sleep(0.2)
+        mock_task.assert_not_called()
+
+    def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
+        """DO adds to tasks.json."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 204,
+                "body": "cache the results",
                 "user": {"login": "owner"},
                 "html_url": "https://example.com",
                 "path": "foo.py",
@@ -275,7 +306,7 @@ class TestProcessAction:
         with (
             patch(
                 "kennel.server.reply_to_comment",
-                return_value=(True, "DEFER", "big refactor"),
+                return_value=(True, "DO", "add result caching"),
             ),
             patch("kennel.server.create_task", side_effect=capture_task),
             patch("kennel.server.launch_worker"),
@@ -283,7 +314,7 @@ class TestProcessAction:
             status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
             assert status == 200
             time.sleep(0.2)
-        assert any("DEFER:" in t for t in task_titles)
+        assert task_titles == ["add result caching"]
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
         url, cfg = server

@@ -1822,6 +1822,21 @@ class TestBuildPrBody:
         assert "- [ ] Second task **→ next**" not in result
         assert "- [ ] Second task\n" in result or result.endswith("- [ ] Second task")
 
+    def test_next_marker_follows_pick_next_task_priority(self, tmp_path: Path) -> None:
+        """CI failure task second in list should still get the → next marker."""
+        worker = self._make_worker(tmp_path)
+        regular = self._pending_task("Regular work")
+        ci = {"id": "2", "title": "CI failure: lint", "status": "pending"}
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[regular, ci]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "- [ ] CI failure: lint **→ next**" in result
+        assert "- [ ] Regular work **→ next**" not in result
+
     def test_no_tasks_shows_placeholder(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (

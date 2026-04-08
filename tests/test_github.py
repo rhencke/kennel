@@ -202,6 +202,15 @@ class TestGitHubClass:
         with patch.object(gh._gh._s, "get", return_value=mock_resp):
             assert gh.get_issue_comments("o/r", 9) == comments
 
+    def test_create_issue_delegates(self) -> None:
+        gh = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/10"}
+        with patch.object(gh._gh._s, "post", return_value=mock_resp) as mock_post:
+            url = gh.create_issue("o/r", "My suggestion", "some body")
+        assert url == "https://github.com/o/r/issues/10"
+        assert "repos/o/r/issues" in mock_post.call_args.args[0]
+
     def test_get_pull_comments_delegates(self) -> None:
         gh = self._github()
         comments = [{"id": 42}]
@@ -765,6 +774,19 @@ class TestGHClass:
         url = mock_get.call_args.args[0]
         assert "repos/o/r/issues/9/comments" in url
         assert result == comments
+
+    def test_create_issue(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/42"}
+        with patch.object(gh._s, "post", return_value=mock_resp) as mock_post:
+            url = gh.create_issue("o/r", "My feature request", "body text")
+        assert url == "https://github.com/o/r/issues/42"
+        post_url = mock_post.call_args.args[0]
+        assert "repos/o/r/issues" in post_url
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["title"] == "My feature request"
+        assert payload["body"] == "body text"
 
     def test_create_pr_returns_url(self) -> None:
         gh = self._gh()

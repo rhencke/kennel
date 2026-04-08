@@ -282,8 +282,19 @@ def reply_to_comment(
     category, title = _triage(comment, action.is_bot, context)
     log.info("triage: %s — %s", category, title)
 
-    # Step 2: Opus reply based on triage
-    instr = reply_instruction(category, comment, title, context)
+    # Step 2: For DEFER, open a tracking issue before crafting the reply
+    issue_url: str | None = None
+    if category == "DEFER" and info.get("repo"):
+        pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
+        issue_body = f"Deferred from {pr_url}\n\n> {comment}"
+        try:
+            issue_url = get_github().create_issue(info["repo"], title, issue_body)
+            log.info("opened tracking issue for DEFER: %s", issue_url)
+        except Exception:
+            log.exception("failed to open tracking issue for DEFER")
+
+    # Step 3: Opus reply based on triage
+    instr = reply_instruction(category, comment, title, context, issue_url=issue_url)
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -479,7 +490,21 @@ def reply_to_issue_comment(
     category, title = _triage(comment, action.is_bot, action.context)
     log.info("issue comment triage: %s — %s", category, title)
 
-    instr = issue_reply_instruction(category, comment, title, action.context)
+    # For DEFER, open a tracking issue before crafting the reply
+    issue_url: str | None = None
+    if category == "DEFER":
+        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
+        pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
+        issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
+        try:
+            issue_url = get_github().create_issue(repo_full, title, issue_body)
+            log.info("opened tracking issue for DEFER: %s", issue_url)
+        except Exception:
+            log.exception("failed to open tracking issue for DEFER")
+
+    instr = issue_reply_instruction(
+        category, comment, title, action.context, issue_url=issue_url
+    )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
     try:
@@ -531,7 +556,12 @@ def create_task(
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
 ) -> None:
-    """Write a task to the shared task file, then trigger sync."""
+    """Write a task to the shared task file, then trigger sync.
+
+    PR comment tasks (those with a thread) carry a thread payload that causes
+    ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
+    without inserting them out-of-order in the list.
+    """
     log.info("creating task: %s", prompt[:100])
     add_task(repo_cfg.work_dir, title=prompt, thread=thread)
     launch_sync(config, repo_cfg)

@@ -231,6 +231,11 @@ class GH:
         """Return all comments on an issue."""
         return self._get(f"/repos/{repo}/issues/{number}/comments")
 
+    def create_issue(self, repo: str, title: str, body: str) -> str:
+        """Create an issue and return its HTML URL."""
+        data = self._post_json(f"/repos/{repo}/issues", title=title, body=body)
+        return data["html_url"]
+
     def create_pr(self, repo: str, title: str, body: str, base: str, head: str) -> str:
         """Create a draft PR and return its URL."""
         data = self._post_json(
@@ -432,6 +437,10 @@ class GitHub:
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all comments on an issue."""
         return self._gh.get_issue_comments(repo, number)
+
+    def create_issue(self, repo: str, title: str, body: str) -> str:
+        """Create an issue and return its HTML URL."""
+        return self._gh.create_issue(repo, title, body)
 
     # ── Pull requests ─────────────────────────────────────────────────────────
 
