@@ -1167,12 +1167,30 @@ class Worker:
         )
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        session_id, _ = claude_run(fido_dir)
+        session_id, output = claude_run(fido_dir)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        if head_before == head_after:
-            log.warning("task produced no new commits — not marking complete")
-            return True
+
+        # Resume loop: let Claude cook until commits appear
+        attempt = 0
+        while head_before == head_after:
+            attempt += 1
+            if session_id:
+                log.info(
+                    "task produced no commits — resuming session (attempt %d)",
+                    attempt,
+                )
+                session_id, output = claude_run(fido_dir, session_id=session_id)
+            else:
+                log.info(
+                    "task produced no commits — starting fresh session (attempt %d)",
+                    attempt,
+                )
+                build_prompt(fido_dir, "task", context)
+                session_id, output = claude_run(fido_dir)
+            log.info("task resume done (session=%s)", session_id)
+            head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)

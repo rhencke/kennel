@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import select
 import subprocess
+import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _claude(
@@ -131,39 +136,83 @@ def print_prompt_json(
     return ""
 
 
+def _run_streaming(
+    cmd: list[str],
+    stdin_file: Path,
+    idle_timeout: float = 1800.0,
+) -> tuple[str, int]:
+    """Run a command, streaming stdout with idle-timeout detection.
+
+    Reads stdout line by line.  If no new output arrives for
+    *idle_timeout* seconds, the process is killed.
+
+    Returns ``(stdout_text, returncode)``.  On idle timeout the process
+    is killed and returncode is ``-1``.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin_file.open(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        return "", -1
+
+    lines: list[str] = []
+    last_activity = time.monotonic()
+
+    while True:
+        ready, _, _ = select.select([proc.stdout], [], [], 10.0)
+        if ready:
+            line = proc.stdout.readline()
+            if not line:
+                break  # EOF
+            lines.append(line)
+            last_activity = time.monotonic()
+        elif proc.poll() is not None:
+            break  # process exited
+        elif time.monotonic() - last_activity > idle_timeout:
+            log.warning("claude idle for %.0fs — killing", idle_timeout)
+            proc.kill()
+            proc.wait()
+            return "".join(lines).strip(), -1
+
+    proc.wait()
+    # Drain any remaining output
+    remaining = proc.stdout.read()
+    if remaining:
+        lines.append(remaining)
+    return "".join(lines).strip(), proc.returncode
+
+
 def print_prompt_from_file(
     system_file: Path,
     prompt_file: Path,
     model: str,
     timeout: int = 30,
+    idle_timeout: float = 1800.0,
 ) -> str:
     """Run claude --print reading system prompt and user prompt from files.
 
-    Returns the session_id from the result JSON (last non-empty line of stdout).
-    Used for sub-Claude sessions started fresh (not resumed).
+    Returns stdout on success, empty string on failure.  Kills the process
+    if no output is produced for *idle_timeout* seconds (default 30 min).
     """
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--system-prompt-file",
-                str(system_file),
-                "--print",
-            ],
-            stdin=prompt_file.open(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    cmd = [
+        "claude",
+        "--model",
+        model,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--system-prompt-file",
+        str(system_file),
+        "--print",
+    ]
+    output, rc = _run_streaming(cmd, prompt_file, idle_timeout)
+    return output if rc == 0 else ""
 
 
 def resume_session(
@@ -171,33 +220,27 @@ def resume_session(
     prompt_file: Path,
     model: str,
     timeout: int = 300,
+    idle_timeout: float = 1800.0,
 ) -> str:
     """Continue an existing claude session by ID, feeding prompt_file on stdin.
 
-    Returns stdout (progress output), empty string on failure.
+    Returns stdout on success, empty string on failure.  Kills the process
+    if no output is produced for *idle_timeout* seconds (default 30 min).
     """
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--resume",
-                session_id,
-                "--print",
-            ],
-            stdin=prompt_file.open(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    cmd = [
+        "claude",
+        "--model",
+        model,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--resume",
+        session_id,
+        "--print",
+    ]
+    output, rc = _run_streaming(cmd, prompt_file, idle_timeout)
+    return output if rc == 0 else ""
 
 
 # ── Specialised wrappers used by events.py ───────────────────────────────────
