@@ -103,7 +103,8 @@ def reply_instruction(
     if category in ("ACT", "DO"):
         return (
             f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-            f"and briefly explain your approach.\n\n{ctx}"
+            f"and briefly explain your approach. "
+            f"Do NOT promise to open issues, create tasks, or do anything outside of code changes in this PR.\n\n{ctx}"
         )
     if category == "ASK":
         return (
@@ -118,7 +119,8 @@ def reply_instruction(
     if category == "DEFER":
         return (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-            f"out of scope for this PR.\n\n{ctx}"
+            f"out of scope for this PR. "
+            f"Do NOT promise to open issues or create tasks.\n\n{ctx}"
         )
     if category == "DUMP":
         return (

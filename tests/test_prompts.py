@@ -210,6 +210,7 @@ class TestReplyInstruction:
         result = reply_instruction(category, "fix this", "will fix", {})
         assert "Acknowledge" in result or "acknowledge" in result
         assert "approach" in result
+        assert "Do NOT promise" in result
 
     def test_ask_asks_question(self) -> None:
         result = reply_instruction("ASK", "unclear", "need info", {})
@@ -223,6 +224,7 @@ class TestReplyInstruction:
     def test_defer_out_of_scope(self) -> None:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
+        assert "Do NOT promise" in result
 
     def test_dump_politely_declines(self) -> None:
         result = reply_instruction("DUMP", "bad idea", "decline", {})
