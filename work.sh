@@ -284,6 +284,7 @@ elif [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
+  [[ -n "$EXISTING_SLUG" ]] && git push "$FORK_REMOTE" --delete "$EXISTING_SLUG" 2>/dev/null || true
   [[ -n "$EXISTING_SLUG" ]] && git branch -d "$EXISTING_SLUG" 2>/dev/null || true
   continue
 fi
@@ -635,6 +636,7 @@ if [[ "$APPROVED" == "true" && "$IS_DRAFT" == "false" && "$_PENDING_COUNT" -eq 0
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH"
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
+  git push "$FORK_REMOTE" --delete "$SLUG" 2>/dev/null || true
   git branch -d "$SLUG" 2>/dev/null || true
   continue
 fi
