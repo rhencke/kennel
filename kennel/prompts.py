@@ -92,6 +92,7 @@ def reply_instruction(
     comment_body: str,
     title: str,
     context: dict[str, Any] | None = None,
+    issue_url: str | None = None,
 ) -> str:
     """Build the instruction text for a review-comment reply.
 
@@ -117,10 +118,15 @@ def reply_instruction(
             f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
         )
     if category == "DEFER":
+        issue_line = (
+            f"An issue has been opened to track this: {issue_url}"
+            if issue_url
+            else "An issue will be opened to track this"
+        )
         return (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
             f"out of scope for this PR. "
-            f"You may mention opening an issue to track it for later.\n\n{ctx}"
+            f"{issue_line} — mention it in your reply.\n\n{ctx}"
         )
     if category == "DUMP":
         return (
@@ -135,6 +141,7 @@ def issue_reply_instruction(
     comment_body: str,
     title: str,
     context: dict[str, Any] | None = None,
+    issue_url: str | None = None,
 ) -> str:
     """Build the instruction text for a top-level issue/PR comment reply.
 
@@ -158,10 +165,15 @@ def issue_reply_instruction(
     if category == "ANSWER":
         return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
     if category == "DEFER":
+        issue_line = (
+            f"An issue has been opened to track this: {issue_url}"
+            if issue_url
+            else "An issue will be opened to track this"
+        )
         return (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
             f"out of scope for this PR. "
-            f"You may mention opening an issue to track it for later.\n\n{context_str}"
+            f"{issue_line} — mention it in your reply.\n\n{context_str}"
         )
     if category == "DUMP":
         return f"Write a short polite decline.\n\n{context_str}"

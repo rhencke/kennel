@@ -564,13 +564,20 @@ class TestReplyToComment:
                 return _make_completed_run("That's out of scope for this PR.\n")
             return _make_completed_run("")
 
+        mock_gh = MagicMock()
+        mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.events.get_github", return_value=MagicMock()),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert posted
         assert cat == "DEFER"
+        mock_gh.create_issue.assert_called_once_with(
+            "owner/repo",
+            "out of scope",
+            "Deferred from https://github.com/owner/repo/pull/1\n\n> refactor everything",
+        )
 
     def test_full_flow_dump(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -596,6 +603,34 @@ class TestReplyToComment:
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert posted
         assert cat == "DUMP"
+
+    def test_full_flow_defer_issue_creation_failure(self, tmp_path: Path) -> None:
+        """DEFER still posts a reply even when create_issue raises."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 15},
+            comment_body="refactor everything",
+            is_bot=False,
+        )
+
+        def fake_run(args, **kwargs):
+            if "claude" in args:
+                text = args[-1]
+                if "Triage" in text:
+                    return _make_completed_run("DEFER: out of scope\n")
+                return _make_completed_run("That's out of scope for this PR.\n")
+            return _make_completed_run("")
+
+        mock_gh = MagicMock()
+        mock_gh.create_issue.side_effect = RuntimeError("network fail")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        assert posted
+        assert cat == "DEFER"
 
     def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -906,9 +941,41 @@ class TestReplyToIssueComment:
                 return _make_completed_run("Out of scope.\n")
             return _make_completed_run("https://github.com/owner/repo.git\n")
 
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.events.get_github", return_value=MagicMock()),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
+            cat, title = reply_to_issue_comment(
+                self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
+            )
+        assert cat == "DEFER"
+        mock_gh.create_issue.assert_called_once_with(
+            "owner/repo",
+            "later",
+            "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
+        )
+
+    def test_defer_reply_issue_creation_failure(self, tmp_path: Path) -> None:
+        """DEFER still posts a reply even when create_issue raises."""
+        cfg = self._cfg(tmp_path)
+
+        def fake_run(args, **kwargs):
+            if "claude" in args:
+                text = args[-1]
+                if "Triage" in text:
+                    return _make_completed_run("DEFER: later\n")
+                return _make_completed_run("Out of scope.\n")
+            return _make_completed_run("https://github.com/owner/repo.git\n")
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.create_issue.side_effect = RuntimeError("network fail")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             cat, title = reply_to_issue_comment(
                 self._action("big refactor"), cfg, self._repo_cfg(tmp_path)

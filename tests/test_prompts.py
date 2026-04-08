@@ -239,9 +239,20 @@ class TestReplyInstruction:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
 
-    def test_defer_may_mention_issue(self) -> None:
+    def test_defer_issue_opened_with_url(self) -> None:
+        result = reply_instruction(
+            "DEFER",
+            "big refactor",
+            "defer",
+            {},
+            issue_url="https://github.com/x/y/issues/1",
+        )
+        assert "An issue has been opened" in result
+        assert "https://github.com/x/y/issues/1" in result
+
+    def test_defer_issue_will_be_opened_without_url(self) -> None:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
-        assert "opening an issue" in result
+        assert "An issue will be opened" in result
 
     def test_dump_politely_declines(self) -> None:
         result = reply_instruction("DUMP", "bad idea", "decline", {})
@@ -299,9 +310,20 @@ class TestIssueReplyInstruction:
         result = issue_reply_instruction("DEFER", "add feature", "defer", {})
         assert "out of scope" in result
 
-    def test_defer_may_mention_issue(self) -> None:
+    def test_defer_issue_opened_with_url(self) -> None:
+        result = issue_reply_instruction(
+            "DEFER",
+            "add feature",
+            "defer",
+            {},
+            issue_url="https://github.com/x/y/issues/2",
+        )
+        assert "An issue has been opened" in result
+        assert "https://github.com/x/y/issues/2" in result
+
+    def test_defer_issue_will_be_opened_without_url(self) -> None:
         result = issue_reply_instruction("DEFER", "add feature", "defer", {})
-        assert "opening an issue" in result
+        assert "An issue will be opened" in result
 
     def test_dump_decline(self) -> None:
         result = issue_reply_instruction("DUMP", "bad idea", "decline", {})
