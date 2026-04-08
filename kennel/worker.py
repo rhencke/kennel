@@ -17,7 +17,6 @@ from kennel.github import GitHub
 from kennel.prompts import Prompts
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
-_SHORTCODE_RE = re.compile(r"^(:[a-z0-9_+\-]+:)\s*(.*)", re.DOTALL)
 
 log = logging.getLogger(__name__)
 
@@ -535,9 +534,11 @@ class Worker:
     def set_status(self, what: str, busy: bool = True) -> None:
         """Set the authenticated user's GitHub status using Claude-generated text.
 
-        Reads the persona from sub/persona.md, asks Claude to generate a two-line
-        status (emoji + text), then updates the GitHub user status via GraphQL.
-        Silently skips if Claude returns an empty or malformed response.
+        Makes two separate Opus calls: the first generates short status text
+        (≤80 chars), the second picks an emoji.  If the text exceeds 80
+        characters, retries up to 3 times in the same session to shorten it,
+        then truncates as a last resort.  Silently skips if Claude returns an
+        empty response for the text call.
         """
         persona_path = _sub_dir() / "persona.md"
         try:
@@ -546,31 +547,37 @@ class Worker:
             persona = ""
 
         prompts = Prompts(persona)
-        raw = claude.generate_status(
-            prompt=prompts.status_prompt(what),
-            system_prompt=prompts.status_system_prompt(),
+
+        # Call 1: generate status text
+        text, session_id = claude.generate_status_with_session(
+            prompt=prompts.status_text_prompt(what),
+            system_prompt=prompts.status_text_system_prompt(),
         )
-        if not raw:
+        if not text:
             log.warning("set_status: claude returned empty — skipping")
             return
 
-        lines = raw.splitlines()
-        if len(lines) >= 2:
-            emoji = lines[0].strip()
-            text = lines[1].strip()[:80]
-        else:
-            # Single-line output — extract :shortcode: prefix if present,
-            # otherwise fall back to :dog: and use the whole line as text.
-            m = _SHORTCODE_RE.match(raw.strip())
-            if m:
-                emoji = m.group(1)
-                text = m.group(2).strip()[:80]
-            else:
-                emoji = ":dog:"
-                text = raw.strip()[:80]
-            if not text:
-                log.warning("set_status: no status text extracted — skipping")
-                return
+        for _ in range(3):
+            if len(text) <= 80 or not session_id:
+                break
+            retry_raw = claude.resume_status(
+                session_id,
+                f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
+            )
+            if not retry_raw:
+                break
+            text = retry_raw.strip()
+
+        if len(text) > 80:
+            text = text[:80]
+
+        # Call 2: generate emoji
+        emoji = claude.generate_status_emoji(
+            prompt=prompts.status_emoji_prompt(text),
+            system_prompt=prompts.status_emoji_system_prompt(),
+        )
+        if not emoji:
+            emoji = ":dog:"
 
         self.gh.set_user_status(text, emoji, busy=busy)
         log.info("set_status: %s %s", emoji, text)

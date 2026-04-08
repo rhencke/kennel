@@ -264,6 +264,24 @@ def generate_status(
     )
 
 
+def generate_status_emoji(
+    prompt: str,
+    system_prompt: str,
+    model: str = "claude-opus-4-6",
+    timeout: int = 15,
+) -> str:
+    """Ask claude to choose a single emoji for a GitHub status.
+
+    Returns the stripped response, or an empty string on failure.
+    """
+    return print_prompt(
+        prompt=prompt,
+        model=model,
+        system_prompt=system_prompt,
+        timeout=timeout,
+    )
+
+
 def generate_status_with_session(
     prompt: str,
     system_prompt: str,

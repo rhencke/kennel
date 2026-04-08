@@ -11,6 +11,7 @@ from kennel.claude import (
     generate_branch_name,
     generate_reply,
     generate_status,
+    generate_status_emoji,
     generate_status_with_session,
     print_prompt,
     print_prompt_from_file,
@@ -642,6 +643,28 @@ class TestGenerateStatusWithSession:
             text, sid = generate_status_with_session("working", "sys")
         assert text == "🐶\nwoof"
         assert sid == ""
+
+
+class TestGenerateStatusEmoji:
+    def test_returns_emoji(self) -> None:
+        with patch("subprocess.run", return_value=_completed("🐕")):
+            result = generate_status_emoji("pick emoji", "be fido")
+        assert result == "🐕"
+
+    def test_returns_empty_on_failure(self) -> None:
+        with patch("subprocess.run", return_value=_completed("", returncode=1)):
+            result = generate_status_emoji("pick emoji", "sys")
+        assert result == ""
+
+    def test_passes_correct_flags(self) -> None:
+        with patch("subprocess.run", return_value=_completed("🐕")) as mock:
+            generate_status_emoji(
+                "pick emoji", "be fido", model="claude-sonnet-4-6", timeout=10
+            )
+        cmd = mock.call_args.args[0]
+        assert "claude-sonnet-4-6" in cmd
+        assert "be fido" in cmd
+        assert mock.call_args.kwargs["timeout"] == 10
 
 
 class TestResumeStatus:
