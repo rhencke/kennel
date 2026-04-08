@@ -139,8 +139,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER") and title:
                     create_task(title, self.config, repo_cfg)
 
-            # Non-comment events just trigger work.sh — no task needed
-            launch_worker(self.config, repo_cfg)
+            # Non-comment events just trigger kennel worker — no task needed
+            launch_worker(repo_cfg)
         except Exception:
             log.exception("error processing action")
 

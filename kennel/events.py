@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -585,27 +584,22 @@ def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
         log.exception("failed to launch sync-tasks")
 
 
-def launch_worker(config: Config, repo_cfg: RepoConfig) -> int | None:
-    """Launch work.sh in background (disowned). Returns PID.
-
-    TODO: replace with a call to worker.run() once work.sh is fully rewritten to Python.
-    """
-    work_script = config.sub_dir.parent / "work.sh"
+def launch_worker(repo_cfg: RepoConfig) -> int | None:
+    """Launch kennel worker in background (disowned). Returns PID."""
     log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log.info("launching work.sh → %s", repo_cfg.work_dir)
+    log.info("launching kennel worker → %s", repo_cfg.work_dir)
     try:
         with open(log_path, "a") as log_file:
             proc = subprocess.Popen(
-                ["bash", str(work_script), str(repo_cfg.work_dir)],
+                ["uv", "run", "kennel", "worker", str(repo_cfg.work_dir)],
                 stdout=log_file,
-                stderr=subprocess.STDOUT,
+                stderr=log_file,
                 start_new_session=True,
-                env=os.environ.copy(),
             )
-        log.info("work.sh launched — pid=%d", proc.pid)
+        log.info("kennel worker launched — pid=%d", proc.pid)
         return proc.pid
     except Exception:
-        log.exception("failed to launch work.sh")
+        log.exception("failed to launch kennel worker")
         return None

@@ -1184,32 +1184,27 @@ class TestLaunchSync:
 
 
 class TestLaunchWorker:
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            self_repo=None,
-            sub_dir=tmp_path / "sub",
-        )
-
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_returns_pid(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         mock_proc = MagicMock()
         mock_proc.pid = 12345
         with patch("subprocess.Popen", return_value=mock_proc):
-            pid = launch_worker(cfg, self._repo_cfg(tmp_path))
+            pid = launch_worker(self._repo_cfg(tmp_path))
         assert pid == 12345
 
+    def test_launches_kennel_worker_subprocess(self, tmp_path: Path) -> None:
+        mock_proc = MagicMock()
+        mock_proc.pid = 1
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            launch_worker(self._repo_cfg(tmp_path))
+        cmd = mock_popen.call_args[0][0]
+        assert cmd == ["uv", "run", "kennel", "worker", str(tmp_path)]
+
     def test_exception_returns_none(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         with patch("subprocess.Popen", side_effect=Exception("fail")):
-            pid = launch_worker(cfg, self._repo_cfg(tmp_path))
+            pid = launch_worker(self._repo_cfg(tmp_path))
         assert pid is None
 
 
