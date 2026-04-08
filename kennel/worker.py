@@ -712,6 +712,7 @@ class Worker:
                     "PR #%s already merged — issue #%s auto-closed", pr_number, issue
                 )
                 clear_state(fido_dir)
+                self._git(["push", "origin", "--delete", slug], check=False)
                 return None
 
             if state != "CLOSED":
@@ -1293,6 +1294,7 @@ class Worker:
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False
             )
             self._git(["branch", "-d", slug], check=False)
+            self._git(["push", "origin", "--delete", slug], check=False)
             self.set_status(f"Merged PR #{pr_number}! Issue #{issue} done")
             return 1
 

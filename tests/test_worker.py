@@ -2091,9 +2091,10 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._merged_pr()
         fido_dir = self._fido_dir(tmp_path)
-        result = worker.find_or_create_pr(
-            fido_dir, self._make_repo_ctx(), 5, "Fix the thing"
-        )
+        with patch.object(worker, "_git"):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Fix the thing"
+            )
         assert result is None
 
     def test_merged_pr_clears_state(self, tmp_path: Path) -> None:
@@ -2101,8 +2102,19 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = self._merged_pr()
         fido_dir = self._fido_dir(tmp_path)
         save_state(fido_dir, {"issue": 5})
-        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        with patch.object(worker, "_git"):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert load_state(fido_dir) == {}
+
+    def test_merged_pr_deletes_remote_branch(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._merged_pr(slug="fix-bug")
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "_git") as mock_git:
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        mock_git.assert_called_once_with(
+            ["push", "origin", "--delete", "fix-bug"], check=False
+        )
 
     def test_merged_pr_logs_info(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -2110,7 +2122,10 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._merged_pr(number=33)
         fido_dir = self._fido_dir(tmp_path)
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with (
+            patch.object(worker, "_git"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "merged" in caplog.text
 
@@ -5098,6 +5113,23 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["branch", "-d", "fix-slug"] in calls
+
+    def test_approved_not_draft_no_pending_git_push_delete_remote_branch(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_git = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git", mock_git),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        calls = [c[0][0] for c in mock_git.call_args_list]
+        assert ["push", "origin", "--delete", "fix-slug"] in calls
 
     def test_approved_not_draft_no_pending_sets_merged_status(
         self, tmp_path: Path
