@@ -236,8 +236,10 @@ class TestWorker:
         gh = self._make_gh()
         with (
             patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nwriting tests"
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("writing tests", "sess-1"),
             ),
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -247,7 +249,11 @@ class TestWorker:
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         with (
-            patch("kennel.worker.claude.generate_status", return_value="😴\nnapping"),
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("napping", "sess-1"),
+            ),
+            patch("kennel.worker.claude.generate_status_emoji", return_value="😴"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -257,48 +263,25 @@ class TestWorker:
     def test_set_status_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         with (
-            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("", ""),
+            ),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
             Worker(tmp_path, gh).set_status("idle")
         gh.set_user_status.assert_not_called()
 
-    def test_set_status_falls_back_on_single_line_emoji(self, tmp_path: Path) -> None:
-        # Single unicode emoji with no text → :dog: fallback emoji, emoji char as text
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("idle")
-        gh.set_user_status.assert_called_once_with("🐕", ":dog:", busy=True)
-
-    def test_set_status_parses_shortcode_from_single_line(self, tmp_path: Path) -> None:
-        # Opus squishes two-line output into one :shortcode: text line
+    def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
+        # generate_status_emoji returns empty → :dog: fallback
         gh = self._make_gh()
         with (
             patch(
-                "kennel.worker.claude.generate_status",
-                return_value=":dog: Fetching bugs",
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("Sniffing out endpoints", "sess-1"),
             ),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("idle")
-        gh.set_user_status.assert_called_once_with("Fetching bugs", ":dog:", busy=True)
-
-    def test_set_status_falls_back_to_dog_emoji_on_plain_single_line(
-        self, tmp_path: Path
-    ) -> None:
-        # No shortcode found → :dog: fallback, whole line as text
-        gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status",
-                return_value="Sniffing out endpoints",
-            ),
+            patch("kennel.worker.claude.generate_status_emoji", return_value=""),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -307,29 +290,102 @@ class TestWorker:
             "Sniffing out endpoints", ":dog:", busy=True
         )
 
-    def test_set_status_skips_when_shortcode_only_no_text(self, tmp_path: Path) -> None:
-        # :shortcode: with no text → nothing meaningful to display
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value=":dog:"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("idle")
-        gh.set_user_status.assert_not_called()
-
     def test_set_status_text_truncated_to_80_chars(self, tmp_path: Path) -> None:
+        # All retries fail (return empty) → fall back to truncation
         gh = self._make_gh()
         long_text = "x" * 100
         with (
             patch(
-                "kennel.worker.claude.generate_status",
-                return_value=f"🐕\n{long_text}",
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=(long_text, "sess-1"),
             ),
+            patch("kennel.worker.claude.resume_status", return_value=""),
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
             Worker(tmp_path, gh).set_status("something")
+        called_text = gh.set_user_status.call_args[0][0]
+        assert len(called_text) == 80
+
+    def test_set_status_retries_when_text_exceeds_80_chars(
+        self, tmp_path: Path
+    ) -> None:
+        gh = self._make_gh()
+        long_text = "y" * 90
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=(long_text, "sess-99"),
+            ),
+            patch(
+                "kennel.worker.claude.resume_status",
+                return_value="shorter text",
+            ) as mock_resume,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("something")
+        mock_resume.assert_called_once_with("sess-99", ANY)
+        gh.set_user_status.assert_called_once_with("shorter text", "🐕", busy=True)
+
+    def test_set_status_stops_retrying_when_text_fits(self, tmp_path: Path) -> None:
+        # Second retry produces short text → no third retry
+        gh = self._make_gh()
+        long_text = "z" * 90
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=(long_text, "sess-7"),
+            ),
+            patch(
+                "kennel.worker.claude.resume_status",
+                side_effect=["z" * 85, "good"],
+            ) as mock_resume,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("something")
+        assert mock_resume.call_count == 2
+        gh.set_user_status.assert_called_once_with("good", "🐕", busy=True)
+
+    def test_set_status_retries_up_to_3_times_max(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        long_text = "w" * 90
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=(long_text, "sess-3"),
+            ),
+            patch(
+                "kennel.worker.claude.resume_status",
+                return_value=long_text,
+            ) as mock_resume,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("something")
+        assert mock_resume.call_count == 3
+
+    def test_set_status_skips_retry_when_no_session_id(self, tmp_path: Path) -> None:
+        # No session_id → retry loop is skipped, truncation applied directly
+        gh = self._make_gh()
+        long_text = "v" * 100
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=(long_text, ""),
+            ),
+            patch("kennel.worker.claude.resume_status") as mock_resume,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("something")
+        mock_resume.assert_not_called()
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -340,7 +396,10 @@ class TestWorker:
 
         gh = self._make_gh()
         with (
-            patch("kennel.worker.claude.generate_status", return_value=""),
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("", ""),
+            ),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -348,27 +407,16 @@ class TestWorker:
                 Worker(tmp_path, gh).set_status("idle")
         assert "empty" in caplog.text
 
-    def test_set_status_logs_warning_when_no_text_extracted(
-        self, tmp_path: Path, caplog
-    ) -> None:
-        import logging
-
-        gh = self._make_gh()
-        with (
-            patch("kennel.worker.claude.generate_status", return_value=":dog:"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.WARNING, logger="kennel"):
-                Worker(tmp_path, gh).set_status("idle")
-        assert "no status text" in caplog.text
-
     def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
         import logging
 
         gh = self._make_gh()
         with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕\nfetching"),
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("fetching", "sess-1"),
+            ),
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -383,23 +431,27 @@ class TestWorker:
         missing_dir = tmp_path / "no_such_dir"
         with (
             patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("working", "sess-1"),
             ) as mock_gen,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
             patch("kennel.worker._sub_dir", return_value=missing_dir),
         ):
             Worker(tmp_path, gh).set_status("working")
-        # persona file missing — generate_status still called with empty persona
+        # persona file missing — generate_status_with_session still called with empty persona
         prompt_arg = mock_gen.call_args[1]["prompt"]
         assert "What you're doing right now: working" in prompt_arg
 
-    def test_set_status_passes_system_prompt_to_generate_status(
+    def test_set_status_passes_system_prompt_to_generate_status_with_session(
         self, tmp_path: Path
     ) -> None:
         gh = self._make_gh()
         with (
             patch(
-                "kennel.worker.claude.generate_status", return_value="🐕\nworking"
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("working", "sess-1"),
             ) as mock_gen,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")

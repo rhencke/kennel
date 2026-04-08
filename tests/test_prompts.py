@@ -347,22 +347,46 @@ class TestIssueReplyInstruction:
 # ── Prompts.status_system_prompt ─────────────────────────────────────────────
 
 
-class TestStatusSystemPrompt:
+class TestStatusTextSystemPrompt:
     def test_returns_string(self) -> None:
-        result = Prompts("persona").status_system_prompt()
+        result = Prompts("persona").status_text_system_prompt()
         assert isinstance(result, str)
 
-    def test_mentions_two_lines(self) -> None:
-        result = Prompts("persona").status_system_prompt()
-        assert "two lines" in result
+    def test_no_emoji_instruction(self) -> None:
+        result = Prompts("persona").status_text_system_prompt()
+        assert "no emoji" in result.lower() or "ONLY the status text" in result
+
+    def test_mentions_80_chars(self) -> None:
+        result = Prompts("persona").status_text_system_prompt()
+        assert "80" in result
+
+    def test_mentions_fido(self) -> None:
+        result = Prompts("persona").status_text_system_prompt()
+        assert "Fido" in result
+
+
+class TestStatusEmojiSystemPrompt:
+    def test_returns_string(self) -> None:
+        result = Prompts("persona").status_emoji_system_prompt()
+        assert isinstance(result, str)
 
     def test_mentions_emoji(self) -> None:
-        result = Prompts("persona").status_system_prompt()
+        result = Prompts("persona").status_emoji_system_prompt()
         assert "emoji" in result
 
     def test_mentions_fido(self) -> None:
-        result = Prompts("persona").status_system_prompt()
+        result = Prompts("persona").status_emoji_system_prompt()
         assert "Fido" in result
+
+
+class TestStatusEmojiPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").status_emoji_prompt("working hard")
+        assert "I am Fido." in result
+
+    def test_includes_text(self) -> None:
+        result = Prompts("persona").status_emoji_prompt("chasing bugs")
+        assert "chasing bugs" in result
 
 
 # ── Prompts class ─────────────────────────────────────────────────────────────
@@ -412,17 +436,17 @@ class TestPromptsReactPrompt:
         assert "emoji" in result
 
 
-class TestPromptsStatusPrompt:
+class TestPromptsStatusTextPrompt:
     def test_includes_persona(self) -> None:
-        result = Prompts("I am Fido.").status_prompt("writing tests")
+        result = Prompts("I am Fido.").status_text_prompt("writing tests")
         assert "I am Fido." in result
 
     def test_includes_what(self) -> None:
-        result = Prompts("persona").status_prompt("reviewing PRs")
+        result = Prompts("persona").status_text_prompt("reviewing PRs")
         assert "reviewing PRs" in result
 
     def test_what_is_framed_as_doing(self) -> None:
-        result = Prompts("persona").status_prompt("fixing a bug")
+        result = Prompts("persona").status_text_prompt("fixing a bug")
         assert "What you're doing right now" in result
         assert "fixing a bug" in result
 
@@ -468,6 +492,6 @@ class TestPromptsStoresPersona:
     def test_different_personas_independent(self) -> None:
         p1 = Prompts("persona A")
         p2 = Prompts("persona B")
-        assert "persona A" in p1.status_prompt("working")
-        assert "persona B" in p2.status_prompt("working")
-        assert "persona A" not in p2.status_prompt("working")
+        assert "persona A" in p1.status_text_prompt("working")
+        assert "persona B" in p2.status_text_prompt("working")
+        assert "persona A" not in p2.status_text_prompt("working")

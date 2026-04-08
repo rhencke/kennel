@@ -47,6 +47,29 @@ def extract_session_id(output: str) -> str:
     return result
 
 
+def extract_result_text(output: str) -> str:
+    """Extract the result text from stream-json output.
+
+    Scans each line for a JSON object with ``"type": "result"`` and a
+    non-empty string ``"result"`` field.  Returns the last such value found,
+    or an empty string if none is present.
+    """
+    result = ""
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "result" and isinstance(obj.get("result"), str):
+            text = obj["result"]
+            if text:
+                result = text
+    return result
+
+
 # ── Simple print calls (no tool use) ─────────────────────────────────────────
 
 
@@ -239,3 +262,102 @@ def generate_status(
         system_prompt=system_prompt,
         timeout=timeout,
     )
+
+
+def generate_status_emoji(
+    prompt: str,
+    system_prompt: str,
+    model: str = "claude-opus-4-6",
+    timeout: int = 15,
+) -> str:
+    """Ask claude to choose a single emoji for a GitHub status.
+
+    Returns the stripped response, or an empty string on failure.
+    """
+    return print_prompt(
+        prompt=prompt,
+        model=model,
+        system_prompt=system_prompt,
+        timeout=timeout,
+    )
+
+
+def generate_status_with_session(
+    prompt: str,
+    system_prompt: str,
+    model: str = "claude-opus-4-6",
+    timeout: int = 15,
+) -> tuple[str, str]:
+    """Generate a GitHub status, returning (status_text, session_id).
+
+    Uses stream-json output format to capture the session_id alongside the
+    response text, enabling follow-up calls (e.g., ``resume_status`` to
+    shorten a long response).  Returns ``("", "")`` on failure.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "--model",
+                model,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--system-prompt",
+                system_prompt,
+                "--print",
+                "-p",
+                prompt,
+            ],
+            input=None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return "", ""
+        raw = result.stdout.strip()
+        return extract_result_text(raw), extract_session_id(raw)
+    except subprocess.TimeoutExpired, FileNotFoundError:
+        return "", ""
+
+
+def resume_status(
+    session_id: str,
+    prompt: str,
+    model: str = "claude-opus-4-6",
+    timeout: int = 15,
+) -> str:
+    """Resume an existing claude session to refine a status response.
+
+    Passes *prompt* as a positional argument (``-p``), so no file is needed.
+    Returns the response text extracted from stream-json output, or an empty
+    string on failure.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "--model",
+                model,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--resume",
+                session_id,
+                "--print",
+                "-p",
+                prompt,
+            ],
+            input=None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return ""
+        return extract_result_text(result.stdout.strip())
+    except subprocess.TimeoutExpired, FileNotFoundError:
+        return ""

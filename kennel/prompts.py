@@ -210,7 +210,8 @@ class Prompts:
         prompt = p.persona_wrap(instruction)
         prompt = p.react_prompt(comment_body)
         prompt = p.pickup_comment_prompt(issue_title)
-        prompt = p.status_prompt(what)
+        prompt = p.status_text_prompt(what)
+        prompt = p.status_emoji_prompt(text)
     """
 
     def __init__(self, persona: str) -> None:
@@ -241,17 +242,27 @@ class Prompts:
             f"{plain}"
         )
 
-    def status_prompt(self, what: str) -> str:
-        """Build the user prompt for GitHub status generation."""
+    def status_text_prompt(self, what: str) -> str:
+        """Build the user prompt for GitHub status text generation."""
         return f"{self.persona}\n\nWhat you're doing right now: {what}"
 
-    def status_system_prompt(self) -> str:
-        """Return the system prompt for GitHub status generation."""
+    def status_text_system_prompt(self) -> str:
+        """Return the system prompt for GitHub status text generation."""
         return (
             "You are writing your GitHub profile status as Fido the dog. "
-            "Output exactly two lines. "
-            "Line 1: a single emoji for the status icon. "
-            "Line 2: the status text (under 80 chars, no quotes, no preamble)."
+            "Output ONLY the status text — no emoji, no quotes, no preamble. "
+            "Keep it under 80 characters."
+        )
+
+    def status_emoji_prompt(self, text: str) -> str:
+        """Build the user prompt for GitHub status emoji selection."""
+        return f"{self.persona}\n\nYour current GitHub status text is: {text}\n\nChoose one emoji."
+
+    def status_emoji_system_prompt(self) -> str:
+        """Return the system prompt for GitHub status emoji generation."""
+        return (
+            "You are choosing an emoji for your GitHub profile status as Fido the dog. "
+            "Output ONLY a single emoji or :shortcode:. No other text."
         )
 
     def react_prompt(self, comment_body: str) -> str:
