@@ -460,7 +460,7 @@ def _triage(
             prefix, title = line.split(":", 1)
             prefix = prefix.strip().upper()
             title = title.strip()
-            if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
+            if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "TASK", "DUMP"):
                 return prefix, title
     except Exception:
         pass

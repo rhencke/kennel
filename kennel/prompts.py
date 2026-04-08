@@ -10,7 +10,12 @@ from typing import Any
 def triage_categories(is_bot: bool) -> str:
     """Return the category list string for a triage prompt."""
     if is_bot:
-        return "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
+        return (
+            "DO (worth implementing now), "
+            "TASK (good idea — queue for later in this repo), "
+            "DEFER (out of scope — file a separate issue), "
+            "DUMP (not applicable)"
+        )
     return (
         "ACT (code change needed), ASK (unclear what code change is needed), "
         "ANSWER (question, casual/playful comment, or anything that isn't a code change request"
@@ -117,6 +122,12 @@ def reply_instruction(
             f"Write a short GitHub PR reply directly answering this question. "
             f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
         )
+    if category == "TASK":
+        return (
+            f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
+            f"it's been added to the work queue for later. "
+            f"Do NOT say it will be done right now.\n\n{ctx}"
+        )
     if category == "DEFER":
         issue_line = (
             f"An issue has been opened to track this: {issue_url}"
@@ -164,6 +175,12 @@ def issue_reply_instruction(
         return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
     if category == "ANSWER":
         return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
+    if category == "TASK":
+        return (
+            f"Write a short GitHub PR reply acknowledging this suggestion and letting them know "
+            f"it's been added to the work queue for later. "
+            f"Do NOT say it will be done right now.\n\n{context_str}"
+        )
     if category == "DEFER":
         issue_line = (
             f"An issue has been opened to track this: {issue_url}"

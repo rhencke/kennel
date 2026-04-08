@@ -29,6 +29,7 @@ class TestTriageCategories:
     def test_bot_categories(self) -> None:
         result = triage_categories(is_bot=True)
         assert "DO" in result
+        assert "TASK" in result
         assert "DEFER" in result
         assert "DUMP" in result
         assert "ACT" not in result
@@ -235,6 +236,14 @@ class TestReplyInstruction:
         assert "Do NOT say you'll make code changes" in result
         assert "Question: what is X?" in result
 
+    def test_task_queued(self) -> None:
+        result = reply_instruction("TASK", "add caching", "add caching", {})
+        assert "work queue" in result
+
+    def test_task_no_immediate_promise(self) -> None:
+        result = reply_instruction("TASK", "add caching", "add caching", {})
+        assert "Do NOT say it will be done right now" in result
+
     def test_defer_out_of_scope(self) -> None:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
@@ -305,6 +314,14 @@ class TestIssueReplyInstruction:
     def test_answer_direct(self) -> None:
         result = issue_reply_instruction("ANSWER", "what is X?", "explain", {})
         assert "Question: what is X?" in result
+
+    def test_task_queued(self) -> None:
+        result = issue_reply_instruction("TASK", "add caching", "add caching", {})
+        assert "work queue" in result
+
+    def test_task_no_immediate_promise(self) -> None:
+        result = issue_reply_instruction("TASK", "add caching", "add caching", {})
+        assert "Do NOT say it will be done right now" in result
 
     def test_defer_out_of_scope(self) -> None:
         result = issue_reply_instruction("DEFER", "add feature", "defer", {})

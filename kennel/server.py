@@ -112,13 +112,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     if cid and posted:
                         _replied_comments.add(cid)
                     handled = True
-                # Create task based on triage result
-                if category in ("DUMP", "ANSWER", "ASK"):
-                    pass  # No task needed — ASK just posts a question
+                # Create task based on triage result.
+                # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
+                # TASK, ACT, DO → add to work queue.
+                if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                    pass  # No task needed
                 elif title:
-                    prefix = f"{category}: " if category == "DEFER" else ""
                     create_task(
-                        f"{prefix}{title}",
+                        title,
                         self.config,
                         repo_cfg,
                         thread=action.reply_to,
@@ -134,9 +135,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if not handled and action.comment_body:
                 category, title = reply_to_issue_comment(action, self.config, repo_cfg)
                 handled = True
-                if category not in ("DUMP", "ANSWER", "ASK") and title:
-                    prefix = f"{category}: " if category == "DEFER" else ""
-                    create_task(f"{prefix}{title}", self.config, repo_cfg)
+                # DEFER files a GitHub issue — no tasks.json entry.
+                if category not in ("DUMP", "ANSWER", "ASK", "DEFER") and title:
+                    create_task(title, self.config, repo_cfg)
 
             # Non-comment events just trigger work.sh — no task needed
             launch_worker(self.config, repo_cfg)
