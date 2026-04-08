@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from kennel.claude import (
     _claude,
@@ -18,6 +18,7 @@ from kennel.claude import (
     print_prompt_json,
     resume_session,
     resume_status,
+    session_was_active,
     triage_comment,
 )
 
@@ -188,126 +189,177 @@ class TestPrintPromptJson:
         assert mock.call_args.kwargs["timeout"] == 7
 
 
+class TestRunStreaming:
+    def test_returns_output_and_returncode(self, tmp_path: Path) -> None:
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("hello")
+        output, rc = _run_streaming(["echo", "hi"], stdin_file)
+        assert output == "hi"
+        assert rc == 0
+
+    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("")
+        output, rc = _run_streaming(["/nonexistent/binary"], stdin_file)
+        assert output == ""
+        assert rc == -1
+
+    def test_kills_on_idle_timeout(self, tmp_path: Path) -> None:
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("")
+        # sleep 60 will be killed after 0.1s idle timeout
+        output, rc = _run_streaming(["sleep", "60"], stdin_file, idle_timeout=0.1)
+        assert rc == -1
+
+    def test_handles_process_exit_without_eof(self, tmp_path: Path) -> None:
+        """Cover the proc.poll() is not None branch."""
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("")
+
+        mock_stdout = MagicMock()
+        mock_stdout.fileno.return_value = 99
+        mock_stdout.read.return_value = "leftover"
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = MagicMock()
+        # poll returns 0 (exited) — triggers the break at poll() branch
+        mock_proc.poll.return_value = 0
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            # select returns NOT ready — forces poll() check
+            patch("select.select", return_value=([], [], [])),
+        ):
+            output, rc = _run_streaming(["fake"], stdin_file)
+        assert "leftover" in output
+        assert rc == 0
+
+    def test_drains_remaining_output(self, tmp_path: Path) -> None:
+        """Cover the remaining = proc.stdout.read() branch."""
+        from io import StringIO
+
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("")
+
+        mock_stdout = MagicMock(spec=StringIO)
+        # readline returns data then EOF
+        mock_stdout.readline.side_effect = ["line1\n", ""]
+        mock_stdout.fileno.return_value = 99
+        mock_stdout.read.return_value = "extra"
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch("select.select", return_value=([mock_stdout], [], [])),
+        ):
+            output, rc = _run_streaming(["fake"], stdin_file)
+        assert "line1" in output
+        assert "extra" in output
+
+
 class TestPrintPromptFromFile:
+    def _files(self, tmp_path: Path) -> tuple[Path, Path]:
+        sys = tmp_path / "system.md"
+        sys.write_text("sys")
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("p")
+        return sys, prompt
+
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("be a good dog")
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("hello")
-        with patch("subprocess.run", return_value=_completed("session output\n")):
-            result = print_prompt_from_file(
-                system_file, prompt_file, "claude-sonnet-4-6"
-            )
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", return_value=("session output", 0)):
+            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == "session output"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("p")
-        with patch("subprocess.run", return_value=_completed("", returncode=1)):
-            result = print_prompt_from_file(
-                system_file, prompt_file, "claude-sonnet-4-6"
-            )
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", return_value=("err", 1)):
+            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == ""
 
-    def test_returns_empty_on_timeout(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("p")
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 30),
-        ):
-            result = print_prompt_from_file(
-                system_file, prompt_file, "claude-sonnet-4-6"
-            )
+    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", return_value=("partial", -1)):
+            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == ""
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("p")
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            result = print_prompt_from_file(
-                system_file, prompt_file, "claude-sonnet-4-6"
-            )
-        assert result == ""
-
-    def test_passes_correct_flags(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("p")
-        with patch("subprocess.run", return_value=_completed("out")) as mock:
-            print_prompt_from_file(
-                system_file, prompt_file, "claude-sonnet-4-6", timeout=60
-            )
-        cmd = mock.call_args.args[0]
+    def test_passes_correct_cmd(self, tmp_path: Path) -> None:
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+            print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        cmd = mock.call_args[0][0]
         assert "--model" in cmd
         assert "claude-sonnet-4-6" in cmd
-        assert "--output-format" in cmd
-        assert "stream-json" in cmd
-        assert "--verbose" in cmd
-        assert "--dangerously-skip-permissions" in cmd
         assert "--system-prompt-file" in cmd
-        assert str(system_file) in cmd
+        assert str(sys) in cmd
         assert "--print" in cmd
-        assert mock.call_args.kwargs["timeout"] == 60
+
+    def test_passes_idle_timeout(self, tmp_path: Path) -> None:
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+            print_prompt_from_file(sys, prompt, "claude-sonnet-4-6", idle_timeout=600.0)
+        assert mock.call_args[0][2] == 600.0
 
 
 class TestResumeSession:
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
-        with patch("subprocess.run", return_value=_completed("continued\n")):
+        with patch("kennel.claude._run_streaming", return_value=("continued", 0)):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == "continued"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("subprocess.run", return_value=_completed("", returncode=1)):
+        with patch("kennel.claude._run_streaming", return_value=("", 1)):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == ""
 
-    def test_returns_empty_on_timeout(self, tmp_path: Path) -> None:
+    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 300),
-        ):
+        with patch("kennel.claude._run_streaming", return_value=("partial", -1)):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == ""
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
-        assert result == ""
-
-    def test_passes_correct_flags(self, tmp_path: Path) -> None:
-        prompt_file = tmp_path / "prompt.txt"
-        prompt_file.write_text("p")
-        with patch("subprocess.run", return_value=_completed("out")) as mock:
-            resume_session(
-                "my-session-id", prompt_file, "claude-sonnet-4-6", timeout=120
-            )
-        cmd = mock.call_args.args[0]
-        assert "--model" in cmd
-        assert "claude-sonnet-4-6" in cmd
-        assert "--output-format" in cmd
-        assert "stream-json" in cmd
-        assert "--verbose" in cmd
-        assert "--dangerously-skip-permissions" in cmd
+        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+            resume_session("my-session-id", prompt_file, "claude-sonnet-4-6")
+        cmd = mock.call_args[0][0]
         assert "--resume" in cmd
         assert "my-session-id" in cmd
         assert "--print" in cmd
-        assert mock.call_args.kwargs["timeout"] == 120
+
+    def test_passes_idle_timeout(self, tmp_path: Path) -> None:
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("p")
+        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+            resume_session(
+                "sess-1", prompt_file, "claude-sonnet-4-6", idle_timeout=900.0
+            )
+        assert mock.call_args[0][2] == 900.0
 
 
 class TestTriageComment:
@@ -569,6 +621,20 @@ class TestExtractResultText:
             '{"type":"result","result":"🐕\\nworking","session_id":"sid"}\n'
         )
         assert extract_result_text(output) == "🐕\nworking"
+
+
+class TestSessionWasActive:
+    def test_returns_true_on_any_output(self) -> None:
+        assert session_was_active("some output\n") is True
+
+    def test_returns_false_on_empty_output(self) -> None:
+        assert session_was_active("") is False
+
+    def test_returns_false_on_whitespace_only(self) -> None:
+        assert session_was_active("   \n  \n") is False
+
+    def test_returns_true_on_json_output(self) -> None:
+        assert session_was_active('{"type":"result"}\n') is True
 
 
 class TestGenerateStatusWithSession:

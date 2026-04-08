@@ -1167,12 +1167,35 @@ class Worker:
         )
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        session_id, _ = claude_run(fido_dir)
+        session_id, output = claude_run(fido_dir)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+        # Retry loop: resume session if no commits but Claude was still working
+        max_retries = 5
+        for attempt in range(max_retries):
+            if head_before != head_after:
+                break
+            if not session_id or not claude.session_was_active(output):
+                log.warning("task produced no commits and no output — giving up")
+                return True
+            log.info(
+                "task produced no commits but was still working — resuming "
+                "(attempt %d/%d)",
+                attempt + 1,
+                max_retries,
+            )
+            session_id, output = claude_run(fido_dir, session_id=session_id)
+            log.info("task resume done (session=%s)", session_id)
+            head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
         if head_before == head_after:
-            log.warning("task produced no new commits — not marking complete")
+            log.warning(
+                "task produced no commits after %d retries — not marking complete",
+                max_retries,
+            )
             return True
+
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)

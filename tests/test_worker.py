@@ -4782,7 +4782,99 @@ class TestExecuteTask:
             caplog.at_level(logging.WARNING, logger="kennel"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert "no new commits" in caplog.text
+        assert "no commits and no output" in caplog.text
+
+    def test_resumes_session_when_no_commits_but_had_tool_use(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Big refactor")
+        # head_before=aaa, head_after_1=aaa (no change), head_after_2=bbb (commit)
+        shas = iter(["aaa", "aaa", "bbb"])
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout=next(shas, "bbb") if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch(
+                "kennel.worker.claude_run",
+                side_effect=[("sess-1", "output1"), ("sess-1", "output2")],
+            ) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch("kennel.worker.claude.session_was_active", return_value=True),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # First call: fresh start. Second call: resume with session_id.
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[1][1]["session_id"] == "sess-1"
+
+    def test_gives_up_when_no_commits_and_no_tool_use(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess-1", "output")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch("kennel.worker.claude.session_was_active", return_value=False),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_not_called()
+
+    def test_gives_up_after_max_retries(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Endless task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch(
+                "kennel.worker.claude_run", return_value=("sess-1", "output")
+            ) as mock_run,
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch("kennel.worker.claude.session_was_active", return_value=True),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # 1 initial + 5 retries = 6 total
+        assert mock_run.call_count == 6
+        mock_complete.assert_not_called()
+
+    def test_gives_up_when_no_session_id(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "output")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch("kennel.worker.claude.session_was_active", return_value=True),
+            patch.object(worker, "ensure_pushed"),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks_background"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_not_called()
 
 
 class TestRunExecuteTaskIntegration:
