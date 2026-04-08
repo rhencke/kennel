@@ -2036,13 +2036,6 @@ class TestFindOrCreatePr:
         )
         assert result is None
 
-    def test_merged_pr_closes_issue(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = self._merged_pr(number=77)
-        fido_dir = self._fido_dir(tmp_path)
-        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        gh.close_issue.assert_called_once_with("owner/proj", 5)
-
     def test_merged_pr_clears_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._merged_pr()
@@ -4703,19 +4696,6 @@ class TestHandlePromoteMerge:
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True)
-
-    def test_approved_not_draft_no_pending_closes_issue(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        gh.get_reviews.return_value = self._reviews(is_draft=False)
-        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.close_issue.assert_called_once_with("rhencke/myrepo", 5)
 
     def test_approved_not_draft_no_pending_resets_tasks_json(
         self, tmp_path: Path

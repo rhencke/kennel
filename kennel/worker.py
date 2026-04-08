@@ -476,8 +476,9 @@ class Worker:
             slug = existing["headRefName"]
 
             if state == "MERGED":
-                log.info("PR #%s already merged — closing issue #%s", pr_number, issue)
-                self.gh.close_issue(repo_ctx.repo, issue)
+                log.info(
+                    "PR #%s already merged — issue #%s auto-closed", pr_number, issue
+                )
                 clear_state(fido_dir)
                 return None
 
@@ -1051,7 +1052,6 @@ class Worker:
                 return 0
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
-            self.gh.close_issue(repo_ctx.repo, issue)
             (fido_dir / "tasks.json").write_text("[]")
             clear_state(fido_dir)
             self._git(["checkout", repo_ctx.default_branch])

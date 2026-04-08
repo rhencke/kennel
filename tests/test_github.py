@@ -179,14 +179,6 @@ class TestGitHubClass:
             result = gh.view_issue("o/r", 1)
         assert result["state"] == "OPEN"
 
-    def test_close_issue_delegates(self) -> None:
-        gh = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(gh._gh._s, "patch", return_value=mock_resp) as mock_patch:
-            gh.close_issue("o/r", 3)
-        assert "repos/o/r/issues/3" in mock_patch.call_args.args[0]
-
     def test_comment_issue_delegates(self) -> None:
         gh = self._github()
         mock_resp = MagicMock()
@@ -757,16 +749,6 @@ class TestGHClass:
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.view_issue("o/r", 5)
         assert result == {"state": "OPEN", "title": "Bug", "body": "desc"}
-
-    def test_close_issue(self) -> None:
-        gh = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(gh._s, "patch", return_value=mock_resp) as mock_patch:
-            gh.close_issue("o/r", 3)
-        url = mock_patch.call_args.args[0]
-        assert "repos/o/r/issues/3" in url
-        assert mock_patch.call_args.kwargs["json"]["state"] == "closed"
 
     def test_get_issue_comments(self) -> None:
         gh = self._gh()

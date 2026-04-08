@@ -223,10 +223,6 @@ class GH:
             "body": data["body"] or "",
         }
 
-    def close_issue(self, repo: str, number: int | str) -> None:
-        """Close an issue."""
-        self._patch(f"/repos/{repo}/issues/{number}", state="closed")
-
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all comments on an issue."""
         return self._get(f"/repos/{repo}/issues/{number}/comments")
@@ -433,10 +429,6 @@ class GitHub:
     def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
         """Return issue data (state, title, body)."""
         return self._gh.view_issue(repo, number)
-
-    def close_issue(self, repo: str, number: int | str) -> None:
-        """Close an issue."""
-        self._gh.close_issue(repo, number)
 
     def comment_issue(self, repo: str, number: int | str, body: str) -> None:
         """Post a comment on an issue."""
