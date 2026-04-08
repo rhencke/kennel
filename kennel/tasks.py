@@ -81,6 +81,10 @@ def add_task(
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
         existing = lock.read()
+        for t in existing:
+            if t["title"] == title and t["status"] == "pending":
+                log.info("task already exists: %s", title[:80])
+                return t
         existing.append(task)
         lock.write(existing)
     log.info("task added: %s", title[:80])

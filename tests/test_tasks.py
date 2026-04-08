@@ -48,6 +48,21 @@ class TestAddTask:
         assert tasks[0]["title"] == "first"
         assert tasks[1]["title"] == "second"
 
+    def test_returns_existing_pending_task_if_title_matches(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = add_task(tmp_path, title="duplicate task")
+        t2 = add_task(tmp_path, title="duplicate task")
+        assert t1["id"] == t2["id"]
+        assert len(list_tasks(tmp_path)) == 1
+
+    def test_does_not_deduplicate_completed_tasks(self, tmp_path: Path) -> None:
+        t1 = add_task(tmp_path, title="done task")
+        complete_by_title(tmp_path, "done task")
+        t2 = add_task(tmp_path, title="done task")
+        assert t1["id"] != t2["id"]
+        assert len(list_tasks(tmp_path)) == 2
+
     def test_thread_task_appends_at_end(self, tmp_path: Path) -> None:
         add_task(tmp_path, title="existing")
         thread = {"repo": "r/r", "pr": 1, "comment_id": 42}
@@ -106,8 +121,18 @@ class TestCompleteByTitle:
     def test_completes_first_pending_when_duplicate_titles(
         self, tmp_path: Path
     ) -> None:
-        add_task(tmp_path, title="t")
-        add_task(tmp_path, title="t")
+        # Write duplicate titles directly to simulate pre-existing data
+        task_file = _task_file(tmp_path)
+        import json
+
+        task_file.write_text(
+            json.dumps(
+                [
+                    {"id": "1", "title": "t", "status": "pending"},
+                    {"id": "2", "title": "t", "status": "pending"},
+                ]
+            )
+        )
         complete_by_title(tmp_path, "t")
         tasks = list_tasks(tmp_path)
         assert tasks[0]["status"] == "completed"
