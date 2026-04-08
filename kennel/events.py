@@ -558,13 +558,12 @@ def create_task(
 ) -> None:
     """Write a task to the shared task file, then trigger sync.
 
-    PR comment tasks (those with a thread) are inserted at the front of the
-    queue so they become the next task worked on, not queued for later.
+    PR comment tasks (those with a thread) carry a thread payload that causes
+    ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
+    without inserting them out-of-order in the list.
     """
     log.info("creating task: %s", prompt[:100])
-    add_task(
-        repo_cfg.work_dir, title=prompt, thread=thread, priority=thread is not None
-    )
+    add_task(repo_cfg.work_dir, title=prompt, thread=thread)
     launch_sync(config, repo_cfg)
 
 
