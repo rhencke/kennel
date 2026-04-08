@@ -1058,6 +1058,15 @@ class Worker:
             last_author = comments[-1].get("author", {}).get("login", "")
             if last_author != repo_ctx.gh_user:
                 continue
+            comment_id = comments[0].get("databaseId")
+            if comment_id and tasks.has_pending_tasks_for_comment(
+                self.work_dir, comment_id
+            ):
+                log.info(
+                    "skipping resolve for thread %s — pending sibling tasks remain",
+                    node.get("id", ""),
+                )
+                continue
             thread_id = node.get("id", "")
             self.gh.resolve_thread(thread_id)
             log.info("resolved thread %s", thread_id)
