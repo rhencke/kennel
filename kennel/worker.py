@@ -315,43 +315,33 @@ def sync_tasks(work_dir: Path, gh: GitHub) -> None:
         pr_number = pr_data["number"]
         _auto_complete_ask_tasks(work_dir, gh, repo, pr_number)
 
-        task_file = fido_dir / "tasks.json"
-        while True:
-            mtime_before = task_file.stat().st_mtime if task_file.exists() else 0
-            task_list = tasks.list_tasks(work_dir)
-            if not task_list:
-                log.info("sync_tasks: no tasks — nothing to sync")
-                break
+        task_list = tasks.list_tasks(work_dir)
+        if not task_list:
+            log.info("sync_tasks: no tasks — nothing to sync")
+            return
 
-            queue = _format_work_queue(task_list)
-            log.info("sync_tasks: syncing task list → PR #%s", pr_number)
+        queue = _format_work_queue(task_list)
+        log.info("sync_tasks: syncing task list → PR #%s", pr_number)
 
-            try:
-                body = gh.get_pr_body(repo, pr_number)
-            except Exception:
-                log.exception("sync_tasks: failed to get PR body")
-                break
+        try:
+            body = gh.get_pr_body(repo, pr_number)
+        except Exception:
+            log.exception("sync_tasks: failed to get PR body")
+            return
 
-            if "WORK_QUEUE_START" not in body:
-                log.info(
-                    "sync_tasks: PR #%s has no work queue markers — skipping",
-                    pr_number,
-                )
-                break
+        if "WORK_QUEUE_START" not in body:
+            log.info(
+                "sync_tasks: PR #%s has no work queue markers — skipping",
+                pr_number,
+            )
+            return
 
-            new_body = _apply_queue_to_body(body, queue)
-            try:
-                gh.edit_pr_body(repo, pr_number, new_body)
-                log.info("sync_tasks: PR #%s work queue synced", pr_number)
-            except Exception:
-                log.exception("sync_tasks: failed to update PR body")
-                break
-
-            mtime_after = task_file.stat().st_mtime if task_file.exists() else 0
-            if mtime_after != mtime_before:
-                log.info("sync_tasks: tasks.json changed during sync — re-syncing")
-                continue
-            break
+        new_body = _apply_queue_to_body(body, queue)
+        try:
+            gh.edit_pr_body(repo, pr_number, new_body)
+            log.info("sync_tasks: PR #%s work queue synced", pr_number)
+        except Exception:
+            log.exception("sync_tasks: failed to update PR body")
     finally:
         sync_lock_fd.close()
 
