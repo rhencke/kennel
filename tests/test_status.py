@@ -22,6 +22,7 @@ from kennel.status import (
     _process_uptime_seconds,
     _read_state,
     _read_tasks,
+    _repos_from_pid,
     collect,
     format_status,
     repo_status,
@@ -159,6 +160,73 @@ class TestProcessUptimeSeconds:
             capture_output=True,
             text=True,
         )
+
+
+class TestReposFromPid:
+    def test_parses_single_repo(self) -> None:
+        cmdline = (
+            b"kennel\x00--port\x009000\x00rhencke/confusio:/workspace/confusio\x00"
+        )
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(123)
+        assert len(result) == 1
+        assert result[0].name == "rhencke/confusio"
+        assert result[0].work_dir == Path("/workspace/confusio")
+
+    def test_parses_multiple_repos(self) -> None:
+        cmdline = b"kennel\x00rhencke/a:/path/a\x00rhencke/b:/path/b\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(123)
+        assert len(result) == 2
+        assert result[0].name == "rhencke/a"
+        assert result[1].name == "rhencke/b"
+
+    def test_oserror_returns_empty(self) -> None:
+        with patch.object(Path, "read_bytes", side_effect=OSError("no proc")):
+            result = _repos_from_pid(123)
+        assert result == []
+
+    def test_skips_args_without_colon(self) -> None:
+        cmdline = b"kennel\x00--port\x009000\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(123)
+        assert result == []
+
+    def test_skips_colon_args_without_slash_in_name(self) -> None:
+        cmdline = b"something:value\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(123)
+        assert result == []
+
+    def test_reads_proc_pid_cmdline(self) -> None:
+        paths_read: list[Path] = []
+
+        def capturing_read_bytes(self_path: Path) -> bytes:
+            paths_read.append(self_path)
+            return b""
+
+        with patch.object(Path, "read_bytes", capturing_read_bytes):
+            _repos_from_pid(789)
+        assert paths_read == [Path("/proc/789/cmdline")]
+
+    def test_expands_tilde_in_path(self) -> None:
+        cmdline = b"rhencke/repo:~/workspace/repo\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(1)
+        assert result[0].work_dir == Path("~/workspace/repo").expanduser()
+
+    def test_no_repos_returns_empty(self) -> None:
+        cmdline = b"kennel\x00--port\x009000\x00--secret-file\x00/home/user/.kennel-secret\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(1)
+        assert result == []
+
+    def test_skips_non_utf8_args(self) -> None:
+        cmdline = b"\xff\xfe\x00rhencke/repo:/path\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            result = _repos_from_pid(1)
+        assert len(result) == 1
+        assert result[0].name == "rhencke/repo"
 
 
 class TestKennelPid:

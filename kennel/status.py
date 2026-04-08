@@ -100,6 +100,27 @@ def _process_uptime_seconds(pid: int) -> int | None:
     return None
 
 
+def _repos_from_pid(pid: int) -> list[RepoConfig]:
+    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    repos = []
+    for arg in cmdline.rstrip(b"\x00").split(b"\x00"):
+        try:
+            spec = arg.decode()
+        except UnicodeDecodeError:
+            continue
+        if ":" not in spec:
+            continue
+        name, path_str = spec.split(":", 1)
+        if "/" not in name:
+            continue
+        repos.append(RepoConfig(name=name, work_dir=Path(path_str).expanduser()))
+    return repos
+
+
 def _kennel_pid() -> int | None:
     """Return the PID of the running kennel server, or None."""
     pids = _pgrep("kennel --port")
