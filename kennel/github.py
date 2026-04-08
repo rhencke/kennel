@@ -5,10 +5,11 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import requests as _requests
 
@@ -100,7 +101,7 @@ class GH:
 
     def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all inline review comments on a pull request."""
-        return self._get(f"/repos/{repo}/pulls/{pr}/comments")
+        return list(self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/comments"))
 
     def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all review-comment threads for a PR as a structured list.
@@ -140,19 +141,50 @@ class GH:
         self, repo: str, pr: int | str, review_id: int | str
     ) -> list[tuple[int, str]]:
         """Return list of (comment_id, body) pairs from a review."""
-        data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
-        return [(c["id"], c.get("body", "")) for c in data]
+        url = f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments"
+        return [(c["id"], c.get("body", "")) for c in self._paginate(url)]
+
+    def _paginate(self, url: str) -> Iterator[Any]:
+        """Yield each item from all pages of a paginated GitHub API endpoint."""
+        current: str | None = url
+        while current:
+            resp = self._s.get(current)
+            resp.raise_for_status()
+            yield from resp.json()
+            link = resp.headers.get("Link", "")
+            current = next(
+                (
+                    part.split(";")[0].strip().strip("<>")
+                    for part in link.split(",")
+                    if 'rel="next"' in part
+                ),
+                None,
+            )
 
     def find_pr(
         self, repo: str, issue_number: int | str, user: str
     ) -> dict[str, Any] | None:
-        """Find the most recent PR with issue_number in body by user."""
-        q = quote(f"#{issue_number} in:body repo:{repo} type:pr")
-        data = self._get(f"/search/issues?q={q}")
-        for item in data.get("items", []):
-            if item.get("user", {}).get("login") != user:
+        """Find a PR linked to issue_number via its body by user.
+
+        Uses the issue timeline cross-referenced events API to enumerate PRs
+        that reference this issue, then confirms the reference appears in the
+        PR body as a closing keyword reference (e.g. "closes #N").
+        """
+        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
+        url = f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
+        for event in self._paginate(url):
+            if event.get("event") != "cross-referenced":
                 continue
-            pr = self._get(f"/repos/{repo}/pulls/{item['number']}")
+            source_issue = event.get("source", {}).get("issue", {})
+            if "pull_request" not in source_issue:
+                continue
+            if source_issue.get("user", {}).get("login") != user:
+                continue
+            if not pattern.search(source_issue.get("body", "") or ""):
+                continue
+            pr_number = source_issue["number"]
+            pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
             state = "MERGED" if pr.get("merged") else pr["state"].upper()
             return {
                 "number": pr["number"],
@@ -225,7 +257,9 @@ class GH:
 
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all comments on an issue."""
-        return self._get(f"/repos/{repo}/issues/{number}/comments")
+        return list(
+            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/comments")
+        )
 
     def create_issue(self, repo: str, title: str, body: str) -> str:
         """Create an issue and return its HTML URL."""
@@ -312,8 +346,12 @@ class GH:
     def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
-        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
-        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
+        reviews_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews")
+        )
+        commits_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/commits")
+        )
         reviews = [
             {
                 "author": {"login": r["user"]["login"]},
@@ -341,8 +379,12 @@ class GH:
     def get_reviews(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return reviews, commits, and isDraft for a PR."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
-        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
-        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
+        reviews_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews")
+        )
+        commits_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/commits")
+        )
         reviews = [
             {
                 "author": {"login": r["user"]["login"]},

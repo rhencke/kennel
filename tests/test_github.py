@@ -220,10 +220,21 @@ class TestGitHubClass:
 
     def test_find_pr_delegates(self) -> None:
         gh = self._github()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}}]
-        }
+        timeline_resp = MagicMock()
+        timeline_resp.json.return_value = [
+            {
+                "event": "cross-referenced",
+                "source": {
+                    "issue": {
+                        "number": 1,
+                        "user": {"login": "fido"},
+                        "body": "closes #5",
+                        "pull_request": {},
+                    }
+                },
+            }
+        ]
+        timeline_resp.headers = {}
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
             "number": 1,
@@ -232,7 +243,7 @@ class TestGitHubClass:
             "merged": False,
             "user": {"login": "fido"},
         }
-        with patch.object(gh._gh._s, "get", side_effect=[search_resp, pr_resp]):
+        with patch.object(gh._gh._s, "get", side_effect=[timeline_resp, pr_resp]):
             result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 1
@@ -561,6 +572,7 @@ class TestGHClass:
         mock_resp = MagicMock()
         comments = [{"id": 42, "body": "looks good"}]
         mock_resp.json.return_value = comments
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_pull_comments("o/r", 7)
         assert result == comments
@@ -569,6 +581,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             gh.get_pull_comments("o/r", 7)
         url = mock_get.call_args.args[0]
@@ -581,6 +594,7 @@ class TestGHClass:
             {"id": 101, "body": "nit"},
             {"id": 102, "body": "fix"},
         ]
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_review_comments("o/r", 10, 99)
         assert result == [(101, "nit"), (102, "fix")]
@@ -589,6 +603,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_review_comments("o/r", 10, 99)
         assert result == []
@@ -597,6 +612,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             gh.get_review_comments("o/r", 10, 99)
         url = mock_get.call_args.args[0]
@@ -611,21 +627,67 @@ class TestGHClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_post.call_args.kwargs["json"]["body"] == "hello"
 
+    def test_paginate_single_page(self) -> None:
+        gh = self._gh()
+        resp = MagicMock()
+        resp.json.return_value = [{"id": 1}, {"id": 2}]
+        resp.headers = {}
+        with patch.object(gh._s, "get", return_value=resp):
+            result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert result == [{"id": 1}, {"id": 2}]
+
+    def test_paginate_follows_next_link(self) -> None:
+        gh = self._gh()
+        page1 = MagicMock()
+        page1.json.return_value = [{"id": 1}]
+        next_url = "https://api.github.com/repos/o/r/items?page=2"
+        page1.headers = {"Link": f'<{next_url}>; rel="next"'}
+        page2 = MagicMock()
+        page2.json.return_value = [{"id": 2}]
+        page2.headers = {}
+        with patch.object(gh._s, "get", side_effect=[page1, page2]) as mock_get:
+            result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert result == [{"id": 1}, {"id": 2}]
+        assert mock_get.call_count == 2
+        assert mock_get.call_args_list[1].args[0] == next_url
+
+    def _timeline_resp(self, events: list[dict]) -> MagicMock:
+        """Build a mock timeline response with no next-page Link header."""
+        resp = MagicMock()
+        resp.json.return_value = events
+        resp.headers = {}
+        return resp
+
+    def _cross_ref_event(
+        self, pr_number: int, user: str, body: str, has_pull_request: bool = True
+    ) -> dict:
+        source_issue: dict = {
+            "number": pr_number,
+            "user": {"login": user},
+            "body": body,
+        }
+        if has_pull_request:
+            source_issue["pull_request"] = {}
+        return {"event": "cross-referenced", "source": {"issue": source_issue}}
+
+    def _pr_resp(
+        self, number: int, ref: str, state: str, merged: bool, user: str
+    ) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {
+            "number": number,
+            "head": {"ref": ref},
+            "state": state,
+            "merged": merged,
+            "user": {"login": user},
+        }
+        return resp
+
     def test_find_pr_returns_match(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}}]
-        }
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "number": 1,
-            "head": {"ref": "feat"},
-            "state": "open",
-            "merged": False,
-            "user": {"login": "fido"},
-        }
-        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+        timeline = self._timeline_resp([self._cross_ref_event(1, "fido", "closes #5")])
+        pr = self._pr_resp(1, "feat", "open", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, pr]):
             result = gh.find_pr("o/r", 5, "fido")
         assert result == {
             "number": 1,
@@ -636,48 +698,91 @@ class TestGHClass:
 
     def test_find_pr_merged_state(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 3, "user": {"login": "fido"}}]
-        }
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "number": 3,
-            "head": {"ref": "fix"},
-            "state": "closed",
-            "merged": True,
-            "user": {"login": "fido"},
-        }
-        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+        timeline = self._timeline_resp([self._cross_ref_event(3, "fido", "closes #2")])
+        pr = self._pr_resp(3, "fix", "closed", True, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, pr]):
             result = gh.find_pr("o/r", 2, "fido")
         assert result is not None
         assert result["state"] == "MERGED"
 
     def test_find_pr_filters_by_user(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "other"}}]
-        }
-        with patch.object(gh._s, "get", return_value=search_resp):
+        timeline = self._timeline_resp([self._cross_ref_event(1, "other", "closes #5")])
+        with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_returns_none_on_empty(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {"items": []}
-        with patch.object(gh._s, "get", return_value=search_resp):
+        timeline = self._timeline_resp([])
+        with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 1, "fido") is None
 
-    def test_find_pr_search_url(self) -> None:
+    def test_find_pr_skips_non_pr_cross_reference(self) -> None:
+        """Cross-referenced events from plain issues (not PRs) are ignored."""
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {"items": []}
-        with patch.object(gh._s, "get", return_value=search_resp) as mock_get:
+        event = self._cross_ref_event(9, "fido", "closes #5", has_pull_request=False)
+        timeline = self._timeline_resp([event])
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
+    def test_find_pr_skips_substring_match(self) -> None:
+        """#9 must not match a PR body that only contains #90."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [self._cross_ref_event(99, "fido", "closes #90")]
+        )
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 9, "fido") is None
+
+    def test_find_pr_skips_prefix_match(self) -> None:
+        """#100 must not match a PR body that only contains closes #10."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [self._cross_ref_event(99, "fido", "closes #10")]
+        )
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 100, "fido") is None
+
+    def test_find_pr_requires_closing_keyword(self) -> None:
+        """Bare #N in PR body (no closing keyword) must not match."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [self._cross_ref_event(7, "fido", "see #5 for context")]
+        )
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
+    def test_find_pr_body_only_not_title(self) -> None:
+        """Issue reference in PR title alone does not count — body only."""
+        gh = self._gh()
+        event = self._cross_ref_event(7, "fido", "")  # empty body
+        # Inject a title field to simulate a PR where #5 appears only in the title
+        event["source"]["issue"]["title"] = "closes #5"
+        timeline = self._timeline_resp([event])
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
+    def test_find_pr_timeline_url(self) -> None:
+        gh = self._gh()
+        timeline = self._timeline_resp([])
+        with patch.object(gh._s, "get", return_value=timeline) as mock_get:
             gh.find_pr("o/r", 5, "fido")
         url = mock_get.call_args.args[0]
-        assert "/search/issues?q=" in url
-        assert "type%3Apr" in url or "type:pr" in url
+        assert "/repos/o/r/issues/5/timeline" in url
+
+    def test_find_pr_follows_pagination(self) -> None:
+        """find_pr fetches additional pages when a Link: next header is present."""
+        gh = self._gh()
+        page1 = MagicMock()
+        page1.json.return_value = [{"event": "committed"}]  # no match on page 1
+        next_url = "https://api.github.com/repos/o/r/issues/5/timeline?page=2"
+        page1.headers = {"Link": f'<{next_url}>; rel="next"'}
+        page2 = self._timeline_resp([self._cross_ref_event(7, "fido", "closes #5")])
+        pr = self._pr_resp(7, "feat", "open", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[page1, page2, pr]):
+            result = gh.find_pr("o/r", 5, "fido")
+        assert result is not None
+        assert result["number"] == 7
 
     def test_get_user(self) -> None:
         gh = self._gh()
@@ -770,6 +875,7 @@ class TestGHClass:
         comments = [{"id": 1, "body": "hi"}]
         mock_resp = MagicMock()
         mock_resp.json.return_value = comments
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             result = gh.get_issue_comments("o/r", 9)
         url = mock_get.call_args.args[0]
@@ -948,6 +1054,7 @@ class TestGHClass:
                 "submitted_at": "2024-01-01T00:00:00Z",
             }
         ]
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = [
             {
@@ -958,6 +1065,7 @@ class TestGHClass:
                 },
             }
         ]
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -990,8 +1098,10 @@ class TestGHClass:
         }
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = []
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = []
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -1014,10 +1124,12 @@ class TestGHClass:
                 "submitted_at": "2024-01-01T00:00:00Z",
             }
         ]
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = [
             {"commit": {"committer": {"date": "2024-01-02T00:00:00Z"}}}
         ]
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -1039,8 +1151,10 @@ class TestGHClass:
         pr_resp.json.return_value = {"draft": False}
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = []
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = []
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
