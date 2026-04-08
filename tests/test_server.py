@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import subprocess
 import threading
 import time
 import urllib.error
@@ -500,19 +501,33 @@ class TestRun:
         mock_server.serve_forever.assert_called_once()
 
 
+def _self_restart_cfg(tmp_path: Path) -> Config:
+    return Config(
+        port=0,
+        secret=b"test-secret",
+        repos={"owner/kennel": RepoConfig(name="owner/kennel", work_dir=tmp_path)},
+        allowed_bots=frozenset(),
+        log_level="WARNING",
+        self_repo="owner/kennel",
+        sub_dir=tmp_path / "sub",
+    )
+
+
+_MERGE_PAYLOAD = {
+    "repository": {
+        "full_name": "owner/kennel",
+        "owner": {"login": "owner"},
+    },
+    "action": "closed",
+    "pull_request": {"number": 1, "merged": True},
+}
+
+
 class TestSelfRestart:
     """Tests for the self-restart flow (self_repo merge triggers exec)."""
 
     def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=0,
-            secret=b"test-secret",
-            repos={"owner/kennel": RepoConfig(name="owner/kennel", work_dir=tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            self_repo="owner/kennel",
-            sub_dir=tmp_path / "sub",
-        )
+        cfg = _self_restart_cfg(tmp_path)
         WebhookHandler.config = cfg
         WebhookHandler.registry = MagicMock()
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
@@ -521,21 +536,57 @@ class TestSelfRestart:
         t.start()
         url = f"http://127.0.0.1:{port}"
         try:
-            payload = {
-                "repository": {
-                    "full_name": "owner/kennel",
-                    "owner": {"login": "owner"},
-                },
-                "action": "closed",
-                "pull_request": {"number": 1, "merged": True},
-            }
             with (
-                patch("kennel.server.subprocess.run"),
+                patch("kennel.server.subprocess.run") as mock_run,
                 patch("kennel.server.os.execv") as mock_exec,
             ):
-                status = _post_webhook(url, cfg, "pull_request", payload)
+                mock_run.return_value = MagicMock(returncode=0)
+                status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
                 assert status == 200
                 time.sleep(0.2)
                 mock_exec.assert_called_once()
+                calls = mock_run.call_args_list
+                cmds = [c.args[0] for c in calls]
+                assert ["git", "checkout", "main"] in cmds, (
+                    "expected git checkout main before pull"
+                )
+                assert ["git", "reset", "--hard"] in cmds, (
+                    "expected git reset --hard before pull"
+                )
+                assert ["git", "clean", "-fd"] in cmds, (
+                    "expected git clean -fd before pull"
+                )
+                assert ["git", "pull"] in cmds, "expected git pull"
+                reset_idx = cmds.index(["git", "reset", "--hard"])
+                clean_idx = cmds.index(["git", "clean", "-fd"])
+                checkout_idx = cmds.index(["git", "checkout", "main"])
+                pull_idx = cmds.index(["git", "pull"])
+                assert reset_idx < clean_idx, "reset must precede clean"
+                assert clean_idx < checkout_idx, "clean must precede checkout main"
+                assert checkout_idx < pull_idx, "checkout main must precede pull"
+        finally:
+            srv.shutdown()
+
+    def test_self_restart_aborts_on_git_failure(self, tmp_path: Path) -> None:
+        cfg = _self_restart_cfg(tmp_path)
+        WebhookHandler.config = cfg
+        WebhookHandler.registry = MagicMock()
+        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        url = f"http://127.0.0.1:{port}"
+        try:
+            with (
+                patch("kennel.server.subprocess.run") as mock_run,
+                patch("kennel.server.os.execv") as mock_exec,
+            ):
+                # First command fails; subsequent commands and exec should be skipped.
+                mock_run.side_effect = subprocess.CalledProcessError(1, [])
+                status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+                assert status == 200
+                time.sleep(0.2)
+                mock_run.assert_called_once()
+                mock_exec.assert_not_called()
         finally:
             srv.shutdown()

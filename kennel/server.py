@@ -27,6 +27,22 @@ log = logging.getLogger(__name__)
 
 _replied_comments: set[int] = set()
 
+_RESTART_CMDS: list[list[str]] = [
+    ["git", "reset", "--hard"],
+    ["git", "clean", "-fd"],
+    ["git", "checkout", "main"],
+    ["git", "pull"],
+]
+
+
+def _run_git_cmd(work_dir: Path, cmd: list[str]) -> bool:
+    try:
+        subprocess.run(cmd, cwd=str(work_dir), capture_output=True, check=True)
+    except subprocess.CalledProcessError as e:
+        log.error("self-restart: git command failed (%d): %s", e.returncode, cmd)
+        return False
+    return True
+
 
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
@@ -150,9 +166,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         repo_cfg = self.config.repos.get(repo_name)
         if repo_cfg:
             log.info("kennel repo %s merged — pulling and restarting", repo_name)
-            subprocess.run(
-                ["git", "pull"], cwd=str(repo_cfg.work_dir), capture_output=True
-            )
+            for cmd in _RESTART_CMDS:
+                if not _run_git_cmd(repo_cfg.work_dir, cmd):
+                    return
             os.execv(sys.argv[0], sys.argv)
 
     def do_GET(self) -> None:
