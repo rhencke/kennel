@@ -31,15 +31,6 @@ def _claude(
 # ── Stream-JSON helpers ───────────────────────────────────────────────────────
 
 
-def session_was_active(output: str) -> bool:
-    """Return True if the session produced any meaningful output.
-
-    Any non-empty output means the session was actively working.
-    Only silence (empty output) indicates the session is stuck.
-    """
-    return bool(output.strip())
-
-
 def extract_session_id(output: str) -> str:
     """Extract the session_id from stream-json output.
 

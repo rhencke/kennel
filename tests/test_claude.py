@@ -18,7 +18,6 @@ from kennel.claude import (
     print_prompt_json,
     resume_session,
     resume_status,
-    session_was_active,
     triage_comment,
 )
 
@@ -621,20 +620,6 @@ class TestExtractResultText:
             '{"type":"result","result":"🐕\\nworking","session_id":"sid"}\n'
         )
         assert extract_result_text(output) == "🐕\nworking"
-
-
-class TestSessionWasActive:
-    def test_returns_true_on_any_output(self) -> None:
-        assert session_was_active("some output\n") is True
-
-    def test_returns_false_on_empty_output(self) -> None:
-        assert session_was_active("") is False
-
-    def test_returns_false_on_whitespace_only(self) -> None:
-        assert session_was_active("   \n  \n") is False
-
-    def test_returns_true_on_json_output(self) -> None:
-        assert session_was_active('{"type":"result"}\n') is True
 
 
 class TestGenerateStatusWithSession:
