@@ -658,6 +658,21 @@ class Worker:
             check=check,
         )
 
+    def git_clean(self) -> None:
+        """Discard uncommitted changes and untracked files in the work tree.
+
+        Runs ``git checkout -- .`` to restore tracked files to HEAD, then
+        ``git clean -fd`` to remove untracked files and directories.  Only
+        uncommitted changes are affected — pushed commits are never reverted.
+        """
+        self._git(["checkout", "--", "."])
+        result = self._git(["clean", "-fd"])
+        cleaned = result.stdout.strip()
+        if cleaned:
+            log.info("git clean removed:\n%s", cleaned)
+        else:
+            log.info("git clean: nothing to remove")
+
     def _build_pr_body(self, request: str, issue: int) -> str:
         """Build the draft PR body: generated description + work-queue section.
 

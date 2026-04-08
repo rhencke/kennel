@@ -1847,6 +1847,91 @@ class TestGit:
         assert mock_run.call_args[1]["text"] is True
 
 
+class TestGitClean:
+    """Tests for Worker.git_clean."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _git_result(self, stdout: str = "") -> MagicMock:
+        r = MagicMock()
+        r.stdout = stdout
+        return r
+
+    def test_runs_checkout_to_restore_tracked_files(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        calls: list[list[str]] = []
+
+        def capture(args, **kwargs):
+            calls.append(args)
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert ["checkout", "--", "."] in calls
+
+    def test_runs_clean_to_remove_untracked_files(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        calls: list[list[str]] = []
+
+        def capture(args, **kwargs):
+            calls.append(args)
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert ["clean", "-fd"] in calls
+
+    def test_logs_removed_files_when_output_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+
+        def fake_git(args, **kwargs):
+            if args == ["clean", "-fd"]:
+                return self._git_result("Removing foo.py\nRemoving bar/")
+            return self._git_result()
+
+        import logging
+
+        with patch.object(worker, "_git", side_effect=fake_git):
+            with caplog.at_level(logging.INFO):
+                worker.git_clean()
+
+        assert "Removing foo.py" in caplog.text
+
+    def test_logs_nothing_to_remove_when_output_empty(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+
+        with patch.object(worker, "_git", return_value=self._git_result("")):
+            import logging
+
+            with caplog.at_level(logging.INFO):
+                worker.git_clean()
+
+        assert "nothing to remove" in caplog.text
+
+    def test_checkout_called_before_clean(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        order: list[str] = []
+
+        def capture(args, **kwargs):
+            if args == ["checkout", "--", "."]:
+                order.append("checkout")
+            elif args == ["clean", "-fd"]:
+                order.append("clean")
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert order == ["checkout", "clean"]
+
+
 class TestBuildPrBody:
     """Tests for Worker._build_pr_body."""
 
