@@ -62,10 +62,12 @@ def add_task(
     description: str = "",
     status: str = "pending",
     thread: dict[str, Any] | None = None,
+    priority: bool = False,
 ) -> dict[str, Any]:
     """Add a task to the shared task file. Returns the new task.
 
     thread: optional {repo, pr, comment_id} for comment-originated tasks.
+    priority: if True, insert at the front of the queue instead of appending.
     """
     task: dict[str, Any] = {
         "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
@@ -78,9 +80,12 @@ def add_task(
         task["thread"] = thread
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
-        tasks = lock.read()
-        tasks.append(task)
-        lock.write(tasks)
+        existing = lock.read()
+        if priority:
+            existing.insert(0, task)
+        else:
+            existing.append(task)
+        lock.write(existing)
     log.info("task added: %s", title[:80])
     return task
 

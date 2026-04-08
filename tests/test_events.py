@@ -1129,7 +1129,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync") as mock_sync,
         ):
             create_task("do something", cfg, repo_cfg)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=None)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", thread=None, priority=False
+        )
         mock_sync.assert_called_once_with(cfg, repo_cfg)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
@@ -1149,7 +1151,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync"),
         ):
             create_task("do something", cfg, repo_cfg, thread=thread)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=thread)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", thread=thread, priority=True
+        )
 
 
 class TestLaunchSync:

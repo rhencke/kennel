@@ -41,6 +41,20 @@ class TestAddTask:
         t2 = add_task(tmp_path, title="b")
         assert t1["id"] != t2["id"]
 
+    def test_priority_inserts_at_front(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="existing")
+        add_task(tmp_path, title="urgent", priority=True)
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["title"] == "urgent"
+        assert tasks[1]["title"] == "existing"
+
+    def test_default_appends_at_end(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="first")
+        add_task(tmp_path, title="second")
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["title"] == "first"
+        assert tasks[1]["title"] == "second"
+
 
 class TestUpdateTask:
     def test_updates_status(self, tmp_path: Path) -> None:

@@ -556,9 +556,15 @@ def create_task(
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
 ) -> None:
-    """Write a task to the shared task file, then trigger sync."""
+    """Write a task to the shared task file, then trigger sync.
+
+    PR comment tasks (those with a thread) are inserted at the front of the
+    queue so they become the next task worked on, not queued for later.
+    """
     log.info("creating task: %s", prompt[:100])
-    add_task(repo_cfg.work_dir, title=prompt, thread=thread)
+    add_task(
+        repo_cfg.work_dir, title=prompt, thread=thread, priority=thread is not None
+    )
     launch_sync(config, repo_cfg)
 
 
