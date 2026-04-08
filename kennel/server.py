@@ -166,6 +166,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         repo_cfg = self.config.repos.get(repo_name)
         if repo_cfg:
             log.info("kennel repo %s merged — pulling and restarting", repo_name)
+            self.registry.stop_and_join(repo_name)
             for cmd in _RESTART_CMDS:
                 if not _run_git_cmd(repo_cfg.work_dir, cmd):
                     return
