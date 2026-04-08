@@ -712,6 +712,7 @@ class Worker:
                     "PR #%s already merged — issue #%s auto-closed", pr_number, issue
                 )
                 clear_state(fido_dir)
+                self._git(["push", "origin", "--delete", slug], check=False)
                 return None
 
             if state != "CLOSED":
