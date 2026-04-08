@@ -267,27 +267,11 @@ ISSUE_TITLE=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json title --jq .t
 REQUEST="$ISSUE_TITLE (closes #$CURRENT_ISSUE)"
 
 # ── Find or create branch + PR ─────────────────────────────────────────────
-_PR_JSON=$(gh pr list --repo "$REPO" --state all --json number,headRefName,state,author \
+_PR_JSON=$(gh pr list --repo "$REPO" --state open --json number,headRefName,author \
   --search "#$CURRENT_ISSUE in:body" 2>/dev/null \
   | jq -r --arg user "$GH_USER" '[.[] | select(.author.login == $user)] | .[0] // empty')
 EXISTING_PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
-EXISTING_PR_STATE=$(printf '%s' "$_PR_JSON" | jq -r '.state // empty')
 EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
-
-if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "CLOSED" ]]; then
-  log "PR #$EXISTING_PR closed without merge — creating fresh PR"
-  EXISTING_PR=""
-  EXISTING_SLUG=""
-elif [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
-  log "PR #$EXISTING_PR already merged — advancing"
-  echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
-  rm -f "$STATE_FILE"
-  git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
-  git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
-  [[ -n "$EXISTING_SLUG" ]] && git push "$FORK_REMOTE" --delete "$EXISTING_SLUG" 2>/dev/null || true
-  [[ -n "$EXISTING_SLUG" ]] && git branch -d "$EXISTING_SLUG" 2>/dev/null || true
-  continue
-fi
 
 if [[ -n "$EXISTING_SLUG" ]]; then
   SLUG="$EXISTING_SLUG"
