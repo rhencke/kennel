@@ -141,6 +141,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         self.config,
                         repo_cfg,
                         thread=action.reply_to,
+                        registry=self.registry,
                     )
 
             if action.review_comments:
@@ -155,7 +156,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER") and title:
-                    create_task(title, self.config, repo_cfg, thread=action.thread)
+                    create_task(
+                        title,
+                        self.config,
+                        repo_cfg,
+                        thread=action.thread,
+                        registry=self.registry,
+                    )
 
             # Non-comment events just trigger kennel worker — no task needed
             launch_worker(repo_cfg, self.registry)

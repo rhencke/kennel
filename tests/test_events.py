@@ -1180,6 +1180,189 @@ class TestCreateTask:
             create_task("do something", cfg, repo_cfg, thread=thread)
         mock_add.assert_called_once_with(tmp_path, title="do something", thread=thread)
 
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_returns_created_task(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fake_task = {"id": "t1", "title": "do something", "status": "pending"}
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            result = create_task("do something", cfg, repo_cfg)
+        assert result == fake_task
+
+    def test_no_abort_without_registry(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
+        (fido_dir / "tasks.json").write_text(
+            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t2",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread)  # no registry
+        registry.abort_task.assert_not_called()
+
+    def test_no_abort_when_new_task_has_no_thread(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
+        (fido_dir / "tasks.json").write_text(
+            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+        )
+        fake_task = {"id": "t2", "title": "Another plain task", "status": "pending"}
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "Another plain task", cfg, repo_cfg, registry=registry
+            )  # no thread
+        registry.abort_task.assert_not_called()
+
+    def test_no_abort_when_no_current_task_in_state(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(
+            json.dumps({"issue": 5})
+        )  # no current_task_id
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t1",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_not_called()
+
+    def test_no_abort_when_current_task_has_thread(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        existing_thread = {"repo": "owner/repo", "pr": 1, "comment_id": 10}
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
+        (fido_dir / "tasks.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "t1",
+                        "title": "Thread task",
+                        "status": "pending",
+                        "thread": existing_thread,
+                    }
+                ]
+            )
+        )
+        new_thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t2",
+            "title": "New thread task",
+            "status": "pending",
+            "thread": new_thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "New thread task", cfg, repo_cfg, thread=new_thread, registry=registry
+            )
+        registry.abort_task.assert_not_called()
+
+    def test_no_abort_when_state_file_absent(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        self._fido_dir(tmp_path)  # create dir but no state.json
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t1",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_not_called()
+
+    def test_aborts_when_thread_task_supersedes_non_thread_current(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t-plain"}))
+        (fido_dir / "tasks.json").write_text(
+            json.dumps([{"id": "t-plain", "title": "Plain task", "status": "pending"}])
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t-comment",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_called_once_with("owner/repo")
+        # in-progress task should be removed from tasks.json
+        remaining = json.loads((fido_dir / "tasks.json").read_text())
+        assert not any(t["id"] == "t-plain" for t in remaining)
+
 
 class TestLaunchSync:
     def _cfg(self, tmp_path: Path) -> Config:

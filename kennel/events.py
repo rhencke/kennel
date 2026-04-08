@@ -570,21 +570,68 @@ def reply_to_issue_comment(
     return (category, title)
 
 
+def _maybe_abort_for_new_task(
+    repo_cfg: RepoConfig,
+    new_task: dict[str, Any],
+    registry: WorkerRegistry,
+) -> None:
+    """Remove and abort the current in-progress task if the new task invalidates it.
+
+    A thread-originated task (from a PR comment) has higher priority than a
+    plain task under ``_pick_next_task``.  When a comment creates a new task
+    and the worker is already executing a plain (non-thread) task, that task
+    is removed from the queue and the abort event is signalled so the worker
+    stops and picks up the higher-priority comment work.
+    """
+    from kennel.tasks import list_tasks, remove_task
+    from kennel.worker import load_state
+
+    fido_dir = repo_cfg.work_dir / ".git" / "fido"
+    if not (fido_dir / "state.json").exists():
+        return
+    state = load_state(fido_dir)
+    current_task_id = state.get("current_task_id")
+    if not current_task_id:
+        return
+
+    task_list = list_tasks(repo_cfg.work_dir)
+    current_task = next((t for t in task_list if t["id"] == current_task_id), None)
+    if current_task is None or current_task.get("thread"):
+        return  # already removed, or same priority — don't abort
+
+    log.info(
+        "comment task invalidates in-progress task %s — removing and triggering abort",
+        current_task.get("title", "")[:60],
+    )
+    remove_task(repo_cfg.work_dir, current_task_id)
+    registry.abort_task(repo_cfg.name)
+
+
 def create_task(
     prompt: str,
     config: Config,
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
-) -> None:
+    registry: WorkerRegistry | None = None,
+) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
     PR comment tasks (those with a thread) carry a thread payload that causes
     ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
     without inserting them out-of-order in the list.
+
+    If *registry* is given and the new task is thread-originated, checks
+    whether the current in-progress task is invalidated (it is a plain
+    non-thread task with lower priority); if so, removes it and signals abort.
+
+    Returns the new task dict.
     """
     log.info("creating task: %s", prompt[:100])
-    add_task(repo_cfg.work_dir, title=prompt, thread=thread)
+    new_task = add_task(repo_cfg.work_dir, title=prompt, thread=thread)
     launch_sync(config, repo_cfg)
+    if registry is not None and thread:
+        _maybe_abort_for_new_task(repo_cfg, new_task, registry)
+    return new_task
 
 
 def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:

@@ -410,6 +410,7 @@ class TestProcessAction:
                     "comment_id": 300,
                     "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
                 },
+                registry=WebhookHandler.registry,
             )
 
     def test_issue_comment_no_task_for_answer(self, server: tuple) -> None:
