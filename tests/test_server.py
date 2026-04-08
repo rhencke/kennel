@@ -549,12 +549,12 @@ class TestSelfRestart:
                     "expected git clean -fd before pull"
                 )
                 assert ["git", "pull"] in cmds, "expected git pull"
-                checkout_idx = cmds.index(["git", "checkout", "main"])
                 reset_idx = cmds.index(["git", "reset", "--hard"])
                 clean_idx = cmds.index(["git", "clean", "-fd"])
+                checkout_idx = cmds.index(["git", "checkout", "main"])
                 pull_idx = cmds.index(["git", "pull"])
-                assert checkout_idx < reset_idx, "checkout main must precede reset"
                 assert reset_idx < clean_idx, "reset must precede clean"
-                assert clean_idx < pull_idx, "clean must precede pull"
+                assert clean_idx < checkout_idx, "clean must precede checkout main"
+                assert checkout_idx < pull_idx, "checkout main must precede pull"
         finally:
             srv.shutdown()
