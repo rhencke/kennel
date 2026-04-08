@@ -279,8 +279,7 @@ if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "CLOSED" ]]; then
   EXISTING_PR=""
   EXISTING_SLUG=""
 elif [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
-  log "PR #$EXISTING_PR already merged — closing issue #$CURRENT_ISSUE"
-  gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
+  log "PR #$EXISTING_PR already merged — advancing"
   echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
@@ -608,9 +607,7 @@ if [[ "$APPROVED" == "true" && "$IS_DRAFT" == "false" && "$_PENDING_COUNT" -eq 0
   log "PR #$PR approved by $OWNER — merging"
   gh pr merge "$PR" --repo "$REPO" --squash 2>/dev/null \
     || gh pr merge "$PR" --repo "$REPO" --squash --auto
-  log "PR #$PR merged — closing issue #$CURRENT_ISSUE"
   set_status "Merged PR #$PR! Issue #$CURRENT_ISSUE done"
-  gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH"
