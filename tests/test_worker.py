@@ -2107,6 +2107,21 @@ class TestFindOrCreatePr:
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
         mock_start.assert_called_once_with(fido_dir)
 
+    def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.build_prompt", mock_build),
+            patch("kennel.worker.claude_start", return_value="sess"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert f"Work dir: {tmp_path}" in context
+
     def test_open_pr_setup_no_tasks_returns_none(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
@@ -2257,6 +2272,24 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
         mock_start.assert_called_once_with(fido_dir)
+
+    def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
+            patch("kennel.worker.build_prompt", mock_build),
+            patch("kennel.worker.claude_start", return_value="s"),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert f"Work dir: {tmp_path}" in context
 
     def test_no_pr_creates_pr_with_correct_params(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
