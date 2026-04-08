@@ -724,7 +724,8 @@ class Worker:
                         f"Branch: {slug}\n"
                         f"PR: {pr_number}\n"
                         f"Fork remote: {remote}\n"
-                        f"Upstream: {remote}/{repo_ctx.default_branch}"
+                        f"Upstream: {remote}/{repo_ctx.default_branch}\n"
+                        f"Work dir: {self.work_dir}"
                     )
                     build_prompt(fido_dir, "setup", context)
                     session_id = claude_start(fido_dir)
@@ -772,7 +773,8 @@ class Worker:
             f"Repo: {repo_ctx.repo}\n"
             f"Branch: {slug}\n"
             f"Fork remote: {remote}\n"
-            f"Upstream: {remote}/{repo_ctx.default_branch}"
+            f"Upstream: {remote}/{repo_ctx.default_branch}\n"
+            f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
         session_id = claude_start(fido_dir)
