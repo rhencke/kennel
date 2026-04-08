@@ -2205,6 +2205,29 @@ class TestFindOrCreatePr:
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is None
 
+    def test_open_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5})
+        task = {"title": "t", "status": "pending"}
+        call_count = 0
+
+        def list_tasks_side_effect(_work_dir):
+            nonlocal call_count
+            call_count += 1
+            return [] if call_count <= 2 else [task]
+
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", side_effect=list_tasks_side_effect),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="setup-sess-open"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-open"
+
     def test_open_pr_seeds_from_pr_body_before_setup(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
@@ -2510,6 +2533,52 @@ class TestFindOrCreatePr:
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is None
         gh.create_pr.assert_not_called()
+
+    def test_no_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
+        """New-PR path: setup session_id is saved to state.json."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5})
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
+        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-new"
+
+    def test_no_pr_setup_persists_session_id_preserves_issue(
+        self, tmp_path: Path
+    ) -> None:
+        """New-PR path: persisting session_id does not clobber the issue key."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5})
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
+        state = load_state(fido_dir)
+        assert state.get("issue") == 5
+        assert state.get("setup_session_id") == "setup-sess-new"
 
     # --- Closed PR (fall through) path ---
 

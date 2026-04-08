@@ -742,6 +742,9 @@ class Worker:
                     build_prompt(fido_dir, "setup", context)
                     session_id = claude_start(fido_dir)
                     log.info("setup session: %s", session_id)
+                    state = load_state(fido_dir)
+                    state["setup_session_id"] = session_id
+                    save_state(fido_dir, state)
                     if not tasks.list_tasks(self.work_dir):
                         log.warning(
                             "setup produced no tasks — skipping PR #%s, will retry",
@@ -791,6 +794,9 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         session_id = claude_start(fido_dir)
         log.info("setup session: %s", session_id)
+        state = load_state(fido_dir)
+        state["setup_session_id"] = session_id
+        save_state(fido_dir, state)
 
         if not tasks.list_tasks(self.work_dir):
             log.warning("setup produced no tasks — skipping PR creation, will retry")
