@@ -16,6 +16,7 @@ from kennel.github import GitHub
 from kennel.prompts import Prompts
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
+_SHORTCODE_RE = re.compile(r"^(:[a-z0-9_+\-]+:)\s*(.*)", re.DOTALL)
 
 log = logging.getLogger(__name__)
 
@@ -329,12 +330,23 @@ class Worker:
             return
 
         lines = raw.splitlines()
-        if len(lines) < 2:
-            log.warning("set_status: expected 2 lines, got %d — skipping", len(lines))
-            return
+        if len(lines) >= 2:
+            emoji = lines[0].strip()
+            text = lines[1].strip()[:80]
+        else:
+            # Single-line output — extract :shortcode: prefix if present,
+            # otherwise fall back to :dog: and use the whole line as text.
+            m = _SHORTCODE_RE.match(raw.strip())
+            if m:
+                emoji = m.group(1)
+                text = m.group(2).strip()[:80]
+            else:
+                emoji = ":dog:"
+                text = raw.strip()[:80]
+            if not text:
+                log.warning("set_status: no status text extracted — skipping")
+                return
 
-        emoji = lines[0].strip()
-        text = lines[1].strip()[:80]
         self.gh.set_user_status(text, emoji, busy=busy)
         log.info("set_status: %s %s", emoji, text)
 

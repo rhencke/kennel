@@ -256,10 +256,54 @@ class TestWorker:
             Worker(tmp_path, gh).set_status("idle")
         gh.set_user_status.assert_not_called()
 
-    def test_set_status_skips_when_only_one_line(self, tmp_path: Path) -> None:
+    def test_set_status_falls_back_on_single_line_emoji(self, tmp_path: Path) -> None:
+        # Single unicode emoji with no text → :dog: fallback emoji, emoji char as text
         gh = self._make_gh()
         with (
             patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("idle")
+        gh.set_user_status.assert_called_once_with("🐕", ":dog:", busy=True)
+
+    def test_set_status_parses_shortcode_from_single_line(self, tmp_path: Path) -> None:
+        # Opus squishes two-line output into one :shortcode: text line
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status",
+                return_value=":dog: Fetching bugs",
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("idle")
+        gh.set_user_status.assert_called_once_with("Fetching bugs", ":dog:", busy=True)
+
+    def test_set_status_falls_back_to_dog_emoji_on_plain_single_line(
+        self, tmp_path: Path
+    ) -> None:
+        # No shortcode found → :dog: fallback, whole line as text
+        gh = self._make_gh()
+        with (
+            patch(
+                "kennel.worker.claude.generate_status",
+                return_value="Sniffing out endpoints",
+            ),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(tmp_path, gh).set_status("idle")
+        gh.set_user_status.assert_called_once_with(
+            "Sniffing out endpoints", ":dog:", busy=True
+        )
+
+    def test_set_status_skips_when_shortcode_only_no_text(self, tmp_path: Path) -> None:
+        # :shortcode: with no text → nothing meaningful to display
+        gh = self._make_gh()
+        with (
+            patch("kennel.worker.claude.generate_status", return_value=":dog:"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
@@ -296,20 +340,20 @@ class TestWorker:
                 Worker(tmp_path, gh).set_status("idle")
         assert "empty" in caplog.text
 
-    def test_set_status_logs_warning_on_single_line(
+    def test_set_status_logs_warning_when_no_text_extracted(
         self, tmp_path: Path, caplog
     ) -> None:
         import logging
 
         gh = self._make_gh()
         with (
-            patch("kennel.worker.claude.generate_status", return_value="🐕"),
+            patch("kennel.worker.claude.generate_status", return_value=":dog:"),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
             with caplog.at_level(logging.WARNING, logger="kennel"):
                 Worker(tmp_path, gh).set_status("idle")
-        assert "expected 2 lines" in caplog.text
+        assert "no status text" in caplog.text
 
     def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
         import logging
