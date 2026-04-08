@@ -281,8 +281,8 @@ class TestProcessAction:
             time.sleep(0.2)
         mock_task.assert_not_called()
 
-    def test_reply_to_comment_task_creates_task(self, server: tuple) -> None:
-        """TASK adds to tasks.json without a prefix."""
+    def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
+        """DO adds to tasks.json."""
         url, cfg = server
         payload = {
             **self._payload(),
@@ -306,7 +306,7 @@ class TestProcessAction:
         with (
             patch(
                 "kennel.server.reply_to_comment",
-                return_value=(True, "TASK", "add result caching"),
+                return_value=(True, "DO", "add result caching"),
             ),
             patch("kennel.server.create_task", side_effect=capture_task),
             patch("kennel.server.launch_worker"),

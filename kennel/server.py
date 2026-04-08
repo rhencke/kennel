@@ -114,7 +114,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
-                # TASK, ACT, DO → add to work queue.
+                # ACT, DO → add to work queue.
                 if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
                     pass  # No task needed
                 elif title:

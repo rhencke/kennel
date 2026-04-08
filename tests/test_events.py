@@ -345,16 +345,16 @@ class TestTriage:
             cat, title = _triage("hi", is_bot=True)
         assert cat == "DO"
 
-    def test_task_category_accepted(self, tmp_path: Path) -> None:
+    def test_task_category_falls_back(self, tmp_path: Path) -> None:
+        """TASK is no longer a valid bot category — falls back to DO."""
         with patch(
             "subprocess.run", return_value=_make_completed_run("TASK: add caching\n")
         ):
             cat, title = _triage("cache results", is_bot=True)
-        assert cat == "TASK"
-        assert title == "add caching"
+        assert cat == "DO"
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
-        """Ensure bot-specific categories (DO/TASK/DEFER/DUMP) are used when is_bot=True."""
+        """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
         captured = {}
 
         def fake_run(args, **kwargs):
@@ -365,7 +365,7 @@ class TestTriage:
             cat, _ = _triage("implement feature", is_bot=True)
         assert cat == "DO"
         assert "DO" in captured["prompt"]
-        assert "TASK" in captured["prompt"]
+        assert "TASK" not in captured["prompt"]
 
 
 class TestMaybeReact:
@@ -556,7 +556,7 @@ class TestReplyToComment:
         assert posted
         assert cat == "ANSWER"
 
-    def test_full_flow_task(self, tmp_path: Path) -> None:
+    def test_full_flow_do(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -569,8 +569,8 @@ class TestReplyToComment:
             if "claude" in args:
                 text = args[-1]
                 if "Triage" in text:
-                    return _make_completed_run("TASK: add result caching\n")
-                return _make_completed_run("Added to the work queue.\n")
+                    return _make_completed_run("DO: add result caching\n")
+                return _make_completed_run("On it!\n")
             return _make_completed_run("")
 
         mock_gh = MagicMock()
@@ -580,7 +580,7 @@ class TestReplyToComment:
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert posted
-        assert cat == "TASK"
+        assert cat == "DO"
         assert title == "add result caching"
         mock_gh.create_issue.assert_not_called()
 
