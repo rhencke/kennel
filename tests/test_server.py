@@ -530,12 +530,28 @@ class TestSelfRestart:
                 "pull_request": {"number": 1, "merged": True},
             }
             with (
-                patch("kennel.server.subprocess.run"),
+                patch("kennel.server.subprocess.run") as mock_run,
                 patch("kennel.server.os.execv") as mock_exec,
             ):
                 status = _post_webhook(url, cfg, "pull_request", payload)
                 assert status == 200
                 time.sleep(0.2)
                 mock_exec.assert_called_once()
+                calls = mock_run.call_args_list
+                assert any(c.args[0] == ["git", "checkout", "main"] for c in calls), (
+                    "expected git checkout main before pull"
+                )
+                assert any(c.args[0] == ["git", "pull"] for c in calls), (
+                    "expected git pull"
+                )
+                checkout_idx = next(
+                    i
+                    for i, c in enumerate(calls)
+                    if c.args[0] == ["git", "checkout", "main"]
+                )
+                pull_idx = next(
+                    i for i, c in enumerate(calls) if c.args[0] == ["git", "pull"]
+                )
+                assert checkout_idx < pull_idx, "checkout main must precede pull"
         finally:
             srv.shutdown()

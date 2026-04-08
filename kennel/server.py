@@ -151,6 +151,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if repo_cfg:
             log.info("kennel repo %s merged — pulling and restarting", repo_name)
             subprocess.run(
+                ["git", "checkout", "main"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+            )
+            subprocess.run(
                 ["git", "pull"], cwd=str(repo_cfg.work_dir), capture_output=True
             )
             os.execv(sys.argv[0], sys.argv)
