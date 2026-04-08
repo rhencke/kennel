@@ -342,13 +342,29 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
   log "session: $SESSION_ID"
 
   # Build PR body with tasks already populated
-  _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
+  _PR_BODY_PLAIN="$REQUEST
+
+Fixes #$CURRENT_ISSUE."
   _PR_RAW=$(claude --model claude-opus-4-6 --print \
-    --system-prompt "You are a GitHub PR description writer. Write a 2-3 sentence description suitable for a GitHub PR body. No markdown headers. The last line must be a blank line followed by 'Fixes #$CURRENT_ISSUE.' on its own line. Respond with ONLY a JSON object in the form {\"description\": \"your answer\"}. No other text before or after the JSON." \
+    --system-prompt "You are a GitHub PR description writer. Write a 2-3 sentence description suitable for a GitHub PR body. Summarize the problem being solved and how this PR addresses it. No markdown headers. The last line must be a blank line followed by 'Fixes #$CURRENT_ISSUE.' on its own line. Respond with ONLY a JSON object in the form {\"description\": \"your answer\"}. No other text before or after the JSON." \
     -p "$(cat "$SCRIPT_DIR/sub/persona.md")
 
-Write a 2-3 sentence pull request description for: $_PR_BODY_PLAIN" 2>/dev/null || true)
-  _PR_BODY_TEXT=$(printf '%s' "$_PR_RAW" | jq -r '.description // empty' 2>/dev/null || true)
+Issue title: $REQUEST
+
+Write a 2-3 sentence pull request description summarizing the problem and how this PR solves it." 2>/dev/null || true)
+  _PR_BODY_TEXT=$(printf '%s' "$_PR_RAW" | python3 -c "
+import json, re, sys
+raw = sys.stdin.read()
+candidates = [raw] + [m.group() for m in re.finditer(r'\{.*?\}', raw, re.DOTALL)]
+for c in candidates:
+    try:
+        obj = json.loads(c)
+        if isinstance(obj.get('description'), str):
+            print(obj['description'], end='')
+            break
+    except (json.JSONDecodeError, AttributeError):
+        pass
+" 2>/dev/null || true)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
 
   # Format tasks from tasks.json into work queue
