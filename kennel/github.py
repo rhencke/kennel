@@ -9,7 +9,6 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import requests as _requests
 
@@ -147,23 +146,47 @@ class GH:
     def find_pr(
         self, repo: str, issue_number: int | str, user: str
     ) -> dict[str, Any] | None:
-        """Find the most recent PR with issue_number in body by user."""
-        q = quote(f"#{issue_number} in:body repo:{repo} type:pr")
-        data = self._get(f"/search/issues?q={q}")
+        """Find a PR linked to issue_number via its body by user.
+
+        Uses the issue timeline cross-referenced events API to enumerate PRs
+        that reference this issue, then confirms the reference appears in the
+        PR body (word-boundary match).
+        """
         pattern = re.compile(rf"#{issue_number}\b")
-        for item in data.get("items", []):
-            if item.get("user", {}).get("login") != user:
-                continue
-            if not pattern.search(item.get("body", "") or ""):
-                continue
-            pr = self._get(f"/repos/{repo}/pulls/{item['number']}")
-            state = "MERGED" if pr.get("merged") else pr["state"].upper()
-            return {
-                "number": pr["number"],
-                "headRefName": pr["head"]["ref"],
-                "state": state,
-                "author": {"login": pr["user"]["login"]},
-            }
+        url: str | None = (
+            f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
+        )
+        while url:
+            resp = self._s.get(url)
+            resp.raise_for_status()
+            for event in resp.json():
+                if event.get("event") != "cross-referenced":
+                    continue
+                source_issue = event.get("source", {}).get("issue", {})
+                if "pull_request" not in source_issue:
+                    continue
+                if source_issue.get("user", {}).get("login") != user:
+                    continue
+                if not pattern.search(source_issue.get("body", "") or ""):
+                    continue
+                pr_number = source_issue["number"]
+                pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
+                state = "MERGED" if pr.get("merged") else pr["state"].upper()
+                return {
+                    "number": pr["number"],
+                    "headRefName": pr["head"]["ref"],
+                    "state": state,
+                    "author": {"login": pr["user"]["login"]},
+                }
+            link = resp.headers.get("Link", "")
+            url = next(
+                (
+                    part.split(";")[0].strip().strip("<>")
+                    for part in link.split(",")
+                    if 'rel="next"' in part
+                ),
+                None,
+            )
         return None
 
     def comment_issue(self, repo: str, number: int | str, body: str) -> None:

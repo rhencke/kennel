@@ -220,10 +220,21 @@ class TestGitHubClass:
 
     def test_find_pr_delegates(self) -> None:
         gh = self._github()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}, "body": "closes #5"}]
-        }
+        timeline_resp = MagicMock()
+        timeline_resp.json.return_value = [
+            {
+                "event": "cross-referenced",
+                "source": {
+                    "issue": {
+                        "number": 1,
+                        "user": {"login": "fido"},
+                        "body": "closes #5",
+                        "pull_request": {},
+                    }
+                },
+            }
+        ]
+        timeline_resp.headers = {}
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
             "number": 1,
@@ -232,7 +243,7 @@ class TestGitHubClass:
             "merged": False,
             "user": {"login": "fido"},
         }
-        with patch.object(gh._gh._s, "get", side_effect=[search_resp, pr_resp]):
+        with patch.object(gh._gh._s, "get", side_effect=[timeline_resp, pr_resp]):
             result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 1
@@ -611,21 +622,43 @@ class TestGHClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_post.call_args.kwargs["json"]["body"] == "hello"
 
+    def _timeline_resp(self, events: list[dict]) -> MagicMock:
+        """Build a mock timeline response with no next-page Link header."""
+        resp = MagicMock()
+        resp.json.return_value = events
+        resp.headers = {}
+        return resp
+
+    def _cross_ref_event(
+        self, pr_number: int, user: str, body: str, has_pull_request: bool = True
+    ) -> dict:
+        source_issue: dict = {
+            "number": pr_number,
+            "user": {"login": user},
+            "body": body,
+        }
+        if has_pull_request:
+            source_issue["pull_request"] = {}
+        return {"event": "cross-referenced", "source": {"issue": source_issue}}
+
+    def _pr_resp(
+        self, number: int, ref: str, state: str, merged: bool, user: str
+    ) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {
+            "number": number,
+            "head": {"ref": ref},
+            "state": state,
+            "merged": merged,
+            "user": {"login": user},
+        }
+        return resp
+
     def test_find_pr_returns_match(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}, "body": "closes #5"}]
-        }
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "number": 1,
-            "head": {"ref": "feat"},
-            "state": "open",
-            "merged": False,
-            "user": {"login": "fido"},
-        }
-        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+        timeline = self._timeline_resp([self._cross_ref_event(1, "fido", "closes #5")])
+        pr = self._pr_resp(1, "feat", "open", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, pr]):
             result = gh.find_pr("o/r", 5, "fido")
         assert result == {
             "number": 1,
@@ -636,58 +669,63 @@ class TestGHClass:
 
     def test_find_pr_merged_state(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 3, "user": {"login": "fido"}, "body": "closes #2"}]
-        }
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "number": 3,
-            "head": {"ref": "fix"},
-            "state": "closed",
-            "merged": True,
-            "user": {"login": "fido"},
-        }
-        with patch.object(gh._s, "get", side_effect=[search_resp, pr_resp]):
+        timeline = self._timeline_resp([self._cross_ref_event(3, "fido", "closes #2")])
+        pr = self._pr_resp(3, "fix", "closed", True, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, pr]):
             result = gh.find_pr("o/r", 2, "fido")
         assert result is not None
         assert result["state"] == "MERGED"
 
     def test_find_pr_filters_by_user(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "other"}}]
-        }
-        with patch.object(gh._s, "get", return_value=search_resp):
+        timeline = self._timeline_resp([self._cross_ref_event(1, "other", "closes #5")])
+        with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_returns_none_on_empty(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {"items": []}
-        with patch.object(gh._s, "get", return_value=search_resp):
+        timeline = self._timeline_resp([])
+        with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 1, "fido") is None
 
-    def test_find_pr_skips_substring_match(self) -> None:
-        """Search for #9 must not match a PR body that only contains #90."""
+    def test_find_pr_skips_non_pr_cross_reference(self) -> None:
+        """Cross-referenced events from plain issues (not PRs) are ignored."""
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {
-            "items": [{"number": 99, "user": {"login": "fido"}, "body": "closes #90"}]
-        }
-        with patch.object(gh._s, "get", return_value=search_resp):
+        event = self._cross_ref_event(9, "fido", "closes #5", has_pull_request=False)
+        timeline = self._timeline_resp([event])
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
+    def test_find_pr_skips_substring_match(self) -> None:
+        """#9 must not match a PR body that only contains #90."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [self._cross_ref_event(99, "fido", "closes #90")]
+        )
+        with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 9, "fido") is None
 
-    def test_find_pr_search_url(self) -> None:
+    def test_find_pr_timeline_url(self) -> None:
         gh = self._gh()
-        search_resp = MagicMock()
-        search_resp.json.return_value = {"items": []}
-        with patch.object(gh._s, "get", return_value=search_resp) as mock_get:
+        timeline = self._timeline_resp([])
+        with patch.object(gh._s, "get", return_value=timeline) as mock_get:
             gh.find_pr("o/r", 5, "fido")
         url = mock_get.call_args.args[0]
-        assert "/search/issues?q=" in url
-        assert "type%3Apr" in url or "type:pr" in url
+        assert "/repos/o/r/issues/5/timeline" in url
+
+    def test_find_pr_follows_pagination(self) -> None:
+        """find_pr fetches additional pages when a Link: next header is present."""
+        gh = self._gh()
+        page1 = MagicMock()
+        page1.json.return_value = [{"event": "committed"}]  # no match on page 1
+        next_url = "https://api.github.com/repos/o/r/issues/5/timeline?page=2"
+        page1.headers = {"Link": f'<{next_url}>; rel="next"'}
+        page2 = self._timeline_resp([self._cross_ref_event(7, "fido", "closes #5")])
+        pr = self._pr_resp(7, "feat", "open", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[page1, page2, pr]):
+            result = gh.find_pr("o/r", 5, "fido")
+        assert result is not None
+        assert result["number"] == 7
 
     def test_get_user(self) -> None:
         gh = self._gh()
