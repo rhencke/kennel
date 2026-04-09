@@ -196,11 +196,16 @@ def maybe_react(
     comment_type: str,
     repo: str,
     config: Config,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
@@ -209,9 +214,7 @@ def maybe_react(
 
     prompts = Prompts(persona)
     reaction = (
-        claude.print_prompt(
-            prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15
-        )
+        _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15)
         .lower()
         .split("\n")[0]
         .strip()
@@ -222,15 +225,21 @@ def maybe_react(
         log.debug("fido chose not to react (got: %s)", reaction)
         return
 
+    gh = _gh if _gh is not None else get_github()
     log.info("fido reacts with %s to comment %s", reaction, comment_id)
     try:
-        get_github().add_reaction(repo, comment_type, comment_id, reaction)
+        gh.add_reaction(repo, comment_type, comment_id, reaction)
     except Exception:
         log.exception("failed to post reaction")
 
 
 def reply_to_comment(
-    action: Action, config: Config, repo_cfg: RepoConfig
+    action: Action,
+    config: Config,
+    repo_cfg: RepoConfig,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> tuple[bool, str, str]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
@@ -238,6 +247,8 @@ def reply_to_comment(
     posted is True only when the reply was successfully sent to GitHub.
     Uses a per-comment lockfile to prevent races with work.sh.
     """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     info = action.reply_to
     if not info or not action.comment_body:
         return (False, "ACT", action.comment_body or action.prompt)
@@ -258,6 +269,8 @@ def reply_to_comment(
     else:
         lock_fd = None
 
+    gh = _gh if _gh is not None else get_github()
+
     persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
@@ -269,8 +282,12 @@ def reply_to_comment(
 
     # Enrich context with sibling threads when the comment needs more context
     context: dict[str, Any] = dict(action.context) if action.context else {}
-    if needs_more_context(comment) and info.get("repo") and info.get("pr"):
-        siblings = get_github().fetch_sibling_threads(info["repo"], info["pr"])
+    if (
+        needs_more_context(comment, _print_prompt=_print_prompt)
+        and info.get("repo")
+        and info.get("pr")
+    ):
+        siblings = gh.fetch_sibling_threads(info["repo"], info["pr"])
         if siblings:
             context["sibling_threads"] = siblings
             log.info(
@@ -279,7 +296,9 @@ def reply_to_comment(
             )
 
     # Step 1: Haiku triage
-    category, title = _triage(comment, action.is_bot, context)
+    category, title = _triage(
+        comment, action.is_bot, context, _print_prompt=_print_prompt
+    )
     log.info("triage: %s — %s", category, title)
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply
@@ -288,7 +307,7 @@ def reply_to_comment(
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
         issue_body = f"Deferred from {pr_url}\n\n> {comment}"
         try:
-            issue_url = get_github().create_issue(info["repo"], title, issue_body)
+            issue_url = gh.create_issue(info["repo"], title, issue_body)
             log.info("opened tracking issue for DEFER: %s", issue_url)
         except Exception:
             log.exception("failed to open tracking issue for DEFER")
@@ -302,9 +321,7 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = claude.print_prompt(
-        prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30
-    )
+    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
 
     if not body:
         body = (
@@ -316,16 +333,22 @@ def reply_to_comment(
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
     posted = False
     try:
-        get_github().reply_to_review_comment(
-            info["repo"], info["pr"], body, info["comment_id"]
-        )
+        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
         posted = True
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
 
     # Maybe react
-    maybe_react(comment, info["comment_id"], "pulls", info.get("repo", ""), config)
+    maybe_react(
+        comment,
+        info["comment_id"],
+        "pulls",
+        info.get("repo", ""),
+        config,
+        _print_prompt=_print_prompt,
+        _gh=gh,
+    )
 
     # For DUMP: also resolve the thread
     if category == "DUMP" and info.get("comment_id"):
@@ -349,19 +372,23 @@ def reply_to_review(
     config: Config,
     repo_cfg: RepoConfig,
     already_replied: set[int] | None = None,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> None:
     """Fetch inline comments from a review and reply to each."""
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     info = action.review_comments
     if not info:
         return
 
+    gh = _gh if _gh is not None else get_github()
     log.info(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
     try:
-        comments = get_github().get_review_comments(
-            info["repo"], info["pr"], info["review_id"]
-        )
+        comments = gh.get_review_comments(info["repo"], info["pr"], info["review_id"])
     except Exception:
         log.exception("failed to fetch review comments")
         return
@@ -396,18 +423,22 @@ def reply_to_review(
             ),
             config,
             repo_cfg,
+            _print_prompt=_print_prompt,
+            _gh=gh,
         )
         if posted and already_replied is not None:
             already_replied.add(cid)
 
 
-def needs_more_context(comment_body: str) -> bool:
+def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
     """Ask Haiku whether this comment needs sibling thread context to act on.
 
     Returns True if Haiku thinks the comment is too vague or cross-referential
     to act on alone (e.g. "same", "ditto", "^"), False otherwise.
     Falls back to False on any error.
     """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     prompt = (
         "A reviewer left this comment on a pull request:\n\n"
         f"{comment_body!r}\n\n"
@@ -416,16 +447,22 @@ def needs_more_context(comment_body: str) -> bool:
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = claude.print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
+    answer = _print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
     return answer.startswith("YES")
 
 
 def _triage(
-    comment_body: str, is_bot: bool, context: dict[str, Any] | None = None
+    comment_body: str,
+    is_bot: bool,
+    context: dict[str, Any] | None = None,
+    *,
+    _print_prompt=None,
 ) -> tuple[str, str]:
     """Ask Haiku to triage a comment. Returns (prefix, title)."""
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
-    text = claude.print_prompt(prompt, "claude-opus-4-6", timeout=15)
+    text = _print_prompt(prompt, "claude-opus-4-6", timeout=15)
     line = text.splitlines()[0] if text else ""
     if ":" in line:
         prefix, title = line.split(":", 1)
@@ -438,9 +475,16 @@ def _triage(
 
 
 def reply_to_issue_comment(
-    action: Action, config: Config, repo_cfg: RepoConfig
+    action: Action,
+    config: Config,
+    repo_cfg: RepoConfig,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> tuple[str, str]:
     """Triage and reply to a top-level PR comment (issue_comment event)."""
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
     comment = action.comment_body or ""
 
     # Extract PR number from prompt
@@ -456,17 +500,21 @@ def reply_to_issue_comment(
         persona = ""
 
     prompts = Prompts(persona)
-    category, title = _triage(comment, action.is_bot, action.context)
+    category, title = _triage(
+        comment, action.is_bot, action.context, _print_prompt=_print_prompt
+    )
     log.info("issue comment triage: %s — %s", category, title)
+
+    gh = _gh if _gh is not None else get_github()
 
     # For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER":
-        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
+        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
         issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
         try:
-            issue_url = get_github().create_issue(repo_full, title, issue_body)
+            issue_url = gh.create_issue(repo_full, title, issue_body)
             log.info("opened tracking issue for DEFER: %s", issue_url)
         except Exception:
             log.exception("failed to open tracking issue for DEFER")
@@ -476,31 +524,31 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = claude.print_prompt(
-        prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30
-    )
+    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     try:
-        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
-        get_github().comment_issue(repo_full, number, body)
+        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
+        gh.comment_issue(repo_full, number, body)
         log.info("reply posted")
     except Exception:
         log.exception("failed to post issue comment reply")
 
-    # Maybe react (extract comment_id from context)
-    if "#" in action.prompt:
-        import re
-
-        m = re.search(r"#(\d+)", action.prompt)
-        number = m.group(1) if m else ""
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
     if _cid:
-        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
-        maybe_react(comment, _cid, "issues", repo_full, config)
+        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
+        maybe_react(
+            comment,
+            _cid,
+            "issues",
+            repo_full,
+            config,
+            _print_prompt=_print_prompt,
+            _gh=gh,
+        )
 
     return (category, title)
 
@@ -509,6 +557,9 @@ def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
     registry: WorkerRegistry,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> None:
     """Ask Opus whether the new task invalidates the current in-progress task.
 
@@ -535,12 +586,16 @@ def _maybe_abort_for_new_task(
     if current_task is None:
         return
 
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+
+    issue_num = state.get("issue")
+    if not issue_num:
+        return
+
     # Fetch issue/PR context for Opus
     try:
-        gh = get_github()
-        issue_num = state.get("issue")
-        if not issue_num:
-            return
+        gh = _gh if _gh is not None else get_github()
         issue_data = gh.view_issue(repo_cfg.name, issue_num)
         pr_data = gh.find_pr(repo_cfg.name, issue_num, gh.get_user())
         pr_body = pr_data.get("body", "") if pr_data else ""
@@ -570,7 +625,7 @@ def _maybe_abort_for_new_task(
         f"  KEEP — don't abort, let current task finish first"
     )
     decision = (
-        claude.print_prompt(
+        _print_prompt(
             prompt=prompt,
             model="claude-opus-4-6",
             system_prompt=(
@@ -610,6 +665,9 @@ def create_task(
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
+    *,
+    _print_prompt=None,
+    _gh=None,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
@@ -630,15 +688,18 @@ def create_task(
     )
     launch_sync(config, repo_cfg)
     if registry is not None and thread:
-        _maybe_abort_for_new_task(repo_cfg, new_task, registry)
+        _maybe_abort_for_new_task(
+            repo_cfg, new_task, registry, _print_prompt=_print_prompt, _gh=_gh
+        )
     return new_task
 
 
-def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
+def launch_sync(config: Config, repo_cfg: RepoConfig, *, _gh=None) -> None:
     """Sync tasks.json → PR body in a background thread."""
     from kennel.worker import sync_tasks_background
 
-    sync_tasks_background(repo_cfg.work_dir, get_github())
+    gh = _gh if _gh is not None else get_github()
+    sync_tasks_background(repo_cfg.work_dir, gh)
     log.info("sync-tasks launched")
 
 

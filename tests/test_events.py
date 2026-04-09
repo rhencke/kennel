@@ -48,39 +48,46 @@ def _payload(repo_owner: str = "owner") -> dict:
 
 class TestNeedsMoreContext:
     def test_haiku_yes_returns_true(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="YES"):
-            assert needs_more_context("same")
+        assert needs_more_context("same", _print_prompt=MagicMock(return_value="YES"))
 
     def test_haiku_yes_with_explanation_returns_true(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="YES, this is vague"):
-            assert needs_more_context("^")
+        assert needs_more_context(
+            "^", _print_prompt=MagicMock(return_value="YES, this is vague")
+        )
 
     def test_haiku_no_returns_false(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="NO"):
-            assert not needs_more_context("This is a detailed review comment.")
+        assert not needs_more_context(
+            "This is a detailed review comment.",
+            _print_prompt=MagicMock(return_value="NO"),
+        )
 
     def test_haiku_no_with_explanation_returns_false(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="NO, it's clear"):
-            assert not needs_more_context(
-                "Please rename this variable to be more descriptive."
-            )
+        assert not needs_more_context(
+            "Please rename this variable to be more descriptive.",
+            _print_prompt=MagicMock(return_value="NO, it's clear"),
+        )
 
     def test_subprocess_exception_returns_false(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            assert not needs_more_context("ditto")
+        assert not needs_more_context("ditto", _print_prompt=MagicMock(return_value=""))
 
     def test_timeout_returns_false(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            assert not needs_more_context("same")
+        assert not needs_more_context("same", _print_prompt=MagicMock(return_value=""))
 
     def test_empty_output_returns_false(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            assert not needs_more_context("here too")
+        assert not needs_more_context(
+            "here too", _print_prompt=MagicMock(return_value="")
+        )
 
     def test_uses_haiku_model(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="YES") as mock_pp:
-            needs_more_context("same")
+        mock_pp = MagicMock(return_value="YES")
+        needs_more_context("same", _print_prompt=mock_pp)
         assert mock_pp.call_args.args[1] == "claude-haiku-4-5"
+
+    def test_defaults_to_claude_print_prompt(self) -> None:
+        with patch("kennel.claude.print_prompt", return_value="NO") as mock_pp:
+            result = needs_more_context("some comment")
+        mock_pp.assert_called_once()
+        assert result is False
 
 
 class TestIsAllowed:
@@ -299,41 +306,55 @@ class TestCommentLock:
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
-        with patch("kennel.claude.print_prompt", return_value="ACT: add tests"):
-            cat, title = _triage("please add tests", is_bot=False)
+        cat, title = _triage(
+            "please add tests",
+            is_bot=False,
+            _print_prompt=MagicMock(return_value="ACT: add tests"),
+        )
         assert cat == "ACT"
         assert title == "add tests"
 
     def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            cat, title = _triage("do stuff", is_bot=False)
+        cat, title = _triage(
+            "do stuff", is_bot=False, _print_prompt=MagicMock(return_value="")
+        )
         assert cat == "ACT"
 
     def test_fallback_for_bot(self, tmp_path: Path) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            cat, title = _triage("do stuff", is_bot=True)
+        cat, title = _triage(
+            "do stuff", is_bot=True, _print_prompt=MagicMock(return_value="")
+        )
         assert cat == "DO"
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
-        with patch("kennel.claude.print_prompt", return_value="DEFER: out of scope"):
-            cat, title = _triage("nit comment", is_bot=False, context=ctx)
+        cat, title = _triage(
+            "nit comment",
+            is_bot=False,
+            context=ctx,
+            _print_prompt=MagicMock(return_value="DEFER: out of scope"),
+        )
         assert cat == "DEFER"
 
     def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        with patch("kennel.claude.print_prompt", return_value="WEIRD: something"):
-            cat, title = _triage("hi", is_bot=False)
+        cat, title = _triage(
+            "hi", is_bot=False, _print_prompt=MagicMock(return_value="WEIRD: something")
+        )
         assert cat == "ACT"
 
     def test_timeout_falls_back(self, tmp_path: Path) -> None:
-        with patch("kennel.claude.print_prompt", return_value=""):
-            cat, title = _triage("hi", is_bot=True)
+        cat, title = _triage(
+            "hi", is_bot=True, _print_prompt=MagicMock(return_value="")
+        )
         assert cat == "DO"
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
-        with patch("kennel.claude.print_prompt", return_value="TASK: add caching"):
-            cat, title = _triage("cache results", is_bot=True)
+        cat, title = _triage(
+            "cache results",
+            is_bot=True,
+            _print_prompt=MagicMock(return_value="TASK: add caching"),
+        )
         assert cat == "DO"
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
@@ -344,11 +365,16 @@ class TestTriage:
             captured["prompt"] = prompt
             return "DO: implement feature"
 
-        with patch("kennel.claude.print_prompt", side_effect=fake_pp):
-            cat, _ = _triage("implement feature", is_bot=True)
+        cat, _ = _triage("implement feature", is_bot=True, _print_prompt=fake_pp)
         assert cat == "DO"
         assert "DO" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
+
+    def test_defaults_to_claude_print_prompt(self) -> None:
+        with patch("kennel.claude.print_prompt", return_value="ACT: do it") as mock_pp:
+            cat, title = _triage("do it", is_bot=False)
+        mock_pp.assert_called_once()
+        assert cat == "ACT"
 
 
 class TestMaybeReact:
@@ -365,35 +391,53 @@ class TestMaybeReact:
 
     def test_reacts_when_valid(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-
         mock_gh = MagicMock()
-        with (
-            patch("kennel.claude.print_prompt", return_value="heart"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            maybe_react("great work!", 99, "pulls", "owner/repo", cfg)
+        maybe_react(
+            "great work!",
+            99,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=MagicMock(return_value="heart"),
+            _gh=mock_gh,
+        )
         mock_gh.add_reaction.assert_called_once_with("owner/repo", "pulls", 99, "heart")
 
     def test_no_reaction_for_none(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-
         mock_gh = MagicMock()
-        with (
-            patch("kennel.claude.print_prompt", return_value="NONE"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            maybe_react("ok", 99, "pulls", "owner/repo", cfg)
+        maybe_react(
+            "ok",
+            99,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=MagicMock(return_value="NONE"),
+            _gh=mock_gh,
+        )
         mock_gh.add_reaction.assert_not_called()
 
     def test_timeout_warns_and_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.claude.print_prompt", return_value=""):
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+        maybe_react(
+            "hi",
+            1,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=MagicMock(return_value=""),
+        )
 
     def test_file_not_found_warns_and_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.claude.print_prompt", return_value=""):
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+        maybe_react(
+            "hi",
+            1,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=MagicMock(return_value=""),
+        )
 
     def test_reads_persona_if_present(self, tmp_path: Path) -> None:
         sub_dir = tmp_path / "sub"
@@ -414,12 +458,22 @@ class TestMaybeReact:
             captured["prompt"] = prompt
             return "eyes"
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            maybe_react("look at this", 1, "pulls", "owner/repo", cfg)
+        maybe_react(
+            "look at this",
+            1,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert "you are fido" in captured.get("prompt", "")
+
+    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        with patch("kennel.claude.print_prompt", return_value="NONE") as mock_pp:
+            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+        mock_pp.assert_called_once()
 
 
 class TestReplyToComment:
@@ -476,11 +530,13 @@ class TestReplyToComment:
                 return "ACT: add logging"
             return "I will add logging."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ACT"
         assert "logging" in title.lower()
@@ -501,11 +557,13 @@ class TestReplyToComment:
                 return "ASK: need more info"
             return "What specifically?"
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ASK"
 
@@ -525,11 +583,13 @@ class TestReplyToComment:
                 return "ANSWER: explain choice"
             return "I did this because..."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ANSWER"
 
@@ -550,11 +610,13 @@ class TestReplyToComment:
             return "On it!"
 
         mock_gh = MagicMock()
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert posted
         assert cat == "DO"
         assert title == "add result caching"
@@ -578,11 +640,13 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert posted
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
@@ -607,11 +671,13 @@ class TestReplyToComment:
                 return "DUMP: not applicable"
             return "Not applicable here."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "DUMP"
 
@@ -634,11 +700,13 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert posted
         assert cat == "DEFER"
 
@@ -658,11 +726,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
@@ -682,11 +752,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ACT"
 
@@ -730,11 +802,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return "ok"
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert posted
         assert cat == "ACT"
 
@@ -776,11 +850,9 @@ class TestReplyToReview:
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            reply_to_review(action, cfg, self._repo_cfg(tmp_path))
+        reply_to_review(
+            action, cfg, self._repo_cfg(tmp_path), _print_prompt=fake_pp, _gh=mock_gh
+        )
 
     def test_skips_already_replied(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -797,13 +869,14 @@ class TestReplyToReview:
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            reply_to_review(
-                action, cfg, self._repo_cfg(tmp_path), already_replied=already
-            )
+        reply_to_review(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            already_replied=already,
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         # no claude calls since all comments already replied
         assert not calls
 
@@ -815,8 +888,9 @@ class TestReplyToReview:
         )
         mock_gh = MagicMock()
         mock_gh.get_review_comments.side_effect = Exception("network fail")
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # should not raise
+        reply_to_review(
+            action, cfg, self._repo_cfg(tmp_path), _gh=mock_gh
+        )  # should not raise
 
     def test_no_inline_comments(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -826,8 +900,9 @@ class TestReplyToReview:
         )
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = []
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # empty → no replies
+        reply_to_review(
+            action, cfg, self._repo_cfg(tmp_path), _gh=mock_gh
+        )  # empty → no replies
 
 
 class TestReplyToIssueComment:
@@ -861,13 +936,13 @@ class TestReplyToIssueComment:
                 return "ACT: fix the bug"
             return "I'll fix that."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action(), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "ACT"
 
     def test_ask_reply(self, tmp_path: Path) -> None:
@@ -878,13 +953,13 @@ class TestReplyToIssueComment:
                 return "ASK: unclear"
             return "What do you mean?"
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action("unclear"), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action("unclear"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "ASK"
 
     def test_answer_reply(self, tmp_path: Path) -> None:
@@ -895,13 +970,13 @@ class TestReplyToIssueComment:
                 return "ANSWER: it works this way"
             return "Yes, because..."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action("why?"), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action("why?"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "ANSWER"
 
     def test_dump_reply(self, tmp_path: Path) -> None:
@@ -912,13 +987,13 @@ class TestReplyToIssueComment:
                 return "DUMP: nope"
             return "That won't work here."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action("do it differently"), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action("do it differently"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "DUMP"
 
     def test_defer_reply(self, tmp_path: Path) -> None:
@@ -932,13 +1007,13 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action("big refactor"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
             "owner/repo",
@@ -958,13 +1033,13 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action("big refactor"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert cat == "DEFER"
 
     def test_empty_body_fallback(self, tmp_path: Path) -> None:
@@ -975,13 +1050,13 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action(), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "ACT"
 
     def test_timeout_fallback(self, tmp_path: Path) -> None:
@@ -992,13 +1067,13 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(
-                self._action(), cfg, self._repo_cfg(tmp_path)
-            )
+        cat, title = reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
         assert cat == "ACT"
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
@@ -1019,11 +1094,13 @@ class TestReplyToIssueComment:
 
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
+        cat, title = reply_to_issue_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert cat == "ACT"
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
@@ -1040,11 +1117,29 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=MagicMock()),
-        ):
-            cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
+        cat, title = reply_to_issue_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
+        assert cat == "ACT"
+
+    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        action = self._action()
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
+
+        with patch("kennel.claude.print_prompt", side_effect=fake_pp) as mock_pp:
+            cat, title = reply_to_issue_comment(
+                action, cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
+            )
+        assert mock_pp.called
         assert cat == "ACT"
 
 
@@ -1222,15 +1317,19 @@ class TestCreateTask:
         mock_gh.view_issue.return_value = {"title": "Issue", "body": "body"}
         mock_gh.get_user.return_value = "fido"
         mock_gh.find_pr.return_value = {"title": "PR", "body": "pr body"}
+        mock_pp = MagicMock(return_value="KEEP")
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.events.claude") as mock_claude,
         ):
-            mock_claude.print_prompt.return_value = "KEEP"
             create_task(
-                "New thread task", cfg, repo_cfg, thread=new_thread, registry=registry
+                "New thread task",
+                cfg,
+                repo_cfg,
+                thread=new_thread,
+                registry=registry,
+                _print_prompt=mock_pp,
+                _gh=mock_gh,
             )
         registry.abort_task.assert_not_called()
 
@@ -1297,7 +1396,6 @@ class TestCreateTask:
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github"),
         ):
             create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
         registry.abort_task.assert_not_called()
@@ -1344,10 +1442,16 @@ class TestCreateTask:
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.events.claude", mock_claude),
         ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _print_prompt=mock_claude.print_prompt,
+                _gh=mock_gh,
+            )
         registry.abort_task.assert_called_once_with("owner/repo")
         # in-progress task should be removed from tasks.json
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -1371,10 +1475,16 @@ class TestCreateTask:
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.events.claude", mock_claude),
         ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _print_prompt=mock_claude.print_prompt,
+                _gh=mock_gh,
+            )
         registry.abort_task.assert_called_once_with("owner/repo")
         # task should still be in tasks.json
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -1397,10 +1507,16 @@ class TestCreateTask:
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.events.claude", mock_claude),
         ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _print_prompt=mock_claude.print_prompt,
+                _gh=mock_gh,
+            )
         registry.abort_task.assert_not_called()
 
     def test_opus_context_failure_skips_abort(self, tmp_path: Path) -> None:
@@ -1423,12 +1539,20 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
+        mock_gh = MagicMock()
+        mock_gh.view_issue.side_effect = RuntimeError("no token")
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
-            patch("kennel.events.get_github", side_effect=RuntimeError("no token")),
         ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _gh=mock_gh,
+            )
         registry.abort_task.assert_not_called()
 
 
@@ -1449,20 +1573,17 @@ class TestLaunchSync:
 
     def test_calls_sync_tasks_background(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with (
-            patch("kennel.worker.sync_tasks_background") as mock_sync,
-            patch("kennel.events.get_github") as mock_gh,
-        ):
-            launch_sync(cfg, self._repo_cfg(tmp_path))
-        mock_sync.assert_called_once_with(tmp_path, mock_gh.return_value)
+        mock_gh = MagicMock()
+        with patch("kennel.worker.sync_tasks_background") as mock_sync:
+            launch_sync(cfg, self._repo_cfg(tmp_path), _gh=mock_gh)
+        mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with (
-            patch("kennel.worker.sync_tasks_background"),
-            patch("kennel.events.get_github"),
-        ):
-            launch_sync(cfg, self._repo_cfg(tmp_path))  # should not raise
+        with patch("kennel.worker.sync_tasks_background"):
+            launch_sync(
+                cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
+            )  # should not raise
 
 
 class TestLaunchWorker:
@@ -1612,11 +1733,15 @@ class TestMaybeReactGhException:
         )
         mock_gh = MagicMock()
         mock_gh.add_reaction.side_effect = RuntimeError("network down")
-        with (
-            patch("kennel.claude.print_prompt", return_value="heart"),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            maybe_react("great job", 77, "pulls", "owner/repo", cfg)  # must not raise
+        maybe_react(
+            "great job",
+            77,
+            "pulls",
+            "owner/repo",
+            cfg,
+            _print_prompt=MagicMock(return_value="heart"),
+            _gh=mock_gh,
+        )  # must not raise
 
 
 class TestReplyToCommentElseBranch:
@@ -1648,17 +1773,17 @@ class TestReplyToCommentElseBranch:
         # The else fires when _triage returns an unrecognised prefix, which hits the
         # fallback "ACT"/"DO". We need to force an unlisted category past _triage.
         # Monkey-patch _triage directly to return a fake category.
-        with patch("kennel.events._triage", return_value=("UNKNOWN_CAT", "do it")):
-            with (
-                patch(
-                    "kennel.claude.print_prompt", return_value="I'll look into this."
-                ),
-                patch("kennel.events.needs_more_context", return_value=False),
-                patch("kennel.events.get_github", return_value=MagicMock()),
-            ):
-                posted, cat, title = reply_to_comment(
-                    action, cfg, self._repo_cfg(tmp_path)
-                )
+        with (
+            patch("kennel.events._triage", return_value=("UNKNOWN_CAT", "do it")),
+            patch("kennel.events.needs_more_context", return_value=False),
+        ):
+            posted, cat, title = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=MagicMock(return_value="I'll look into this."),
+                _gh=MagicMock(),
+            )
         assert posted
         assert cat == "UNKNOWN_CAT"
 
@@ -1681,13 +1806,13 @@ class TestReplyToCommentElseBranch:
 
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            posted, cat, title = reply_to_comment(
-                action, cfg, self._repo_cfg(tmp_path)
-            )  # must not raise
+        posted, cat, title = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )  # must not raise
         assert not posted  # post failed
         assert cat == "ACT"
 
@@ -1725,13 +1850,14 @@ class TestReplyToReviewAlreadyRepliedTracking:
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(500, "please fix")]
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            reply_to_review(
-                action, cfg, self._repo_cfg(tmp_path), already_replied=already
-            )
+        reply_to_review(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            already_replied=already,
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert 500 in already
 
     def test_does_not_add_to_already_replied_on_post_failure(
@@ -1755,13 +1881,14 @@ class TestReplyToReviewAlreadyRepliedTracking:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(501, "please fix")]
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            reply_to_review(
-                action, cfg, self._repo_cfg(tmp_path), already_replied=already
-            )
+        reply_to_review(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            already_replied=already,
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert 501 not in already  # post failed — should not be marked as replied
 
 
@@ -1794,7 +1921,7 @@ class TestReplyToCommentTerseEnrichment:
         )
         captured_context: dict = {}
 
-        def fake_triage(body, is_bot, context=None):
+        def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
             if context is not None:
                 captured_context.update(context)
             return ("ACT", "handle same comment")
@@ -1811,10 +1938,14 @@ class TestReplyToCommentTerseEnrichment:
         with (
             patch("kennel.events._triage", side_effect=fake_triage),
             patch("kennel.events.needs_more_context", return_value=True),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.claude.print_prompt", return_value="On it!"),
         ):
-            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=MagicMock(return_value="On it!"),
+                _gh=mock_gh,
+            )
 
         mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
         assert "sibling_threads" in captured_context
@@ -1836,12 +1967,14 @@ class TestReplyToCommentTerseEnrichment:
                 return "ACT: do it"
             return "Got it."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.needs_more_context", return_value=False),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        with patch("kennel.events.needs_more_context", return_value=False):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
         mock_gh.fetch_sibling_threads.assert_not_called()
 
@@ -1862,12 +1995,14 @@ class TestReplyToCommentTerseEnrichment:
                 return "ACT: do it"
             return "On it."
 
-        with (
-            patch("kennel.claude.print_prompt", side_effect=fake_pp),
-            patch("kennel.events.needs_more_context", return_value=True),
-            patch("kennel.events.get_github", return_value=mock_gh),
-        ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        with patch("kennel.events.needs_more_context", return_value=True):
+            posted, cat, title = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
         assert posted
         assert cat == "ACT"
@@ -1884,7 +2019,7 @@ class TestReplyToCommentTerseEnrichment:
         )
         captured_context: dict = {}
 
-        def fake_triage(body, is_bot, context=None):
+        def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
             if context is not None:
                 captured_context.update(context)
             return ("ACT", "check caret comment")
@@ -1895,9 +2030,13 @@ class TestReplyToCommentTerseEnrichment:
         with (
             patch("kennel.events._triage", side_effect=fake_triage),
             patch("kennel.events.needs_more_context", return_value=True),
-            patch("kennel.events.get_github", return_value=mock_gh),
-            patch("kennel.claude.print_prompt", return_value="On it!"),
         ):
-            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=MagicMock(return_value="On it!"),
+                _gh=mock_gh,
+            )
 
         assert "sibling_threads" not in captured_context
