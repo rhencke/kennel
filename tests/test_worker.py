@@ -3939,6 +3939,38 @@ class TestResolveAddressedThreads:
         assert result is False
         gh.resolve_thread.assert_not_called()
 
+    def test_skips_resolve_when_pending_task_references_reply_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """Task comment_id matches a non-root comment — must still block resolution."""
+        from kennel import tasks as tasks_mod
+        from kennel.types import TaskType
+
+        worker, gh = self._make_worker(tmp_path)
+        # Thread with root comment databaseId=10, reply databaseId=11
+        node = {
+            "id": "tid-reply",
+            "isResolved": False,
+            "comments": {
+                "nodes": [
+                    {"author": {"login": "owner"}, "databaseId": 10},
+                    {"author": {"login": "owner"}, "databaseId": 11},
+                    {"author": {"login": "fido-bot"}, "databaseId": 12},
+                ]
+            },
+        }
+        gh.get_review_threads.return_value = self._make_threads_data([node])
+        # Task references reply comment (id=11), not the root (id=10)
+        tasks_mod.add_task(
+            tmp_path,
+            title="pending reply task",
+            task_type=TaskType.THREAD,
+            thread={"repo": "owner/repo", "pr": 1, "comment_id": 11},
+        )
+        result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
+        assert result is False
+        gh.resolve_thread.assert_not_called()
+
     def test_resolves_when_all_sibling_tasks_complete(self, tmp_path: Path) -> None:
         from kennel import tasks as tasks_mod
 
