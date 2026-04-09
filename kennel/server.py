@@ -36,9 +36,9 @@ _RESTART_CMDS: list[list[str]] = [
 ]
 
 
-def _run_git_cmd(work_dir: Path, cmd: list[str]) -> bool:
+def _run_git_cmd(work_dir: Path, cmd: list[str], *, _run=subprocess.run) -> bool:
     try:
-        subprocess.run(cmd, cwd=str(work_dir), capture_output=True, check=True)
+        _run(cmd, cwd=str(work_dir), capture_output=True, check=True)
     except subprocess.CalledProcessError as e:
         log.error("self-restart: git command failed (%d): %s", e.returncode, cmd)
         return False
@@ -48,6 +48,15 @@ def _run_git_cmd(work_dir: Path, cmd: list[str]) -> bool:
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
+    # Injectable callables — set as class attributes so HTTP-driven tests can
+    # replace them without patching module-level names.
+    _fn_reply_to_comment = reply_to_comment
+    _fn_reply_to_review = reply_to_review
+    _fn_reply_to_issue_comment = reply_to_issue_comment
+    _fn_create_task = create_task
+    _fn_launch_worker = launch_worker
+    _fn_subprocess_run = subprocess.run
+    _fn_os_execv = os.execv
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -125,7 +134,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                     category, title = None, None
                 else:
-                    posted, category, title = reply_to_comment(
+                    posted, category, title = type(self)._fn_reply_to_comment(
                         action, self.config, repo_cfg
                     )
                     if cid and posted:
@@ -137,7 +146,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
                     pass  # No task needed
                 elif title:
-                    create_task(
+                    type(self)._fn_create_task(
                         title,
                         self.config,
                         repo_cfg,
@@ -146,18 +155,20 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     )
 
             if action.review_comments:
-                reply_to_review(
+                type(self)._fn_reply_to_review(
                     action, self.config, repo_cfg, already_replied=_replied_comments
                 )
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                category, title = reply_to_issue_comment(action, self.config, repo_cfg)
+                category, title = type(self)._fn_reply_to_issue_comment(
+                    action, self.config, repo_cfg
+                )
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER") and title:
-                    create_task(
+                    type(self)._fn_create_task(
                         title,
                         self.config,
                         repo_cfg,
@@ -166,7 +177,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     )
 
             # Non-comment events just trigger kennel worker — no task needed
-            launch_worker(repo_cfg, self.registry)
+            type(self)._fn_launch_worker(repo_cfg, self.registry)
         except Exception:
             log.exception("error processing action")
 
@@ -176,9 +187,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.info("kennel repo %s merged — pulling and restarting", repo_name)
             self.registry.stop_and_join(repo_name)
             for cmd in _RESTART_CMDS:
-                if not _run_git_cmd(repo_cfg.work_dir, cmd):
+                if not _run_git_cmd(
+                    repo_cfg.work_dir, cmd, _run=type(self)._fn_subprocess_run
+                ):
                     return
-            os.execv(sys.argv[0], sys.argv)
+            type(self)._fn_os_execv(sys.argv[0], sys.argv)
 
     def do_GET(self) -> None:
         if self.path == "/status":
@@ -214,16 +227,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run() -> None:
-    config = Config.from_args()
+def run(
+    *,
+    _from_args=Config.from_args,
+    _HTTPServer=HTTPServer,
+    _make_registry=make_registry,
+    _path_home=Path.home,
+    _basic_config=logging.basicConfig,
+    _stderr=sys.stderr,
+) -> None:
+    config = _from_args()
 
-    log_file = Path.home() / "log" / "kennel.log"
+    log_file = _path_home() / "log" / "kennel.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     repo_filter = RepoContextFilter()
     handlers: list[logging.Handler] = [logging.FileHandler(log_file)]
-    if sys.stderr.isatty():
-        handlers.append(logging.StreamHandler(sys.stderr))
+    if _stderr.isatty():
+        handlers.append(logging.StreamHandler(_stderr))
     for handler in handlers:
         handler.addFilter(repo_filter)
 
@@ -235,7 +256,7 @@ def run() -> None:
         repo_handler.addFilter(RepoNameFilter(short_name))
         handlers.append(repo_handler)
 
-    logging.basicConfig(
+    _basic_config(
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)-5s [%(repo_name)s] %(message)s",
         datefmt="%H:%M:%S",
@@ -243,9 +264,9 @@ def run() -> None:
     )
 
     WebhookHandler.config = config
-    WebhookHandler.registry = make_registry(config.repos)
+    WebhookHandler.registry = _make_registry(config.repos)
 
-    server = HTTPServer(("", config.port), WebhookHandler)
+    server = _HTTPServer(("", config.port), WebhookHandler)
     repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
     log.info("kennel listening on :%d — repos: %s", config.port, repos_str)
     try:

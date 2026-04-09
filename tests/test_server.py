@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from http.server import HTTPServer
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,6 +32,22 @@ def _config(tmp_path: Path) -> Config:
 
 def _sign(body: bytes, secret: bytes) -> str:
     return "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _restore_handler_fns():
+    saved = {
+        "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
+        "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
+        "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
+        "_fn_create_task": WebhookHandler._fn_create_task,
+        "_fn_launch_worker": WebhookHandler._fn_launch_worker,
+        "_fn_subprocess_run": WebhookHandler._fn_subprocess_run,
+        "_fn_os_execv": WebhookHandler._fn_os_execv,
+    }
+    yield
+    for attr, val in saved.items():
+        setattr(WebhookHandler, attr, val)
 
 
 @pytest.fixture()
@@ -212,14 +228,13 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
-        with (
-            patch("kennel.server.launch_worker") as mock_worker,
-            patch("kennel.server.create_task"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_worker.assert_called()
+        mock_worker = MagicMock()
+        WebhookHandler._fn_launch_worker = mock_worker
+        WebhookHandler._fn_create_task = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_worker.assert_called()
 
     def test_reply_to_comment_creates_task_for_act(self, server: tuple) -> None:
         url, cfg = server
@@ -237,19 +252,16 @@ class TestProcessAction:
             },
             "pull_request": {"number": 3, "title": "My PR", "body": "desc"},
         }
-        with (
-            patch(
-                "kennel.server.reply_to_comment",
-                return_value=(True, "ACT", "add logging"),
-            ) as mock_reply,
-            patch("kennel.server.create_task") as mock_task,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_reply.assert_called()
-            mock_task.assert_called()
+        mock_reply = MagicMock(return_value=(True, "ACT", "add logging"))
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_reply.assert_called()
+        mock_task.assert_called()
 
     def test_reply_to_comment_no_task_for_dump(self, server: tuple) -> None:
         url, cfg = server
@@ -267,18 +279,16 @@ class TestProcessAction:
             },
             "pull_request": {"number": 4, "title": "My PR", "body": ""},
         }
-        with (
-            patch(
-                "kennel.server.reply_to_comment", return_value=(True, "DUMP", "nope")
-            ) as mock_reply,
-            patch("kennel.server.create_task") as mock_task,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_reply.assert_called()
-            mock_task.assert_not_called()
+        mock_reply = MagicMock(return_value=(True, "DUMP", "nope"))
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_reply.assert_called()
+        mock_task.assert_not_called()
 
     def test_reply_to_comment_defer_skips_task(self, server: tuple) -> None:
         """DEFER files a GitHub issue instead — no tasks.json entry."""
@@ -297,17 +307,15 @@ class TestProcessAction:
             },
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
-        with (
-            patch(
-                "kennel.server.reply_to_comment",
-                return_value=(True, "DEFER", "big refactor"),
-            ),
-            patch("kennel.server.create_task") as mock_task,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            return_value=(True, "DEFER", "big refactor")
+        )
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
         mock_task.assert_not_called()
 
     def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
@@ -332,17 +340,14 @@ class TestProcessAction:
         def capture_task(title, *args, **kwargs):
             task_titles.append(title)
 
-        with (
-            patch(
-                "kennel.server.reply_to_comment",
-                return_value=(True, "DO", "add result caching"),
-            ),
-            patch("kennel.server.create_task", side_effect=capture_task),
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            return_value=(True, "DO", "add result caching")
+        )
+        WebhookHandler._fn_create_task = capture_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
         assert task_titles == ["add result caching"]
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
@@ -365,15 +370,14 @@ class TestProcessAction:
                 },
                 "pull_request": {"number": 6, "title": "My PR", "body": ""},
             }
-            with (
-                patch("kennel.server.reply_to_comment") as mock_reply,
-                patch("kennel.server.create_task"),
-                patch("kennel.server.launch_worker"),
-            ):
-                status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-                assert status == 200
-                time.sleep(0.2)
-                mock_reply.assert_not_called()
+            mock_reply = MagicMock()
+            WebhookHandler._fn_reply_to_comment = mock_reply
+            WebhookHandler._fn_create_task = MagicMock()
+            WebhookHandler._fn_launch_worker = MagicMock()
+            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+            assert status == 200
+            time.sleep(0.2)
+            mock_reply.assert_not_called()
         finally:
             ks._replied_comments.discard(203)
 
@@ -389,14 +393,13 @@ class TestProcessAction:
             },
             "pull_request": {"number": 9},
         }
-        with (
-            patch("kennel.server.reply_to_review") as mock_review,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_review.assert_called()
+        mock_review = MagicMock()
+        WebhookHandler._fn_reply_to_review = mock_review
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_review.assert_called()
 
     def test_issue_comment_handled(self, server: tuple) -> None:
         url, cfg = server
@@ -416,29 +419,27 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        with (
-            patch(
-                "kennel.server.reply_to_issue_comment", return_value=("ACT", "do it")
-            ) as mock_ic,
-            patch("kennel.server.create_task") as mock_task,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "issue_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_ic.assert_called()
-            mock_task.assert_called_once_with(
-                "do it",
-                cfg,
-                cfg.repos["owner/repo"],
-                thread={
-                    "repo": "owner/repo",
-                    "pr": 11,
-                    "comment_id": 300,
-                    "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
-                },
-                registry=WebhookHandler.registry,
-            )
+        mock_ic = MagicMock(return_value=("ACT", "do it"))
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = mock_ic
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_ic.assert_called()
+        mock_task.assert_called_once_with(
+            "do it",
+            cfg,
+            cfg.repos["owner/repo"],
+            thread={
+                "repo": "owner/repo",
+                "pr": 11,
+                "comment_id": 300,
+                "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
+            },
+            registry=WebhookHandler.registry,
+        )
 
     def test_issue_comment_no_task_for_answer(self, server: tuple) -> None:
         url, cfg = server
@@ -453,19 +454,16 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        with (
-            patch(
-                "kennel.server.reply_to_issue_comment",
-                return_value=("ANSWER", "because"),
-            ) as mock_ic,
-            patch("kennel.server.create_task") as mock_task,
-            patch("kennel.server.launch_worker"),
-        ):
-            status = _post_webhook(url, cfg, "issue_comment", payload)
-            assert status == 200
-            time.sleep(0.2)
-            mock_ic.assert_called()
-            mock_task.assert_not_called()
+        mock_ic = MagicMock(return_value=("ANSWER", "because"))
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = mock_ic
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_ic.assert_called()
+        mock_task.assert_not_called()
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server
@@ -474,21 +472,18 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
-        with patch("kennel.server.launch_worker", side_effect=Exception("explode")):
-            status = _post_webhook(url, cfg, "pull_request", payload)
-            assert status == 200
-            time.sleep(0.2)
-            # server still alive — no crash
+        WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        time.sleep(0.2)
+        # server still alive — no crash
 
 
 class TestRun:
     """Tests for the run() entry point."""
 
-    def test_run_starts_server(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
-        from kennel.server import run
-
-        fake_cfg = Config(
+    def _fake_cfg(self, tmp_path: Path) -> Config:
+        return Config(
             port=0,
             secret=b"test",
             repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
@@ -498,18 +493,20 @@ class TestRun:
             sub_dir=tmp_path / "sub",
         )
 
+    def test_run_starts_server(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
-        tmp_path / "log"
-
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-        ):
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+        )
 
         mock_server.serve_forever.assert_called_once()
         mock_server.server_close.assert_called_once()
@@ -517,16 +514,7 @@ class TestRun:
     def test_run_format_includes_repo_name(self, tmp_path: Path) -> None:
         from kennel.server import run
 
-        fake_cfg = Config(
-            port=0,
-            secret=b"test",
-            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            self_repo=None,
-            sub_dir=tmp_path / "sub",
-        )
-
+        fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
@@ -535,14 +523,13 @@ class TestRun:
         def fake_basic_config(**kwargs):
             captured_kwargs.append(kwargs)
 
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("logging.basicConfig", side_effect=fake_basic_config),
-        ):
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=fake_basic_config,
+        )
 
         assert len(captured_kwargs) == 1
         assert "%(repo_name)s" in captured_kwargs[0]["format"]
@@ -551,16 +538,7 @@ class TestRun:
         from kennel.server import run
         from kennel.worker import RepoContextFilter
 
-        fake_cfg = Config(
-            port=0,
-            secret=b"test",
-            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            self_repo=None,
-            sub_dir=tmp_path / "sub",
-        )
-
+        fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
@@ -569,50 +547,39 @@ class TestRun:
         def fake_basic_config(**kwargs):
             captured_handlers.extend(kwargs.get("handlers", []))
 
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("logging.basicConfig", side_effect=fake_basic_config),
-        ):
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=fake_basic_config,
+        )
 
         assert len(captured_handlers) >= 1
         for handler in captured_handlers:
             assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
 
     def test_run_stderr_tty_adds_stream_handler(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
         from kennel.server import run
 
-        fake_cfg = Config(
-            port=0,
-            secret=b"test",
-            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            self_repo=None,
-            sub_dir=tmp_path / "sub",
-        )
-
+        fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_stderr = MagicMock()
+        mock_stderr.isatty.return_value = True
 
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("sys.stderr") as mock_stderr,
-        ):
-            mock_stderr.isatty.return_value = True
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _stderr=mock_stderr,
+        )
 
         mock_server.serve_forever.assert_called_once()
 
     def test_run_creates_per_repo_log_handlers(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
         from kennel.server import run
         from kennel.worker import RepoContextFilter, RepoNameFilter
 
@@ -637,14 +604,13 @@ class TestRun:
         def fake_basic_config(**kwargs):
             captured_handlers.extend(kwargs.get("handlers", []))
 
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("logging.basicConfig", side_effect=fake_basic_config),
-        ):
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=fake_basic_config,
+        )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
         assert len(captured_handlers) == 3  # shared file + 2 per-repo (no tty)
@@ -665,7 +631,6 @@ class TestRun:
             assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
 
     def test_run_per_repo_log_file_path(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
         from kennel.server import run
         from kennel.worker import RepoNameFilter
 
@@ -687,14 +652,13 @@ class TestRun:
         def fake_basic_config(**kwargs):
             captured_handlers.extend(kwargs.get("handlers", []))
 
-        with (
-            patch("kennel.server.Config.from_args", return_value=fake_cfg),
-            patch("kennel.server.HTTPServer", return_value=mock_server),
-            patch("kennel.server.make_registry"),
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("logging.basicConfig", side_effect=fake_basic_config),
-        ):
-            run()
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=fake_basic_config,
+        )
 
         repo_handler = next(
             h
@@ -732,7 +696,7 @@ _MERGE_PAYLOAD = {
 class TestSelfRestart:
     """Tests for the self-restart flow (self_repo merge triggers exec)."""
 
-    def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
+    def _make_server(self, tmp_path: Path):
         cfg = _self_restart_cfg(tmp_path)
         mock_registry = MagicMock()
         WebhookHandler.config = cfg
@@ -741,64 +705,56 @@ class TestSelfRestart:
         port = srv.server_address[1]
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
-        url = f"http://127.0.0.1:{port}"
+        return srv, f"http://127.0.0.1:{port}", cfg, mock_registry
+
+    def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            with (
-                patch("kennel.server.subprocess.run") as mock_run,
-                patch("kennel.server.os.execv") as mock_exec,
-            ):
-                mock_run.return_value = MagicMock(returncode=0)
-                status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-                assert status == 200
-                time.sleep(0.2)
-                mock_exec.assert_called_once()
-                mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-                calls = mock_run.call_args_list
-                cmds = [c.args[0] for c in calls]
-                assert ["git", "checkout", "main"] in cmds, (
-                    "expected git checkout main before pull"
-                )
-                assert ["git", "reset", "--hard"] in cmds, (
-                    "expected git reset --hard before pull"
-                )
-                assert ["git", "clean", "-fd"] in cmds, (
-                    "expected git clean -fd before pull"
-                )
-                assert ["git", "pull"] in cmds, "expected git pull"
-                reset_idx = cmds.index(["git", "reset", "--hard"])
-                clean_idx = cmds.index(["git", "clean", "-fd"])
-                checkout_idx = cmds.index(["git", "checkout", "main"])
-                pull_idx = cmds.index(["git", "pull"])
-                assert reset_idx < clean_idx, "reset must precede clean"
-                assert clean_idx < checkout_idx, "clean must precede checkout main"
-                assert checkout_idx < pull_idx, "checkout main must precede pull"
+            mock_run = MagicMock(return_value=MagicMock(returncode=0))
+            mock_exec = MagicMock()
+            WebhookHandler._fn_subprocess_run = mock_run
+            WebhookHandler._fn_os_execv = mock_exec
+            status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            assert status == 200
+            time.sleep(0.2)
+            mock_exec.assert_called_once()
+            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            calls = mock_run.call_args_list
+            cmds = [c.args[0] for c in calls]
+            assert ["git", "checkout", "main"] in cmds, (
+                "expected git checkout main before pull"
+            )
+            assert ["git", "reset", "--hard"] in cmds, (
+                "expected git reset --hard before pull"
+            )
+            assert ["git", "clean", "-fd"] in cmds, "expected git clean -fd before pull"
+            assert ["git", "pull"] in cmds, "expected git pull"
+            reset_idx = cmds.index(["git", "reset", "--hard"])
+            clean_idx = cmds.index(["git", "clean", "-fd"])
+            checkout_idx = cmds.index(["git", "checkout", "main"])
+            pull_idx = cmds.index(["git", "pull"])
+            assert reset_idx < clean_idx, "reset must precede clean"
+            assert clean_idx < checkout_idx, "clean must precede checkout main"
+            assert checkout_idx < pull_idx, "checkout main must precede pull"
         finally:
             srv.shutdown()
 
     def test_self_restart_stop_and_join_precedes_git(self, tmp_path: Path) -> None:
-        cfg = _self_restart_cfg(tmp_path)
         call_order: list[str] = []
-        mock_registry = MagicMock()
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
         mock_registry.stop_and_join.side_effect = lambda *_a, **_kw: call_order.append(
             "stop_and_join"
         )
-        WebhookHandler.config = cfg
-        WebhookHandler.registry = mock_registry
-        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
-        port = srv.server_address[1]
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        url = f"http://127.0.0.1:{port}"
         try:
-            with (
-                patch("kennel.server.subprocess.run") as mock_run,
-                patch("kennel.server.os.execv"),
-            ):
-                mock_run.side_effect = lambda *_a, **_kw: (
+            mock_run = MagicMock(
+                side_effect=lambda *_a, **_kw: (
                     call_order.append("git") or MagicMock(returncode=0)
                 )
-                _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-                time.sleep(0.2)
+            )
+            WebhookHandler._fn_subprocess_run = mock_run
+            WebhookHandler._fn_os_execv = MagicMock()
+            _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            time.sleep(0.2)
         finally:
             srv.shutdown()
         assert call_order[0] == "stop_and_join", (
@@ -807,27 +763,18 @@ class TestSelfRestart:
         assert "git" in call_order[1:], "git commands must follow stop_and_join"
 
     def test_self_restart_aborts_on_git_failure(self, tmp_path: Path) -> None:
-        cfg = _self_restart_cfg(tmp_path)
-        mock_registry = MagicMock()
-        WebhookHandler.config = cfg
-        WebhookHandler.registry = mock_registry
-        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
-        port = srv.server_address[1]
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        url = f"http://127.0.0.1:{port}"
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            with (
-                patch("kennel.server.subprocess.run") as mock_run,
-                patch("kennel.server.os.execv") as mock_exec,
-            ):
-                # First command fails; subsequent commands and exec should be skipped.
-                mock_run.side_effect = subprocess.CalledProcessError(1, [])
-                status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-                assert status == 200
-                time.sleep(0.2)
-                mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-                mock_run.assert_called_once()
-                mock_exec.assert_not_called()
+            mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
+            mock_exec = MagicMock()
+            WebhookHandler._fn_subprocess_run = mock_run
+            WebhookHandler._fn_os_execv = mock_exec
+            # First command fails; subsequent commands and exec should be skipped.
+            status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            assert status == 200
+            time.sleep(0.2)
+            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_run.assert_called_once()
+            mock_exec.assert_not_called()
         finally:
             srv.shutdown()
