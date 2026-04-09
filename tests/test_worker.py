@@ -925,7 +925,11 @@ class TestWorker:
     def test_run_calls_find_or_create_pr_when_issue_found(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        gh.view_issue.return_value = {"title": "My task", "body": "", "state": "OPEN"}
+        gh.view_issue.return_value = {
+            "title": "My task",
+            "body": "Issue body text",
+            "state": "OPEN",
+        }
         worker = Worker(tmp_path, gh)
         mock_focp = MagicMock(return_value=(42, "my-branch"))
         repo_ctx = self._make_mock_repo_ctx()
@@ -942,7 +946,9 @@ class TestWorker:
             patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
-        mock_focp.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 8, "My task")
+        mock_focp.assert_called_once_with(
+            mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text"
+        )
 
     def test_run_returns_0_when_find_or_create_pr_returns_none(
         self, tmp_path: Path
@@ -2142,17 +2148,22 @@ class TestBuildPrBody:
         assert "<!-- no tasks yet -->" in result
 
     def test_falls_back_to_plain_when_claude_returns_empty(
-        self, tmp_path: Path
+        self, tmp_path: Path, caplog
     ) -> None:
+        import logging
+
         worker = self._make_worker(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_json", return_value=""),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
+            caplog.at_level(logging.WARNING, logger="kennel"),
         ):
             (tmp_path / "persona.md").write_text("")
             result = worker._build_pr_body("Fix auth", 7)
-        assert "Working on: Fix auth" in result
+        assert "Fix auth" in result
+        assert "Fixes #7." in result
+        assert "falling back" in caplog.text.lower()
 
     def test_contains_separator(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -2191,6 +2202,19 @@ class TestBuildPrBody:
             worker._build_pr_body("req", 99)
         assert "99" in mock_pp.call_args[1]["system_prompt"]
 
+    def test_system_prompt_instructs_problem_and_solution(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_json", return_value="d"
+            ) as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        assert "problem" in mock_pp.call_args[1]["system_prompt"].lower()
+
     def test_prompt_includes_persona(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
@@ -2203,6 +2227,19 @@ class TestBuildPrBody:
             (tmp_path / "persona.md").write_text("I am Fido, a very good dog.")
             worker._build_pr_body("req", 1)
         assert "I am Fido, a very good dog." in mock_pp.call_args[1]["prompt"]
+
+    def test_prompt_includes_issue_body(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_json", return_value="d"
+            ) as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1, "Detailed description of the issue.")
+        assert "Detailed description of the issue." in mock_pp.call_args[1]["prompt"]
 
     def test_skips_completed_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -2576,6 +2613,28 @@ class TestFindOrCreatePr:
             "main",
             "do-work",
         )
+
+    def test_no_pr_passes_issue_body_to_build_pr_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build_body = MagicMock(return_value="body")
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="sess"),
+            patch.object(worker, "_build_pr_body", mock_build_body),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Fix it", "Detailed issue body."
+            )
+        mock_build_body.assert_called_once_with(ANY, 5, "Detailed issue body.")
 
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

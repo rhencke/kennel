@@ -726,7 +726,7 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
-    def _build_pr_body(self, request: str, issue: int) -> str:
+    def _build_pr_body(self, request: str, issue: int, issue_body: str = "") -> str:
         """Build the draft PR body: generated description + work-queue section.
 
         Reads the Fido persona from ``sub/persona.md`` and generates a 2-3
@@ -741,22 +741,26 @@ class Worker:
         except OSError:
             persona = ""
 
-        plain = f"Working on: {request}. Implementation in progress."
+        plain = f"{request}\n\nFixes #{issue}."
         system_prompt = (
             "You are a GitHub PR description writer."
             " Write a 2-3 sentence description suitable for a GitHub PR body."
+            " Summarize the problem being solved and how this PR addresses it."
             " No markdown headers."
             f" The last line must be a blank line followed by 'Fixes #{issue}.'"
             " on its own line."
         )
+        body_section = f"\n\nIssue body:\n{issue_body}" if issue_body else ""
         desc = claude.print_prompt_json(
-            prompt=f"{persona}\n\nWrite a 2-3 sentence pull request description"
-            f" for: {plain}",
+            prompt=f"{persona}\n\nIssue title: {request}{body_section}\n\n"
+            "Write a 2-3 sentence pull request description summarizing"
+            " the problem and how this PR solves it.",
             key="description",
             model="claude-opus-4-6",
             system_prompt=system_prompt,
         )
         if not desc:
+            log.warning("Opus returned no description — falling back to plain text")
             desc = plain
 
         task_list = tasks.list_tasks(self.work_dir)
@@ -782,6 +786,7 @@ class Worker:
         repo_ctx: RepoContext,
         issue: int,
         issue_title: str,
+        issue_body: str = "",
     ) -> tuple[int, str] | None:
         """Find or create the branch and draft PR for *issue*.
 
@@ -888,7 +893,7 @@ class Worker:
             return None
 
         # Build PR body with tasks already populated by setup
-        pr_body = self._build_pr_body(request, issue)
+        pr_body = self._build_pr_body(request, issue, issue_body)
 
         # Create draft PR
         url = self.gh.create_pr(
@@ -1579,10 +1584,13 @@ class Worker:
 
             issue_data = self.gh.view_issue(repo_ctx.repo, issue)
             issue_title = issue_data["title"]
+            issue_body = issue_data.get("body", "") or ""
             self.post_pickup_comment(
                 repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
             )
-            result = self.find_or_create_pr(ctx.fido_dir, repo_ctx, issue, issue_title)
+            result = self.find_or_create_pr(
+                ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
+            )
             if result is None:
                 return 0
             pr_number, slug = result
