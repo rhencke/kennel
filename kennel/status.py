@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ class RepoStatus:
     current_task: str | None  # title of first in_progress or pending task
     claude_pid: int | None
     claude_uptime: int | None  # seconds
+    worker_what: str | None  # last reported activity text
 
 
 @dataclass
@@ -186,6 +189,33 @@ def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def write_activity(fido_dir: Path, what: str, busy: bool) -> None:
+    """Write the worker's current activity to fido_dir/activity.json atomically."""
+    fido_dir.mkdir(parents=True, exist_ok=True)
+    data = json.dumps({"what": what, "busy": busy})
+    fd, tmp = tempfile.mkstemp(dir=fido_dir, prefix=".activity-")
+    try:
+        os.write(fd, data.encode())
+    finally:
+        os.close(fd)
+    try:
+        os.replace(tmp, fido_dir / "activity.json")
+    except Exception:
+        os.unlink(tmp)
+        raise
+
+
+def _read_activity(fido_dir: Path) -> dict[str, Any]:
+    """Read activity.json from fido_dir, returning {} if absent or unreadable."""
+    path = fido_dir / "activity.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError, OSError:
+        return {}
+
+
 def repo_status(repo_config: RepoConfig) -> RepoStatus:
     """Collect status for a single repo."""
     git_dir = _git_dir(repo_config.work_dir)
@@ -199,6 +229,7 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
             current_task=None,
             claude_pid=None,
             claude_uptime=None,
+            worker_what=None,
         )
 
     fido_dir = git_dir / "fido"
@@ -218,6 +249,9 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
         _process_uptime_seconds(claude_pid) if claude_pid is not None else None
     )
 
+    activity = _read_activity(fido_dir)
+    worker_what = activity.get("what") or None
+
     return RepoStatus(
         name=repo_config.name,
         fido_running=running,
@@ -227,6 +261,7 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
         current_task=current,
         claude_pid=claude_pid,
         claude_uptime=claude_uptime,
+        worker_what=worker_what,
     )
 
 
@@ -262,6 +297,9 @@ def format_status(status: KennelStatus) -> str:
             parts.append("fido running")
         else:
             parts.append("fido idle")
+
+        if repo.worker_what:
+            parts.append(repo.worker_what)
 
         if repo.issue is not None:
             total = repo.pending + repo.completed

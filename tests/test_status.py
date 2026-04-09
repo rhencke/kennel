@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kennel.config import RepoConfig
 from kennel.status import (
     KennelStatus,
@@ -20,12 +22,14 @@ from kennel.status import (
     _kennel_pid,
     _pgrep,
     _process_uptime_seconds,
+    _read_activity,
     _read_state,
     _read_tasks,
     _repos_from_pid,
     collect,
     format_status,
     repo_status,
+    write_activity,
 )
 
 
@@ -346,6 +350,81 @@ class TestReadTasks:
             assert _read_tasks(fido_dir) == []
 
 
+class TestWriteActivity:
+    def test_creates_activity_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        write_activity(fido_dir, "Working on: #1", busy=True)
+        data = json.loads((fido_dir / "activity.json").read_text())
+        assert data == {"what": "Working on: #1", "busy": True}
+
+    def test_overwrites_existing_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        write_activity(fido_dir, "old", busy=True)
+        write_activity(fido_dir, "new", busy=False)
+        data = json.loads((fido_dir / "activity.json").read_text())
+        assert data == {"what": "new", "busy": False}
+
+    def test_creates_fido_dir_if_missing(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        assert not fido_dir.exists()
+        write_activity(fido_dir, "Working on: #1", busy=True)
+        assert (fido_dir / "activity.json").exists()
+
+    def test_busy_false(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        write_activity(fido_dir, "Napping", busy=False)
+        data = json.loads((fido_dir / "activity.json").read_text())
+        assert data["busy"] is False
+
+    def test_cleans_up_temp_file_on_error(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        with patch("os.replace", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                write_activity(fido_dir, "x", busy=True)
+        # no stray temp files
+        assert list(fido_dir.glob(".activity-*")) == []
+
+
+class TestReadActivity:
+    def test_absent_returns_empty(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        assert _read_activity(fido_dir) == {}
+
+    def test_reads_activity(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "activity.json").write_text(
+            '{"what": "Working on: #1", "busy": true}'
+        )
+        assert _read_activity(fido_dir) == {"what": "Working on: #1", "busy": True}
+
+    def test_corrupt_json_returns_empty(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "activity.json").write_text("not json {{{")
+        assert _read_activity(fido_dir) == {}
+
+    def test_oserror_returns_empty(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "activity.json").touch()
+        with patch.object(Path, "read_text", side_effect=OSError("oops")):
+            assert _read_activity(fido_dir) == {}
+
+    def test_roundtrip_with_write_activity(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        write_activity(fido_dir, "Fixing CI: tests on PR #7", busy=True)
+        data = _read_activity(fido_dir)
+        assert data["what"] == "Fixing CI: tests on PR #7"
+        assert data["busy"] is True
+
+
 class TestCurrentTask:
     def test_empty_list(self) -> None:
         assert _current_task([]) is None
@@ -394,6 +473,7 @@ class TestRepoStatus:
         assert result.current_task is None
         assert result.claude_pid is None
         assert result.claude_uptime is None
+        assert result.worker_what is None
 
     def test_with_running_fido_and_issue(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
@@ -423,6 +503,24 @@ class TestRepoStatus:
         assert result.current_task == "next task"
         assert result.claude_pid == 555
         assert result.claude_uptime == 180
+        assert result.worker_what is None
+
+    def test_reads_worker_activity(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        fido_dir = git_dir / "fido"
+        fido_dir.mkdir(parents=True)
+        write_activity(fido_dir, "Working on: #5 add thing", busy=True)
+
+        cfg = self._make_config(tmp_path)
+        with (
+            patch("kennel.status._git_dir", return_value=git_dir),
+            patch("kennel.status._fido_running", return_value=True),
+            patch("kennel.status._claude_pid", return_value=None),
+            patch("kennel.status._process_uptime_seconds", return_value=None),
+        ):
+            result = repo_status(cfg)
+
+        assert result.worker_what == "Working on: #5 add thing"
 
     def test_no_claude_pid_skips_uptime(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
@@ -455,6 +553,7 @@ class TestCollect:
             current_task=None,
             claude_pid=None,
             claude_uptime=None,
+            worker_what=None,
         )
         with (
             patch("kennel.status._kennel_pid", return_value=42),
@@ -495,6 +594,7 @@ class TestFormatStatus:
             current_task=None,
             claude_pid=None,
             claude_uptime=None,
+            worker_what=None,
         )
         defaults.update(kwargs)
         return RepoStatus(**defaults)
@@ -582,3 +682,21 @@ class TestFormatStatus:
         assert lines[0].startswith("kennel:")
         assert lines[1].startswith("a/b:")
         assert lines[2].startswith("c/d:")
+
+    def test_worker_what_included_in_output(self) -> None:
+        repo = self._repo(fido_running=True, worker_what="Working on: #3 add widget")
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "Working on: #3 add widget" in output
+
+    def test_worker_what_none_not_included(self) -> None:
+        repo = self._repo(fido_running=True, worker_what=None)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "Working on:" not in output
+
+    def test_worker_what_appears_after_fido_status(self) -> None:
+        repo = self._repo(fido_running=True, worker_what="Napping — waiting for work")
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "fido running — Napping — waiting for work" in output
