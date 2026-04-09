@@ -2176,6 +2176,40 @@ class TestBuildPrBody:
             worker._build_pr_body("req", 1, "Detailed description of the issue.")
         assert "Detailed description of the issue." in mock_pp.call_args[1]["prompt"]
 
+    def test_prompt_includes_pending_task_titles(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        pending = [
+            self._pending_task("Add retry logic"),
+            self._pending_task("Write tests"),
+        ]
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_json", return_value="d"
+            ) as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=pending),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        prompt = mock_pp.call_args[1]["prompt"]
+        assert "Add retry logic" in prompt
+        assert "Write tests" in prompt
+
+    def test_prompt_omits_task_section_when_no_pending_tasks(
+        self, tmp_path: Path
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_json", return_value="d"
+            ) as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        assert "Planned changes" not in mock_pp.call_args[1]["prompt"]
+
     def test_skips_completed_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         task_list = [

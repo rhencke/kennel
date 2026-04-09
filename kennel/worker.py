@@ -784,9 +784,16 @@ class Worker:
             f" The last line must be a blank line followed by 'Fixes #{issue}.'"
             " on its own line."
         )
+        task_list = tasks.list_tasks(self.work_dir)
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
         body_section = f"\n\nIssue body:\n{issue_body}" if issue_body else ""
+        tasks_section = (
+            "\n\nPlanned changes:\n" + "\n".join(f"- {t['title']}" for t in pending)
+            if pending
+            else ""
+        )
         desc = claude.print_prompt_json(
-            prompt=f"{persona}\n\nIssue title: {request}{body_section}\n\n"
+            prompt=f"{persona}\n\nIssue title: {request}{body_section}{tasks_section}\n\n"
             "Write a 2-3 sentence pull request description summarizing"
             " the problem and how this PR solves it.",
             key="description",
@@ -797,8 +804,6 @@ class Worker:
             log.warning("Opus returned no description — falling back to plain text")
             desc = plain
 
-        task_list = tasks.list_tasks(self.work_dir)
-        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
         next_task = _pick_next_task(task_list)
         if pending:
             lines = []
