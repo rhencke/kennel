@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.cli import Cmd, build_parser, main
+from kennel.types import TaskType
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -26,14 +27,16 @@ def _task_file(tmp_path: Path) -> Path:
 class TestBuildParser:
     def test_add_subcommand(self, tmp_path: Path) -> None:
         parser = build_parser()
-        args = parser.parse_args([str(tmp_path), "add", "my task"])
+        args = parser.parse_args([str(tmp_path), "add", "spec", "my task"])
         assert args.command == "add"
+        assert args.task_type == TaskType.SPEC
         assert args.title == "my task"
         assert args.description == ""
 
     def test_add_with_description(self, tmp_path: Path) -> None:
         parser = build_parser()
-        args = parser.parse_args([str(tmp_path), "add", "title", "desc"])
+        args = parser.parse_args([str(tmp_path), "add", "ci", "title", "desc"])
+        assert args.task_type == TaskType.CI
         assert args.description == "desc"
 
     def test_add_with_comment_id(self, tmp_path: Path) -> None:
@@ -42,6 +45,7 @@ class TestBuildParser:
             [
                 str(tmp_path),
                 "add",
+                "thread",
                 "my task",
                 "--comment-id",
                 "42",
@@ -51,22 +55,23 @@ class TestBuildParser:
                 "7",
             ]
         )
+        assert args.task_type == TaskType.THREAD
         assert args.comment_id == 42
         assert args.repo == "a/b"
         assert args.pr == 7
 
     def test_add_without_comment_id_defaults_none(self, tmp_path: Path) -> None:
         parser = build_parser()
-        args = parser.parse_args([str(tmp_path), "add", "my task"])
+        args = parser.parse_args([str(tmp_path), "add", "spec", "my task"])
         assert args.comment_id is None
         assert args.repo is None
         assert args.pr is None
 
     def test_complete_subcommand(self, tmp_path: Path) -> None:
         parser = build_parser()
-        args = parser.parse_args([str(tmp_path), "complete", "my task"])
+        args = parser.parse_args([str(tmp_path), "complete", "task-id-123"])
         assert args.command == "complete"
-        assert args.title == "my task"
+        assert args.task_id == "task-id-123"
 
     def test_list_subcommand(self, tmp_path: Path) -> None:
         parser = build_parser()
@@ -83,71 +88,112 @@ class TestBuildParser:
 
 
 class TestCmdAdd:
-    def test_adds_task(self, tmp_path: Path) -> None:
+    def test_adds_task(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, "my task", "some description")
+        Cmd().add(tmp_path, TaskType.SPEC, "my task", "some description")
+        capsys.readouterr()  # consume add output
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert len(tasks) == 1
         assert tasks[0]["title"] == "my task"
         assert tasks[0]["description"] == "some description"
+        assert tasks[0]["type"] == "spec"
 
-    def test_adds_task_no_description(self, tmp_path: Path) -> None:
+    def test_adds_task_no_description(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, "bare task", "")
+        Cmd().add(tmp_path, TaskType.CI, "bare task", "")
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["description"] == ""
+        assert tasks[0]["type"] == "ci"
 
-    def test_adds_task_with_comment_id_builds_thread(self, tmp_path: Path) -> None:
+    def test_adds_task_with_comment_id_builds_thread(
+        self, tmp_path: Path, capsys
+    ) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, "threaded", "", comment_id=42, repo="a/b", pr=7)
+        Cmd().add(
+            tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
+        )
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 42, "repo": "a/b", "pr": 7}
 
-    def test_adds_task_comment_id_only(self, tmp_path: Path) -> None:
+    def test_adds_task_comment_id_only(self, tmp_path: Path, capsys) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
-        Cmd().add(tmp_path, "threaded", "", comment_id=99)
+        Cmd().add(tmp_path, TaskType.THREAD, "threaded", "", comment_id=99)
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 99}
 
-    def test_add_deduplicates_by_comment_id(self, tmp_path: Path) -> None:
+    def test_add_deduplicates_by_comment_id(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, "first title", "", comment_id=42, repo="a/b", pr=7)
-        Cmd().add(tmp_path, "different title", "", comment_id=42, repo="a/b", pr=7)
+        Cmd().add(
+            tmp_path,
+            TaskType.THREAD,
+            "first title",
+            "",
+            comment_id=42,
+            repo="a/b",
+            pr=7,
+        )
+        capsys.readouterr()
+        Cmd().add(
+            tmp_path,
+            TaskType.THREAD,
+            "different title",
+            "",
+            comment_id=42,
+            repo="a/b",
+            pr=7,
+        )
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert len(tasks) == 1
         assert tasks[0]["title"] == "first title"
 
+    def test_add_prints_task_json(self, tmp_path: Path, capsys) -> None:
+        _task_file(tmp_path)
+        Cmd().add(tmp_path, TaskType.SPEC, "my task", "")
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert data["title"] == "my task"
+        assert "id" in data
+
 
 # ── Cmd.complete ──────────────────────────────────────────────────────────────
 
 
 class TestCmdComplete:
-    def test_completes_task_no_thread(self, tmp_path: Path) -> None:
+    def test_completes_task_no_thread(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
         cmd = Cmd()
-        cmd.add(tmp_path, "task to finish", "")
-        cmd.complete(tmp_path, "task to finish")
+        task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
+        capsys.readouterr()
+        cmd.complete(tmp_path, task["id"])
         from kennel.tasks import list_tasks
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
-    def test_completes_task_with_thread_resolves(self, tmp_path: Path, caplog) -> None:
+    def test_completes_task_with_thread_resolves(
+        self, tmp_path: Path, capsys, caplog
+    ) -> None:
         _task_file(tmp_path)
         from kennel.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
-        add_task(tmp_path, title="threaded task", thread=thread)
+        task = add_task(
+            tmp_path, title="threaded task", task_type=TaskType.THREAD, thread=thread
+        )
 
         mock_github = MagicMock()
         mock_github.get_user.return_value = "fido-bot"
@@ -184,19 +230,21 @@ class TestCmdComplete:
         }
 
         with caplog.at_level(logging.INFO, logger="kennel"):
-            Cmd(github=mock_github).complete(tmp_path, "threaded task")
+            Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
 
     def test_completes_task_with_thread_skips_if_not_last(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, capsys, caplog
     ) -> None:
         _task_file(tmp_path)
         from kennel.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
-        add_task(tmp_path, title="threaded task", thread=thread)
+        task = add_task(
+            tmp_path, title="threaded task", task_type=TaskType.THREAD, thread=thread
+        )
 
         mock_github = MagicMock()
         mock_github.get_user.return_value = "fido-bot"
@@ -216,7 +264,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="kennel"):
-            Cmd(github=mock_github).complete(tmp_path, "threaded task")
+            Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -228,13 +276,15 @@ class TestCmdComplete:
         from kennel.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
-        add_task(tmp_path, title="threaded task", thread=thread)
+        task = add_task(
+            tmp_path, title="threaded task", task_type=TaskType.THREAD, thread=thread
+        )
 
         mock_github = MagicMock()
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = []
 
-        Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -245,14 +295,16 @@ class TestCmdComplete:
         from kennel.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
-        add_task(tmp_path, title="threaded task", thread=thread)
+        task = add_task(
+            tmp_path, title="threaded task", task_type=TaskType.THREAD, thread=thread
+        )
 
         mock_github = MagicMock()
         mock_github.get_user.side_effect = RuntimeError("network error")
 
         # Should not raise; exception is swallowed and logged
         with caplog.at_level(logging.WARNING, logger="kennel"):
-            Cmd(github=mock_github).complete(tmp_path, "threaded task")
+            Cmd(github=mock_github).complete(tmp_path, task["id"])
         assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
@@ -260,7 +312,9 @@ class TestCmdComplete:
         from kennel.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
-        add_task(tmp_path, title="threaded task", thread=thread)
+        task = add_task(
+            tmp_path, title="threaded task", task_type=TaskType.THREAD, thread=thread
+        )
 
         mock_github = MagicMock()
         mock_github.get_user.return_value = "fido-bot"
@@ -290,7 +344,7 @@ class TestCmdComplete:
             }
         }
 
-        Cmd(github=mock_github).complete(tmp_path, "threaded task")
+        Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -300,12 +354,19 @@ class TestCmdComplete:
         from kennel.tasks import add_task
 
         # thread missing 'pr' and 'comment_id'
-        add_task(tmp_path, title="task", thread={"repo": "a/b"})
+        task = add_task(
+            tmp_path, title="task", task_type=TaskType.THREAD, thread={"repo": "a/b"}
+        )
 
         mock_github = MagicMock()
-        Cmd(github=mock_github).complete(tmp_path, "task")
+        Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_not_called()
+
+    def test_complete_nonexistent_id_no_error(self, tmp_path: Path) -> None:
+        """Completing a non-existent task ID should not raise."""
+        _task_file(tmp_path)
+        Cmd().complete(tmp_path, "nonexistent-id")
 
 
 # ── Cmd.list ──────────────────────────────────────────────────────────────────
@@ -315,8 +376,10 @@ class TestCmdList:
     def test_prints_json(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
         cmd = Cmd()
-        cmd.add(tmp_path, "alpha", "")
-        cmd.add(tmp_path, "beta", "desc")
+        cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
+        capsys.readouterr()
+        cmd.add(tmp_path, TaskType.SPEC, "beta", "desc")
+        capsys.readouterr()
         cmd.list(tmp_path)
         out = capsys.readouterr().out
         data = json.loads(out)
@@ -335,20 +398,22 @@ class TestCmdList:
 
 
 class TestMain:
-    def test_add_via_main(self, tmp_path: Path) -> None:
+    def test_add_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "task title"])
+        main([str(tmp_path), "add", "spec", "task title"])
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["title"] == "task title"
 
-    def test_add_via_main_with_comment_id(self, tmp_path: Path) -> None:
+    def test_add_via_main_with_comment_id(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
         main(
             [
                 str(tmp_path),
                 "add",
+                "thread",
                 "task title",
                 "--comment-id",
                 "55",
@@ -358,22 +423,26 @@ class TestMain:
                 "3",
             ]
         )
+        capsys.readouterr()
         from kennel.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 55, "repo": "r/r", "pr": 3}
 
-    def test_complete_via_main(self, tmp_path: Path) -> None:
+    def test_complete_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "finish me"])
-        main([str(tmp_path), "complete", "finish me"])
+        main([str(tmp_path), "add", "spec", "finish me"])
+        out = capsys.readouterr().out
+        task_id = json.loads(out)["id"]
+        main([str(tmp_path), "complete", task_id])
         from kennel.tasks import list_tasks
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
     def test_list_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "one"])
+        main([str(tmp_path), "add", "spec", "one"])
+        capsys.readouterr()
         main([str(tmp_path), "list"])
         out = capsys.readouterr().out
         data = json.loads(out)
