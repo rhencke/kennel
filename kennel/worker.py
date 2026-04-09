@@ -764,56 +764,26 @@ class Worker:
         self,
         request: str,
         issue: int,
-        issue_body: str = "",
-        setup_session_id: str = "",
+        *,
+        setup_session_id: str,
     ) -> str:
         """Build the draft PR body: generated description + work-queue section.
 
-        If *setup_session_id* is provided, continues that planning session so
-        Opus can write a description informed by everything it just planned.
-        Otherwise falls back to a fresh ``claude --print`` call with the issue
-        context and task list.  Falls back to plain text if Claude returns nothing.
-        Appends the pending task list inside the ``WORK_QUEUE_START/END`` markers.
+        Continues *setup_session_id* (the planning session) so Opus writes the
+        description with full context from everything it just planned.  Falls
+        back to plain text if Claude returns nothing.  Appends the pending task
+        list inside the ``WORK_QUEUE_START/END`` markers.
         """
         plain = f"{request}\n\nFixes #{issue}."
         task_list = tasks.list_tasks(self.work_dir)
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
 
-        if setup_session_id:
-            continuation_prompt = (
-                "Based on the planning above, write a specific 2-3 sentence pull"
-                " request description for this PR. Reference the concrete tasks by"
-                " name. No markdown headers. Do not include a 'Fixes #N.' line."
-            )
-            desc = claude.resume_status(
-                setup_session_id, continuation_prompt, timeout=60
-            )
-        else:
-            persona_path = _sub_dir() / "persona.md"
-            try:
-                persona = persona_path.read_text()
-            except OSError:
-                persona = ""
-            system_prompt = (
-                "You are a GitHub PR description writer."
-                " Write a specific 2-3 sentence description for a GitHub PR body."
-                " Use the planned changes to describe exactly what this PR implements."
-                " Reference the actual tasks by name — do not write generic summaries."
-                " No markdown headers. Do not include a 'Fixes #N.' line."
-            )
-            body_section = f"\n\nIssue body:\n{issue_body}" if issue_body else ""
-            tasks_section = (
-                "\n\nPlanned changes:\n" + "\n".join(f"- {t['title']}" for t in pending)
-                if pending
-                else ""
-            )
-            desc = claude.print_prompt(
-                prompt=f"{persona}\n\nIssue title: {request}{body_section}{tasks_section}\n\n"
-                "Using the planned changes above, write a specific description of what"
-                " this PR implements. Name the concrete tasks — do not write a generic summary.",
-                model="claude-opus-4-6",
-                system_prompt=system_prompt,
-            )
+        continuation_prompt = (
+            "Based on the planning above, write a specific 2-3 sentence pull"
+            " request description for this PR. Reference the concrete tasks by"
+            " name. No markdown headers. Do not include a 'Fixes #N.' line."
+        )
+        desc = claude.resume_status(setup_session_id, continuation_prompt, timeout=60)
 
         if desc:
             desc = f"{desc.rstrip()}\n\nFixes #{issue}."
@@ -949,7 +919,7 @@ class Worker:
             return None
 
         # Build PR body with tasks already populated by setup
-        pr_body = self._build_pr_body(request, issue, issue_body, session_id)
+        pr_body = self._build_pr_body(request, issue, setup_session_id=session_id)
 
         # Create draft PR
         url = self.gh.create_pr(
