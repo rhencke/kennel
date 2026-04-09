@@ -6755,6 +6755,90 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "no work" in caplog.text
 
+    # --- open questions (pending ASK tasks) ---
+
+    def _ask_task(self) -> dict:
+        return {
+            "id": "a1",
+            "title": "ASK: should I also handle X?",
+            "status": "pending",
+        }
+
+    def test_pending_ask_draft_not_promoted(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed"},
+            self._ask_task(),
+        ]
+        with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_not_called()
+
+    def test_pending_ask_draft_review_not_requested(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed"},
+            self._ask_task(),
+        ]
+        with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_pending_ask_non_draft_review_not_requested(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[self._ask_task()]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_pending_ask_changes_requested_rerequest_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with patch("kennel.worker.tasks.list_tasks", return_value=[self._ask_task()]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_pending_ask_returns_zero(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed"},
+            self._ask_task(),
+        ]
+        with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_pending_ask_logs_deferring(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed"},
+            self._ask_task(),
+        ]
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=tasks_list),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "open questions" in caplog.text
+
 
 class TestRunPromoteMergeIntegration:
     """Tests that Worker.run() calls handle_promote_merge after execute_task."""

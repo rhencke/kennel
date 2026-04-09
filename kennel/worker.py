@@ -475,6 +475,14 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
     return pending[0]
 
 
+def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
+    """Return True if any pending task is an open question (ASK: prefix)."""
+    return any(
+        t.get("status") == "pending" and t.get("title", "").lower().startswith("ask:")
+        for t in task_list
+    )
+
+
 def should_rerequest_review(
     owner_reviews: list[dict[str, Any]],
     commits: list[dict[str, Any]],
@@ -1483,6 +1491,12 @@ class Worker:
             self._git(["push", "origin", "--delete", slug], check=False)
             self.set_status(f"Merged PR #{pr_number}! Issue #{issue} done")
             return 1
+
+        if _has_pending_asks(task_list):
+            log.info(
+                "PR #%s: open questions pending — deferring ready/review", pr_number
+            )
+            return 0
 
         if latest_state == "CHANGES_REQUESTED":
             if not should_rerequest_review(owner_reviews, commits):
