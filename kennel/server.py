@@ -180,7 +180,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
             os.execv(sys.argv[0], sys.argv)
 
     def do_GET(self) -> None:
-        self._respond(200, "kennel is running")
+        if self.path == "/status":
+            activities = [
+                {"repo_name": a.repo_name, "what": a.what, "busy": a.busy}
+                for a in self.registry.get_all_activities()
+            ]
+            body = json.dumps(activities).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self._respond(200, "kennel is running")
 
     def _verify_signature(self, body: bytes) -> bool:
         header = self.headers.get("X-Hub-Signature-256", "")

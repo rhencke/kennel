@@ -8,28 +8,26 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from kennel.config import RepoConfig
 from kennel.status import (
     KennelStatus,
     RepoStatus,
     _claude_pid,
     _current_task,
+    _fetch_activities,
     _fido_running,
     _format_uptime,
     _git_dir,
     _kennel_pid,
     _pgrep,
+    _port_from_pid,
     _process_uptime_seconds,
-    _read_activity,
     _read_state,
     _read_tasks,
     _repos_from_pid,
     collect,
     format_status,
     repo_status,
-    write_activity,
 )
 
 
@@ -250,6 +248,106 @@ class TestKennelPid:
         mock.assert_called_once_with("kennel --port")
 
 
+class TestPortFromPid:
+    def test_returns_port(self) -> None:
+        cmdline = b"kennel\x00--port\x009000\x00rhencke/repo:/path\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            assert _port_from_pid(42) == 9000
+
+    def test_returns_none_when_no_port_flag(self) -> None:
+        cmdline = b"kennel\x00rhencke/repo:/path\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            assert _port_from_pid(42) is None
+
+    def test_returns_none_when_port_flag_last_arg(self) -> None:
+        cmdline = b"kennel\x00--port\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            assert _port_from_pid(42) is None
+
+    def test_returns_none_when_port_value_not_integer(self) -> None:
+        cmdline = b"kennel\x00--port\x00notanumber\x00"
+        with patch.object(Path, "read_bytes", return_value=cmdline):
+            assert _port_from_pid(42) is None
+
+    def test_oserror_returns_none(self) -> None:
+        with patch.object(Path, "read_bytes", side_effect=OSError("no proc")):
+            assert _port_from_pid(42) is None
+
+    def test_reads_correct_pid_path(self) -> None:
+        paths_read: list[Path] = []
+
+        def capturing_read_bytes(self_path: Path) -> bytes:
+            paths_read.append(self_path)
+            return b""
+
+        with patch.object(Path, "read_bytes", capturing_read_bytes):
+            _port_from_pid(1234)
+        assert paths_read == [Path("/proc/1234/cmdline")]
+
+
+class TestFetchActivities:
+    def test_returns_repo_what_map(self) -> None:
+        data = json.dumps(
+            [{"repo_name": "owner/repo", "what": "Working on: #1", "busy": True}]
+        ).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = data
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _fetch_activities(9000)
+        assert result == {"owner/repo": "Working on: #1"}
+
+    def test_returns_multiple_repos(self) -> None:
+        data = json.dumps(
+            [
+                {"repo_name": "a/b", "what": "Napping", "busy": False},
+                {"repo_name": "c/d", "what": "Fixing CI", "busy": True},
+            ]
+        ).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = data
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _fetch_activities(9000)
+        assert result == {"a/b": "Napping", "c/d": "Fixing CI"}
+
+    def test_returns_empty_on_exception(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            result = _fetch_activities(9000)
+        assert result == {}
+
+    def test_skips_items_without_repo_name(self) -> None:
+        data = json.dumps([{"what": "something", "busy": True}]).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = data
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _fetch_activities(9000)
+        assert result == {}
+
+    def test_skips_items_without_what(self) -> None:
+        data = json.dumps([{"repo_name": "a/b", "busy": True}]).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = data
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _fetch_activities(9000)
+        assert result == {}
+
+    def test_calls_correct_url(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b"[]"
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            _fetch_activities(8888)
+        mock_open.assert_called_once_with("http://localhost:8888/status", timeout=2)
+
+
 class TestClaudePid:
     def test_returns_first_pid(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -350,81 +448,6 @@ class TestReadTasks:
             assert _read_tasks(fido_dir) == []
 
 
-class TestWriteActivity:
-    def test_creates_activity_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        write_activity(fido_dir, "Working on: #1", busy=True)
-        data = json.loads((fido_dir / "activity.json").read_text())
-        assert data == {"what": "Working on: #1", "busy": True}
-
-    def test_overwrites_existing_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        write_activity(fido_dir, "old", busy=True)
-        write_activity(fido_dir, "new", busy=False)
-        data = json.loads((fido_dir / "activity.json").read_text())
-        assert data == {"what": "new", "busy": False}
-
-    def test_creates_fido_dir_if_missing(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        assert not fido_dir.exists()
-        write_activity(fido_dir, "Working on: #1", busy=True)
-        assert (fido_dir / "activity.json").exists()
-
-    def test_busy_false(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        write_activity(fido_dir, "Napping", busy=False)
-        data = json.loads((fido_dir / "activity.json").read_text())
-        assert data["busy"] is False
-
-    def test_cleans_up_temp_file_on_error(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        with patch("os.replace", side_effect=OSError("disk full")):
-            with pytest.raises(OSError, match="disk full"):
-                write_activity(fido_dir, "x", busy=True)
-        # no stray temp files
-        assert list(fido_dir.glob(".activity-*")) == []
-
-
-class TestReadActivity:
-    def test_absent_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        assert _read_activity(fido_dir) == {}
-
-    def test_reads_activity(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "activity.json").write_text(
-            '{"what": "Working on: #1", "busy": true}'
-        )
-        assert _read_activity(fido_dir) == {"what": "Working on: #1", "busy": True}
-
-    def test_corrupt_json_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "activity.json").write_text("not json {{{")
-        assert _read_activity(fido_dir) == {}
-
-    def test_oserror_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "activity.json").touch()
-        with patch.object(Path, "read_text", side_effect=OSError("oops")):
-            assert _read_activity(fido_dir) == {}
-
-    def test_roundtrip_with_write_activity(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        write_activity(fido_dir, "Fixing CI: tests on PR #7", busy=True)
-        data = _read_activity(fido_dir)
-        assert data["what"] == "Fixing CI: tests on PR #7"
-        assert data["busy"] is True
-
-
 class TestCurrentTask:
     def test_empty_list(self) -> None:
         assert _current_task([]) is None
@@ -475,6 +498,12 @@ class TestRepoStatus:
         assert result.claude_uptime is None
         assert result.worker_what is None
 
+    def test_no_git_dir_passes_worker_what(self, tmp_path: Path) -> None:
+        cfg = self._make_config(tmp_path)
+        with patch("kennel.status._git_dir", return_value=None):
+            result = repo_status(cfg, worker_what="Napping")
+        assert result.worker_what == "Napping"
+
     def test_with_running_fido_and_issue(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         fido_dir = git_dir / "fido"
@@ -493,7 +522,7 @@ class TestRepoStatus:
             patch("kennel.status._claude_pid", return_value=555),
             patch("kennel.status._process_uptime_seconds", return_value=180),
         ):
-            result = repo_status(cfg)
+            result = repo_status(cfg, worker_what="Working on: #7 do thing")
 
         assert result.name == "owner/repo"
         assert result.fido_running is True
@@ -503,24 +532,22 @@ class TestRepoStatus:
         assert result.current_task == "next task"
         assert result.claude_pid == 555
         assert result.claude_uptime == 180
-        assert result.worker_what is None
+        assert result.worker_what == "Working on: #7 do thing"
 
-    def test_reads_worker_activity(self, tmp_path: Path) -> None:
+    def test_worker_what_defaults_to_none(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         fido_dir = git_dir / "fido"
         fido_dir.mkdir(parents=True)
-        write_activity(fido_dir, "Working on: #5 add thing", busy=True)
 
         cfg = self._make_config(tmp_path)
         with (
             patch("kennel.status._git_dir", return_value=git_dir),
-            patch("kennel.status._fido_running", return_value=True),
+            patch("kennel.status._fido_running", return_value=False),
             patch("kennel.status._claude_pid", return_value=None),
             patch("kennel.status._process_uptime_seconds", return_value=None),
         ):
             result = repo_status(cfg)
-
-        assert result.worker_what == "Working on: #5 add thing"
+        assert result.worker_what is None
 
     def test_no_claude_pid_skips_uptime(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
@@ -542,10 +569,9 @@ class TestRepoStatus:
 
 
 class TestCollect:
-    def test_kennel_up_with_uptime(self, tmp_path: Path) -> None:
-        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        fake_repo_status = RepoStatus(
-            name="owner/repo",
+    def _fake_repo_status(self, name: str = "owner/repo") -> RepoStatus:
+        return RepoStatus(
+            name=name,
             fido_running=False,
             issue=None,
             pending=0,
@@ -555,11 +581,15 @@ class TestCollect:
             claude_uptime=None,
             worker_what=None,
         )
+
+    def test_kennel_up_with_uptime(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
         with (
             patch("kennel.status._kennel_pid", return_value=42),
             patch("kennel.status._repos_from_pid", return_value=[rc]),
             patch("kennel.status._process_uptime_seconds", return_value=600),
-            patch("kennel.status.repo_status", return_value=fake_repo_status),
+            patch("kennel.status._port_from_pid", return_value=None),
+            patch("kennel.status.repo_status", return_value=self._fake_repo_status()),
         ):
             result = collect()
 
@@ -572,6 +602,7 @@ class TestCollect:
             patch("kennel.status._kennel_pid", return_value=None),
             patch("kennel.status._repos_from_pid") as mock_repos,
             patch("kennel.status._process_uptime_seconds") as mock_uptime,
+            patch("kennel.status._port_from_pid") as mock_port,
             patch("kennel.status.repo_status") as mock_repo_status,
         ):
             result = collect()
@@ -579,8 +610,71 @@ class TestCollect:
         mock_uptime.assert_not_called()
         mock_repos.assert_not_called()
         mock_repo_status.assert_not_called()
+        mock_port.assert_not_called()
         assert result.kennel_pid is None
         assert result.kennel_uptime is None
+
+    def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": "Working on: #1"},
+            ) as mock_fetch,
+            patch("kennel.status.repo_status", return_value=self._fake_repo_status()),
+        ):
+            collect()
+        mock_fetch.assert_called_once_with(9000)
+
+    def test_skips_fetch_when_port_unknown(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=None),
+            patch("kennel.status._fetch_activities") as mock_fetch,
+            patch("kennel.status.repo_status", return_value=self._fake_repo_status()),
+        ):
+            collect()
+        mock_fetch.assert_not_called()
+
+    def test_passes_worker_what_to_repo_status(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": "Fixing CI: tests"},
+            ),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        mock_rs.assert_called_once_with(rc, worker_what="Fixing CI: tests")
+
+    def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch("kennel.status._fetch_activities", return_value={}),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        mock_rs.assert_called_once_with(rc, worker_what=None)
 
 
 class TestFormatStatus:

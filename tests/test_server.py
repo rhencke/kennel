@@ -109,6 +109,33 @@ class TestGetEndpoint:
         assert resp.status == 200
         assert b"kennel is running" in resp.read()
 
+    def test_status_endpoint_returns_activities(self, server: tuple) -> None:
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(repo_name="owner/repo", what="Working on: #1", busy=True),
+        ]
+        resp = urllib.request.urlopen(f"{url}/status")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert data == [
+            {"repo_name": "owner/repo", "what": "Working on: #1", "busy": True}
+        ]
+
+    def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        resp = urllib.request.urlopen(f"{url}/status")
+        assert resp.status == 200
+        assert json.loads(resp.read()) == []
+
+    def test_status_endpoint_content_type_json(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        resp = urllib.request.urlopen(f"{url}/status")
+        assert resp.headers.get("Content-Type") == "application/json"
+
 
 class TestEmptyBody:
     def test_returns_400(self, server: tuple) -> None:
