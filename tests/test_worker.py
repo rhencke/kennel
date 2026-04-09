@@ -2229,6 +2229,70 @@ class TestBuildPrBody:
         # Should not raise; persona becomes empty string
         assert mock_pp.called
 
+    def test_uses_resume_status_when_session_id_provided(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.resume_status", return_value="Session desc."
+            ) as mock_resume,
+            patch("kennel.worker.claude.print_prompt") as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1, setup_session_id="sess-abc")
+        mock_resume.assert_called_once()
+        mock_pp.assert_not_called()
+        assert "Session desc." in result
+        assert "Fixes #1." in result
+
+    def test_falls_back_to_print_prompt_when_no_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.resume_status") as mock_resume,
+            patch("kennel.worker.claude.print_prompt", return_value="Prompt desc."),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        mock_resume.assert_not_called()
+
+    def test_resume_status_passes_session_id_and_prompt(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.resume_status", return_value="d"
+            ) as mock_resume,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1, setup_session_id="my-session")
+        args = mock_resume.call_args
+        assert args[0][0] == "my-session"
+        assert "specific" in args[0][1].lower()
+
+    def test_falls_back_to_plain_when_resume_returns_empty(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.resume_status", return_value=""),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("Fix it", 5, setup_session_id="sess")
+        assert "Fix it" in result
+        assert "Fixes #5." in result
+        assert "falling back" in caplog.text.lower()
+
 
 class TestFindOrCreatePr:
     """Tests for Worker.find_or_create_pr."""
@@ -2592,7 +2656,31 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "Fix it", "Detailed issue body."
             )
-        mock_build_body.assert_called_once_with(ANY, 5, "Detailed issue body.")
+        mock_build_body.assert_called_once_with(ANY, 5, "Detailed issue body.", "sess")
+
+    def test_no_pr_passes_setup_session_id_to_build_pr_body(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build_body = MagicMock(return_value="body")
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="br"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="planning-session-id"),
+            patch.object(worker, "_build_pr_body", mock_build_body),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 3, "Do it")
+        _, call_kwargs = mock_build_body.call_args
+        # session ID is the 4th positional arg
+        assert mock_build_body.call_args[0][3] == "planning-session-id"
 
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
