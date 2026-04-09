@@ -13,8 +13,14 @@ class TestMain:
         git_dir = tmp_path / ".git" / "fido"
         git_dir.mkdir(parents=True)
 
-        with patch("kennel.tasks.add_task") as mock_add:
-            main(["task", str(tmp_path), "add", "my task"])
+        fake_task = {
+            "id": "t1",
+            "title": "my task",
+            "type": "spec",
+            "status": "pending",
+        }
+        with patch("kennel.tasks.add_task", return_value=fake_task) as mock_add:
+            main(["task", str(tmp_path), "add", "spec", "my task"])
 
         mock_add.assert_called_once()
 

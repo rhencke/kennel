@@ -382,7 +382,7 @@ if [[ "$_EXISTING" == "[]" || "$_EXISTING" == "" ]]; then
   if [[ -n "$_SEED_TASKS" ]]; then
     while IFS= read -r task_title; do
       [[ -z "$task_title" ]] && continue
-      uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" add "$task_title" 2>/dev/null || true
+      uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" add spec "$task_title" 2>/dev/null || true
     done <<< "$_SEED_TASKS"
     bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
     log "seeded $(echo "$_SEED_TASKS" | wc -l) tasks"
@@ -453,7 +453,7 @@ Review threads related to this CI failure (JSON — may be empty):
 $CI_THREADS"
   claude_run
   log "CI fix done"
-  uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "CI failure: $FAILING" 2>/dev/null || true
+  # CI failures have no task entry — no complete call needed
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
@@ -487,7 +487,7 @@ Review feedback:
 $REVIEW_FEEDBACK"
   claude_run
   log "review feedback done"
-  uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "Address review feedback from $OWNER" 2>/dev/null || true
+  # Review feedback is now handled by events — no complete call needed
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
@@ -558,17 +558,20 @@ fi
 # ── Task ───────────────────────────────────────────────────────────────────
 log "checking: tasks"
 _TASK_JSON=$(uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" list 2>/dev/null || echo "[]")
-# Prioritise: CI fix → comment-originated (has thread) → rest (skip ASK/DEFER)
-PENDING=$(printf '%s' "$_TASK_JSON" | jq -r '
+# Prioritise: CI (type=ci) → thread (type=thread) → rest (skip ASK/DEFER)
+_NEXT_TASK=$(printf '%s' "$_TASK_JSON" | jq -r '
   [.[] | select(.status == "pending")
        | select((.title | ascii_downcase | startswith("ask:")) | not)
        | select((.title | ascii_downcase | startswith("defer:")) | not)
   ] |
-  (map(select(.title | startswith("CI failure:"))) | .[0].title // empty) //
-  (map(select(.thread != null)) | .[0].title // empty) //
-  (.[0].title // empty)' 2>/dev/null || true)
+  (map(select(.type == "ci")) | .[0] // empty) //
+  (map(select(.type == "thread")) | .[0] // empty) //
+  (.[0] // empty)
+  | if . == "" or . == null then empty else "\(.id)\t\(.title)" end' 2>/dev/null || true)
 
-if [[ -n "$PENDING" ]]; then
+if [[ -n "$_NEXT_TASK" ]]; then
+  TASK_ID=$(echo "$_NEXT_TASK" | cut -f1)
+  PENDING=$(echo "$_NEXT_TASK" | cut -f2-)
   log "task: $PENDING"
   set_status "Working on: $PENDING"
   build_prompt task \
@@ -584,7 +587,7 @@ Task title: $PENDING"
   _REMOTE=$(git rev-parse "$FORK_REMOTE/$SLUG" 2>/dev/null || echo "none")
   if [[ "$_LOCAL" == "$_REMOTE" ]]; then
     log "task done: $PENDING"
-    uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
+    uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "$TASK_ID" 2>/dev/null || true
   else
     log "push failed — leaving task pending: $PENDING"
   fi

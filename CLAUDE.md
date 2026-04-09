@@ -73,6 +73,35 @@ Markdown instruction files passed to sub-Claude as system prompts:
 | `comments.md` | Review thread handling |
 | `resume.md` | PR resumption |
 
+## Task type system
+
+Tasks have a mandatory `type` field using the `TaskType` enum (`kennel.types`):
+
+| Value | Meaning |
+|-------|---------|
+| `ci` | CI failure fix |
+| `thread` | PR comment / review thread work |
+| `spec` | Planned spec task (default for setup) |
+
+Tasks also use `TaskStatus` enum: `pending`, `completed`, `in_progress`.
+
+### CLI syntax
+
+```bash
+kennel task <work_dir> add <type> <title> [description]  # prints task JSON to stdout
+kennel task <work_dir> complete <task_id>                  # complete by ID, not title
+kennel task <work_dir> list                                # list all tasks as JSON
+```
+
+### Priority order
+
+`_pick_next_task` selects by type: `ci` first, `thread` second, `spec` last.
+
+### Notes
+
+- `handle_review_feedback` has been removed from `Worker`; review feedback is now handled through the normal task system via events creating thread tasks
+- `complete_by_title` has been removed; all completion is by task ID
+
 ## Conventions
 
 - **100% test coverage** — CI enforced, no exceptions

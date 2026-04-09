@@ -9,6 +9,7 @@ from pathlib import Path
 
 from kennel import tasks as _tasks_mod
 from kennel.github import GitHub
+from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
 
@@ -69,12 +70,13 @@ class Cmd:
     def add(
         self,
         work_dir: Path,
+        task_type: TaskType,
         title: str,
         description: str,
         comment_id: int | None = None,
         repo: str | None = None,
         pr: int | None = None,
-    ) -> None:
+    ) -> dict:
         thread: dict | None = None
         if comment_id is not None:
             thread = {"comment_id": comment_id}
@@ -82,12 +84,18 @@ class Cmd:
                 thread["repo"] = repo
             if pr is not None:
                 thread["pr"] = pr
-        self._tasks.add_task(
-            work_dir, title=title, description=description, thread=thread
+        task = self._tasks.add_task(
+            work_dir,
+            title=title,
+            task_type=task_type,
+            description=description,
+            thread=thread,
         )
+        print(json.dumps(task))
+        return task
 
-    def complete(self, work_dir: Path, title: str) -> None:
-        thread = self._tasks.complete_by_title(work_dir, title)
+    def complete(self, work_dir: Path, task_id: str) -> None:
+        thread = self._tasks.complete_by_id(work_dir, task_id)
         if thread:
             self._resolve_thread_if_ours(thread)
 
@@ -106,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_add = sub.add_parser("add", help="Add a task")
+    p_add.add_argument(
+        "task_type",
+        type=TaskType,
+        choices=list(TaskType),
+        help="Task type (ci, thread, spec)",
+    )
     p_add.add_argument("title", help="Task title")
     p_add.add_argument(
         "description", nargs="?", default="", help="Optional description"
@@ -117,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--pr", type=int, default=None, help="PR number")
 
     p_complete = sub.add_parser("complete", help="Mark a task completed")
-    p_complete.add_argument("title", help="Task title")
+    p_complete.add_argument("task_id", help="Task ID")
 
     sub.add_parser("list", help="List all tasks as JSON")
 
@@ -133,6 +147,7 @@ def main(argv: list[str] | None = None) -> None:
         case "add":
             cmd.add(
                 args.work_dir,
+                args.task_type,
                 args.title,
                 args.description,
                 args.comment_id,
@@ -140,7 +155,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.pr,
             )
         case "complete":
-            cmd.complete(args.work_dir, args.title)
+            cmd.complete(args.work_dir, args.task_id)
         case "list":
             cmd.list(args.work_dir)
         case _:

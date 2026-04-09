@@ -15,6 +15,7 @@ from typing import IO, Any, Protocol
 from kennel import claude, hooks, tasks
 from kennel.github import GitHub
 from kennel.prompts import Prompts
+from kennel.types import TaskStatus, TaskType
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
@@ -210,11 +211,12 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
 
     Priority order: CI failures → comment-originated → others.
     Completed tasks appear in a collapsible ``<details>`` section.
+    Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
     """
-    ci_pending: list[str] = []
-    comment_pending: list[str] = []
-    other_pending: list[str] = []
-    completed: list[str] = []
+    ci_pending: list[tuple[str, str]] = []
+    comment_pending: list[tuple[str, str]] = []
+    other_pending: list[tuple[str, str]] = []
+    completed: list[tuple[str, str]] = []
 
     def _fmt(t: dict[str, Any]) -> str:
         title = t.get("title", "")
@@ -222,30 +224,32 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         return f"[{title}]({url})" if url else title
 
     for t in task_list:
-        status = t.get("status", "pending")
-        if status == "completed":
-            completed.append(_fmt(t))
-        elif status in ("pending", "in_progress"):
+        status = t.get("status", TaskStatus.PENDING)
+        task_type = t.get("type", TaskType.SPEC)
+        display = _fmt(t)
+        if status == TaskStatus.COMPLETED:
+            completed.append((display, task_type))
+        elif status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
             title = t.get("title", "")
             if title.startswith("CI failure:"):
-                ci_pending.append(_fmt(t))
+                ci_pending.append((display, task_type))
             elif t.get("thread"):
-                comment_pending.append(_fmt(t))
+                comment_pending.append((display, task_type))
             else:
-                other_pending.append(_fmt(t))
+                other_pending.append((display, task_type))
 
     pending = ci_pending + comment_pending + other_pending
     lines: list[str] = []
-    for i, display in enumerate(pending):
+    for i, (display, task_type) in enumerate(pending):
         suffix = " **→ next**" if i == 0 else ""
-        lines.append(f"- [ ] {display}{suffix}")
+        lines.append(f"- [ ] {display}{suffix} <!-- type:{task_type} -->")
 
     if completed:
         lines.append("")
         lines.append(f"<details><summary>Completed ({len(completed)})</summary>")
         lines.append("")
-        for display in completed:
-            lines.append(f"- [x] {display}")
+        for display, task_type in completed:
+            lines.append(f"- [x] {display} <!-- type:{task_type} -->")
         lines.append("</details>")
 
     return "\n".join(lines)
@@ -277,7 +281,7 @@ def _auto_complete_ask_tasks(
     ask_tasks = [
         t
         for t in task_list
-        if t.get("status") == "pending"
+        if t.get("status") == TaskStatus.PENDING
         and t.get("title", "").upper().startswith("ASK:")
         and t.get("thread")
     ]
@@ -310,7 +314,7 @@ def _auto_complete_ask_tasks(
             log.info(
                 "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
             )
-            tasks.complete_by_title(work_dir, task["title"])
+            tasks.complete_by_id(work_dir, task["id"])
 
 
 def sync_tasks(work_dir: Path, gh: GitHub) -> None:
@@ -453,24 +457,24 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
     Filters out completed tasks and those prefixed with ``ask:`` or ``defer:``
     (case-insensitive).  Among the remaining candidates the priority order is:
 
-    1. Tasks whose title starts with ``CI failure:``
-    2. Tasks that carry a ``thread`` payload (comment-originated)
+    1. Tasks with ``type`` == ``TaskType.CI``
+    2. Tasks with ``type`` == ``TaskType.THREAD``
     3. Everything else (first in list wins)
     """
     pending = [
         t
         for t in task_list
-        if t.get("status") == "pending"
+        if t.get("status") == TaskStatus.PENDING
         and not t.get("title", "").lower().startswith("ask:")
         and not t.get("title", "").lower().startswith("defer:")
     ]
     if not pending:
         return None
     for t in pending:
-        if t.get("title", "").startswith("CI failure:"):
+        if t.get("type") == TaskType.CI:
             return t
     for t in pending:
-        if t.get("thread") is not None:
+        if t.get("type") == TaskType.THREAD:
             return t
     return pending[0]
 
@@ -478,7 +482,8 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
     """Return True if any pending task is an open question (ASK: prefix)."""
     return any(
-        t.get("status") == "pending" and t.get("title", "").lower().startswith("ask:")
+        t.get("status") == TaskStatus.PENDING
+        and t.get("title", "").lower().startswith("ask:")
         for t in task_list
     )
 
@@ -772,7 +777,7 @@ class Worker:
             desc = plain
 
         task_list = tasks.list_tasks(self.work_dir)
-        pending = [t for t in task_list if t.get("status") == "pending"]
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
         next_task = _pick_next_task(task_list)
         if pending:
             lines = []
@@ -1041,7 +1046,7 @@ class Worker:
         session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
         log.info("CI fix done (session=%s)", session_id)
 
-        tasks.complete_by_title(self.work_dir, f"CI failure: {check_name}")
+        # CI failures have no task entry — no complete call needed
         sync_tasks(self.work_dir, self.gh)
         return True
 
@@ -1143,56 +1148,6 @@ class Worker:
             log.info("resolved thread %s", thread_id)
             resolved_any = True
         return resolved_any
-
-    def handle_review_feedback(
-        self,
-        fido_dir: Path,
-        repo_ctx: RepoContext,
-        pr_number: int,
-        slug: str,
-    ) -> bool:
-        """Check for a CHANGES_REQUESTED review with no newer commits and handle it.
-
-        Returns ``True`` if review feedback was found and handled.  Returns
-        ``False`` if there is no actionable review.
-        """
-        pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
-        reviews = pr_data.get("reviews", [])
-        owner_reviews = [
-            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
-        ]
-        if not owner_reviews:
-            return False
-        review = owner_reviews[-1]
-        if review.get("state") != "CHANGES_REQUESTED":
-            return False
-        commits = pr_data.get("commits", [])
-        if commits:
-            last_commit_date = commits[-1].get("committedDate", "")
-            if last_commit_date > review.get("submittedAt", ""):
-                return False
-        review_body = review.get("body", "")
-        if not review_body:
-            return False
-        log.info("review feedback from %s", repo_ctx.owner)
-        context = (
-            f"PR: {pr_number}\n"
-            f"Repo: {repo_ctx.repo}\n"
-            f"Branch: {slug}\n"
-            f"Upstream: origin/{repo_ctx.default_branch}\n"
-            f"\nTask title: Address review feedback from {repo_ctx.owner}\n"
-            f"Task description: {repo_ctx.owner} submitted a review requesting"
-            f" changes with the following feedback. Address it, commit, and push.\n"
-            f"\nReview feedback:\n{review_body}"
-        )
-        build_prompt(fido_dir, "task", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
-        log.info("review feedback done (session=%s)", session_id)
-        tasks.complete_by_title(
-            self.work_dir, f"Address review feedback from {repo_ctx.owner}"
-        )
-        sync_tasks(self.work_dir, self.gh)
-        return True
 
     def handle_threads(
         self,
@@ -1360,7 +1315,7 @@ class Worker:
 
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            tasks.complete_by_title(self.work_dir, task_title)
+            tasks.complete_by_id(self.work_dir, task["id"])
             state = load_state(fido_dir)
             state.pop("current_task_id", None)
             save_state(fido_dir, state)
@@ -1372,8 +1327,11 @@ class Worker:
 
         Extracts unchecked task items (``- [ ] ...``) between
         ``WORK_QUEUE_START`` and ``WORK_QUEUE_END`` markers and adds them via
-        :func:`~kennel.tasks.add_task`.  No-op if tasks.json is already
-        non-empty, or if no markers / unchecked items are found.
+        :func:`~kennel.tasks.add_task`.  Each line must contain a
+        ``<!-- type:X -->`` comment; raises ``ValueError`` if missing.
+
+        No-op if tasks.json is already non-empty, or if no markers /
+        unchecked items are found.
         """
         if tasks.list_tasks(self.work_dir):
             return  # already have tasks — nothing to seed
@@ -1386,17 +1344,27 @@ class Worker:
         )
         if not match:
             return
-        task_titles = []
+        parsed: list[tuple[str, TaskType]] = []
         for line in match.group(1).splitlines():
-            m = re.match(r"^- \[ \] (.+)$", line)
-            if m:
-                title = re.sub(r"\s*\*\*→ next\*\*\s*", "", m.group(1)).strip()
-                task_titles.append(title)
-        if not task_titles:
+            m = re.match(r"^- \[[ x]\] (.+)$", line)
+            if not m:
+                continue
+            rest = m.group(1)
+            type_match = re.search(r"<!-- type:(\w+) -->", rest)
+            if not type_match:
+                raise ValueError(f"missing <!-- type:X --> in task line: {line!r}")
+            raw_type = type_match.group(1)
+            task_type = TaskType(raw_type)
+            title = re.sub(r"\s*<!-- type:\w+ -->\s*", "", rest)
+            title = re.sub(r"\s*\*\*→ next\*\*\s*", "", title).strip()
+            if not title:
+                continue
+            parsed.append((title, task_type))
+        if not parsed:
             return
-        for title in task_titles:
-            tasks.add_task(self.work_dir, title)
-        log.info("seeded %d tasks from PR body", len(task_titles))
+        for title, task_type in parsed:
+            tasks.add_task(self.work_dir, title, task_type=task_type)
+        log.info("seeded %d tasks from PR body", len(parsed))
 
     def post_pickup_comment(
         self, repo: str, issue: int, issue_title: str, gh_user: str
@@ -1466,7 +1434,7 @@ class Worker:
         )
         is_approved = latest_state == "APPROVED"
         task_list = tasks.list_tasks(self.work_dir)
-        pending = [t for t in task_list if t.get("status") == "pending"]
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
 
         # Merge only if: approved + not draft + no pending tasks
         if is_approved and not is_draft and not pending:
@@ -1514,7 +1482,9 @@ class Worker:
             return 0
 
         if is_draft:
-            completed = [t for t in task_list if t.get("status") == "completed"]
+            completed = [
+                t for t in task_list if t.get("status") == TaskStatus.COMPLETED
+            ]
             if not completed:
                 log.info(
                     "PR #%s: no tasks completed — not promoting (setup may have failed)",
@@ -1610,8 +1580,6 @@ class Worker:
             pr_number, slug = result
             self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
-                return 1
-            if self.handle_review_feedback(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1
             if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1

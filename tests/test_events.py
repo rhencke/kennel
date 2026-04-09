@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from kennel.config import Config, RepoConfig
 from kennel.events import (
@@ -1158,7 +1158,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync") as mock_sync,
         ):
             create_task("do something", cfg, repo_cfg)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=None)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", task_type=ANY, thread=None
+        )
         mock_sync.assert_called_once_with(cfg, repo_cfg)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
@@ -1178,7 +1180,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync"),
         ):
             create_task("do something", cfg, repo_cfg, thread=thread)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=thread)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", task_type=ANY, thread=thread
+        )
 
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(

@@ -16,6 +16,7 @@ from kennel.prompts import (
 )
 from kennel.registry import WorkerRegistry
 from kennel.tasks import add_task
+from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
 
@@ -626,8 +627,11 @@ def create_task(
 
     Returns the new task dict.
     """
+    task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
-    new_task = add_task(repo_cfg.work_dir, title=prompt, thread=thread)
+    new_task = add_task(
+        repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
+    )
     launch_sync(config, repo_cfg)
     if registry is not None and thread:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
