@@ -741,10 +741,11 @@ class Worker:
         except OSError:
             persona = ""
 
-        plain = f"Working on: {request}. Implementation in progress."
+        plain = f"{request}\n\nFixes #{issue}."
         system_prompt = (
             "You are a GitHub PR description writer."
             " Write a 2-3 sentence description suitable for a GitHub PR body."
+            " Summarize the problem being solved and how this PR addresses it."
             " No markdown headers."
             f" The last line must be a blank line followed by 'Fixes #{issue}.'"
             " on its own line."

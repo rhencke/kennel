@@ -2158,7 +2158,8 @@ class TestBuildPrBody:
         ):
             (tmp_path / "persona.md").write_text("")
             result = worker._build_pr_body("Fix auth", 7)
-        assert "Working on: Fix auth" in result
+        assert "Fix auth" in result
+        assert "Fixes #7." in result
 
     def test_contains_separator(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -2196,6 +2197,19 @@ class TestBuildPrBody:
             (tmp_path / "persona.md").write_text("")
             worker._build_pr_body("req", 99)
         assert "99" in mock_pp.call_args[1]["system_prompt"]
+
+    def test_system_prompt_instructs_problem_and_solution(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch(
+                "kennel.worker.claude.print_prompt_json", return_value="d"
+            ) as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        assert "problem" in mock_pp.call_args[1]["system_prompt"].lower()
 
     def test_prompt_includes_persona(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
