@@ -89,6 +89,23 @@ class TestAddTask:
         assert t1["id"] == t2["id"]
         assert len(list_tasks(tmp_path)) == 1
 
+    def test_deduplicates_by_comment_id_even_when_completed(
+        self, tmp_path: Path
+    ) -> None:
+        thread = {"repo": "r/r", "pr": 1, "comment_id": 55}
+        t1 = add_task(
+            tmp_path, title="handle feedback", task_type=TaskType.THREAD, thread=thread
+        )
+        complete_by_id(tmp_path, t1["id"])
+        t2 = add_task(
+            tmp_path,
+            title="handle feedback again",
+            task_type=TaskType.THREAD,
+            thread=thread,
+        )
+        assert t1["id"] == t2["id"]
+        assert len(list_tasks(tmp_path)) == 1
+
     def test_different_comment_ids_are_not_deduplicated(self, tmp_path: Path) -> None:
         t1 = add_task(
             tmp_path,
