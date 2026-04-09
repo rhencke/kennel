@@ -778,11 +778,10 @@ class Worker:
         plain = f"{request}\n\nFixes #{issue}."
         system_prompt = (
             "You are a GitHub PR description writer."
-            " Write a 2-3 sentence description suitable for a GitHub PR body."
-            " Summarize the problem being solved and how this PR addresses it."
-            " No markdown headers."
-            f" The last line must be a blank line followed by 'Fixes #{issue}.'"
-            " on its own line."
+            " Write a specific 2-3 sentence description for a GitHub PR body."
+            " Use the planned changes to describe exactly what this PR implements."
+            " Reference the actual tasks by name — do not write generic summaries."
+            " No markdown headers. Do not include a 'Fixes #N.' line."
         )
         task_list = tasks.list_tasks(self.work_dir)
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
@@ -792,15 +791,16 @@ class Worker:
             if pending
             else ""
         )
-        desc = claude.print_prompt_json(
+        desc = claude.print_prompt(
             prompt=f"{persona}\n\nIssue title: {request}{body_section}{tasks_section}\n\n"
-            "Write a 2-3 sentence pull request description summarizing"
-            " the problem and how this PR solves it.",
-            key="description",
+            "Using the planned changes above, write a specific description of what"
+            " this PR implements. Name the concrete tasks — do not write a generic summary.",
             model="claude-opus-4-6",
             system_prompt=system_prompt,
         )
-        if not desc:
+        if desc:
+            desc = f"{desc.rstrip()}\n\nFixes #{issue}."
+        else:
             log.warning("Opus returned no description — falling back to plain text")
             desc = plain
 

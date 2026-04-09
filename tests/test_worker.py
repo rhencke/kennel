@@ -1988,7 +1988,7 @@ class TestBuildPrBody:
     def test_returns_string(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="PR desc."),
+            patch("kennel.worker.claude.print_prompt", return_value="PR desc."),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -1999,7 +1999,7 @@ class TestBuildPrBody:
     def test_contains_work_queue_start_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2010,7 +2010,7 @@ class TestBuildPrBody:
     def test_contains_work_queue_end_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2022,7 +2022,7 @@ class TestBuildPrBody:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("Write tests"), self._pending_task("Fix lint")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2035,7 +2035,7 @@ class TestBuildPrBody:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("First task"), self._pending_task("Second task")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2047,7 +2047,7 @@ class TestBuildPrBody:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("First task"), self._pending_task("Second task")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2062,7 +2062,7 @@ class TestBuildPrBody:
         regular = self._pending_task("Regular work")
         ci = {"id": "2", "title": "CI failure: lint", "status": "pending", "type": "ci"}
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[regular, ci]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2074,7 +2074,7 @@ class TestBuildPrBody:
     def test_no_tasks_shows_placeholder(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2089,7 +2089,7 @@ class TestBuildPrBody:
 
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value=""),
+            patch("kennel.worker.claude.print_prompt", return_value=""),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
             caplog.at_level(logging.WARNING, logger="kennel"),
@@ -2103,7 +2103,7 @@ class TestBuildPrBody:
     def test_contains_separator(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2111,12 +2111,10 @@ class TestBuildPrBody:
             result = worker._build_pr_body("req", 1)
         assert "---" in result
 
-    def test_calls_claude_print_prompt_json_with_opus(self, tmp_path: Path) -> None:
+    def test_calls_claude_print_prompt_with_opus(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2124,38 +2122,37 @@ class TestBuildPrBody:
             worker._build_pr_body("req", 1)
         assert mock_pp.call_args[1]["model"] == "claude-opus-4-6"
 
-    def test_system_prompt_includes_issue_number(self, tmp_path: Path) -> None:
+    def test_opus_desc_has_fixes_line_appended(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
             patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+                "kennel.worker.claude.print_prompt", return_value="Specific summary."
+            ),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("")
-            worker._build_pr_body("req", 99)
-        assert "99" in mock_pp.call_args[1]["system_prompt"]
+            result = worker._build_pr_body("req", 99)
+        assert "Specific summary." in result
+        assert "Fixes #99." in result
 
-    def test_system_prompt_instructs_problem_and_solution(self, tmp_path: Path) -> None:
+    def test_system_prompt_instructs_specific_not_generic(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
             (tmp_path / "persona.md").write_text("")
             worker._build_pr_body("req", 1)
-        assert "problem" in mock_pp.call_args[1]["system_prompt"].lower()
+        sp = mock_pp.call_args[1]["system_prompt"].lower()
+        assert "specific" in sp
+        assert "generic" in sp
 
     def test_prompt_includes_persona(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2166,9 +2163,7 @@ class TestBuildPrBody:
     def test_prompt_includes_issue_body(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2183,9 +2178,7 @@ class TestBuildPrBody:
             self._pending_task("Write tests"),
         ]
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2200,9 +2193,7 @@ class TestBuildPrBody:
     ) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
@@ -2230,9 +2221,7 @@ class TestBuildPrBody:
         worker = self._make_worker(tmp_path)
         missing = tmp_path / "nosuchdir"
         with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=missing),
         ):
