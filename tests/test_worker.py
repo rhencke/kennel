@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -11,6 +12,8 @@ import pytest
 from kennel.worker import (
     LockHeld,
     RepoContext,
+    RepoContextFilter,
+    RepoNameFilter,
     Worker,
     WorkerContext,
     WorkerThread,
@@ -20,6 +23,7 @@ from kennel.worker import (
     _pick_next_task,
     _resolve_git_dir,
     _sanitize_slug,
+    _thread_repo,
     acquire_lock,
     build_prompt,
     ci_ready_for_review,
@@ -34,6 +38,53 @@ from kennel.worker import (
     sync_tasks,
     sync_tasks_background,
 )
+
+
+class TestRepoContextFilter:
+    def test_filter_injects_repo_name_from_thread_local(self) -> None:
+        _thread_repo.repo_name = "confusio"
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        try:
+            assert RepoContextFilter().filter(record) is True
+            assert record.repo_name == "confusio"  # type: ignore[attr-defined]
+        finally:
+            del _thread_repo.repo_name
+
+    def test_filter_defaults_to_dash_when_no_context(self) -> None:
+        # Ensure the thread-local is not set for this test.
+        _thread_repo.__dict__.pop("repo_name", None)
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        RepoContextFilter().filter(record)
+        assert record.repo_name == "-"  # type: ignore[attr-defined]
+
+    def test_filter_always_returns_true(self) -> None:
+        _thread_repo.__dict__.pop("repo_name", None)
+        record = logging.LogRecord("", logging.WARNING, "", 0, "", (), None)
+        assert RepoContextFilter().filter(record) is True
+
+
+class TestRepoNameFilter:
+    def _record_with_repo(self, repo_name: str) -> logging.LogRecord:
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        record.repo_name = repo_name  # type: ignore[attr-defined]
+        return record
+
+    def test_passes_matching_repo(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("kennel")) is True
+
+    def test_blocks_other_repo(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("confusio")) is False
+
+    def test_blocks_default_dash(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("-")) is False
+
+    def test_blocks_record_without_repo_name(self) -> None:
+        f = RepoNameFilter("kennel")
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        assert f.filter(record) is False
 
 
 class TestResolveGitDir:
@@ -7373,6 +7424,23 @@ class TestWorkerThread:
         assert not wt._wake.is_set()
         wt.abort_task()
         assert wt._wake.is_set()
+
+    def test_run_sets_thread_local_repo_name(self, tmp_path: Path) -> None:
+        """WorkerThread.run() sets _thread_repo.repo_name to the short name."""
+        wt = WorkerThread(tmp_path, "owner/myrepo", MagicMock())
+        captured: list[str] = []
+
+        def fake_worker_run(self_w):
+            import kennel.worker as wmod
+
+            captured.append(getattr(wmod._thread_repo, "repo_name", None))
+            wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            wt.run()
+
+        assert captured == ["myrepo"]
 
     def test_abort_event_passed_to_worker(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
