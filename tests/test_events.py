@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from kennel.config import Config, RepoConfig
 from kennel.events import (
@@ -1158,7 +1158,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync") as mock_sync,
         ):
             create_task("do something", cfg, repo_cfg)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=None)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", task_type=ANY, thread=None
+        )
         mock_sync.assert_called_once_with(cfg, repo_cfg)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
@@ -1178,7 +1180,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync"),
         ):
             create_task("do something", cfg, repo_cfg, thread=thread)
-        mock_add.assert_called_once_with(tmp_path, title="do something", thread=thread)
+        mock_add.assert_called_once_with(
+            tmp_path, title="do something", task_type=ANY, thread=thread
+        )
 
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -1284,7 +1288,9 @@ class TestCreateTask:
         import json
 
         existing_thread = {"repo": "owner/repo", "pr": 1, "comment_id": 10}
-        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
+        (fido_dir / "state.json").write_text(
+            json.dumps({"current_task_id": "t1", "issue": 5})
+        )
         (fido_dir / "tasks.json").write_text(
             json.dumps(
                 [
@@ -1305,10 +1311,17 @@ class TestCreateTask:
             "thread": new_thread,
         }
         registry = MagicMock()
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Issue", "body": "body"}
+        mock_gh.get_user.return_value = "fido"
+        mock_gh.find_pr.return_value = {"title": "PR", "body": "pr body"}
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("kennel.events.claude") as mock_claude,
         ):
+            mock_claude.print_prompt.return_value = "KEEP"
             create_task(
                 "New thread task", cfg, repo_cfg, thread=new_thread, registry=registry
             )
@@ -1333,15 +1346,165 @@ class TestCreateTask:
             create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
         registry.abort_task.assert_not_called()
 
-    def test_aborts_when_thread_task_supersedes_non_thread_current(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_abort_when_current_task_not_in_tasks_json(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         import json
 
-        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t-plain"}))
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t-gone"}))
+        (fido_dir / "tasks.json").write_text(json.dumps([]))
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t2",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_not_called()
+
+    def test_no_abort_when_state_has_no_issue(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
+        (fido_dir / "tasks.json").write_text(
+            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t2",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        registry = MagicMock()
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github"),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_not_called()
+
+    def _setup_abort_scenario(
+        self, tmp_path: Path, opus_decision: str
+    ) -> tuple[MagicMock, MagicMock, Path]:
+        """Set up state/tasks for abort tests and return (registry, mock_claude, fido_dir)."""
+        import json
+
+        fido_dir = self._fido_dir(tmp_path)
+        (fido_dir / "state.json").write_text(
+            json.dumps({"current_task_id": "t-plain", "issue": 5})
+        )
+        (fido_dir / "tasks.json").write_text(
+            json.dumps([{"id": "t-plain", "title": "Plain task", "status": "pending"}])
+        )
+        registry = MagicMock()
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Issue", "body": "body"}
+        mock_gh.get_user.return_value = "fido"
+        mock_gh.find_pr.return_value = {"title": "PR", "body": "pr body"}
+        mock_claude = MagicMock()
+        mock_claude.print_prompt.return_value = opus_decision
+        return registry, mock_gh, mock_claude, fido_dir
+
+    def test_aborts_when_thread_task_supersedes_non_thread_current(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        import json
+
+        registry, mock_gh, mock_claude, fido_dir = self._setup_abort_scenario(
+            tmp_path, "ABORT_DISCARD"
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t-comment",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("kennel.events.claude", mock_claude),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_called_once_with("owner/repo")
+        # in-progress task should be removed from tasks.json
+        remaining = json.loads((fido_dir / "tasks.json").read_text())
+        assert not any(t["id"] == "t-plain" for t in remaining)
+
+    def test_opus_abort_keep_signals_abort_but_keeps_task(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        import json
+
+        registry, mock_gh, mock_claude, fido_dir = self._setup_abort_scenario(
+            tmp_path, "ABORT_KEEP"
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t-comment",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("kennel.events.claude", mock_claude),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_called_once_with("owner/repo")
+        # task should still be in tasks.json
+        remaining = json.loads((fido_dir / "tasks.json").read_text())
+        assert any(t["id"] == "t-plain" for t in remaining)
+
+    def test_opus_keep_does_not_abort(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+        registry, mock_gh, mock_claude, _fido_dir = self._setup_abort_scenario(
+            tmp_path, "KEEP"
+        )
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        fake_task = {
+            "id": "t-comment",
+            "title": "Comment task",
+            "status": "pending",
+            "thread": thread,
+        }
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("kennel.events.claude", mock_claude),
+        ):
+            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        registry.abort_task.assert_not_called()
+
+    def test_opus_context_failure_skips_abort(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        import json
+
+        (fido_dir / "state.json").write_text(
+            json.dumps({"current_task_id": "t-plain", "issue": 5})
+        )
         (fido_dir / "tasks.json").write_text(
             json.dumps([{"id": "t-plain", "title": "Plain task", "status": "pending"}])
         )
@@ -1356,12 +1519,10 @@ class TestCreateTask:
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
+            patch("kennel.events.get_github", side_effect=RuntimeError("no token")),
         ):
             create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
-        registry.abort_task.assert_called_once_with("owner/repo")
-        # in-progress task should be removed from tasks.json
-        remaining = json.loads((fido_dir / "tasks.json").read_text())
-        assert not any(t["id"] == "t-plain" for t in remaining)
+        registry.abort_task.assert_not_called()
 
 
 class TestLaunchSync:

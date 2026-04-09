@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kennel.types import TaskStatus, TaskType
+
 log = logging.getLogger(__name__)
 
 
@@ -59,21 +61,24 @@ def _locked(path: Path, write: bool = False):
 def add_task(
     work_dir: Path,
     title: str,
+    task_type: TaskType,
     description: str = "",
-    status: str = "pending",
+    status: TaskStatus = TaskStatus.PENDING,
     thread: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add a task to the shared task file. Returns the new task.
 
-    thread: optional {repo, pr, comment_id} for comment-originated tasks.
-    Thread-originated tasks are prioritised by ``_pick_next_task`` (second only
-    to CI-failure tasks) without needing a special insert position here.
+    task_type: mandatory — one of TaskType.CI, TaskType.THREAD, TaskType.SPEC.
+    thread: optional {repo, pr, comment_id, review_id} for comment/review tasks.
     """
+    if not isinstance(task_type, TaskType):
+        raise TypeError(f"task_type must be TaskType, got {type(task_type).__name__}")
     task: dict[str, Any] = {
         "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
         "title": title,
+        "type": str(task_type),
         "description": description,
-        "status": status,
+        "status": str(status),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if thread:
@@ -83,7 +88,7 @@ def add_task(
     with _locked(path, write=True) as lock:
         existing = lock.read()
         for t in existing:
-            if t["status"] != "pending":
+            if t["status"] != TaskStatus.PENDING:
                 continue
             if comment_id is not None:
                 if (t.get("thread") or {}).get("comment_id") == comment_id:
@@ -98,14 +103,14 @@ def add_task(
     return task
 
 
-def update_task(work_dir: Path, task_id: str, status: str) -> bool:
+def update_task(work_dir: Path, task_id: str, status: TaskStatus) -> bool:
     """Update a task's status. Returns True if found."""
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
         tasks = lock.read()
         for t in tasks:
             if t["id"] == task_id:
-                t["status"] = status
+                t["status"] = str(status)
                 lock.write(tasks)
                 log.info("task %s → %s", task_id, status)
                 return True
@@ -119,20 +124,20 @@ def list_tasks(work_dir: Path) -> list[dict[str, Any]]:
         return lock.read()
 
 
-def complete_by_title(work_dir: Path, title: str) -> dict[str, Any] | None:
-    """Mark the first pending task with the given title as completed.
+def complete_by_id(work_dir: Path, task_id: str) -> dict[str, Any] | None:
+    """Mark the task with the given ID as completed.
 
     Returns the task's thread dict if it had one, else None.
-    Returns None silently if no matching pending task is found.
+    Returns None silently if no matching task is found.
     """
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
         tasks = lock.read()
         for t in tasks:
-            if t["title"] == title and t["status"] != "completed":
-                t["status"] = "completed"
+            if t["id"] == task_id and t["status"] != TaskStatus.COMPLETED:
+                t["status"] = str(TaskStatus.COMPLETED)
                 lock.write(tasks)
-                log.info("task completed: %s", title[:80])
+                log.info("task completed (id=%s): %s", task_id, t["title"][:80])
                 return t.get("thread")
     return None
 
@@ -143,7 +148,7 @@ def has_pending_tasks_for_comment(work_dir: Path, comment_id: int | str) -> bool
     path = _task_file(work_dir)
     with _locked(path) as lock:
         for t in lock.read():
-            if t.get("status") == "pending":
+            if t.get("status") == TaskStatus.PENDING:
                 if int((t.get("thread") or {}).get("comment_id", -1)) == cid:
                     return True
     return False
