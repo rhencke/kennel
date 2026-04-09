@@ -44,10 +44,16 @@ def _locked(path: Path, write: bool = False):
             if not text:
                 return []
             try:
-                return json.loads(text)
+                result = json.loads(text)
             except json.JSONDecodeError:
                 log.warning("corrupt tasks.json — resetting")
                 return []
+            for t in result:
+                if "type" not in t:
+                    raise ValueError(
+                        f"task {t.get('id', '?')} missing required type field"
+                    )
+            return result
 
         def write(self, tasks: list[dict[str, Any]]) -> None:
             self.fd.seek(0)

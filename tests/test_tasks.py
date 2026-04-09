@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from kennel.tasks import (
     add_task,
     complete_by_id,
@@ -130,6 +132,12 @@ class TestListTasks:
     def test_corrupt_json(self, tmp_path: Path) -> None:
         _task_file(tmp_path).write_text("not json")
         assert list_tasks(tmp_path) == []
+
+    def test_raises_on_missing_type_field(self, tmp_path: Path) -> None:
+        tf = _task_file(tmp_path)
+        tf.write_text('[{"id": "bad", "title": "no type", "status": "pending"}]')
+        with pytest.raises(ValueError, match="missing required type field"):
+            list_tasks(tmp_path)
 
 
 class TestCompleteById:

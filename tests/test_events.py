@@ -1110,7 +1110,12 @@ class TestCreateTask:
     def test_returns_created_task(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        fake_task = {"id": "t1", "title": "do something", "status": "pending"}
+        fake_task = {
+            "id": "t1",
+            "title": "do something",
+            "status": "pending",
+            "type": "spec",
+        }
         with (
             patch("kennel.events.add_task", return_value=fake_task),
             patch("kennel.events.launch_sync"),
@@ -1126,13 +1131,23 @@ class TestCreateTask:
 
         (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
         (fido_dir / "tasks.json").write_text(
-            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+            json.dumps(
+                [
+                    {
+                        "id": "t1",
+                        "title": "Plain task",
+                        "status": "pending",
+                        "type": "spec",
+                    }
+                ]
+            )
         )
         thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
         fake_task = {
             "id": "t2",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
@@ -1151,9 +1166,23 @@ class TestCreateTask:
 
         (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
         (fido_dir / "tasks.json").write_text(
-            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+            json.dumps(
+                [
+                    {
+                        "id": "t1",
+                        "title": "Plain task",
+                        "status": "pending",
+                        "type": "spec",
+                    }
+                ]
+            )
         )
-        fake_task = {"id": "t2", "title": "Another plain task", "status": "pending"}
+        fake_task = {
+            "id": "t2",
+            "title": "Another plain task",
+            "status": "pending",
+            "type": "spec",
+        }
         registry = MagicMock()
         with (
             patch("kennel.events.add_task", return_value=fake_task),
@@ -1178,6 +1207,7 @@ class TestCreateTask:
             "id": "t1",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
@@ -1205,6 +1235,7 @@ class TestCreateTask:
                         "id": "t1",
                         "title": "Thread task",
                         "status": "pending",
+                        "type": "spec",
                         "thread": existing_thread,
                     }
                 ]
@@ -1215,6 +1246,7 @@ class TestCreateTask:
             "id": "t2",
             "title": "New thread task",
             "status": "pending",
+            "type": "spec",
             "thread": new_thread,
         }
         registry = MagicMock()
@@ -1243,6 +1275,7 @@ class TestCreateTask:
             "id": "t1",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
@@ -1266,6 +1299,7 @@ class TestCreateTask:
             "id": "t2",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
@@ -1284,13 +1318,23 @@ class TestCreateTask:
 
         (fido_dir / "state.json").write_text(json.dumps({"current_task_id": "t1"}))
         (fido_dir / "tasks.json").write_text(
-            json.dumps([{"id": "t1", "title": "Plain task", "status": "pending"}])
+            json.dumps(
+                [
+                    {
+                        "id": "t1",
+                        "title": "Plain task",
+                        "status": "pending",
+                        "type": "spec",
+                    }
+                ]
+            )
         )
         thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
         fake_task = {
             "id": "t2",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
@@ -1313,7 +1357,16 @@ class TestCreateTask:
             json.dumps({"current_task_id": "t-plain", "issue": 5})
         )
         (fido_dir / "tasks.json").write_text(
-            json.dumps([{"id": "t-plain", "title": "Plain task", "status": "pending"}])
+            json.dumps(
+                [
+                    {
+                        "id": "t-plain",
+                        "title": "Plain task",
+                        "status": "pending",
+                        "type": "spec",
+                    }
+                ]
+            )
         )
         registry = MagicMock()
         mock_gh = MagicMock()
@@ -1339,6 +1392,7 @@ class TestCreateTask:
             "id": "t-comment",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         with (
@@ -1366,6 +1420,7 @@ class TestCreateTask:
             "id": "t-comment",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         with (
@@ -1392,6 +1447,7 @@ class TestCreateTask:
             "id": "t-comment",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         with (
@@ -1413,13 +1469,23 @@ class TestCreateTask:
             json.dumps({"current_task_id": "t-plain", "issue": 5})
         )
         (fido_dir / "tasks.json").write_text(
-            json.dumps([{"id": "t-plain", "title": "Plain task", "status": "pending"}])
+            json.dumps(
+                [
+                    {
+                        "id": "t-plain",
+                        "title": "Plain task",
+                        "status": "pending",
+                        "type": "spec",
+                    }
+                ]
+            )
         )
         thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
         fake_task = {
             "id": "t-comment",
             "title": "Comment task",
             "status": "pending",
+            "type": "spec",
             "thread": thread,
         }
         registry = MagicMock()
