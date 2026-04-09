@@ -2148,18 +2148,22 @@ class TestBuildPrBody:
         assert "<!-- no tasks yet -->" in result
 
     def test_falls_back_to_plain_when_claude_returns_empty(
-        self, tmp_path: Path
+        self, tmp_path: Path, caplog
     ) -> None:
+        import logging
+
         worker = self._make_worker(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_json", return_value=""),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch("kennel.worker._sub_dir", return_value=tmp_path),
+            caplog.at_level(logging.WARNING, logger="kennel"),
         ):
             (tmp_path / "persona.md").write_text("")
             result = worker._build_pr_body("Fix auth", 7)
         assert "Fix auth" in result
         assert "Fixes #7." in result
+        assert "falling back" in caplog.text.lower()
 
     def test_contains_separator(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)

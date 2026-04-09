@@ -760,6 +760,7 @@ class Worker:
             system_prompt=system_prompt,
         )
         if not desc:
+            log.warning("Opus returned no description — falling back to plain text")
             desc = plain
 
         task_list = tasks.list_tasks(self.work_dir)
