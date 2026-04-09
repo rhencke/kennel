@@ -629,6 +629,14 @@ LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
   | jq -r --arg owner "$OWNER" \
     '[.reviews[] | select(.author.login == $owner)] | last | .state // "NONE"')
 
+# Defer ready/review if there are open questions (pending ASK tasks)
+_ASK_COUNT=$(uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" list 2>/dev/null \
+  | jq -r '[.[] | select(.status == "pending") | select(.title | ascii_downcase | startswith("ask:"))] | length' 2>/dev/null || echo "0")
+if [[ "$_ASK_COUNT" -gt 0 ]]; then
+  log "PR #$PR: open questions pending — deferring ready/review"
+  break
+fi
+
 if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
   log "PR #$PR: changes requested by $OWNER — all addressed, re-requesting review"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
