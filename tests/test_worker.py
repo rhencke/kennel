@@ -1996,6 +1996,11 @@ class TestBuildPrBody:
             )
         assert isinstance(result, str)
 
+    def test_raises_if_setup_session_id_empty(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with pytest.raises(AssertionError):
+            worker._build_pr_body("req", 1, setup_session_id="")
+
     def test_contains_work_queue_start_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (

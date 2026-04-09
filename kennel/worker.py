@@ -774,6 +774,7 @@ class Worker:
         back to plain text if Claude returns nothing.  Appends the pending task
         list inside the ``WORK_QUEUE_START/END`` markers.
         """
+        assert setup_session_id, "setup_session_id must be non-empty"
         plain = f"{request}\n\nFixes #{issue}."
         task_list = tasks.list_tasks(self.work_dir)
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
