@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from kennel.claude import (
     ClaudeStreamError,
@@ -33,9 +33,11 @@ def _completed(
 
 class TestClaudeHelper:
     def test_calls_subprocess_run_with_prompt(self) -> None:
-        with patch("subprocess.run", return_value=_completed("out")) as mock:
-            result = _claude("--print", "-p", "hello", prompt="input", timeout=5)
-        mock.assert_called_once_with(
+        mock_run = MagicMock(return_value=_completed("out"))
+        result = _claude(
+            "--print", "-p", "hello", prompt="input", timeout=5, runner=mock_run
+        )
+        mock_run.assert_called_once_with(
             ["claude", "--print", "-p", "hello"],
             input="input",
             capture_output=True,
@@ -45,122 +47,136 @@ class TestClaudeHelper:
         assert result.stdout == "out"
 
     def test_defaults(self) -> None:
-        with patch("subprocess.run", return_value=_completed()) as mock:
-            _claude("--version")
-        _, kwargs = mock.call_args
+        mock_run = MagicMock(return_value=_completed())
+        _claude("--version", runner=mock_run)
+        _, kwargs = mock_run.call_args
         assert kwargs["timeout"] == 30
         assert kwargs["input"] is None
 
     def test_no_prompt(self) -> None:
-        with patch("subprocess.run", return_value=_completed("x")) as mock:
-            _claude("--help")
-        assert mock.call_args.kwargs["input"] is None
+        mock_run = MagicMock(return_value=_completed("x"))
+        _claude("--help", runner=mock_run)
+        assert mock_run.call_args.kwargs["input"] is None
 
 
 class TestPrintPrompt:
     def test_returns_stripped_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("  hello world  \n")):
-            assert print_prompt("hi", "claude-opus-4-6") == "hello world"
+        mock_run = MagicMock(return_value=_completed("  hello world  \n"))
+        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == "hello world"
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch("subprocess.run", return_value=_completed("err", returncode=1)):
-            assert print_prompt("hi", "claude-opus-4-6") == ""
+        mock_run = MagicMock(return_value=_completed("err", returncode=1))
+        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 30),
-        ):
-            assert print_prompt("hi", "claude-opus-4-6") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
+        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert print_prompt("hi", "claude-opus-4-6") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
 
     def test_includes_system_prompt(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            print_prompt("question", "claude-opus-4-6", system_prompt="be helpful")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ok"))
+        print_prompt(
+            "question", "claude-opus-4-6", system_prompt="be helpful", runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "--system-prompt" in cmd
         assert "be helpful" in cmd
 
     def test_no_system_prompt_arg_when_none(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            print_prompt("q", "claude-opus-4-6", system_prompt=None)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ok"))
+        print_prompt("q", "claude-opus-4-6", system_prompt=None, runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "--system-prompt" not in cmd
 
     def test_passes_model(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            print_prompt("q", "claude-haiku-4-5-20251001")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ok"))
+        print_prompt("q", "claude-haiku-4-5-20251001", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "--model" in cmd
         assert "claude-haiku-4-5-20251001" in cmd
 
     def test_passes_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            print_prompt("q", "claude-opus-4-6", timeout=7)
-        assert mock.call_args.kwargs["timeout"] == 7
+        mock_run = MagicMock(return_value=_completed("ok"))
+        print_prompt("q", "claude-opus-4-6", timeout=7, runner=mock_run)
+        assert mock_run.call_args.kwargs["timeout"] == 7
 
 
 class TestPrintPromptJson:
     def test_extracts_key_from_clean_json(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed('{"description": "Fixes bug."}')
-        ):
-            assert (
-                print_prompt_json("q", "description", "claude-opus-4-6") == "Fixes bug."
-            )
+        mock_run = MagicMock(return_value=_completed('{"description": "Fixes bug."}'))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == "Fixes bug."
+        )
 
     def test_extracts_key_when_preamble_present(self) -> None:
-        with patch(
-            "subprocess.run",
+        mock_run = MagicMock(
             return_value=_completed(
                 'Sure! Here you go: {"description": "Adds feature."} Done.'
-            ),
-        ):
-            assert (
-                print_prompt_json("q", "description", "claude-opus-4-6")
-                == "Adds feature."
             )
+        )
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == "Adds feature."
+        )
 
     def test_returns_empty_when_key_missing(self) -> None:
-        with patch("subprocess.run", return_value=_completed('{"other": "value"}')):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(return_value=_completed('{"other": "value"}'))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_returns_empty_on_no_json(self) -> None:
-        with patch("subprocess.run", return_value=_completed("just plain text")):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(return_value=_completed("just plain text"))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_returns_empty_on_empty_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("")):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(return_value=_completed(""))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch(
-            "subprocess.run",
-            return_value=_completed('{"description": "x"}', returncode=1),
-        ):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(
+            return_value=_completed('{"description": "x"}', returncode=1)
+        )
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 30)
-        ):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_appends_json_instruction_to_system_prompt(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed('{"description": "x"}')
-        ) as mock:
-            print_prompt_json(
-                "q", "description", "claude-opus-4-6", system_prompt="be helpful"
-            )
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed('{"description": "x"}'))
+        print_prompt_json(
+            "q",
+            "description",
+            "claude-opus-4-6",
+            system_prompt="be helpful",
+            runner=mock_run,
+        )
+        cmd = mock_run.call_args.args[0]
         assert "--system-prompt" in cmd
         idx = cmd.index("--system-prompt")
         combined = cmd[idx + 1]
@@ -168,25 +184,30 @@ class TestPrintPromptJson:
         assert "description" in combined
 
     def test_uses_json_instruction_as_only_system_prompt_when_none_given(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed('{"description": "x"}')
-        ) as mock:
-            print_prompt_json("q", "description", "claude-opus-4-6", system_prompt=None)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed('{"description": "x"}'))
+        print_prompt_json(
+            "q", "description", "claude-opus-4-6", system_prompt=None, runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "--system-prompt" in cmd
         idx = cmd.index("--system-prompt")
         assert "description" in cmd[idx + 1]
 
     def test_non_string_value_is_ignored(self) -> None:
-        with patch("subprocess.run", return_value=_completed('{"description": 42}')):
-            assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
+        mock_run = MagicMock(return_value=_completed('{"description": 42}'))
+        assert (
+            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
+            == ""
+        )
 
     def test_passes_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed('{"k": "v"}')) as mock:
-            print_prompt_json("q", "k", "claude-haiku-4-5-20251001", timeout=7)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed('{"k": "v"}'))
+        print_prompt_json(
+            "q", "k", "claude-haiku-4-5-20251001", timeout=7, runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "claude-haiku-4-5-20251001" in cmd
-        assert mock.call_args.kwargs["timeout"] == 7
+        assert mock_run.call_args.kwargs["timeout"] == 7
 
 
 class TestRunStreaming:
@@ -249,12 +270,14 @@ class TestRunStreaming:
         mock_proc.wait.return_value = 0
         mock_proc.returncode = 0
 
-        with (
-            patch("subprocess.Popen", return_value=mock_proc),
-            # select returns NOT ready — forces poll() check
-            patch("select.select", return_value=([], [], [])),
-        ):
-            result = "".join(_run_streaming(["fake"], stdin_file))
+        mock_popen = MagicMock(return_value=mock_proc)
+        mock_selector = MagicMock(return_value=([], [], []))
+
+        result = "".join(
+            _run_streaming(
+                ["fake"], stdin_file, popen=mock_popen, selector=mock_selector
+            )
+        )
         assert "leftover" in result
 
     def test_drains_remaining_output(self, tmp_path: Path) -> None:
@@ -279,11 +302,14 @@ class TestRunStreaming:
         mock_proc.wait.return_value = 0
         mock_proc.returncode = 0
 
-        with (
-            patch("subprocess.Popen", return_value=mock_proc),
-            patch("select.select", return_value=([mock_stdout], [], [])),
-        ):
-            result = "".join(_run_streaming(["fake"], stdin_file))
+        mock_popen = MagicMock(return_value=mock_proc)
+        mock_selector = MagicMock(return_value=([mock_stdout], [], []))
+
+        result = "".join(
+            _run_streaming(
+                ["fake"], stdin_file, popen=mock_popen, selector=mock_selector
+            )
+        )
         assert "line1" in result
         assert "extra" in result
 
@@ -298,35 +324,43 @@ class TestPrintPromptFromFile:
 
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch(
-            "kennel.claude._run_streaming", return_value=iter(["session output"])
-        ):
-            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        mock_stream = MagicMock(return_value=iter(["session output"]))
+        result = print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == "session output"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(1)):
-            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
+        result = print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(-1)):
-            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
+        result = print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", side_effect=FileNotFoundError):
-            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=FileNotFoundError)
+        result = print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
-            print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
-        cmd = mock.call_args[0][0]
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
+        cmd = mock_stream.call_args[0][0]
         assert "--model" in cmd
         assert "claude-sonnet-4-6" in cmd
         assert "--system-prompt-file" in cmd
@@ -335,46 +369,65 @@ class TestPrintPromptFromFile:
 
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
-            print_prompt_from_file(sys, prompt, "claude-sonnet-4-6", idle_timeout=600.0)
-        assert mock.call_args[0][2] == 600.0
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        print_prompt_from_file(
+            sys,
+            prompt,
+            "claude-sonnet-4-6",
+            idle_timeout=600.0,
+            streaming_runner=mock_stream,
+        )
+        assert mock_stream.call_args[0][2] == 600.0
 
 
 class TestResumeSession:
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
-        with patch("kennel.claude._run_streaming", return_value=iter(["continued"])):
-            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
+        mock_stream = MagicMock(return_value=iter(["continued"]))
+        result = resume_session(
+            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == "continued"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(1)):
-            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
+        result = resume_session(
+            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(-1)):
-            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
+        result = resume_session(
+            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", side_effect=FileNotFoundError):
-            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
+        mock_stream = MagicMock(side_effect=FileNotFoundError)
+        result = resume_session(
+            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
+        )
         assert result == ""
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
-            resume_session("my-session-id", prompt_file, "claude-sonnet-4-6")
-        cmd = mock.call_args[0][0]
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        resume_session(
+            "my-session-id",
+            prompt_file,
+            "claude-sonnet-4-6",
+            streaming_runner=mock_stream,
+        )
+        cmd = mock_stream.call_args[0][0]
         assert "--resume" in cmd
         assert "my-session-id" in cmd
         assert "--print" in cmd
@@ -382,167 +435,166 @@ class TestResumeSession:
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
-            resume_session(
-                "sess-1", prompt_file, "claude-sonnet-4-6", idle_timeout=900.0
-            )
-        assert mock.call_args[0][2] == 900.0
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        resume_session(
+            "sess-1",
+            prompt_file,
+            "claude-sonnet-4-6",
+            idle_timeout=900.0,
+            streaming_runner=mock_stream,
+        )
+        assert mock_stream.call_args[0][2] == 900.0
 
 
 class TestTriageComment:
     def test_returns_first_line(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed("ACT: fix the thing\nextra")
-        ):
-            assert triage_comment("triage this") == "ACT: fix the thing"
+        mock_run = MagicMock(return_value=_completed("ACT: fix the thing\nextra"))
+        assert triage_comment("triage this", runner=mock_run) == "ACT: fix the thing"
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ACT", returncode=1)):
-            assert triage_comment("triage this") == ""
+        mock_run = MagicMock(return_value=_completed("ACT", returncode=1))
+        assert triage_comment("triage this", runner=mock_run) == ""
 
     def test_returns_empty_on_empty_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("")):
-            assert triage_comment("triage this") == ""
+        mock_run = MagicMock(return_value=_completed(""))
+        assert triage_comment("triage this", runner=mock_run) == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 15),
-        ):
-            assert triage_comment("triage") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
+        assert triage_comment("triage", runner=mock_run) == ""
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert triage_comment("triage") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert triage_comment("triage", runner=mock_run) == ""
 
     def test_default_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ACT: thing")) as mock:
-            triage_comment("triage this")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ACT: thing"))
+        triage_comment("triage this", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 15
+        assert mock_run.call_args.kwargs["timeout"] == 15
 
     def test_custom_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("DO: fix")) as mock:
-            triage_comment("triage", model="claude-haiku-4-5-20251001", timeout=5)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("DO: fix"))
+        triage_comment(
+            "triage", model="claude-haiku-4-5-20251001", timeout=5, runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "claude-haiku-4-5-20251001" in cmd
-        assert mock.call_args.kwargs["timeout"] == 5
+        assert mock_run.call_args.kwargs["timeout"] == 5
 
 
 class TestGenerateReply:
     def test_returns_stripped_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("  woof!  \n")):
-            assert generate_reply("write a reply") == "woof!"
+        mock_run = MagicMock(return_value=_completed("  woof!  \n"))
+        assert generate_reply("write a reply", runner=mock_run) == "woof!"
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch("subprocess.run", return_value=_completed("err", returncode=1)):
-            assert generate_reply("write") == ""
+        mock_run = MagicMock(return_value=_completed("err", returncode=1))
+        assert generate_reply("write", runner=mock_run) == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 30),
-        ):
-            assert generate_reply("write") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
+        assert generate_reply("write", runner=mock_run) == ""
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert generate_reply("write") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert generate_reply("write", runner=mock_run) == ""
 
     def test_default_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            generate_reply("write a reply")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ok"))
+        generate_reply("write a reply", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 30
+        assert mock_run.call_args.kwargs["timeout"] == 30
 
     def test_custom_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("ok")) as mock:
-            generate_reply("write", model="claude-sonnet-4-6", timeout=10)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("ok"))
+        generate_reply("write", model="claude-sonnet-4-6", timeout=10, runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-sonnet-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 10
+        assert mock_run.call_args.kwargs["timeout"] == 10
 
 
 class TestGenerateBranchName:
     def test_returns_first_line(self) -> None:
-        with patch("subprocess.run", return_value=_completed("add-tests\nextra line")):
-            assert generate_branch_name("make branch for: add tests") == "add-tests"
+        mock_run = MagicMock(return_value=_completed("add-tests\nextra line"))
+        assert (
+            generate_branch_name("make branch for: add tests", runner=mock_run)
+            == "add-tests"
+        )
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch("subprocess.run", return_value=_completed("slug", returncode=1)):
-            assert generate_branch_name("make branch") == ""
+        mock_run = MagicMock(return_value=_completed("slug", returncode=1))
+        assert generate_branch_name("make branch", runner=mock_run) == ""
 
     def test_returns_empty_on_empty_output(self) -> None:
-        with patch("subprocess.run", return_value=_completed("")):
-            assert generate_branch_name("make branch") == ""
+        mock_run = MagicMock(return_value=_completed(""))
+        assert generate_branch_name("make branch", runner=mock_run) == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 15),
-        ):
-            assert generate_branch_name("make branch") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
+        assert generate_branch_name("make branch", runner=mock_run) == ""
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert generate_branch_name("make branch") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert generate_branch_name("make branch", runner=mock_run) == ""
 
     def test_default_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("fix-bug")) as mock:
-            generate_branch_name("fix bug in parser")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("fix-bug"))
+        generate_branch_name("fix bug in parser", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-haiku-4-5-20251001" in cmd
-        assert mock.call_args.kwargs["timeout"] == 15
+        assert mock_run.call_args.kwargs["timeout"] == 15
 
     def test_custom_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("fix-bug")) as mock:
-            generate_branch_name("fix bug", model="claude-opus-4-6", timeout=20)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("fix-bug"))
+        generate_branch_name(
+            "fix bug", model="claude-opus-4-6", timeout=20, runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 20
+        assert mock_run.call_args.kwargs["timeout"] == 20
 
 
 class TestGenerateStatus:
     def test_returns_two_lines(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🐶\ncoding up a storm")):
-            result = generate_status("working on #42", "be fido")
+        mock_run = MagicMock(return_value=_completed("🐶\ncoding up a storm"))
+        result = generate_status("working on #42", "be fido", runner=mock_run)
         assert result == "🐶\ncoding up a storm"
 
     def test_returns_empty_on_failure(self) -> None:
-        with patch("subprocess.run", return_value=_completed("", returncode=1)):
-            result = generate_status("working", "sys")
+        mock_run = MagicMock(return_value=_completed("", returncode=1))
+        result = generate_status("working", "sys", runner=mock_run)
         assert result == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 15),
-        ):
-            result = generate_status("working", "sys")
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
+        result = generate_status("working", "sys", runner=mock_run)
         assert result == ""
 
     def test_passes_system_prompt(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🚀\nworking")) as mock:
-            generate_status("doing stuff", system_prompt="be a dog")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("🚀\nworking"))
+        generate_status("doing stuff", system_prompt="be a dog", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "--system-prompt" in cmd
         assert "be a dog" in cmd
 
     def test_default_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🐶\nwoof")) as mock:
-            generate_status("working", "sys")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("🐶\nwoof"))
+        generate_status("working", "sys", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 15
+        assert mock_run.call_args.kwargs["timeout"] == 15
 
     def test_custom_model_and_timeout(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🐶\nwoof")) as mock:
-            generate_status("working", "sys", model="claude-sonnet-4-6", timeout=5)
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("🐶\nwoof"))
+        generate_status(
+            "working", "sys", model="claude-sonnet-4-6", timeout=5, runner=mock_run
+        )
+        cmd = mock_run.call_args.args[0]
         assert "claude-sonnet-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 5
+        assert mock_run.call_args.kwargs["timeout"] == 5
 
 
 class TestExtractSessionId:
@@ -654,39 +706,44 @@ class TestGenerateStatusWithSession:
     _RESULT_LINE = '{"type":"result","result":"🐶\\ncoding","session_id":"sess-42"}'
 
     def test_returns_text_and_session_id_on_success(self) -> None:
-        with patch("subprocess.run", return_value=_completed(self._RESULT_LINE)):
-            text, sid = generate_status_with_session("doing stuff", "be fido")
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        text, sid = generate_status_with_session(
+            "doing stuff", "be fido", runner=mock_run
+        )
         assert text == "🐶\ncoding"
         assert sid == "sess-42"
 
     def test_returns_empty_pair_on_nonzero(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE, returncode=1)
-        ):
-            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
+        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
+            "",
+            "",
+        )
 
     def test_returns_empty_pair_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 15),
-        ):
-            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
+        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
+            "",
+            "",
+        )
 
     def test_returns_empty_pair_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert generate_status_with_session("doing stuff", "sys") == ("", "")
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
+            "",
+            "",
+        )
 
     def test_passes_correct_flags(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE)
-        ) as mock:
-            generate_status_with_session(
-                "working on #42",
-                "be a dog",
-                model="claude-sonnet-4-6",
-                timeout=10,
-            )
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        generate_status_with_session(
+            "working on #42",
+            "be a dog",
+            model="claude-sonnet-4-6",
+            timeout=10,
+            runner=mock_run,
+        )
+        cmd = mock_run.call_args.args[0]
         assert "--model" in cmd
         assert "claude-sonnet-4-6" in cmd
         assert "--output-format" in cmd
@@ -698,90 +755,86 @@ class TestGenerateStatusWithSession:
         assert "--print" in cmd
         assert "-p" in cmd
         assert "working on #42" in cmd
-        assert mock.call_args.kwargs["timeout"] == 10
+        assert mock_run.call_args.kwargs["timeout"] == 10
 
     def test_default_model_and_timeout(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE)
-        ) as mock:
-            generate_status_with_session("working", "sys")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        generate_status_with_session("working", "sys", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 15
+        assert mock_run.call_args.kwargs["timeout"] == 15
 
     def test_returns_empty_text_when_no_result_field(self) -> None:
         no_result = '{"type":"result","session_id":"sid"}'
-        with patch("subprocess.run", return_value=_completed(no_result)):
-            text, sid = generate_status_with_session("working", "sys")
+        mock_run = MagicMock(return_value=_completed(no_result))
+        text, sid = generate_status_with_session("working", "sys", runner=mock_run)
         assert text == ""
         assert sid == "sid"
 
     def test_returns_empty_session_when_no_session_id(self) -> None:
         no_sid = '{"type":"result","result":"🐶\\nwoof"}'
-        with patch("subprocess.run", return_value=_completed(no_sid)):
-            text, sid = generate_status_with_session("working", "sys")
+        mock_run = MagicMock(return_value=_completed(no_sid))
+        text, sid = generate_status_with_session("working", "sys", runner=mock_run)
         assert text == "🐶\nwoof"
         assert sid == ""
 
 
 class TestGenerateStatusEmoji:
     def test_returns_emoji(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🐕")):
-            result = generate_status_emoji("pick emoji", "be fido")
+        mock_run = MagicMock(return_value=_completed("🐕"))
+        result = generate_status_emoji("pick emoji", "be fido", runner=mock_run)
         assert result == "🐕"
 
     def test_returns_empty_on_failure(self) -> None:
-        with patch("subprocess.run", return_value=_completed("", returncode=1)):
-            result = generate_status_emoji("pick emoji", "sys")
+        mock_run = MagicMock(return_value=_completed("", returncode=1))
+        result = generate_status_emoji("pick emoji", "sys", runner=mock_run)
         assert result == ""
 
     def test_passes_correct_flags(self) -> None:
-        with patch("subprocess.run", return_value=_completed("🐕")) as mock:
-            generate_status_emoji(
-                "pick emoji", "be fido", model="claude-sonnet-4-6", timeout=10
-            )
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed("🐕"))
+        generate_status_emoji(
+            "pick emoji",
+            "be fido",
+            model="claude-sonnet-4-6",
+            timeout=10,
+            runner=mock_run,
+        )
+        cmd = mock_run.call_args.args[0]
         assert "claude-sonnet-4-6" in cmd
         assert "be fido" in cmd
-        assert mock.call_args.kwargs["timeout"] == 10
+        assert mock_run.call_args.kwargs["timeout"] == 10
 
 
 class TestResumeStatus:
     _RESULT_LINE = '{"type":"result","result":"🐕\\nfetching","session_id":"s-1"}'
 
     def test_returns_text_on_success(self) -> None:
-        with patch("subprocess.run", return_value=_completed(self._RESULT_LINE)):
-            result = resume_status("s-1", "please shorten")
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        result = resume_status("s-1", "please shorten", runner=mock_run)
         assert result == "🐕\nfetching"
 
     def test_returns_empty_on_nonzero(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE, returncode=1)
-        ):
-            assert resume_status("s-1", "shorten") == ""
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
+        assert resume_status("s-1", "shorten", runner=mock_run) == ""
 
     def test_returns_empty_on_timeout(self) -> None:
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired("claude", 15),
-        ):
-            assert resume_status("s-1", "shorten") == ""
+        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
+        assert resume_status("s-1", "shorten", runner=mock_run) == ""
 
     def test_returns_empty_on_file_not_found(self) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert resume_status("s-1", "shorten") == ""
+        mock_run = MagicMock(side_effect=FileNotFoundError)
+        assert resume_status("s-1", "shorten", runner=mock_run) == ""
 
     def test_passes_correct_flags(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE)
-        ) as mock:
-            resume_status(
-                "my-session",
-                "shorten to 80 chars",
-                model="claude-sonnet-4-6",
-                timeout=20,
-            )
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        resume_status(
+            "my-session",
+            "shorten to 80 chars",
+            model="claude-sonnet-4-6",
+            timeout=20,
+            runner=mock_run,
+        )
+        cmd = mock_run.call_args.args[0]
         assert "--model" in cmd
         assert "claude-sonnet-4-6" in cmd
         assert "--output-format" in cmd
@@ -793,18 +846,16 @@ class TestResumeStatus:
         assert "--print" in cmd
         assert "-p" in cmd
         assert "shorten to 80 chars" in cmd
-        assert mock.call_args.kwargs["timeout"] == 20
+        assert mock_run.call_args.kwargs["timeout"] == 20
 
     def test_default_model_and_timeout(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed(self._RESULT_LINE)
-        ) as mock:
-            resume_status("s-1", "shorten")
-        cmd = mock.call_args.args[0]
+        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
+        resume_status("s-1", "shorten", runner=mock_run)
+        cmd = mock_run.call_args.args[0]
         assert "claude-opus-4-6" in cmd
-        assert mock.call_args.kwargs["timeout"] == 15
+        assert mock_run.call_args.kwargs["timeout"] == 15
 
     def test_returns_empty_when_no_result_field(self) -> None:
         no_result = '{"type":"result","session_id":"s-1"}'
-        with patch("subprocess.run", return_value=_completed(no_result)):
-            assert resume_status("s-1", "shorten") == ""
+        mock_run = MagicMock(return_value=_completed(no_result))
+        assert resume_status("s-1", "shorten", runner=mock_run) == ""

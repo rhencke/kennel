@@ -8,7 +8,7 @@ import re
 import select
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -18,9 +18,10 @@ def _claude(
     *args: str,
     prompt: str | None = None,
     timeout: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
     """Run the claude CLI with the given args, optionally piping prompt to stdin."""
-    return subprocess.run(
+    return runner(
         ["claude", *args],
         input=prompt,
         capture_output=True,
@@ -92,6 +93,7 @@ def print_prompt(
     model: str,
     system_prompt: str | None = None,
     timeout: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Run claude --print with a prompt, return stdout (empty string on failure).
 
@@ -102,7 +104,7 @@ def print_prompt(
         args += ["--system-prompt", system_prompt]
     args += ["-p", prompt]
     try:
-        result = _claude(*args, timeout=timeout)
+        result = _claude(*args, timeout=timeout, runner=runner)
         return result.stdout.strip() if result.returncode == 0 else ""
     except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
@@ -114,6 +116,7 @@ def print_prompt_json(
     model: str,
     system_prompt: str | None = None,
     timeout: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Run claude --print, parse JSON from output, return the string at *key*.
 
@@ -130,7 +133,9 @@ def print_prompt_json(
     full_system = (
         f"{system_prompt}\n\n{json_instruction}" if system_prompt else json_instruction
     )
-    raw = print_prompt(prompt, model, system_prompt=full_system, timeout=timeout)
+    raw = print_prompt(
+        prompt, model, system_prompt=full_system, timeout=timeout, runner=runner
+    )
     if not raw:
         return ""
     # Try parsing whole output, then scan for JSON objects (handles preamble).
@@ -150,6 +155,8 @@ def _run_streaming(
     stdin_file: Path,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
+    popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+    selector: Callable[..., tuple[list, list, list]] = select.select,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -159,7 +166,7 @@ def _run_streaming(
     ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
     propagates naturally if the command is not found.
     """
-    proc = subprocess.Popen(
+    proc = popen(
         cmd,
         stdin=stdin_file.open(),
         stdout=subprocess.PIPE,
@@ -171,7 +178,7 @@ def _run_streaming(
     last_activity = time.monotonic()
 
     while True:
-        ready, _, _ = select.select([proc.stdout], [], [], 10.0)
+        ready, _, _ = selector([proc.stdout], [], [], 10.0)
         if ready:
             line = proc.stdout.readline()
             if not line:
@@ -203,6 +210,7 @@ def print_prompt_from_file(
     timeout: int = 30,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
+    streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
 ) -> str:
     """Run claude --print reading system prompt and user prompt from files.
 
@@ -222,7 +230,9 @@ def print_prompt_from_file(
         "--print",
     ]
     try:
-        return "".join(_run_streaming(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
+        return "".join(
+            streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
+        ).strip()
     except ClaudeStreamError, FileNotFoundError:
         return ""
 
@@ -234,6 +244,7 @@ def resume_session(
     timeout: int = 300,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
+    streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
 ) -> str:
     """Continue an existing claude session by ID, feeding prompt_file on stdin.
 
@@ -253,7 +264,9 @@ def resume_session(
         "--print",
     ]
     try:
-        return "".join(_run_streaming(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
+        return "".join(
+            streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
+        ).strip()
     except ClaudeStreamError, FileNotFoundError:
         return ""
 
@@ -265,13 +278,16 @@ def triage_comment(
     prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Ask claude to triage a PR comment. Returns the raw first line of output.
 
     Returns empty string on timeout or if the CLI is not found.
     """
     try:
-        result = _claude("--model", model, "--print", "-p", prompt, timeout=timeout)
+        result = _claude(
+            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
+        )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
@@ -283,10 +299,13 @@ def generate_reply(
     prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 30,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Ask claude to generate a short reply. Returns stripped output or empty string."""
     try:
-        result = _claude("--model", model, "--print", "-p", prompt, timeout=timeout)
+        result = _claude(
+            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
+        )
         return result.stdout.strip() if result.returncode == 0 else ""
     except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
@@ -296,10 +315,13 @@ def generate_branch_name(
     prompt: str,
     model: str = "claude-haiku-4-5-20251001",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Ask claude to generate a git branch name slug. Returns first line of output."""
     try:
-        result = _claude("--model", model, "--print", "-p", prompt, timeout=timeout)
+        result = _claude(
+            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
+        )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
@@ -312,6 +334,7 @@ def generate_status(
     system_prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Ask claude to generate a GitHub status (two lines: emoji + text)."""
     return print_prompt(
@@ -319,6 +342,7 @@ def generate_status(
         model=model,
         system_prompt=system_prompt,
         timeout=timeout,
+        runner=runner,
     )
 
 
@@ -327,6 +351,7 @@ def generate_status_emoji(
     system_prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Ask claude to choose a single emoji for a GitHub status.
 
@@ -337,6 +362,7 @@ def generate_status_emoji(
         model=model,
         system_prompt=system_prompt,
         timeout=timeout,
+        runner=runner,
     )
 
 
@@ -345,6 +371,7 @@ def generate_status_with_session(
     system_prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[str, str]:
     """Generate a GitHub status, returning (status_text, session_id).
 
@@ -353,25 +380,20 @@ def generate_status_with_session(
     shorten a long response).  Returns ``("", "")`` on failure.
     """
     try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--system-prompt",
-                system_prompt,
-                "--print",
-                "-p",
-                prompt,
-            ],
-            input=None,
-            capture_output=True,
-            text=True,
+        result = _claude(
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--system-prompt",
+            system_prompt,
+            "--print",
+            "-p",
+            prompt,
             timeout=timeout,
+            runner=runner,
         )
         if result.returncode != 0:
             return "", ""
@@ -386,6 +408,7 @@ def resume_status(
     prompt: str,
     model: str = "claude-opus-4-6",
     timeout: int = 15,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Resume an existing claude session to refine a status response.
 
@@ -394,25 +417,20 @@ def resume_status(
     string on failure.
     """
     try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--resume",
-                session_id,
-                "--print",
-                "-p",
-                prompt,
-            ],
-            input=None,
-            capture_output=True,
-            text=True,
+        result = _claude(
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--resume",
+            session_id,
+            "--print",
+            "-p",
+            prompt,
             timeout=timeout,
+            runner=runner,
         )
         if result.returncode != 0:
             return ""
