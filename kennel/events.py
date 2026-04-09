@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -553,24 +552,22 @@ def reply_to_issue_comment(
     return (category, title)
 
 
+_TYPE_PRIORITY = {TaskType.CI: 0, TaskType.THREAD: 1, TaskType.SPEC: 2}
+
+
 def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
     registry: WorkerRegistry,
-    *,
-    _print_prompt=None,
-    _gh=None,
 ) -> None:
-    """Ask Opus whether the new task invalidates the current in-progress task.
+    """Abort the current task if the new task has higher priority.
 
-    Opus receives the full context: issue title/body, PR title/body, all tasks,
-    and the current task ID.  It decides:
-    - Whether to abort the current task
-    - If aborting, whether to discard or keep the aborted task
-
-    Response format (first line): ``ABORT_DISCARD``, ``ABORT_KEEP``, or ``KEEP``.
+    Priority is deterministic by type: ci > thread > spec.
+    A higher-priority task always preempts — the current task is kept
+    pending for later (ABORT_KEEP).  Equal or lower priority does not
+    preempt.
     """
-    from kennel.tasks import list_tasks, remove_task
+    from kennel.tasks import list_tasks
     from kennel.worker import load_state
 
     fido_dir = repo_cfg.work_dir / ".git" / "fido"
@@ -586,77 +583,17 @@ def _maybe_abort_for_new_task(
     if current_task is None:
         return
 
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    new_priority = _TYPE_PRIORITY.get(new_task.get("type", "spec"), 2)
+    current_priority = _TYPE_PRIORITY.get(current_task.get("type", "spec"), 2)
 
-    issue_num = state.get("issue")
-    if not issue_num:
-        return
-
-    # Fetch issue/PR context for Opus
-    try:
-        gh = _gh if _gh is not None else get_github()
-        issue_data = gh.view_issue(repo_cfg.name, issue_num)
-        pr_data = gh.find_pr(repo_cfg.name, issue_num, gh.get_user())
-        pr_body = pr_data.get("body", "") if pr_data else ""
-        pr_title = pr_data.get("title", "") if pr_data else ""
-    except Exception:
-        log.warning("_maybe_abort: failed to fetch context — skipping")
-        return
-
-    tasks_json = json.dumps(task_list, indent=2)
-    prompt = (
-        f"A new task has been created from a PR comment:\n"
-        f"  New task: {new_task.get('title', '')}\n"
-        f"  New task type: {new_task.get('type', '')}\n\n"
-        f"The worker is currently executing:\n"
-        f"  Current task ID: {current_task_id}\n"
-        f"  Current task: {current_task.get('title', '')}\n"
-        f"  Current task type: {current_task.get('type', '')}\n\n"
-        f"Issue: {issue_data.get('title', '')}\n"
-        f"Issue body: {issue_data.get('body', '')[:500]}\n\n"
-        f"PR: {pr_title}\n"
-        f"PR body: {pr_body[:500]}\n\n"
-        f"All tasks:\n{tasks_json}\n\n"
-        f"Should the current task be aborted for the new task?\n"
-        f"Reply with exactly one of:\n"
-        f"  ABORT_DISCARD — abort current task and remove it from the queue\n"
-        f"  ABORT_KEEP — abort current task but keep it pending for later\n"
-        f"  KEEP — don't abort, let current task finish first"
-    )
-    decision = (
-        _print_prompt(
-            prompt=prompt,
-            model="claude-opus-4-6",
-            system_prompt=(
-                "You decide whether a new PR comment task should interrupt "
-                "the current in-progress task. Consider priority, dependency, "
-                "and whether the new task invalidates the current work. "
-                "Reply with exactly one word: ABORT_DISCARD, ABORT_KEEP, or KEEP."
-            ),
-            timeout=15,
-        )
-        .strip()
-        .split("\n")[0]
-        .strip()
-        .upper()
-    )
-
-    if decision == "ABORT_DISCARD":
+    if new_priority < current_priority:
         log.info(
-            "Opus: ABORT_DISCARD — removing task %s and triggering abort",
-            current_task.get("title", "")[:60],
-        )
-        remove_task(repo_cfg.work_dir, current_task_id)
-        registry.abort_task(repo_cfg.name)
-    elif decision == "ABORT_KEEP":
-        log.info(
-            "Opus: ABORT_KEEP — keeping task %s pending, triggering abort",
+            "preempt: %s task interrupts %s task — aborting %s",
+            new_task.get("type", "?"),
+            current_task.get("type", "?"),
             current_task.get("title", "")[:60],
         )
         registry.abort_task(repo_cfg.name)
-    else:
-        log.info("Opus: KEEP — letting current task finish")
 
 
 def create_task(
@@ -665,9 +602,6 @@ def create_task(
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
-    *,
-    _print_prompt=None,
-    _gh=None,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
@@ -675,9 +609,9 @@ def create_task(
     ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
     without inserting them out-of-order in the list.
 
-    If *registry* is given and the new task is thread-originated, checks
-    whether the current in-progress task is invalidated (it is a plain
-    non-thread task with lower priority); if so, removes it and signals abort.
+    If *registry* is given, checks whether the new task has higher priority
+    than the current in-progress task; if so, signals abort so the worker
+    picks up the higher-priority task.
 
     Returns the new task dict.
     """
@@ -687,10 +621,8 @@ def create_task(
         repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
     )
     launch_sync(config, repo_cfg)
-    if registry is not None and thread:
-        _maybe_abort_for_new_task(
-            repo_cfg, new_task, registry, _print_prompt=_print_prompt, _gh=_gh
-        )
+    if registry is not None:
+        _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task
 
 
