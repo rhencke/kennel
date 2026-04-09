@@ -1142,6 +1142,59 @@ class TestReplyToIssueComment:
         assert mock_pp.called
         assert cat == "ACT"
 
+    def test_includes_conversation_context_in_triage(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        action = self._action()
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            {"user": {"login": "alice"}, "body": "first comment"},
+            {"user": {"login": "bob"}, "body": "second comment"},
+            {"user": {"login": "owner"}, "body": "please fix"},
+        ]
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
+
+        with patch(
+            "kennel.events._triage", wraps=lambda *a, **kw: ("ACT", "do it")
+        ) as mock_triage:
+            cat, title = reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
+        assert cat == "ACT"
+        mock_gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
+        # Verify conversation context was built and passed to _triage
+        triage_ctx = mock_triage.call_args[0][2]  # third positional arg = context
+        assert "conversation" in triage_ctx
+        assert "alice: first comment" in triage_ctx["conversation"]
+        assert "bob: second comment" in triage_ctx["conversation"]
+
+    def test_conversation_context_exception_is_swallowed(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        action = self._action()
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.side_effect = RuntimeError("API down")
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
+
+        cat, title = reply_to_issue_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
+        assert cat == "ACT"
+
 
 class TestCreateTask:
     def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:

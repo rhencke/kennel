@@ -75,3 +75,4 @@ Task implemented, committed, and pushed.
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
 - **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `kennel task`.
 - **Never** edit the PR body directly. `sync-tasks.sh` owns the PR body work queue.
+- **Never** fix unrelated bugs in this PR. If you encounter a bug that is not directly related to the current task title, file a GitHub issue for it (`gh issue create`) — do NOT fix it here. One PR, one purpose. Scope creep breaks reviewability.

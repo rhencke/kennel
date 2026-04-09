@@ -255,12 +255,13 @@ class GH:
         return data["data"]["repository"]["issues"]["nodes"]
 
     def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
-        """Return issue data (state, title, body)."""
+        """Return issue data (state, title, body, created_at)."""
         data = self._get(f"/repos/{repo}/issues/{number}")
         return {
             "state": data["state"].upper(),
             "title": data["title"],
             "body": data["body"] or "",
+            "created_at": data.get("created_at", ""),
         }
 
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
@@ -268,6 +269,10 @@ class GH:
         return list(
             self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/comments")
         )
+
+    def get_issue_events(self, repo: str, number: int | str) -> list[dict[str, Any]]:
+        """Return all events on an issue."""
+        return list(self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/events"))
 
     def create_issue(self, repo: str, title: str, body: str) -> str:
         """Create an issue and return its HTML URL."""
@@ -523,6 +528,10 @@ class GitHub:
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all comments on an issue."""
         return self._gh.get_issue_comments(repo, number)
+
+    def get_issue_events(self, repo: str, number: int | str) -> list[dict[str, Any]]:
+        """Return all events on an issue."""
+        return self._gh.get_issue_events(repo, number)
 
     def create_issue(self, repo: str, title: str, body: str) -> str:
         """Create an issue and return its HTML URL."""

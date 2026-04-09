@@ -130,10 +130,16 @@ class TestGitHubClass:
     def test_view_issue_delegates(self) -> None:
         gh, mock_s = self._github()
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "open", "title": "T", "body": "b"}
+        mock_resp.json.return_value = {
+            "state": "open",
+            "title": "T",
+            "body": "b",
+            "created_at": "2024-01-01T00:00:00Z",
+        }
         mock_s.get.return_value = mock_resp
         result = gh.view_issue("o/r", 1)
         assert result["state"] == "OPEN"
+        assert result["created_at"] == "2024-01-01T00:00:00Z"
 
     def test_comment_issue_delegates(self) -> None:
         gh, mock_s = self._github()
@@ -150,6 +156,15 @@ class TestGitHubClass:
         mock_resp.headers = {}
         mock_s.get.return_value = mock_resp
         assert gh.get_issue_comments("o/r", 9) == comments
+
+    def test_get_issue_events_delegates(self) -> None:
+        gh, mock_s = self._github()
+        events = [{"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = events
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_issue_events("o/r", 3) == events
 
     def test_create_issue_delegates(self) -> None:
         gh, mock_s = self._github()
@@ -929,10 +944,20 @@ class TestGHClass:
     def test_view_issue(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "open", "title": "Bug", "body": "desc"}
+        mock_resp.json.return_value = {
+            "state": "open",
+            "title": "Bug",
+            "body": "desc",
+            "created_at": "2024-01-01T00:00:00Z",
+        }
         mock_s.get.return_value = mock_resp
         result = gh.view_issue("o/r", 5)
-        assert result == {"state": "OPEN", "title": "Bug", "body": "desc"}
+        assert result == {
+            "state": "OPEN",
+            "title": "Bug",
+            "body": "desc",
+            "created_at": "2024-01-01T00:00:00Z",
+        }
 
     def test_get_issue_comments(self) -> None:
         gh, mock_s = self._gh()
@@ -945,6 +970,18 @@ class TestGHClass:
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/issues/9/comments" in url
         assert result == comments
+
+    def test_get_issue_events(self) -> None:
+        gh, mock_s = self._gh()
+        events = [{"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = events
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_issue_events("o/r", 3)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/issues/3/events" in url
+        assert result == events
 
     def test_create_issue(self) -> None:
         gh, mock_s = self._gh()

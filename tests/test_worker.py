@@ -1112,12 +1112,18 @@ class TestWorkerPostPickupComment:
 
     def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
+        gh.view_issue.return_value = {"created_at": "2024-01-01T00:00:00Z"}
+        gh.get_issue_events.return_value = []
         return Worker(tmp_path, gh), gh
 
     def test_skips_when_already_commented(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = [
-            {"user": {"login": "fido-bot"}, "body": "Woof!"}
+            {
+                "user": {"login": "fido-bot"},
+                "body": "Woof!",
+                "created_at": "2024-02-01T00:00:00Z",
+            }
         ]
         worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
         gh.comment_issue.assert_not_called()
@@ -1219,7 +1225,11 @@ class TestWorkerPostPickupComment:
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = [
-            {"user": {"login": "fido-bot"}, "body": "Woof!"}
+            {
+                "user": {"login": "fido-bot"},
+                "body": "Woof!",
+                "created_at": "2024-02-01T00:00:00Z",
+            }
         ]
         with (
             patch("kennel.worker._sub_dir", return_value=tmp_path),
@@ -1228,6 +1238,27 @@ class TestWorkerPostPickupComment:
             with caplog.at_level(logging.INFO, logger="kennel"):
                 worker.post_pickup_comment("owner/repo", 7, "Title", "fido-bot")
         assert "already exists" in caplog.text
+
+    def test_posts_comment_on_reopened_issue(self, tmp_path: Path) -> None:
+        """Old comment predates reopen, so a new pickup comment is posted."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_events.return_value = [
+            {"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}
+        ]
+        gh.get_issue_comments.return_value = [
+            {
+                "user": {"login": "fido-bot"},
+                "body": "Woof!",
+                "created_at": "2024-02-01T00:00:00Z",
+            }
+        ]
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch("kennel.worker.claude.generate_reply", return_value="Back on it!"),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        gh.comment_issue.assert_called_once_with("owner/repo", 1, "Back on it!")
 
 
 class TestRun:

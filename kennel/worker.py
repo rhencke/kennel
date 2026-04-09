@@ -1450,12 +1450,27 @@ class Worker:
     ) -> None:
         """Post a Fido-flavoured pickup comment on the issue if not already posted.
 
-        Checks whether gh_user has already commented; if so, skips.  Otherwise
-        generates the comment via Claude (Opus, using the Fido persona) and posts it.
+        Checks whether gh_user has commented since the issue was last opened
+        (handles reopened issues).  Otherwise generates the comment via Claude
+        (Opus, using the Fido persona) and posts it.
         Falls back to a plain-text comment if Claude returns nothing.
         """
+        issue_data = self.gh.view_issue(repo, issue)
+        issue_created = issue_data.get("created_at", "")
+        # For reopened issues, use the most recent open event
+        events = self.gh.get_issue_events(repo, issue)
+        last_opened = issue_created
+        for e in events:
+            if e.get("event") == "reopened":
+                last_opened = e.get("created_at", last_opened)
+
         comments = self.gh.get_issue_comments(repo, issue)
-        if any(c.get("user", {}).get("login") == gh_user for c in comments):
+        has_recent_comment = any(
+            c.get("user", {}).get("login") == gh_user
+            and c.get("created_at", "") >= last_opened
+            for c in comments
+        )
+        if has_recent_comment:
             log.info("issue #%s: pickup comment already exists — skipping", issue)
             return
 

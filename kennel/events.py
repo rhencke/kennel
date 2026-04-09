@@ -492,6 +492,29 @@ def reply_to_issue_comment(
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
+    # Fetch full conversation history for context
+    gh = _gh if _gh is not None else get_github()
+    conversation_context = ""
+    if number:
+        try:
+            all_comments = gh.get_issue_comments(repo_cfg.name, int(number))
+            preceding = [c for c in all_comments if c.get("body", "") != comment]
+            if preceding:
+                lines = [
+                    f"{c.get('user', {}).get('login', '?')}: {c.get('body', '')}"
+                    for c in preceding
+                ]
+                conversation_context = (
+                    "\n\nFull conversation on this issue/PR:\n" + "\n".join(lines)
+                )
+        except Exception:
+            pass  # best-effort
+
+    # Merge conversation context into triage context
+    context = dict(action.context) if action.context else {}
+    if conversation_context:
+        context["conversation"] = conversation_context
+
     persona_path = config.sub_dir / "persona.md"
     try:
         persona = persona_path.read_text()
@@ -500,7 +523,7 @@ def reply_to_issue_comment(
 
     prompts = Prompts(persona)
     category, title = _triage(
-        comment, action.is_bot, action.context, _print_prompt=_print_prompt
+        comment, action.is_bot, context or None, _print_prompt=_print_prompt
     )
     log.info("issue comment triage: %s — %s", category, title)
 
