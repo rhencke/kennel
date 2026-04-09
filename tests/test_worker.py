@@ -1601,6 +1601,7 @@ class TestClaudeStart:
             fido_dir / "prompt",
             "claude-opus-4-6",
             300,
+            cwd=None,
         )
 
     def test_passes_custom_model(self, tmp_path: Path) -> None:
@@ -1694,7 +1695,7 @@ class TestClaudeRun:
                 timeout=120,
             )
         mock_rs.assert_called_once_with(
-            "my-session", fido_dir / "prompt", "claude-opus-4-6", 120
+            "my-session", fido_dir / "prompt", "claude-opus-4-6", 120, cwd=None
         )
 
     def test_resume_does_not_call_print_prompt_from_file(self, tmp_path: Path) -> None:
@@ -1745,6 +1746,7 @@ class TestClaudeRun:
             fido_dir / "prompt",
             "claude-sonnet-4-6",
             300,
+            cwd=None,
         )
 
     def test_start_does_not_call_resume_session(self, tmp_path: Path) -> None:
@@ -2259,7 +2261,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2478,7 +2480,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3293,7 +3295,7 @@ class TestHandleCi:
             patch("kennel.worker.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
 
     def test_completes_ci_task_by_title(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3976,7 +3978,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.sync_tasks"),
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
 
     def test_completes_task_by_title(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -4127,7 +4129,7 @@ class TestHandleThreads:
             patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -4747,7 +4749,7 @@ class TestExecuteTask:
             patch("kennel.worker.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="")
+        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5057,7 +5059,9 @@ class TestExecuteTask:
             patch("kennel.worker.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="setup-sess-42")
+        mock_run.assert_called_once_with(
+            fido_dir, session_id="setup-sess-42", cwd=tmp_path
+        )
 
     def test_uses_empty_session_id_when_not_in_state(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5077,7 +5081,7 @@ class TestExecuteTask:
             patch("kennel.worker.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="")
+        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
 
     def test_updates_state_with_returned_session_id(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)

@@ -149,6 +149,7 @@ def _run_streaming(
     cmd: list[str],
     stdin_file: Path,
     idle_timeout: float = 1800.0,
+    cwd: Path | str | None = None,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -164,6 +165,7 @@ def _run_streaming(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        cwd=cwd,
     )
 
     last_activity = time.monotonic()
@@ -200,6 +202,7 @@ def print_prompt_from_file(
     model: str,
     timeout: int = 30,
     idle_timeout: float = 1800.0,
+    cwd: Path | str | None = None,
 ) -> str:
     """Run claude --print reading system prompt and user prompt from files.
 
@@ -219,7 +222,7 @@ def print_prompt_from_file(
         "--print",
     ]
     try:
-        return "".join(_run_streaming(cmd, prompt_file, idle_timeout)).strip()
+        return "".join(_run_streaming(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
     except ClaudeStreamError, FileNotFoundError:
         return ""
 
@@ -230,6 +233,7 @@ def resume_session(
     model: str,
     timeout: int = 300,
     idle_timeout: float = 1800.0,
+    cwd: Path | str | None = None,
 ) -> str:
     """Continue an existing claude session by ID, feeding prompt_file on stdin.
 
@@ -249,7 +253,7 @@ def resume_session(
         "--print",
     ]
     try:
-        return "".join(_run_streaming(cmd, prompt_file, idle_timeout)).strip()
+        return "".join(_run_streaming(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
     except ClaudeStreamError, FileNotFoundError:
         return ""
 

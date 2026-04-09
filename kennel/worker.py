@@ -374,6 +374,7 @@ def claude_start(
     fido_dir: Path,
     model: str = "claude-opus-4-6",
     timeout: int = 300,
+    cwd: Path | str | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
@@ -381,7 +382,9 @@ def claude_start(
     """
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+    output = claude.print_prompt_from_file(
+        system_file, prompt_file, model, timeout, cwd=cwd
+    )
     return claude.extract_session_id(output)
 
 
@@ -390,6 +393,7 @@ def claude_run(
     session_id: str = "",
     model: str = "claude-sonnet-4-6",
     timeout: int = 300,
+    cwd: Path | str | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
@@ -402,10 +406,12 @@ def claude_run(
     """
     prompt_file = fido_dir / "prompt"
     if session_id:
-        output = claude.resume_session(session_id, prompt_file, model, timeout)
+        output = claude.resume_session(session_id, prompt_file, model, timeout, cwd=cwd)
         return session_id, output
     system_file = fido_dir / "system"
-    output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+    output = claude.print_prompt_from_file(
+        system_file, prompt_file, model, timeout, cwd=cwd
+    )
     new_session_id = claude.extract_session_id(output)
     return new_session_id, output
 
@@ -791,7 +797,7 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                session_id = claude_start(fido_dir)
+                session_id = claude_start(fido_dir, cwd=self.work_dir)
                 log.info("setup session: %s", session_id)
                 state = load_state(fido_dir)
                 state["setup_session_id"] = session_id
@@ -840,7 +846,7 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        session_id = claude_start(fido_dir)
+        session_id = claude_start(fido_dir, cwd=self.work_dir)
         log.info("setup session: %s", session_id)
         state = load_state(fido_dir)
         state["setup_session_id"] = session_id
@@ -988,7 +994,7 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
-        session_id, _ = claude_run(fido_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
         log.info("CI fix done (session=%s)", session_id)
 
         tasks.complete_by_title(self.work_dir, f"CI failure: {check_name}")
@@ -1136,7 +1142,7 @@ class Worker:
             f"\nReview feedback:\n{review_body}"
         )
         build_prompt(fido_dir, "task", context)
-        session_id, _ = claude_run(fido_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
         log.info("review feedback done (session=%s)", session_id)
         tasks.complete_by_title(
             self.work_dir, f"Address review feedback from {repo_ctx.owner}"
@@ -1176,7 +1182,7 @@ class Worker:
             f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = claude_run(fido_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
         log.info("threads done (session=%s)", session_id)
         sync_tasks_background(self.work_dir, self.gh)
         return True
@@ -1267,7 +1273,9 @@ class Worker:
         setup_session_id = state.get("setup_session_id", "")
         state["current_task_id"] = task["id"]
         save_state(fido_dir, state)
-        session_id, output = claude_run(fido_dir, session_id=setup_session_id)
+        session_id, output = claude_run(
+            fido_dir, session_id=setup_session_id, cwd=self.work_dir
+        )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
@@ -1284,14 +1292,16 @@ class Worker:
                     "task produced no commits — resuming session (attempt %d)",
                     attempt,
                 )
-                session_id, output = claude_run(fido_dir, session_id=session_id)
+                session_id, output = claude_run(
+                    fido_dir, session_id=session_id, cwd=self.work_dir
+                )
             else:
                 log.info(
                     "task produced no commits — starting fresh session (attempt %d)",
                     attempt,
                 )
                 build_prompt(fido_dir, "task", context)
-                session_id, output = claude_run(fido_dir)
+                session_id, output = claude_run(fido_dir, cwd=self.work_dir)
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
