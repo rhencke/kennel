@@ -1188,8 +1188,9 @@ class Worker:
 
         Extracts unchecked task items (``- [ ] ...``) between
         ``WORK_QUEUE_START`` and ``WORK_QUEUE_END`` markers and adds them via
-        :func:`~kennel.tasks.add_task`.  Each line must contain a
-        ``<!-- type:X -->`` comment; raises ``ValueError`` if missing.
+        :func:`~kennel.tasks.add_task`.  Lines without a ``<!-- type:X -->``
+        comment are skipped with a warning (e.g. stale multi-line task bodies
+        from older PR bodies).
 
         No-op if tasks.json is already non-empty, or if no markers /
         unchecked items are found.
@@ -1213,7 +1214,8 @@ class Worker:
             rest = m.group(1)
             type_match = re.search(r"<!-- type:(\w+) -->", rest)
             if not type_match:
-                raise ValueError(f"missing <!-- type:X --> in task line: {line!r}")
+                log.warning("skipping task line without type marker: %r", line)
+                continue
             raw_type = type_match.group(1)
             task_type = TaskType(raw_type)
             title = re.sub(r"\s*<!-- type:\w+ -->\s*", "", rest)

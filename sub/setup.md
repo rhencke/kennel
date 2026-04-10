@@ -14,6 +14,8 @@ uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add spec 
 ```
 Where `<work_dir>` is from the Context section.
 
+**Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `kennel status`, PR work queues, and log lines — it needs to fit on one line. Details belong in the implementation itself, not the task title.
+
 The `spec` argument is the task type — always use `spec` for planned tasks. Other types (`thread`, `ci`) are created by the system, never by you.
 
 **CRITICAL**: Always use the `kennel task add` CLI command to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.

@@ -2953,20 +2953,26 @@ class TestSeedTasksFromPrBody:
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
-    def test_raises_on_missing_type_comment(self, tmp_path: Path) -> None:
+    def test_skips_lines_without_type_comment(self, tmp_path: Path, caplog) -> None:
+        import logging
+
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
             "body": (
                 "<!-- WORK_QUEUE_START -->\n"
+                "- [ ] Task with type <!-- type:spec -->\n"
                 "- [ ] Task without type\n"
                 "<!-- WORK_QUEUE_END -->"
             )
         }
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            pytest.raises(ValueError, match="missing <!-- type:X -->"),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+            caplog.at_level(logging.WARNING, logger="kennel"),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert mock_add.call_count == 1
+        assert "without type marker" in caplog.text
 
     def test_logs_info_with_task_count(self, tmp_path: Path, caplog) -> None:
         import logging
