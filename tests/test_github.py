@@ -849,12 +849,23 @@ class TestGHClass:
         )
         assert gh.find_pr("o/r", 5, "fido") is None
 
-    def test_find_pr_body_only_not_title(self) -> None:
-        """Issue reference in PR title alone does not count — body only."""
+    def test_find_pr_title_keyword_matches(self) -> None:
+        """Issue reference in PR title (not body) still matches."""
         gh, mock_s = self._gh()
         pr = self._gql_pr(7, "feat", "OPEN", "fido", "")
         node = self._cross_ref_node(pr)
-        node["source"]["title"] = "closes #5"  # reference only in title
+        node["source"]["title"] = "closes #5"
+        mock_s.post.return_value.json.return_value = self._gql_timeline([node])
+        result = gh.find_pr("o/r", 5, "fido")
+        assert result is not None
+        assert result["number"] == 7
+
+    def test_find_pr_no_keyword_in_body_or_title(self) -> None:
+        """No closing keyword in body or title — not matched."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr(7, "feat", "OPEN", "fido", "some other text")
+        node = self._cross_ref_node(pr)
+        node["source"]["title"] = "unrelated title"
         mock_s.post.return_value.json.return_value = self._gql_timeline([node])
         assert gh.find_pr("o/r", 5, "fido") is None
 

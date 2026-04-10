@@ -190,7 +190,7 @@ class GH:
             "pageInfo{hasNextPage endCursor}"
             "nodes{__typename"
             "...on CrossReferencedEvent{source{__typename"
-            " ...on PullRequest{number headRefName state body author{login}}}}"
+            " ...on PullRequest{number headRefName state title body author{login}}}}"
             "...on ConnectedEvent{subject{__typename"
             " ...on PullRequest{number headRefName state author{login}}}}"
             "...on DisconnectedEvent{subject{__typename"
@@ -228,7 +228,9 @@ class GH:
                         continue
                     if pr.get("author", {}).get("login") != user:
                         continue
-                    if not pattern.search(pr.get("body", "") or ""):
+                    body = pr.get("body", "") or ""
+                    title = pr.get("title", "") or ""
+                    if not (pattern.search(body) or pattern.search(title)):
                         continue
                     pr_cache.setdefault(pr["number"], pr)
                     keyword_prs.add(pr["number"])
