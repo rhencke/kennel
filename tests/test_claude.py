@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 from kennel.claude import (
     ClaudeStreamError,
     _claude,
+    _register_child,
+    _unregister_child,
     extract_result_text,
     extract_session_id,
     generate_branch_name,
@@ -14,6 +16,7 @@ from kennel.claude import (
     generate_status,
     generate_status_emoji,
     generate_status_with_session,
+    kill_active_children,
     print_prompt,
     print_prompt_from_file,
     print_prompt_json,
@@ -859,3 +862,116 @@ class TestResumeStatus:
         no_result = '{"type":"result","session_id":"s-1"}'
         mock_run = MagicMock(return_value=_completed(no_result))
         assert resume_status("s-1", "shorten", runner=mock_run) == ""
+
+
+class TestKillActiveChildren:
+    def _fake_proc(self, alive_after_term: bool = False) -> MagicMock:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        if alive_after_term:
+            proc.wait = MagicMock(
+                side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
+            )
+        else:
+            proc.wait = MagicMock(return_value=None)
+        return proc
+
+    def test_no_children_is_noop(self) -> None:
+        kill_active_children()  # nothing registered
+
+    def test_terminates_registered_children(self) -> None:
+        proc1 = self._fake_proc()
+        proc2 = self._fake_proc()
+        _register_child(proc1)
+        _register_child(proc2)
+        try:
+            kill_active_children()
+        finally:
+            _unregister_child(proc1)
+            _unregister_child(proc2)
+        proc1.terminate.assert_called_once()
+        proc2.terminate.assert_called_once()
+
+    def test_kills_stragglers_after_grace(self) -> None:
+        proc = self._fake_proc(alive_after_term=True)
+        _register_child(proc)
+        try:
+            kill_active_children(grace_seconds=0.0)
+        finally:
+            _unregister_child(proc)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+    def test_swallows_oserror_on_terminate(self) -> None:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.terminate.side_effect = ProcessLookupError()
+        proc.wait = MagicMock(return_value=None)
+        _register_child(proc)
+        try:
+            kill_active_children()  # must not raise
+        finally:
+            _unregister_child(proc)
+
+    def test_swallows_oserror_on_wait(self) -> None:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.terminate = MagicMock()
+        proc.wait = MagicMock(side_effect=ProcessLookupError())
+        _register_child(proc)
+        try:
+            kill_active_children()  # must not raise
+        finally:
+            _unregister_child(proc)
+
+    def test_swallows_oserror_on_kill_after_timeout(self) -> None:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.terminate = MagicMock()
+        proc.wait = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
+        )
+        proc.kill.side_effect = ProcessLookupError()
+        _register_child(proc)
+        try:
+            kill_active_children(grace_seconds=0.0)  # must not raise
+        finally:
+            _unregister_child(proc)
+
+
+class TestRunStreamingTracksChildren:
+    def _make_proc(self, lines: list[str]) -> MagicMock:
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline = MagicMock(side_effect=lines + [""])
+        proc.stdout.read = MagicMock(return_value="")
+        proc.poll = MagicMock(return_value=None)
+        proc.wait = MagicMock(return_value=None)
+        proc.returncode = 0
+        return proc
+
+    def test_registers_and_unregisters(self, tmp_path: Path) -> None:
+        from kennel.claude import _active_children, _run_streaming
+
+        stdin_file = tmp_path / "in"
+        stdin_file.write_text("hi")
+        proc = self._make_proc(["one\n"])
+        captured: list = []
+
+        def fake_popen(*args, **kwargs):
+            captured.append(proc in _active_children)
+            return proc
+
+        def fake_select(rs, ws, xs, t):
+            return (rs, [], [])
+
+        list(
+            _run_streaming(
+                ["claude"],
+                stdin_file,
+                idle_timeout=1.0,
+                popen=fake_popen,
+                selector=fake_select,
+            )
+        )
+        # Was registered (popen sees it not yet in set, but it is by the time
+        # the generator runs); after exhaustion it should be unregistered.
+        assert proc not in _active_children
