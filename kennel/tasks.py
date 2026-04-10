@@ -413,7 +413,8 @@ def _apply_reorder(
     Rules (in priority order):
     - CI tasks always come first.
     - Non-CI pending tasks follow in Opus dependency order.
-    - In-progress tasks that Opus dropped are reinstated at the front (safety net).
+    - In-progress tasks dropped by Opus are removed; the caller detects this
+      and signals an abort so the worker picks the new next task.
     - Tasks added after the original snapshot (IDs not in *original_ids*) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
@@ -438,11 +439,9 @@ def _apply_reorder(
             orig["description"] = item["description"]
         merged.append(orig)
 
-    # Safety net: never silently drop an in-progress task.
-    for t in current:
-        if t.get("status") == TaskStatus.IN_PROGRESS and t["id"] not in seen_ids:
-            merged.insert(0, t)
-            seen_ids.add(t["id"])
+    # In-progress tasks are intentionally NOT reinstated here.
+    # If Opus drops an in-progress task, the caller (reorder_tasks) will detect
+    # it was affected and signal an abort so the worker picks the new next task.
 
     ci = [t for t in merged if t.get("type") == TaskType.CI]
     non_ci = [t for t in merged if t.get("type") != TaskType.CI]
@@ -509,6 +508,7 @@ def reorder_tasks(
     _print_prompt=_claude_print_prompt,
     _rescope_prompt_fn=_rescope_prompt_default,
     _on_changes=None,
+    _on_inprogress_affected=None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -525,6 +525,12 @@ def reorder_tasks(
 
     If *_on_changes* is provided and any thread tasks were dropped or modified,
     it is called with a list of change records (see :func:`_compute_thread_changes`).
+
+    If *_on_inprogress_affected* is provided and the currently in-progress task
+    is dropped or modified by Opus, it is called with no arguments so the caller
+    can abort the running worker and restart on the new next task.  When the
+    in-progress task is modified its status is reset to ``pending`` so the worker
+    loop picks it up again with the updated title/description.
     """
     task_list = list_tasks(work_dir)
     if not task_list:
@@ -544,15 +550,45 @@ def reorder_tasks(
         return
 
     path = _task_file(work_dir)
+    inprogress_affected = False
     with _locked(path, write=True) as lock:
         current = lock.read()
+        inprogress = next(
+            (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
+        )
         result = _apply_reorder(current, ordered_items, original_ids)
+        if inprogress is not None:
+            inprogress_in_result = next(
+                (t for t in result if t["id"] == inprogress["id"]), None
+            )
+            if inprogress_in_result is None:
+                # Opus dropped the in-progress task — it's gone.
+                inprogress_affected = True
+                log.info(
+                    "reorder_tasks: in-progress task dropped by Opus: %s",
+                    inprogress.get("title", "")[:60],
+                )
+            elif inprogress_in_result.get("title") != inprogress.get(
+                "title"
+            ) or inprogress_in_result.get("description") != inprogress.get(
+                "description"
+            ):
+                # Opus modified the in-progress task — reset to pending.
+                inprogress_affected = True
+                inprogress_in_result["status"] = str(TaskStatus.PENDING)
+                log.info(
+                    "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
+                    inprogress_in_result.get("title", "")[:60],
+                )
         lock.write(result)
 
     if _on_changes is not None:
         changes = _compute_thread_changes(current, result, original_ids)
         if changes:
             _on_changes(changes)
+
+    if inprogress_affected and _on_inprogress_affected is not None:
+        _on_inprogress_affected()
 
     log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 

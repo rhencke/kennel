@@ -791,6 +791,8 @@ def _reorder_tasks_background(
     work_dir: Path,
     commit_summary: str,
     config: Config,
+    repo_cfg: RepoConfig | None = None,
+    registry: WorkerRegistry | None = None,
     *,
     _start=threading.Thread.start,
     _gh=None,
@@ -800,6 +802,11 @@ def _reorder_tasks_background(
     Passes an ``_on_changes`` callback so that any thread tasks dropped or
     modified during rescoping trigger a notification reply to the original
     comment.
+
+    If *repo_cfg* and *registry* are provided, also passes an
+    ``_on_inprogress_affected`` callback that aborts the running worker whenever
+    the in-progress task is dropped or modified by the rescope, so the worker
+    loop restarts on the new next task.
     """
     from kennel.tasks import reorder_tasks
 
@@ -809,10 +816,22 @@ def _reorder_tasks_background(
         for change in changes:
             _notify_thread_change(change, config, _gh=gh)
 
+    kwargs: dict[str, Any] = {"_on_changes": on_changes}
+    if registry is not None and repo_cfg is not None:
+
+        def on_inprogress_affected() -> None:
+            log.info(
+                "reorder_tasks_background: in-progress task affected — aborting %s",
+                repo_cfg.name,
+            )
+            registry.abort_task(repo_cfg.name)
+
+        kwargs["_on_inprogress_affected"] = on_inprogress_affected
+
     t = threading.Thread(
         target=reorder_tasks,
         args=(work_dir, commit_summary),
-        kwargs={"_on_changes": on_changes},
+        kwargs=kwargs,
         name=f"reorder-{work_dir.name}",
         daemon=True,
     )
@@ -854,7 +873,9 @@ def create_task(
     launch_sync(config, repo_cfg)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
-        _reorder_background_fn(repo_cfg.work_dir, commit_summary, config)
+        _reorder_background_fn(
+            repo_cfg.work_dir, commit_summary, config, repo_cfg, registry
+        )
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task

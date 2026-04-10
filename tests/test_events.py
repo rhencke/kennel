@@ -1863,14 +1863,16 @@ class TestCreateTask:
                 repo_cfg,
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "abc1234 add thing",
-                _reorder_background_fn=lambda wd, cs, cfg: reorder_called.append(
-                    (wd, cs, cfg)
+                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: (
+                    reorder_called.append((wd, cs, cfg, rc, reg))
                 ),
             )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
         assert reorder_called[0][1] == "abc1234 add thing"
         assert reorder_called[0][2] is cfg
+        assert reorder_called[0][3] is repo_cfg
+        assert reorder_called[0][4] is None  # no registry passed
 
     def test_spec_task_does_not_trigger_reorder(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1918,7 +1920,9 @@ class TestCreateTask:
                 repo_cfg,
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "custom summary",
-                _reorder_background_fn=lambda wd, cs, cfg: summaries.append(cs),
+                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: summaries.append(
+                    cs
+                ),
             )
         assert summaries == ["custom summary"]
 
@@ -2049,6 +2053,36 @@ class TestReorderTasksBackground:
         with patch("kennel.events._notify_thread_change") as mock_notify:
             on_changes([change])
         mock_notify.assert_called_once_with(change, self._cfg(tmp_path), _gh=mock_gh)
+
+    def test_on_inprogress_affected_aborts_worker_via_registry(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+        )
+        on_inprogress_affected = started[0]._kwargs["_on_inprogress_affected"]
+        on_inprogress_affected()
+        registry.abort_task.assert_called_once_with("owner/repo")
+
+    def test_on_inprogress_affected_not_in_kwargs_when_no_registry(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+        )
+        assert "_on_inprogress_affected" not in started[0]._kwargs
 
 
 class TestNotifyThreadChange:

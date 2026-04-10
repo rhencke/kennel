@@ -403,17 +403,18 @@ class TestApplyReorder:
         assert result[0]["id"] == "2"
         assert result[1]["id"] == "1"
 
-    def test_in_progress_task_reinstated_at_front(self) -> None:
+    def test_in_progress_task_dropped_when_opus_excludes_it(self) -> None:
         current = [
             self._t("1", "Active task", status="in_progress"),
             self._t("2", "Spec task"),
         ]
-        # Opus dropped task "1" (in_progress)
+        original_ids = frozenset({"1", "2"})
+        # Opus dropped task "1" (in_progress) — caller will abort the worker
         items = [self._item("2", "Spec task")]
-        result = _apply_reorder(current, items)
+        result = _apply_reorder(current, items, original_ids)
         ids = [t["id"] for t in result]
-        assert "1" in ids
-        assert ids.index("1") == 0  # reinstated at front
+        # in-progress task is dropped; caller (reorder_tasks) detects and signals abort
+        assert "1" not in ids
 
     def test_completed_tasks_preserved_at_end(self) -> None:
         current = [
@@ -649,6 +650,100 @@ class TestReorderTasks:
         # Should not raise even though t1 is dropped and _on_changes is None
         reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: raw, _on_changes=None)
         # t1 should be gone
+        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+
+    def test_on_inprogress_affected_called_when_inprogress_task_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "In-progress task")
+        update_task(tmp_path, t1["id"], TaskStatus.IN_PROGRESS)
+        t2 = self._add(tmp_path, "Keep this")
+        raw = self._response(
+            [{"id": t2["id"], "title": "Keep this", "description": ""}]
+        )
+        affected: list[int] = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_inprogress_affected=lambda: affected.append(1),
+        )
+        assert affected == [1]
+        # in-progress task is gone from the list
+        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+
+    def test_on_inprogress_affected_called_when_inprogress_task_modified(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Old title")
+        update_task(tmp_path, t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [{"id": t1["id"], "title": "New title", "description": ""}]
+        )
+        affected: list[int] = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_inprogress_affected=lambda: affected.append(1),
+        )
+        assert affected == [1]
+        # task reset to pending with new title
+        result = list_tasks(tmp_path)
+        assert result[0]["title"] == "New title"
+        assert result[0]["status"] == str(TaskStatus.PENDING)
+
+    def test_on_inprogress_affected_not_called_when_inprogress_task_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Stable task")
+        update_task(tmp_path, t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [{"id": t1["id"], "title": "Stable task", "description": ""}]
+        )
+        affected: list[int] = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_inprogress_affected=lambda: affected.append(1),
+        )
+        assert affected == []
+        # task still in_progress (unchanged by Opus)
+        result = list_tasks(tmp_path)
+        assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
+    def test_on_inprogress_affected_not_called_when_no_inprogress_task(
+        self, tmp_path: Path
+    ) -> None:
+        self._add(tmp_path, "Pending task")
+        t2 = self._add(tmp_path, "Keep this")
+        raw = self._response(
+            [{"id": t2["id"], "title": "Keep this", "description": ""}]
+        )
+        affected: list[int] = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_inprogress_affected=lambda: affected.append(1),
+        )
+        assert affected == []
+
+    def test_on_inprogress_affected_none_does_not_error(self, tmp_path: Path) -> None:
+        t1 = self._add(tmp_path, "In-progress task")
+        update_task(tmp_path, t1["id"], TaskStatus.IN_PROGRESS)
+        t2 = self._add(tmp_path, "Keep this")
+        raw = self._response(
+            [{"id": t2["id"], "title": "Keep this", "description": ""}]
+        )
+        # Should not raise even though in-progress task is dropped and callback is None
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_inprogress_affected=None,
+        )
         assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
 
 
