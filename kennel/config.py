@@ -21,7 +21,6 @@ class Config:
     repos: dict[str, RepoConfig]  # keyed by full_name
     allowed_bots: frozenset[str]
     log_level: str
-    self_repo: str | None  # which repo is kennel itself (for self-restart)
     sub_dir: Path  # path to sub/ skill files
 
     @classmethod
@@ -45,11 +44,6 @@ class Config:
         )
         parser.add_argument(
             "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
-        )
-        parser.add_argument(
-            "--self-repo",
-            default=None,
-            help="Repo name that is kennel itself (for self-restart on merge)",
         )
         parser.add_argument(
             "repos",
@@ -83,6 +77,5 @@ class Config:
                 b.strip() for b in args.allowed_bots.split(",") if b.strip()
             ),
             log_level=args.log_level.upper(),
-            self_repo=args.self_repo,
             sub_dir=Path(__file__).resolve().parent.parent / "sub",
         )

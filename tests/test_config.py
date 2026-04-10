@@ -127,22 +127,6 @@ class TestFromArgs:
         assert "owner/repo1" in cfg.repos
         assert "owner/repo2" in cfg.repos
 
-    def test_self_repo(self, tmp_path: Path) -> None:
-        secret_file = tmp_path / "secret"
-        secret_file.write_text("s")
-        repo_dir = tmp_path / "repo"
-        repo_dir.mkdir()
-        cfg = Config.from_args(
-            [
-                "--self-repo",
-                "owner/repo",
-                "--secret-file",
-                str(secret_file),
-                f"owner/repo:{repo_dir}",
-            ]
-        )
-        assert cfg.self_repo == "owner/repo"
-
     def test_sub_dir_points_to_package_parent(self, tmp_path: Path) -> None:
         secret_file = tmp_path / "secret"
         secret_file.write_text("s")

@@ -121,9 +121,11 @@ For each managed repo (kennel, confusio, fidocancode.github.io):
 - Verify: branch matches PR, tasks match PR body, workspace is clean
 
 ### Step 9: Restart kennel
+Kennel runs from the **runner clone** at `/home/rhencke/kennel-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
 ```bash
-/home/rhencke/workspace/kennel/.venv/bin/kennel --port 9000 --secret-file ~/.kennel-secret --self-repo rhencke/kennel rhencke/confusio:/home/rhencke/workspace/confusio rhencke/kennel:/home/rhencke/workspace/kennel >> ~/log/kennel.log 2>&1 & disown
-sleep 5 && /home/rhencke/workspace/kennel/.venv/bin/kennel status
+/home/rhencke/start-kennel.sh >> ~/log/kennel.log 2>&1 &
+disown
+sleep 5 && /home/rhencke/kennel-runner/.venv/bin/kennel status
 ```
 
 Update GitHub status: `uv run kennel gh-status set "kennel restarted — back on watch duty"`

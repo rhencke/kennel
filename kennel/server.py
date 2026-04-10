@@ -5,9 +5,12 @@ import hmac
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -28,21 +31,103 @@ log = logging.getLogger(__name__)
 
 _replied_comments: set[int] = set()
 
-_RESTART_CMDS: list[list[str]] = [
-    ["git", "reset", "--hard"],
-    ["git", "clean", "-fd"],
-    ["git", "checkout", "main"],
-    ["git", "pull"],
-]
+# Exponential backoff for git pull during self-restart: 10s, 30s, 60s
+# with a 10-minute total budget. Retries stop once the cumulative delay
+# exceeds _PULL_BUDGET_SECONDS, even if a retry window remains.
+_PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
+_PULL_BUDGET_SECONDS: float = 600.0
 
 
-def _run_git_cmd(work_dir: Path, cmd: list[str], *, _run=subprocess.run) -> bool:
+def _runner_dir() -> Path:
+    """Return the runner clone directory — where the running kennel code lives."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _get_self_repo(
+    runner_dir: Path,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str | None:
+    """Return 'owner/repo' from the runner clone's origin remote, or None on error.
+
+    Handles both SSH (``git@github.com:owner/repo.git``) and HTTPS
+    (``https://github.com/owner/repo.git``) remote URLs.
+    """
     try:
-        _run(cmd, cwd=str(work_dir), capture_output=True, check=True)
-    except subprocess.CalledProcessError as e:
-        log.error("self-restart: git command failed (%d): %s", e.returncode, cmd)
-        return False
-    return True
+        result = _run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(runner_dir),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log.error("self-restart: failed to read origin remote: %s", e)
+        return None
+    url = result.stdout.strip()
+    m = re.search(r"[:/]([^:/]+/[^/]+?)(?:\.git)?$", url)
+    if not m:
+        log.error("self-restart: could not parse owner/repo from remote url: %r", url)
+        return None
+    return m.group(1)
+
+
+def _pull_with_backoff(
+    runner_dir: Path,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    _sleep: Callable[[float], None] = time.sleep,
+    _monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Run ``git pull`` in *runner_dir* with exponential backoff on failure.
+
+    Retries with delays from :data:`_PULL_BACKOFF_DELAYS` (10s, 30s, 60s)
+    and a total budget of :data:`_PULL_BUDGET_SECONDS` (10 minutes).  Logs
+    each attempt and the elapsed time.  Returns ``True`` on success,
+    ``False`` if every retry fails or the budget is exhausted.
+    """
+    start = _monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _run(
+                ["git", "pull"],
+                cwd=str(runner_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            log.info(
+                "self-restart: git pull succeeded on attempt %d (%.1fs elapsed)",
+                attempt,
+                _monotonic() - start,
+            )
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            elapsed = _monotonic() - start
+            log.error(
+                "self-restart: git pull attempt %d failed after %.1fs: %s",
+                attempt,
+                elapsed,
+                e,
+            )
+            if attempt > len(_PULL_BACKOFF_DELAYS):
+                log.error(
+                    "self-restart: git pull exhausted %d retries in %.1fs — giving up",
+                    attempt,
+                    elapsed,
+                )
+                return False
+            delay = _PULL_BACKOFF_DELAYS[attempt - 1]
+            if elapsed + delay > _PULL_BUDGET_SECONDS:
+                log.error(
+                    "self-restart: git pull would exceed %.0fs budget — giving up",
+                    _PULL_BUDGET_SECONDS,
+                )
+                return False
+            log.info("self-restart: sleeping %ds before retry", delay)
+            _sleep(delay)
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -55,8 +140,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_reply_to_issue_comment = reply_to_issue_comment
     _fn_create_task = create_task
     _fn_launch_worker = launch_worker
-    _fn_subprocess_run = subprocess.run
-    _fn_os_execv = os.execv
+    _fn_runner_dir = _runner_dir
+    _fn_get_self_repo = _get_self_repo
+    _fn_pull_with_backoff = _pull_with_backoff
+    _fn_os_chdir = os.chdir
+    _fn_os_execvp = os.execvp
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -99,16 +187,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Respond immediately — don't block on dispatch
         self._respond(200, "ok")
 
-        # Check for self-restart (kennel repo merged)
+        # Check for self-restart (kennel repo merged).  _self_restart itself
+        # verifies via the runner clone's git remote that the webhook's repo
+        # actually matches kennel — if so it execs a new process and never
+        # returns.  For other merged PRs (e.g. fido's own work) it's a no-op.
         if (
-            self.config.self_repo
-            and repo_name == self.config.self_repo
-            and event == "pull_request"
+            event == "pull_request"
             and payload.get("action") == "closed"
             and payload.get("pull_request", {}).get("merged")
         ):
             self._self_restart(repo_name)
-            return
 
         if not repo_cfg:
             log.debug("ignoring webhook for unregistered repo: %s", repo_name)
@@ -182,16 +270,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.exception("error processing action")
 
     def _self_restart(self, repo_name: str) -> None:
-        repo_cfg = self.config.repos.get(repo_name)
-        if repo_cfg:
-            log.info("kennel repo %s merged — pulling and restarting", repo_name)
-            self.registry.stop_and_join(repo_name)
-            for cmd in _RESTART_CMDS:
-                if not _run_git_cmd(
-                    repo_cfg.work_dir, cmd, _run=type(self)._fn_subprocess_run
-                ):
-                    return
-            type(self)._fn_os_execv(sys.argv[0], sys.argv)
+        runner_dir = type(self)._fn_runner_dir()
+        self_repo = type(self)._fn_get_self_repo(runner_dir)
+        if self_repo != repo_name:
+            return  # Not our repo — nothing to do.
+        log.info(
+            "kennel repo %s merged — pulling runner clone at %s",
+            repo_name,
+            runner_dir,
+        )
+        self.registry.stop_and_join(repo_name)
+        if not type(self)._fn_pull_with_backoff(runner_dir):
+            log.error("self-restart: git pull gave up — running old version")
+            return
+        type(self)._fn_os_chdir(runner_dir)
+        type(self)._fn_os_execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
 
     def do_GET(self) -> None:
         if self.path == "/status":

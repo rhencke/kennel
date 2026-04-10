@@ -29,7 +29,6 @@ def _config(tmp_path: Path) -> Config:
         repos={},
         allowed_bots=frozenset({"copilot[bot]"}),
         log_level="WARNING",
-        self_repo=None,
         sub_dir=tmp_path / "sub",
     )
 
@@ -443,7 +442,6 @@ class TestMaybeReact:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -507,7 +505,6 @@ class TestMaybeReact:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=sub_dir,
         )
         captured = {}
@@ -542,7 +539,6 @@ class TestReplyToComment:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -879,7 +875,6 @@ class TestReplyToReview:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -971,7 +966,6 @@ class TestReplyToIssueComment:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -1262,7 +1256,6 @@ class TestCreateTask:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1283,7 +1276,6 @@ class TestCreateTask:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1304,7 +1296,6 @@ class TestCreateTask:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -1734,7 +1725,6 @@ class TestLaunchSync:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -1898,7 +1888,6 @@ class TestMaybeReactGhException:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
         mock_gh = MagicMock()
@@ -1922,7 +1911,6 @@ class TestReplyToCommentElseBranch:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -1995,7 +1983,6 @@ class TestReplyToReviewAlreadyRepliedTracking:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -2070,7 +2057,6 @@ class TestReplyToCommentTerseEnrichment:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
