@@ -193,6 +193,22 @@ class TestGitHubClass:
         result = gh.fetch_sibling_threads("o/r", 7)
         assert result == []
 
+    def test_fetch_comment_thread_delegates(self) -> None:
+        gh, mock_s = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {
+                "id": 10,
+                "in_reply_to_id": None,
+                "user": {"login": "alice"},
+                "body": "root",
+            }
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.fetch_comment_thread("o/r", 7, 10)
+        assert result == [{"author": "alice", "body": "root"}]
+
     def test_find_pr_delegates(self) -> None:
         gh, mock_s = self._github()
         pr = {
@@ -666,6 +682,89 @@ class TestGHClass:
         mock_resp.raise_for_status.side_effect = Exception("403")
         mock_s.get.return_value = mock_resp
         result = gh.fetch_sibling_threads("o/r", 7)
+        assert result == []
+
+    def test_fetch_comment_thread_returns_thread(self) -> None:
+        gh, mock_s = self._gh()
+        comments = [
+            {
+                "id": 10,
+                "in_reply_to_id": None,
+                "user": {"login": "alice"},
+                "body": "root comment",
+            },
+            {
+                "id": 11,
+                "in_reply_to_id": 10,
+                "user": {"login": "fido"},
+                "body": "reply one",
+            },
+            {
+                "id": 12,
+                "in_reply_to_id": 10,
+                "user": {"login": "alice"},
+                "body": "reply two",
+            },
+            {
+                "id": 20,
+                "in_reply_to_id": None,
+                "user": {"login": "bob"},
+                "body": "other thread",
+            },
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = comments
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.fetch_comment_thread("o/r", 7, 10)
+        assert result == [
+            {"author": "alice", "body": "root comment"},
+            {"author": "fido", "body": "reply one"},
+            {"author": "alice", "body": "reply two"},
+        ]
+
+    def test_fetch_comment_thread_finds_thread_by_reply_id(self) -> None:
+        """When comment_id is a reply, finds the root and returns the full thread."""
+        gh, mock_s = self._gh()
+        comments = [
+            {
+                "id": 10,
+                "in_reply_to_id": None,
+                "user": {"login": "alice"},
+                "body": "root",
+            },
+            {
+                "id": 11,
+                "in_reply_to_id": 10,
+                "user": {"login": "fido"},
+                "body": "reply",
+            },
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = comments
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.fetch_comment_thread("o/r", 7, 11)
+        assert result == [
+            {"author": "alice", "body": "root"},
+            {"author": "fido", "body": "reply"},
+        ]
+
+    def test_fetch_comment_thread_returns_empty_when_not_found(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.fetch_comment_thread("o/r", 7, 999)
+        assert result == []
+
+    def test_fetch_comment_thread_returns_empty_on_error(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = Exception("403")
+        mock_s.get.return_value = mock_resp
+        result = gh.fetch_comment_thread("o/r", 7, 10)
         assert result == []
 
     def test_get_run_log_skips_non_failing_jobs(self) -> None:

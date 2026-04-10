@@ -30,10 +30,18 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
     parts: list[str] = []
     if ctx.get("pr_title"):
         parts.append(f"PR: {ctx['pr_title']}")
+    if ctx.get("pr_body"):
+        parts.append(f"PR description:\n{ctx['pr_body']}")
     if ctx.get("file"):
         parts.append(f"File: {ctx['file']}")
     if ctx.get("diff_hunk"):
         parts.append(f"Diff:\n{ctx['diff_hunk']}")
+    if ctx.get("comment_thread"):
+        lines = [
+            f"  {c.get('author', '')}: {c.get('body', '')}"
+            for c in ctx["comment_thread"]
+        ]
+        parts.append("Comment thread:\n" + "\n".join(lines))
     if ctx.get("sibling_threads"):
         thread_parts: list[str] = []
         for thread in ctx["sibling_threads"]:
@@ -46,6 +54,8 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
             ]
             thread_parts.append(header + "\n" + "\n".join(comment_lines))
         parts.append("Sibling threads:\n" + "\n\n".join(thread_parts))
+    if ctx.get("conversation"):
+        parts.append(ctx["conversation"])
     return "\n".join(parts)
 
 
@@ -64,7 +74,8 @@ def triage_prompt(
     return (
         f"Triage this PR comment into exactly one category: {categories}\n\n"
         f"{ctx_str}\n\nComment: {comment_body}\n\n"
-        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short task title. "
+        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short imperative task title. "
+        "The title must be an action item starting with a verb — never quote or paraphrase the comment text. "
         "Example: ACT: add unit tests for parser"
     )
 

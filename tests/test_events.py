@@ -8,6 +8,7 @@ from kennel.events import (
     Action,
     _comment_lock,
     _is_allowed,
+    _summarize_as_action_item,
     _triage,
     create_task,
     dispatch,
@@ -304,6 +305,66 @@ class TestCommentLock:
         assert path.parent.is_dir()
 
 
+class TestSummarizeAsActionItem:
+    def test_returns_model_result(self) -> None:
+        pp = MagicMock(return_value="add logging to streamed sub-Claude output")
+        result = _summarize_as_action_item(
+            "Ensure we log at that level too.", _print_prompt=pp
+        )
+        assert result == "add logging to streamed sub-Claude output"
+
+    def test_falls_back_to_comment_body_when_empty(self) -> None:
+        pp = MagicMock(return_value="")
+        result = _summarize_as_action_item("short comment", _print_prompt=pp)
+        assert result == "short comment"
+
+    def test_truncates_long_comment_in_fallback(self) -> None:
+        long_comment = "x" * 200
+        pp = MagicMock(return_value="")
+        result = _summarize_as_action_item(long_comment, _print_prompt=pp)
+        assert result == long_comment[:80]
+
+    def test_strips_whitespace_from_result(self) -> None:
+        pp = MagicMock(return_value="  add tests  ")
+        result = _summarize_as_action_item("add tests please", _print_prompt=pp)
+        assert result == "add tests"
+
+    def test_defaults_to_claude_print_prompt(self) -> None:
+        with patch("kennel.claude.print_prompt", return_value="add tests") as mock_pp:
+            result = _summarize_as_action_item("add some tests")
+        mock_pp.assert_called_once()
+        assert result == "add tests"
+
+    def test_short_result_returned_without_retry(self) -> None:
+        short_title = "add unit tests"
+        pp = MagicMock(return_value=short_title)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == short_title
+        pp.assert_called_once()  # no retry needed
+
+    def test_retries_when_result_too_long(self) -> None:
+        long_title = "a" * 81
+        short_title = "add tests"
+        pp = MagicMock(side_effect=[long_title, short_title])
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == short_title
+        assert pp.call_count == 2
+
+    def test_retries_up_to_three_times_then_truncates(self) -> None:
+        long_title = "a" * 81
+        pp = MagicMock(return_value=long_title)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == long_title[:80]
+        assert pp.call_count == 4  # 1 initial + 3 retries
+
+    def test_stops_retrying_once_short_enough(self) -> None:
+        titles = ["a" * 81, "b" * 81, "short title"]
+        pp = MagicMock(side_effect=titles)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == "short title"
+        assert pp.call_count == 3  # 1 initial + 2 retries
+
+
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
         cat, title = _triage(
@@ -315,16 +376,16 @@ class TestTriage:
         assert title == "add tests"
 
     def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        cat, title = _triage(
-            "do stuff", is_bot=False, _print_prompt=MagicMock(return_value="")
-        )
+        pp = MagicMock(side_effect=["", "implement the thing"])
+        cat, title = _triage("do stuff", is_bot=False, _print_prompt=pp)
         assert cat == "ACT"
+        assert title == "implement the thing"
 
     def test_fallback_for_bot(self, tmp_path: Path) -> None:
-        cat, title = _triage(
-            "do stuff", is_bot=True, _print_prompt=MagicMock(return_value="")
-        )
+        pp = MagicMock(side_effect=["", "implement the thing"])
+        cat, title = _triage("do stuff", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
+        assert title == "implement the thing"
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
@@ -337,25 +398,22 @@ class TestTriage:
         assert cat == "DEFER"
 
     def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        cat, title = _triage(
-            "hi", is_bot=False, _print_prompt=MagicMock(return_value="WEIRD: something")
-        )
+        pp = MagicMock(side_effect=["WEIRD: something", "do the thing"])
+        cat, title = _triage("hi", is_bot=False, _print_prompt=pp)
         assert cat == "ACT"
+        assert title == "do the thing"
 
     def test_timeout_falls_back(self, tmp_path: Path) -> None:
-        cat, title = _triage(
-            "hi", is_bot=True, _print_prompt=MagicMock(return_value="")
-        )
+        pp = MagicMock(side_effect=["", "do the thing"])
+        cat, title = _triage("hi", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
-        cat, title = _triage(
-            "cache results",
-            is_bot=True,
-            _print_prompt=MagicMock(return_value="TASK: add caching"),
-        )
+        pp = MagicMock(side_effect=["TASK: add caching", "add result caching"])
+        cat, title = _triage("cache results", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
+        assert title == "add result caching"
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
         """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""

@@ -56,15 +56,27 @@ class TestTriageContextBlock:
         assert "Diff:" in result
         assert "@@ -1,2 +1,3 @@" in result
 
+    def test_pr_body(self) -> None:
+        result = triage_context_block({"pr_body": "Adds caching to the parser."})
+        assert "PR description:" in result
+        assert "Adds caching to the parser." in result
+
+    def test_empty_pr_body_omitted(self) -> None:
+        result = triage_context_block({"pr_body": ""})
+        assert "PR description:" not in result
+
     def test_all_fields(self) -> None:
         result = triage_context_block(
             {
                 "pr_title": "Refactor",
+                "pr_body": "Refactors the parser.",
                 "file": "app.py",
                 "diff_hunk": "- old\n+ new",
             }
         )
         assert "PR: Refactor" in result
+        assert "PR description:" in result
+        assert "Refactors the parser." in result
         assert "File: app.py" in result
         assert "Diff:" in result
         assert "- old\n+ new" in result
@@ -135,6 +147,30 @@ class TestTriageContextBlock:
         result = triage_context_block({"sibling_threads": []})
         assert "Sibling threads:" not in result
 
+    def test_comment_thread_rendered(self) -> None:
+        result = triage_context_block(
+            {
+                "comment_thread": [
+                    {"author": "alice", "body": "fix this please"},
+                    {"author": "fido", "body": "done in latest commit"},
+                ]
+            }
+        )
+        assert "Comment thread:" in result
+        assert "alice: fix this please" in result
+        assert "fido: done in latest commit" in result
+
+    def test_empty_comment_thread_omitted(self) -> None:
+        result = triage_context_block({"comment_thread": []})
+        assert "Comment thread:" not in result
+
+    def test_conversation_rendered(self) -> None:
+        result = triage_context_block(
+            {"conversation": "\n\nFull conversation:\nalice: hi"}
+        )
+        assert "Full conversation:" in result
+        assert "alice: hi" in result
+
 
 # ── triage_prompt ─────────────────────────────────────────────────────────────
 
@@ -161,6 +197,12 @@ class TestTriagePrompt:
     def test_includes_example(self) -> None:
         result = triage_prompt("x", is_bot=False)
         assert "Example:" in result
+
+    def test_requires_imperative_action_item_title(self) -> None:
+        result = triage_prompt("x", is_bot=False)
+        assert "imperative" in result
+        assert "verb" in result
+        assert "never quote" in result.lower()
 
     def test_no_context(self) -> None:
         # Prompt with empty context still works — just has an empty ctx_str

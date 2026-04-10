@@ -140,6 +140,31 @@ class GH:
 
         return list(threads.values())
 
+    def fetch_comment_thread(
+        self, repo: str, pr: int | str, comment_id: int
+    ) -> list[dict[str, Any]]:
+        """Return all comments in the review thread containing comment_id.
+
+        Returns [{author, body}, ...] in posting order, empty on error.
+        """
+        try:
+            raw = self.get_pull_comments(repo, pr)
+        except Exception:
+            log.exception("failed to fetch comment thread for %s#%s", repo, pr)
+            return []
+
+        by_id = {c["id"]: c for c in raw}
+        comment = by_id.get(comment_id)
+        if comment is None:
+            return []
+        root_id = comment.get("in_reply_to_id") or comment_id
+
+        return [
+            {"author": c.get("user", {}).get("login", ""), "body": c.get("body", "")}
+            for c in raw
+            if c["id"] == root_id or c.get("in_reply_to_id") == root_id
+        ]
+
     def get_review_comments(
         self, repo: str, pr: int | str, review_id: int | str
     ) -> list[tuple[int, str]]:
@@ -610,6 +635,12 @@ class GitHub:
     def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all review-comment threads for a PR as a structured list."""
         return self._gh.fetch_sibling_threads(repo, pr)
+
+    def fetch_comment_thread(
+        self, repo: str, pr: int | str, comment_id: int
+    ) -> list[dict[str, Any]]:
+        """Return all comments in the review thread containing comment_id."""
+        return self._gh.fetch_comment_thread(repo, pr, comment_id)
 
     def find_pr(
         self, repo: str, issue_number: int | str, user: str

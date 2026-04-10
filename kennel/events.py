@@ -110,7 +110,7 @@ def dispatch(
             is_bot=is_bot,
             context={
                 "pr_title": pr.get("title", ""),
-                "pr_body": (pr.get("body", "") or "")[:500],
+                "pr_body": pr.get("body", "") or "",
                 "file": comment.get("path", ""),
                 "line": comment.get("line"),
                 "diff_hunk": comment.get("diff_hunk", ""),
@@ -143,7 +143,7 @@ def dispatch(
             is_bot=is_bot,
             context={
                 "pr_title": issue.get("title", ""),
-                "pr_body": (issue.get("body", "") or "")[:500],
+                "pr_body": issue.get("body", "") or "",
                 "comment_id": comment_id,
             },
             thread={
@@ -279,8 +279,16 @@ def reply_to_comment(
     prompts = Prompts(persona)
     comment = action.comment_body
 
-    # Enrich context with sibling threads when the comment needs more context
     context: dict[str, Any] = dict(action.context) if action.context else {}
+
+    # Always fetch the full thread for this comment
+    if info.get("repo") and info.get("pr") and info.get("comment_id"):
+        thread = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
+        if thread:
+            context["comment_thread"] = thread
+            log.info("fetched %d comment(s) in thread for context", len(thread))
+
+    # Enrich context with sibling threads when the comment needs more context
     if (
         needs_more_context(comment, _print_prompt=_print_prompt)
         and info.get("repo")
@@ -450,6 +458,35 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
     return answer.startswith("YES")
 
 
+_MAX_TITLE_LEN = 80
+
+
+def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
+    """Ask Opus to convert a comment into a short imperative action-item title.
+
+    If the result is too long, asks Claude to shorten it up to 3 times before
+    falling back to hard truncation.
+    """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+    prompt = (
+        "Convert this PR review comment into a short, imperative task title starting with a verb. "
+        "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
+        f"Comment: {comment_body}"
+    )
+    result = _print_prompt(prompt, "claude-opus-4-6", timeout=15).strip()
+    for _ in range(3):
+        if not result or len(result) <= _MAX_TITLE_LEN:
+            break
+        result = _print_prompt(
+            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
+            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
+            "claude-opus-4-6",
+            timeout=15,
+        ).strip()
+    return result[:_MAX_TITLE_LEN] if result else comment_body[:_MAX_TITLE_LEN]
+
+
 def _triage(
     comment_body: str,
     is_bot: bool,
@@ -457,7 +494,7 @@ def _triage(
     *,
     _print_prompt=None,
 ) -> tuple[str, str]:
-    """Ask Haiku to triage a comment. Returns (prefix, title)."""
+    """Ask Opus to triage a comment. Returns (prefix, title)."""
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
@@ -469,8 +506,10 @@ def _triage(
         title = title.strip()
         if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
             return prefix, title
-    # Fallback: ACT for humans, DO for bots
-    return ("DO" if is_bot else "ACT"), comment_body[:80]
+    # Fallback: ACT for humans, DO for bots; summarize comment into action item
+    category = "DO" if is_bot else "ACT"
+    title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
+    return category, title
 
 
 def reply_to_issue_comment(
