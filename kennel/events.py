@@ -450,6 +450,19 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
     return answer.startswith("YES")
 
 
+def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
+    """Ask Opus to convert a comment into a short imperative action-item title."""
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+    prompt = (
+        "Convert this PR review comment into a short, imperative task title starting with a verb. "
+        "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
+        f"Comment: {comment_body}"
+    )
+    result = _print_prompt(prompt, "claude-opus-4-6", timeout=15).strip()
+    return result or comment_body[:80]
+
+
 def _triage(
     comment_body: str,
     is_bot: bool,
@@ -457,7 +470,7 @@ def _triage(
     *,
     _print_prompt=None,
 ) -> tuple[str, str]:
-    """Ask Haiku to triage a comment. Returns (prefix, title)."""
+    """Ask Opus to triage a comment. Returns (prefix, title)."""
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
@@ -469,8 +482,10 @@ def _triage(
         title = title.strip()
         if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
             return prefix, title
-    # Fallback: ACT for humans, DO for bots
-    return ("DO" if is_bot else "ACT"), comment_body[:80]
+    # Fallback: ACT for humans, DO for bots; summarize comment into action item
+    category = "DO" if is_bot else "ACT"
+    title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
+    return category, title
 
 
 def reply_to_issue_comment(
