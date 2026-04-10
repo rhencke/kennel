@@ -1162,6 +1162,18 @@ class Worker:
         # Resume loop: let Claude cook until commits appear
         attempt = 0
         while head_before == head_after:
+            # If the task was completed externally (e.g. via `kennel task
+            # complete`) while we were waiting, stop retrying — the work is
+            # already recorded as done and no commits will ever appear.
+            current_task_list = tasks.list_tasks(self.work_dir)
+            if not any(
+                t["id"] == task["id"] and t.get("status") == TaskStatus.PENDING
+                for t in current_task_list
+            ):
+                log.info(
+                    "task externally completed — stopping retry (id=%s)", task["id"]
+                )
+                break
             attempt += 1
             if session_id:
                 log.info(

@@ -5276,6 +5276,46 @@ class TestExecuteTask:
         assert mock_run.call_count == 4
         mock_complete.assert_called_once()
 
+    def test_breaks_retry_loop_when_task_externally_completed(
+        self, tmp_path: Path
+    ) -> None:
+        # Task is pending on first list_tasks call (execute_task picks it up),
+        # then externally completed before the retry loop re-checks — loop
+        # should break without calling claude_run a second time.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Already done task")
+        completed_task = {**task, "status": "completed"}
+        # HEAD never changes — no commits will ever appear.
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout="aaa" if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+        list_tasks_calls = iter([[task], [completed_task]])
+        with (
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                side_effect=lambda *a, **kw: next(list_tasks_calls),
+            ),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch(
+                "kennel.worker.claude_run", return_value=("sess-1", "output")
+            ) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # claude_run called exactly once (initial dispatch), not again after break
+        mock_run.assert_called_once()
+        # complete_by_id still called (idempotent — task already completed externally)
+        mock_complete.assert_called_once_with(tmp_path, task["id"])
+
     def test_resumes_setup_session_when_present_in_state(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
