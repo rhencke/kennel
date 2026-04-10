@@ -2660,8 +2660,10 @@ class TestFindOrCreatePr:
         assert git_calls[-2] == ["commit", "--allow-empty", "-m", "wip: start"]
         assert git_calls[-1] == ["push", "-u", "origin", "do-work"]
 
-    def test_no_pr_checkout_fallback_when_branch_exists(self, tmp_path: Path) -> None:
-        """checkout -b fails (branch exists) → fall back to checkout."""
+    def test_no_pr_deletes_existing_branch_before_creating(
+        self, tmp_path: Path
+    ) -> None:
+        """Always start fresh — delete existing branch before checkout -b."""
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
@@ -2670,8 +2672,6 @@ class TestFindOrCreatePr:
 
         def side_effect(args, check=True):  # noqa: ARG001
             git_calls.append(list(args))
-            if args[0:2] == ["checkout", "-b"]:
-                raise subprocess.CalledProcessError(128, "git")
             return MagicMock()
 
         with (
@@ -2683,7 +2683,8 @@ class TestFindOrCreatePr:
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        assert ["checkout", "slug"] in git_calls
+        assert ["branch", "-D", "slug"] in git_calls
+        assert ["checkout", "-b", "slug", "origin/main"] in git_calls
 
     def test_no_pr_slug_sanitized(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

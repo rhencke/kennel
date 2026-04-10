@@ -1,4 +1,4 @@
-A fresh git branch has been created. Your job is to plan the work by creating tasks. The PR does not exist yet — it will be created after you finish. All context is in the Context section above.
+A fresh git branch has been created. Your job is to PLAN the work by creating tasks. You are NOT implementing anything — just planning. The PR does not exist yet — it will be created after you finish. All context is in the Context section above.
 
 ## Steps
 
@@ -27,8 +27,12 @@ All tasks written to the task file via `kennel task`.
 **Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
 ## Constraints
+- **Never** commit code. No `git commit`, no `git add`. You are planning, not implementing.
+- **Never** edit source files. No `Edit`, no `Write` to any file except via `kennel task add`.
+- **Never** push to any branch. No `git push`.
 - **Never** mark the PR as ready for review (`gh pr ready`).
-- **Never** rebase, amend, or force-push. New commits only.
+- **Never** rebase, amend, or force-push.
 - **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `kennel task`.
 - **Never** edit any PR body or call sync-tasks. The caller handles that.
 - **Never** write to tasks.json directly. Always use `kennel task add`.
+- **You are a planner, not an implementer.** Read the code to understand it, then create tasks. Do not change it.

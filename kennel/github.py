@@ -167,34 +167,85 @@ class GH:
     def find_pr(
         self, repo: str, issue_number: int | str, user: str
     ) -> dict[str, Any] | None:
-        """Find a PR linked to issue_number via its body by user.
+        """Find a PR linked to issue_number by user, or None.
 
-        Uses the issue timeline cross-referenced events API to enumerate PRs
-        that reference this issue, then confirms the reference appears in the
-        PR body as a closing keyword reference (e.g. "closes #N").
+        Queries the issue timeline via GraphQL for CrossReferencedEvent (PRs
+        with a closing keyword like "closes #N" in their body) and
+        ConnectedEvent (PRs manually linked via the Development sidebar).
+        DisconnectedEvent removes sidebar-linked PRs that were later unlinked.
+        Returns the first open PR found in timeline order.
         """
+        owner, name = repo.split("/", 1)
         _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
         pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
-        url = f"{self.BASE}/repos/{repo}/issues/{issue_number}/timeline?per_page=100"
-        for event in self._paginate(url):
-            if event.get("event") != "cross-referenced":
-                continue
-            source_issue = event.get("source", {}).get("issue", {})
-            if "pull_request" not in source_issue:
-                continue
-            if source_issue.get("user", {}).get("login") != user:
-                continue
-            if not pattern.search(source_issue.get("body", "") or ""):
-                continue
-            pr_number = source_issue["number"]
-            pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
-            if pr["state"] != "open":
+        query = (
+            "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
+            "repository(owner:$owner,name:$repo){"
+            "issue(number:$number){"
+            "timelineItems("
+            "first:100,"
+            "itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT,DISCONNECTED_EVENT],"
+            "after:$cursor"
+            "){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{__typename"
+            "...on CrossReferencedEvent{source{__typename"
+            " ...on PullRequest{number headRefName state body author{login}}}}"
+            "...on ConnectedEvent{subject{__typename"
+            " ...on PullRequest{number headRefName state author{login}}}}"
+            "...on DisconnectedEvent{subject{__typename"
+            " ...on PullRequest{number}}}"
+            "}}}}}}"
+        )
+        keyword_prs: set[int] = set()
+        sidebar_prs: set[int] = set()
+        pr_cache: dict[int, dict[str, Any]] = {}
+        cursor: str | None = None
+        while True:
+            data = self._graphql(
+                query,
+                owner=owner,
+                repo=name,
+                number=int(issue_number),
+                cursor=cursor,
+            )
+            items = data["data"]["repository"]["issue"]["timelineItems"]
+            for node in items["nodes"]:
+                typename = node["__typename"]
+                if typename == "CrossReferencedEvent":
+                    pr = node.get("source") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    if pr.get("author", {}).get("login") != user:
+                        continue
+                    if not pattern.search(pr.get("body", "") or ""):
+                        continue
+                    pr_cache.setdefault(pr["number"], pr)
+                    keyword_prs.add(pr["number"])
+                elif typename == "ConnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    if pr.get("author", {}).get("login") != user:
+                        continue
+                    pr_cache.setdefault(pr["number"], pr)
+                    sidebar_prs.add(pr["number"])
+                elif typename == "DisconnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") == "PullRequest":
+                        sidebar_prs.discard(pr["number"])
+            if not items["pageInfo"]["hasNextPage"]:
+                break
+            cursor = items["pageInfo"]["endCursor"]
+        eligible = keyword_prs | sidebar_prs
+        for pr_num, pr in pr_cache.items():
+            if pr_num not in eligible or pr.get("state") != "OPEN":
                 continue
             return {
                 "number": pr["number"],
-                "headRefName": pr["head"]["ref"],
+                "headRefName": pr["headRefName"],
                 "state": "OPEN",
-                "author": {"login": pr["user"]["login"]},
+                "author": {"login": pr["author"]["login"]},
             }
         return None
 

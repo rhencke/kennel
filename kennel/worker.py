@@ -906,11 +906,12 @@ class Worker:
         log.info("new branch: %s", slug)
 
         # Create branch from default, push
+        # Always start fresh from default branch — delete existing branch if present
         self._git(["fetch", remote])
-        try:
-            self._git(["checkout", "-b", slug, f"{remote}/{repo_ctx.default_branch}"])
-        except subprocess.CalledProcessError:
-            self._git(["checkout", slug])
+        self._git(["checkout", repo_ctx.default_branch], check=False)
+        self._git(["branch", "-D", slug], check=False)
+        self._git(["push", remote, "--delete", slug], check=False)
+        self._git(["checkout", "-b", slug, f"{remote}/{repo_ctx.default_branch}"])
         self._git(["commit", "--allow-empty", "-m", "wip: start"])
         self._git(["push", "-u", remote, slug])
 
