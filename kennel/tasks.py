@@ -411,8 +411,9 @@ def _apply_reorder(
     Rules (in priority order):
     - CI tasks always come first.
     - Non-CI pending tasks follow in Opus dependency order.
-    - In-progress tasks dropped by Opus are removed; the caller detects this
-      and signals an abort so the worker picks the new next task.
+    - Pending/in_progress tasks that Opus omits are marked completed; the caller
+      detects affected in-progress tasks and signals an abort so the worker picks
+      the new next task.
     - Tasks added after the original snapshot (IDs not in *original_ids*) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
@@ -437,13 +438,20 @@ def _apply_reorder(
             orig["description"] = item["description"]
         merged.append(orig)
 
-    # In-progress tasks are intentionally NOT reinstated here.
-    # If Opus drops an in-progress task, the caller (reorder_tasks) will detect
-    # it was affected and signal an abort so the worker picks the new next task.
-
     ci = [t for t in merged if t.get("type") == TaskType.CI]
     non_ci = [t for t in merged if t.get("type") != TaskType.CI]
     completed = [t for t in current if t.get("status") == TaskStatus.COMPLETED]
+
+    # Tasks Opus omitted that were pending/in_progress — mark them completed
+    # rather than silently removing them.  The caller detects in-progress ones
+    # and triggers a worker abort so the next task is picked up cleanly.
+    newly_completed = [
+        {**t, "status": str(TaskStatus.COMPLETED)}
+        for t in current
+        if t["id"] in original_ids
+        and t["id"] not in seen_ids
+        and t.get("status") != TaskStatus.COMPLETED
+    ]
 
     # Tasks added while Opus was thinking — preserve them rather than drop.
     newly_added = [
@@ -454,7 +462,7 @@ def _apply_reorder(
         and t.get("status") != TaskStatus.COMPLETED
     ]
 
-    return ci + non_ci + completed + newly_added
+    return ci + non_ci + completed + newly_completed + newly_added
 
 
 def _compute_thread_changes(
@@ -462,13 +470,13 @@ def _compute_thread_changes(
     result: list[dict[str, Any]],
     original_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Return change records for thread tasks that were dropped or modified.
+    """Return change records for thread tasks that were completed or modified.
 
     Only tasks in *original_ids* (those Opus knew about) with a ``thread``
-    attachment are reported.  Completed tasks are excluded.
+    attachment are reported.  Already-completed tasks are excluded.
 
     Each record is one of:
-    - ``{"task": ..., "kind": "dropped"}``
+    - ``{"task": ..., "kind": "completed"}`` — Opus omitted it; now marked done
     - ``{"task": ..., "kind": "modified", "new_title": ..., "new_description": ...}``
     """
     result_by_id = {t["id"]: t for t in result}
@@ -481,21 +489,20 @@ def _compute_thread_changes(
         if t.get("status") == TaskStatus.COMPLETED:
             continue
         tid = t["id"]
-        if tid not in result_by_id:
-            changes.append({"task": t, "kind": "dropped"})
-        else:
-            r = result_by_id[tid]
-            if r.get("title") != t.get("title") or r.get("description") != t.get(
-                "description"
-            ):
-                changes.append(
-                    {
-                        "task": t,
-                        "kind": "modified",
-                        "new_title": r.get("title", ""),
-                        "new_description": r.get("description", ""),
-                    }
-                )
+        r = result_by_id.get(tid)
+        if r is None or r.get("status") == TaskStatus.COMPLETED:
+            changes.append({"task": t, "kind": "completed"})
+        elif r.get("title") != t.get("title") or r.get("description") != t.get(
+            "description"
+        ):
+            changes.append(
+                {
+                    "task": t,
+                    "kind": "modified",
+                    "new_title": r.get("title", ""),
+                    "new_description": r.get("description", ""),
+                }
+            )
     return changes
 
 
@@ -521,14 +528,14 @@ def reorder_tasks(
     CI tasks always stay first; completed tasks are always preserved.
     An empty or unparseable Opus response leaves the task list unchanged.
 
-    If *_on_changes* is provided and any thread tasks were dropped or modified,
+    If *_on_changes* is provided and any thread tasks were completed or modified,
     it is called with a list of change records (see :func:`_compute_thread_changes`).
 
     If *_on_inprogress_affected* is provided and the currently in-progress task
-    is dropped or modified by Opus, it is called with no arguments so the caller
-    can abort the running worker and restart on the new next task.  When the
-    in-progress task is modified its status is reset to ``pending`` so the worker
-    loop picks it up again with the updated title/description.
+    is marked completed or modified by Opus, it is called with no arguments so
+    the caller can abort the running worker and restart on the new next task.
+    When the in-progress task is modified its status is reset to ``pending`` so
+    the worker loop picks it up again with the updated title/description.
     """
     task_list = list_tasks(work_dir)
     if not task_list:
@@ -559,11 +566,14 @@ def reorder_tasks(
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
             )
-            if inprogress_in_result is None:
-                # Opus dropped the in-progress task — it's gone.
+            if (
+                inprogress_in_result is None
+                or inprogress_in_result.get("status") == TaskStatus.COMPLETED
+            ):
+                # Opus omitted the in-progress task — marked completed.
                 inprogress_affected = True
                 log.info(
-                    "reorder_tasks: in-progress task dropped by Opus: %s",
+                    "reorder_tasks: in-progress task marked completed by Opus: %s",
                     inprogress.get("title", "")[:60],
                 )
             elif inprogress_in_result.get("title") != inprogress.get(

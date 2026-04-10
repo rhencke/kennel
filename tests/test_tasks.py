@@ -420,18 +420,17 @@ class TestApplyReorder:
         assert result[0]["id"] == "2"
         assert result[1]["id"] == "1"
 
-    def test_in_progress_task_dropped_when_opus_excludes_it(self) -> None:
+    def test_in_progress_task_marked_completed_when_opus_excludes_it(self) -> None:
         current = [
             self._t("1", "Active task", status="in_progress"),
             self._t("2", "Spec task"),
         ]
         original_ids = frozenset({"1", "2"})
-        # Opus dropped task "1" (in_progress) — caller will abort the worker
+        # Opus omitted task "1" (in_progress) — marked completed; caller aborts worker
         items = [self._item("2", "Spec task")]
         result = _apply_reorder(current, items, original_ids)
-        ids = [t["id"] for t in result]
-        # in-progress task is dropped; caller (reorder_tasks) detects and signals abort
-        assert "1" not in ids
+        task1 = next(t for t in result if t["id"] == "1")
+        assert task1["status"] == "completed"
 
     def test_completed_tasks_preserved_at_end(self) -> None:
         current = [
@@ -452,12 +451,13 @@ class TestApplyReorder:
         assert "1" in ids
         assert "2" in ids
 
-    def test_drops_pending_task_from_original_set_not_in_opus_output(self) -> None:
-        current = [self._t("1", "Keep"), self._t("2", "Drop this")]
+    def test_marks_pending_task_completed_when_opus_excludes_it(self) -> None:
+        current = [self._t("1", "Keep"), self._t("2", "No longer needed")]
         original_ids = frozenset({"1", "2"})
-        items = [self._item("1", "Keep")]  # Opus dropped "2"
+        items = [self._item("1", "Keep")]  # Opus omitted "2"
         result = _apply_reorder(current, items, original_ids)
-        assert all(t["id"] != "2" for t in result)
+        task2 = next(t for t in result if t["id"] == "2")
+        assert task2["status"] == "completed"
 
     def test_empty_ordered_items_preserves_completed_and_new(self) -> None:
         current = [
@@ -531,13 +531,14 @@ class TestReorderTasks:
         reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: raw)
         assert list_tasks(tmp_path)[0]["title"] == "New title"
 
-    def test_drops_task_opus_excludes(self, tmp_path: Path) -> None:
+    def test_marks_completed_task_opus_excludes(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Keep")
-        t2 = self._add(tmp_path, "Drop")
+        t2 = self._add(tmp_path, "No longer needed")
         raw = self._response([{"id": t1["id"], "title": "Keep", "description": ""}])
         reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: raw)
         result = list_tasks(tmp_path)
-        assert all(t["id"] != t2["id"] for t in result)
+        task2 = next(t for t in result if t["id"] == t2["id"])
+        assert task2["status"] == "completed"
 
     def test_preserves_completed_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Done")
@@ -592,7 +593,9 @@ class TestReorderTasks:
         ids = [t["id"] for t in result]
         assert new_task_id[0] in ids  # not silently dropped
 
-    def test_on_changes_called_when_thread_task_dropped(self, tmp_path: Path) -> None:
+    def test_on_changes_called_when_thread_task_completed_by_reorder(
+        self, tmp_path: Path
+    ) -> None:
         thread = {
             "repo": "r/r",
             "pr": 1,
@@ -614,7 +617,7 @@ class TestReorderTasks:
             _on_changes=lambda changes: received.extend(changes),
         )
         assert len(received) == 1
-        assert received[0]["kind"] == "dropped"
+        assert received[0]["kind"] == "completed"
         assert received[0]["task"]["id"] == t1["id"]
 
     def test_on_changes_called_when_thread_task_modified(self, tmp_path: Path) -> None:
@@ -664,12 +667,13 @@ class TestReorderTasks:
         )
         t2 = self._add(tmp_path, "Keep")
         raw = self._response([{"id": t2["id"], "title": "Keep", "description": ""}])
-        # Should not raise even though t1 is dropped and _on_changes is None
+        # Should not raise even though t1 is completed and _on_changes is None
         reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: raw, _on_changes=None)
-        # t1 should be gone
-        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+        # t1 should be marked completed
+        task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
+        assert task1["status"] == "completed"
 
-    def test_on_inprogress_affected_called_when_inprogress_task_dropped(
+    def test_on_inprogress_affected_called_when_inprogress_task_completed(
         self, tmp_path: Path
     ) -> None:
         t1 = self._add(tmp_path, "In-progress task")
@@ -686,8 +690,9 @@ class TestReorderTasks:
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == [1]
-        # in-progress task is gone from the list
-        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+        # in-progress task is marked completed
+        task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
+        assert task1["status"] == "completed"
 
     def test_on_inprogress_affected_called_when_inprogress_task_modified(
         self, tmp_path: Path
@@ -754,14 +759,15 @@ class TestReorderTasks:
         raw = self._response(
             [{"id": t2["id"], "title": "Keep this", "description": ""}]
         )
-        # Should not raise even though in-progress task is dropped and callback is None
+        # Should not raise even though in-progress task is completed and callback is None
         reorder_tasks(
             tmp_path,
             "",
             _print_prompt=lambda *a, **k: raw,
             _on_inprogress_affected=None,
         )
-        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+        task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
+        assert task1["status"] == "completed"
 
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────
@@ -790,12 +796,12 @@ class TestComputeThreadChanges:
     def _thread(self) -> dict:
         return {"repo": "r/r", "pr": 1, "comment_id": 42, "url": "https://x.com"}
 
-    def test_dropped_thread_task(self) -> None:
+    def test_completed_thread_task(self) -> None:
         original = [self._t("1", "Thread task", thread=self._thread())]
         result: list = []
         changes = _compute_thread_changes(original, result, frozenset({"1"}))
         assert len(changes) == 1
-        assert changes[0]["kind"] == "dropped"
+        assert changes[0]["kind"] == "completed"
         assert changes[0]["task"]["id"] == "1"
 
     def test_modified_title(self) -> None:
@@ -836,10 +842,10 @@ class TestComputeThreadChanges:
 
     def test_multiple_changes_returned(self) -> None:
         thread = self._thread()
-        t1 = self._t("1", "Dropped", thread=thread)
+        t1 = self._t("1", "Covered by commit", thread=thread)
         t2 = self._t("2", "Old", thread=thread)
         r2 = self._t("2", "New", thread=thread)
         changes = _compute_thread_changes([t1, t2], [r2], frozenset({"1", "2"}))
         kinds = {c["kind"] for c in changes}
-        assert "dropped" in kinds
+        assert "completed" in kinds
         assert "modified" in kinds

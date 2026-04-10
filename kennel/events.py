@@ -740,21 +740,20 @@ def _notify_thread_change(
     prompts = Prompts(_load_persona(config))
     mention = f"@{author} " if author else ""
 
-    if kind == "dropped":
+    if kind == "completed":
         instruction = (
-            f"The task you were planning from a PR comment has been removed from "
-            f"your work queue — a subsequent comment changed the requirements and "
-            f"this work is no longer needed.\n\n"
+            f"A task originating from a PR comment has been marked done — it was "
+            f"covered by work already committed and is no longer in the active queue.\n\n"
             f"Original task: {original_title}\n"
             f"Comment author: {author or '(unknown)'}\n"
             f"Comment: {url}\n\n"
             "Write a very brief PR comment notifying the comment author (mention them "
-            "with @username if known) that their original task has been dropped and is "
-            "no longer needed. Reference the comment URL."
+            "with @username if known) that their task has been marked done because it "
+            "was covered by recent commits. Reference the comment URL."
         )
         fallback = (
             f"{mention}FYI — the task from your comment ('{original_title}') has been "
-            f"removed from my queue: a subsequent change made it unnecessary."
+            f"marked done: it was covered by recent commits."
         )
     else:
         new_title = change.get("new_title", "")

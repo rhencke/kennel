@@ -2067,7 +2067,7 @@ class TestReorderTasksBackground:
                     "author": "bob",
                 },
             },
-            "kind": "dropped",
+            "kind": "completed",
         }
         with patch("kennel.events._notify_thread_change") as mock_notify:
             on_changes([change])
@@ -2132,10 +2132,10 @@ class TestNotifyThreadChange:
         t.update(overrides)
         return t
 
-    def test_dropped_posts_comment(self, tmp_path: Path) -> None:
+    def test_completed_posts_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         _notify_thread_change(
             change, cfg, _print_prompt=MagicMock(return_value="Noted!"), _gh=mock_gh
         )
@@ -2160,14 +2160,14 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         task = self._task()
         task["thread"] = {}
-        change = {"task": task, "kind": "dropped"}
+        change = {"task": task, "kind": "completed"}
         _notify_thread_change(change, cfg, _print_prompt=MagicMock(), _gh=mock_gh)
         mock_gh.comment_issue.assert_not_called()
 
-    def test_empty_opus_uses_fallback_for_dropped(self, tmp_path: Path) -> None:
+    def test_empty_opus_uses_fallback_for_completed(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         _notify_thread_change(
             change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
         )
@@ -2201,7 +2201,7 @@ class TestNotifyThreadChange:
             "comment_id": 999,
             "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
         }
-        change = {"task": task, "kind": "dropped"}
+        change = {"task": task, "kind": "completed"}
         _notify_thread_change(
             change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
         )
@@ -2216,14 +2216,14 @@ class TestNotifyThreadChange:
             captured_prompt.append(prompt)
             return "ok"
 
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         _notify_thread_change(change, cfg, _print_prompt=fake_pp, _gh=MagicMock())
         assert "alice" in captured_prompt[0]
 
     def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         with patch("kennel.events.get_github", return_value=mock_gh):
             _notify_thread_change(
                 change, cfg, _print_prompt=MagicMock(return_value="ok")
@@ -2234,7 +2234,7 @@ class TestNotifyThreadChange:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = RuntimeError("api error")
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         # Should not raise
         _notify_thread_change(
             change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
@@ -2243,7 +2243,7 @@ class TestNotifyThreadChange:
     def test_default_print_prompt_uses_claude(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "dropped"}
+        change = {"task": self._task(), "kind": "completed"}
         with patch("kennel.events.claude.print_prompt", return_value="Auto reply"):
             _notify_thread_change(change, cfg, _gh=mock_gh)
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")

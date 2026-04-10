@@ -221,7 +221,8 @@ def rescope_prompt(
     - CI tasks (type "ci") must remain first.
     - Completed tasks are excluded from the output.
     - Task IDs must be preserved exactly.
-    - Tasks already covered by a commit should be removed.
+    - Tasks already covered by a commit should be omitted — they will be marked
+      completed automatically by the caller.
     - Thread-task requirements that conflict with a spec task should cause
       the spec task title/description to be updated.
 
@@ -259,7 +260,7 @@ def rescope_prompt(
         "dependency analysis. Apply these rules:\n"
         '1. Tasks with type "ci" must come first — do not move them.\n'
         "2. Reorder remaining tasks so each task builds on what comes before it.\n"
-        "3. If a task is already covered by a recent commit, remove it.\n"
+        "3. If a task is already covered by a recent commit, omit it from the output — it will be marked done.\n"
         "4. If a thread task changes the requirements of an existing spec task, "
         "rewrite that spec task's title and/or description to reflect the updated "
         "requirements.\n"
