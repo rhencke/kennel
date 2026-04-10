@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # ── Triage ────────────────────────────────────────────────────────────────────
@@ -199,6 +200,72 @@ def issue_reply_instruction(
             return f"Write a short polite decline.\n\n{context_str}"
         case _:
             return f"Write a short GitHub PR reply.\n\n{context_str}"
+
+
+# ── Rescoping ────────────────────────────────────────────────────────────────
+
+
+def rescope_prompt(
+    task_list: list[dict[str, Any]],
+    commit_summary: str,
+) -> str:
+    """Build an Opus prompt for dependency-aware task reordering.
+
+    Presents the full task list and a summary of commits already made, then
+    asks Opus to return a JSON array of the reordered pending tasks.
+
+    Rules enforced in the prompt:
+    - CI tasks (type "ci") must remain first.
+    - Completed tasks are excluded from the output.
+    - Task IDs must be preserved exactly.
+    - Tasks already covered by a commit should be removed.
+    - Thread-task requirements that conflict with a spec task should cause
+      the spec task title/description to be updated.
+
+    The caller is responsible for parsing the returned JSON and applying it.
+    """
+    pending = [t for t in task_list if t.get("status") != "completed"]
+    completed = [t for t in task_list if t.get("status") == "completed"]
+
+    def _fmt(t: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": t.get("id", ""),
+            "type": t.get("type", "spec"),
+            "status": t.get("status", "pending"),
+            "title": t.get("title", ""),
+            "description": t.get("description", ""),
+        }
+
+    pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
+    completed_titles = [t.get("title", "") for t in completed]
+    completed_block = (
+        "\n".join(f"- {title}" for title in completed_titles)
+        if completed_titles
+        else "(none)"
+    )
+
+    return (
+        "You are reviewing the pending work queue for a pull request in progress.\n\n"
+        "Already completed tasks:\n"
+        f"{completed_block}\n\n"
+        "Recent commits (already implemented):\n"
+        f"{commit_summary or '(none)'}\n\n"
+        "Pending tasks (current order):\n"
+        f"{pending_json}\n\n"
+        "Reorder these tasks for the optimal implementation sequence based on "
+        "dependency analysis. Apply these rules:\n"
+        '1. Tasks with type "ci" must come first — do not move them.\n'
+        "2. Reorder remaining tasks so each task builds on what comes before it.\n"
+        "3. If a task is already covered by a recent commit, remove it.\n"
+        "4. If a thread task changes the requirements of an existing spec task, "
+        "rewrite that spec task's title and/or description to reflect the updated "
+        "requirements.\n"
+        "5. Preserve every task ID exactly — never change or drop IDs.\n"
+        "6. Include only pending and in_progress tasks in the output — omit completed.\n\n"
+        'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
+        'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+        "No other text before or after the JSON."
+    )
 
 
 # ── Prompts DI class ──────────────────────────────────────────────────────────

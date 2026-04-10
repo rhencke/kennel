@@ -9,6 +9,7 @@ from kennel.prompts import (
     issue_reply_instruction,
     reply_context_block,
     reply_instruction,
+    rescope_prompt,
     triage_categories,
     triage_context_block,
     triage_prompt,
@@ -584,6 +585,121 @@ class TestPromptsPickupCommentPrompt:
 
     def test_returns_string(self) -> None:
         assert isinstance(Prompts("persona").pickup_comment_prompt("title"), str)
+
+
+# ── rescope_prompt ────────────────────────────────────────────────────────────
+
+
+class TestRescopePrompt:
+    def _task(
+        self,
+        title: str,
+        task_id: str = "1",
+        task_type: str = "spec",
+        status: str = "pending",
+        description: str = "",
+    ) -> dict:
+        return {
+            "id": task_id,
+            "title": title,
+            "type": task_type,
+            "status": status,
+            "description": description,
+        }
+
+    def test_includes_pending_tasks_json(self) -> None:
+        tasks = [self._task("Add feature", task_id="1")]
+        result = rescope_prompt(tasks, "")
+        assert "Add feature" in result
+        assert '"id": "1"' in result
+
+    def test_excludes_completed_from_pending_json(self) -> None:
+        tasks = [
+            self._task("Done task", task_id="1", status="completed"),
+            self._task("Todo task", task_id="2"),
+        ]
+        result = rescope_prompt(tasks, "")
+        # Completed appears in the completed block, not the pending JSON
+        assert '"id": "2"' in result
+        assert '"id": "1"' not in result.split("Pending tasks")[1]
+
+    def test_completed_titles_listed_in_completed_block(self) -> None:
+        tasks = [
+            self._task("Already done", task_id="1", status="completed"),
+            self._task("Still pending", task_id="2"),
+        ]
+        result = rescope_prompt(tasks, "")
+        assert "Already done" in result.split("Pending tasks")[0]
+
+    def test_no_completed_tasks_shows_none(self) -> None:
+        tasks = [self._task("Only pending", task_id="1")]
+        result = rescope_prompt(tasks, "")
+        assert "(none)" in result.split("Pending tasks")[0]
+
+    def test_commit_summary_included(self) -> None:
+        tasks = [self._task("Add tests", task_id="1")]
+        result = rescope_prompt(tasks, "feat: add parser method")
+        assert "feat: add parser method" in result
+
+    def test_empty_commit_summary_shows_none(self) -> None:
+        tasks = [self._task("Add tests", task_id="1")]
+        result = rescope_prompt(tasks, "")
+        assert "(none)" in result
+
+    def test_ci_tasks_must_come_first_rule_stated(self) -> None:
+        tasks = [self._task("Fix CI", task_id="1", task_type="ci")]
+        result = rescope_prompt(tasks, "")
+        assert "ci" in result.lower()
+        assert "first" in result
+
+    def test_json_output_format_instructed(self) -> None:
+        tasks = [self._task("Do something", task_id="1")]
+        result = rescope_prompt(tasks, "")
+        assert '{"tasks": [...]}' in result
+
+    def test_preserve_ids_rule_stated(self) -> None:
+        tasks = [self._task("Task A", task_id="abc-123")]
+        result = rescope_prompt(tasks, "")
+        assert "ID" in result or "id" in result
+        assert "preserve" in result.lower() or "never change" in result.lower()
+
+    def test_remove_covered_tasks_rule_stated(self) -> None:
+        tasks = [self._task("Task A", task_id="1")]
+        result = rescope_prompt(tasks, "commit covering this")
+        assert "commit" in result.lower() or "covered" in result.lower()
+
+    def test_rewrite_spec_on_thread_conflict_rule_stated(self) -> None:
+        tasks = [
+            self._task("Old spec title", task_id="1", task_type="spec"),
+            self._task("New comment task", task_id="2", task_type="thread"),
+        ]
+        result = rescope_prompt(tasks, "")
+        assert "thread" in result.lower() or "rewrite" in result.lower()
+
+    def test_no_other_text_instruction_present(self) -> None:
+        tasks = [self._task("X", task_id="1")]
+        result = rescope_prompt(tasks, "")
+        assert "No other text" in result
+
+    def test_in_progress_tasks_included_in_pending(self) -> None:
+        tasks = [
+            self._task("Running task", task_id="1", status="in_progress"),
+        ]
+        result = rescope_prompt(tasks, "")
+        assert '"id": "1"' in result
+
+    def test_description_included_in_task_json(self) -> None:
+        tasks = [self._task("X", task_id="1", description="important details")]
+        result = rescope_prompt(tasks, "")
+        assert "important details" in result
+
+    def test_empty_task_list(self) -> None:
+        result = rescope_prompt([], "")
+        assert isinstance(result, str)
+        assert "(none)" in result  # both completed and commit summary
+
+
+# ── Prompts.stores_persona ────────────────────────────────────────────────────
 
 
 class TestPromptsStoresPersona:
