@@ -923,15 +923,21 @@ class TestPullWithBackoff:
         assert _pull_with_backoff(
             tmp_path, _run=mock_run, _sleep=mock_sleep, _monotonic=lambda: 0.0
         )
-        mock_run.assert_called_once()
+        # Each sync attempt runs two git commands: fetch + reset.
+        assert mock_run.call_count == 2
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert cmds[0] == ["git", "fetch", "origin", "main"]
+        assert cmds[1] == ["git", "reset", "--hard", "origin/main"]
         mock_sleep.assert_not_called()
 
     def test_success_after_retry(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
+        # First attempt: fetch fails.  Second attempt: fetch + reset both succeed.
         mock_run = MagicMock(
             side_effect=[
                 subprocess.CalledProcessError(1, []),
+                MagicMock(returncode=0),
                 MagicMock(returncode=0),
             ]
         )
@@ -943,12 +949,33 @@ class TestPullWithBackoff:
             _sleep=mock_sleep,
             _monotonic=lambda: next(times),
         )
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
         mock_sleep.assert_called_once_with(10)
+
+    def test_recovers_from_divergent_local(self, tmp_path: Path) -> None:
+        """The whole point of using fetch+reset: divergent local branch is fine.
+
+        Previously git pull would fail with `fatal: Need to specify how to
+        reconcile divergent branches` and the runner would never sync.  With
+        reset --hard the local state is forcibly replaced, so the worker
+        catches up regardless of how the runner clone got into a weird state.
+        """
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        mock_sleep = MagicMock()
+        assert _pull_with_backoff(
+            tmp_path, _run=mock_run, _sleep=mock_sleep, _monotonic=lambda: 0.0
+        )
+        assert ["git", "reset", "--hard", "origin/main"] in [
+            c.args[0] for c in mock_run.call_args_list
+        ]
+        mock_sleep.assert_not_called()
 
     def test_gives_up_after_all_retries_fail(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
+        # Fetch fails on every attempt — 4 attempts total.
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
         mock_sleep = MagicMock()
         times = iter([0.0, 1.0, 1.0, 12.0, 12.0, 43.0, 43.0, 104.0])
@@ -958,10 +985,33 @@ class TestPullWithBackoff:
             _sleep=mock_sleep,
             _monotonic=lambda: next(times),
         )
-        # 4 attempts: initial + 3 retries
+        # 4 attempts × 1 failing fetch each = 4 calls.
         assert mock_run.call_count == 4
-        # 3 sleeps at 10s, 30s, 60s between retries
+        # 3 sleeps at 10s, 30s, 60s between retries.
         assert [c.args[0] for c in mock_sleep.call_args_list] == [10, 30, 60]
+
+    def test_reset_failure_retries(self, tmp_path: Path) -> None:
+        """Fetch succeeds but reset fails — both commands matter for the result."""
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(
+            side_effect=[
+                MagicMock(returncode=0),  # fetch
+                subprocess.CalledProcessError(1, []),  # reset
+                MagicMock(returncode=0),  # fetch retry
+                MagicMock(returncode=0),  # reset retry
+            ]
+        )
+        mock_sleep = MagicMock()
+        times = iter([0.0, 1.0, 1.0])
+        assert _pull_with_backoff(
+            tmp_path,
+            _run=mock_run,
+            _sleep=mock_sleep,
+            _monotonic=lambda: next(times),
+        )
+        assert mock_run.call_count == 4
+        mock_sleep.assert_called_once_with(10)
 
     def test_gives_up_when_budget_exhausted(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
@@ -1060,7 +1110,14 @@ class TestSelfRestart:
         finally:
             srv.shutdown()
 
-    def test_skips_exec_when_pull_gives_up(self, tmp_path: Path) -> None:
+    def test_pull_failure_leaves_worker_alone(self, tmp_path: Path) -> None:
+        """When pull gives up, do NOT tear down the worker thread.
+
+        Previously the worker for the merged repo was stopped before the
+        pull, and stayed stopped after pull failure — silently leaving
+        kennel without a fido worker on its own repo.  Now the pull runs
+        first and the worker is only torn down on success.
+        """
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path
@@ -1070,12 +1127,14 @@ class TestSelfRestart:
             WebhookHandler._fn_os_execvp = mock_exec
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             time.sleep(0.2)
-            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_registry.stop_and_join.assert_not_called()
             mock_exec.assert_not_called()
         finally:
             srv.shutdown()
 
-    def test_stop_and_join_precedes_pull(self, tmp_path: Path) -> None:
+    def test_pull_precedes_stop_and_join(self, tmp_path: Path) -> None:
+        """Pull MUST run before stop_and_join, so a failed pull leaves the
+        worker intact."""
         call_order: list[str] = []
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         mock_registry.stop_and_join.side_effect = lambda *_a, **_kw: call_order.append(
@@ -1096,4 +1155,4 @@ class TestSelfRestart:
             time.sleep(0.2)
         finally:
             srv.shutdown()
-        assert call_order == ["stop_and_join", "pull"]
+        assert call_order == ["pull", "stop_and_join"]

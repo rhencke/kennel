@@ -83,7 +83,14 @@ def _pull_with_backoff(
     _sleep: Callable[[float], None] = time.sleep,
     _monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
-    """Run ``git pull`` in *runner_dir* with exponential backoff on failure.
+    """Sync the runner clone to ``origin/main`` with exponential backoff.
+
+    Uses ``git fetch origin main`` followed by ``git reset --hard origin/main``
+    so the runner clone is forcibly synced to the remote — no merge strategy
+    needed, no failure on local divergence.  The runner clone is supposed to
+    be read-only (fido never commits there), so a destructive reset is safe
+    and the only way to recover from accidental local commits or detached
+    state.
 
     Retries with delays from :data:`_PULL_BACKOFF_DELAYS` (10s, 30s, 60s)
     and a total budget of :data:`_PULL_BUDGET_SECONDS` (10 minutes).  Logs
@@ -96,14 +103,21 @@ def _pull_with_backoff(
         attempt += 1
         try:
             _run(
-                ["git", "pull"],
+                ["git", "fetch", "origin", "main"],
+                cwd=str(runner_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            _run(
+                ["git", "reset", "--hard", "origin/main"],
                 cwd=str(runner_dir),
                 capture_output=True,
                 text=True,
                 check=True,
             )
             log.info(
-                "self-restart: git pull succeeded on attempt %d (%.1fs elapsed)",
+                "self-restart: runner synced on attempt %d (%.1fs elapsed)",
                 attempt,
                 _monotonic() - start,
             )
@@ -111,14 +125,14 @@ def _pull_with_backoff(
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             elapsed = _monotonic() - start
             log.error(
-                "self-restart: git pull attempt %d failed after %.1fs: %s",
+                "self-restart: runner sync attempt %d failed after %.1fs: %s",
                 attempt,
                 elapsed,
                 e,
             )
             if attempt > len(_PULL_BACKOFF_DELAYS):
                 log.error(
-                    "self-restart: git pull exhausted %d retries in %.1fs — giving up",
+                    "self-restart: runner sync exhausted %d retries in %.1fs — giving up",
                     attempt,
                     elapsed,
                 )
@@ -126,7 +140,7 @@ def _pull_with_backoff(
             delay = _PULL_BACKOFF_DELAYS[attempt - 1]
             if elapsed + delay > _PULL_BUDGET_SECONDS:
                 log.error(
-                    "self-restart: git pull would exceed %.0fs budget — giving up",
+                    "self-restart: runner sync would exceed %.0fs budget — giving up",
                     _PULL_BUDGET_SECONDS,
                 )
                 return False
@@ -279,14 +293,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
         log.info(
-            "kennel repo %s merged — pulling runner clone at %s",
+            "kennel repo %s merged — syncing runner clone at %s",
             repo_name,
             runner_dir,
         )
-        self.registry.stop_and_join(repo_name)
+        # Sync runner BEFORE tearing down the worker.  If the sync fails we
+        # log and return without touching the running workers — fido on the
+        # kennel repo keeps running its old code rather than being silently
+        # left without a worker thread.
         if not type(self)._fn_pull_with_backoff(runner_dir):
-            log.error("self-restart: git pull gave up — running old version")
+            log.error("self-restart: runner sync gave up — running old version")
             return
+        self.registry.stop_and_join(repo_name)
         type(self)._fn_os_chdir(runner_dir)
         type(self)._fn_os_execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
 
