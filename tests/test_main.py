@@ -81,6 +81,12 @@ class TestMain:
 
         assert mock_sync.call_args[0][0] == Path.cwd()
 
+    def test_gh_status_subcommand_dispatches(self) -> None:
+        """'kennel gh-status set msg' should delegate to gh_status.main."""
+        with patch("kennel.gh_status.main") as mock_main:
+            main(["gh-status", "set", "test message"])
+        mock_main.assert_called_once_with(["set", "test message"])
+
     def test_status_subcommand_prints_output(self) -> None:
         """'kennel status' calls collect/format_status and prints the result."""
         with (

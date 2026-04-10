@@ -17,6 +17,10 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.status import collect, format_status
 
         print(format_status(collect()))
+    elif args and args[0] == "gh-status":
+        from kennel.gh_status import main as gh_status_main
+
+        gh_status_main(args[1:])
     elif args and args[0] == "sync-tasks":
         from pathlib import Path
 
