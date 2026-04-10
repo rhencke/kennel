@@ -195,7 +195,7 @@ class GH:
             " ...on PullRequest{number headRefName state author{login}}}}"
             "...on DisconnectedEvent{subject{__typename"
             " ...on PullRequest{number}}}"
-            "}}}}}}"
+            "}}}}}"
         )
         keyword_prs: set[int] = set()
         sidebar_prs: set[int] = set()
