@@ -172,6 +172,29 @@ class TestAcquireLock:
         fd2.close()
 
 
+class TestWorkerContextManager:
+    def test_closes_lock_fd_on_exit(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fd = acquire_lock(fido_dir)
+        ctx = WorkerContext(
+            work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
+        )
+        with ctx:
+            assert not fd.closed
+        assert fd.closed
+
+    def test_closes_lock_fd_on_exception(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fd = acquire_lock(fido_dir)
+        ctx = WorkerContext(
+            work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
+        )
+        with pytest.raises(RuntimeError):
+            with ctx:
+                raise RuntimeError("boom")
+        assert fd.closed
+
+
 class TestCreateContext:
     def _mock_run(self, git_dir: Path) -> MagicMock:
         return MagicMock(return_value=MagicMock(stdout=str(git_dir) + "\n"))
