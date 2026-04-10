@@ -97,6 +97,12 @@ class WorkerContext:
     fido_dir: Path
     lock_fd: IO[str]
 
+    def __enter__(self) -> WorkerContext:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.lock_fd.close()
+
 
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
@@ -1436,51 +1442,51 @@ class Worker:
         except LockHeld:
             log.warning("another fido is running — exiting")
             return 2
-        log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
 
-        repo_ctx = self.discover_repo_context()
-        log.info(
-            "repo=%s user=%s default_branch=%s",
-            repo_ctx.repo,
-            repo_ctx.gh_user,
-            repo_ctx.default_branch,
-        )
+        with ctx:
+            log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
 
-        compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
-        try:
-            issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
-            if issue is None:
-                issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
-            if issue is None:
-                return 0
-
-            issue_data = self.gh.view_issue(repo_ctx.repo, issue)
-            issue_title = issue_data["title"]
-            issue_body = issue_data.get("body", "") or ""
-            self.post_pickup_comment(
-                repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
+            repo_ctx = self.discover_repo_context()
+            log.info(
+                "repo=%s user=%s default_branch=%s",
+                repo_ctx.repo,
+                repo_ctx.gh_user,
+                repo_ctx.default_branch,
             )
-            result = self.find_or_create_pr(
-                ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
-            )
-            if result is None:
-                return 0
-            pr_number, slug = result
-            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-            if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
-                return 1
-            if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
-                return 1
-            if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
-                self.resolve_addressed_threads(repo_ctx, pr_number)
-                return 1
-            return self.handle_promote_merge(
-                ctx.fido_dir, repo_ctx, pr_number, slug, issue
-            )
-        finally:
-            self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
-        return 0
+            compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
+            try:
+                issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
+                if issue is None:
+                    issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
+                if issue is None:
+                    return 0
+
+                issue_data = self.gh.view_issue(repo_ctx.repo, issue)
+                issue_title = issue_data["title"]
+                issue_body = issue_data.get("body", "") or ""
+                self.post_pickup_comment(
+                    repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
+                )
+                result = self.find_or_create_pr(
+                    ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
+                )
+                if result is None:
+                    return 0
+                pr_number, slug = result
+                self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    self.resolve_addressed_threads(repo_ctx, pr_number)
+                    return 1
+                return self.handle_promote_merge(
+                    ctx.fido_dir, repo_ctx, pr_number, slug, issue
+                )
+            finally:
+                self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
 
 _IDLE_TIMEOUT = 60.0  # seconds to wait when there was no work to do
