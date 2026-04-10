@@ -2019,46 +2019,45 @@ class TestBuildPrBody:
     def test_returns_string(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="PR desc."),
+            patch("kennel.worker.claude.resume_status", return_value="PR desc."),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("Fix the thing (closes #1)", 1)
+            result = worker._build_pr_body(
+                "Fix the thing (closes #1)", 1, setup_session_id="s"
+            )
         assert isinstance(result, str)
+
+    def test_raises_if_setup_session_id_empty(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with pytest.raises(AssertionError):
+            worker._build_pr_body("req", 1, setup_session_id="")
 
     def test_contains_work_queue_start_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "<!-- WORK_QUEUE_START -->" in result
 
     def test_contains_work_queue_end_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "<!-- WORK_QUEUE_END -->" in result
 
     def test_pending_tasks_shown_as_checkboxes(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("Write tests"), self._pending_task("Fix lint")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "- [ ] Write tests" in result
         assert "- [ ] Fix lint" in result
 
@@ -2066,24 +2065,20 @@ class TestBuildPrBody:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("First task"), self._pending_task("Second task")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "- [ ] First task **→ next**" in result
 
     def test_second_task_has_no_next_marker(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         pending = [self._pending_task("First task"), self._pending_task("Second task")]
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=pending),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "- [ ] Second task **→ next**" not in result
         assert "- [ ] Second task\n" in result or result.endswith("- [ ] Second task")
 
@@ -2093,24 +2088,20 @@ class TestBuildPrBody:
         regular = self._pending_task("Regular work")
         ci = {"id": "2", "title": "CI failure: lint", "status": "pending", "type": "ci"}
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[regular, ci]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "- [ ] CI failure: lint **→ next**" in result
         assert "- [ ] Regular work **→ next**" not in result
 
     def test_no_tasks_shows_placeholder(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "<!-- no tasks yet -->" in result
 
     def test_falls_back_to_plain_when_claude_returns_empty(
@@ -2120,13 +2111,11 @@ class TestBuildPrBody:
 
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value=""),
+            patch("kennel.worker.claude.resume_status", return_value=""),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
             caplog.at_level(logging.WARNING, logger="kennel"),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("Fix auth", 7)
+            result = worker._build_pr_body("Fix auth", 7, setup_session_id="s")
         assert "Fix auth" in result
         assert "Fixes #7." in result
         assert "falling back" in caplog.text.lower()
@@ -2134,78 +2123,23 @@ class TestBuildPrBody:
     def test_contains_separator(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
-            patch("kennel.worker.claude.print_prompt_json", return_value="desc"),
+            patch("kennel.worker.claude.resume_status", return_value="desc"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "---" in result
 
-    def test_calls_claude_print_prompt_json_with_opus(self, tmp_path: Path) -> None:
+    def test_desc_has_fixes_line_appended(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         with (
             patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+                "kennel.worker.claude.resume_status", return_value="Specific summary."
+            ),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            worker._build_pr_body("req", 1)
-        assert mock_pp.call_args[1]["model"] == "claude-opus-4-6"
-
-    def test_system_prompt_includes_issue_number(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("")
-            worker._build_pr_body("req", 99)
-        assert "99" in mock_pp.call_args[1]["system_prompt"]
-
-    def test_system_prompt_instructs_problem_and_solution(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("")
-            worker._build_pr_body("req", 1)
-        assert "problem" in mock_pp.call_args[1]["system_prompt"].lower()
-
-    def test_prompt_includes_persona(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido, a very good dog.")
-            worker._build_pr_body("req", 1)
-        assert "I am Fido, a very good dog." in mock_pp.call_args[1]["prompt"]
-
-    def test_prompt_includes_issue_body(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("")
-            worker._build_pr_body("req", 1, "Detailed description of the issue.")
-        assert "Detailed description of the issue." in mock_pp.call_args[1]["prompt"]
+            result = worker._build_pr_body("req", 99, setup_session_id="s")
+        assert "Specific summary." in result
+        assert "Fixes #99." in result
 
     def test_skips_completed_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -2214,28 +2148,41 @@ class TestBuildPrBody:
             {"id": "2", "title": "Pending task", "status": "pending"},
         ]
         with (
-            patch("kennel.worker.claude.print_prompt", return_value="d"),
+            patch("kennel.worker.claude.resume_status", return_value="d"),
             patch("kennel.worker.tasks.list_tasks", return_value=task_list),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
         ):
-            (tmp_path / "persona.md").write_text("")
-            result = worker._build_pr_body("req", 1)
+            result = worker._build_pr_body("req", 1, setup_session_id="s")
         assert "Done task" not in result
         assert "Pending task" in result
 
-    def test_falls_back_gracefully_when_persona_missing(self, tmp_path: Path) -> None:
+    def test_resume_status_passes_session_id_and_prompt(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
-        missing = tmp_path / "nosuchdir"
         with (
             patch(
-                "kennel.worker.claude.print_prompt_json", return_value="d"
-            ) as mock_pp,
+                "kennel.worker.claude.resume_status", return_value="d"
+            ) as mock_resume,
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._sub_dir", return_value=missing),
         ):
-            worker._build_pr_body("req", 1)
-        # Should not raise; persona becomes empty string
-        assert mock_pp.called
+            worker._build_pr_body("req", 1, setup_session_id="my-session")
+        args = mock_resume.call_args
+        assert args[0][0] == "my-session"
+        assert "specific" in args[0][1].lower()
+
+    def test_falls_back_to_plain_when_resume_returns_empty(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.resume_status", return_value=""),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            result = worker._build_pr_body("Fix it", 5, setup_session_id="sess")
+        assert "Fix it" in result
+        assert "Fixes #5." in result
+        assert "falling back" in caplog.text.lower()
 
 
 class TestFindOrCreatePr:
@@ -2580,7 +2527,9 @@ class TestFindOrCreatePr:
             "do-work",
         )
 
-    def test_no_pr_passes_issue_body_to_build_pr_body(self, tmp_path: Path) -> None:
+    def test_no_pr_passes_setup_session_id_to_build_pr_body(
+        self, tmp_path: Path
+    ) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
@@ -2588,19 +2537,17 @@ class TestFindOrCreatePr:
         mock_build_body = MagicMock(return_value="body")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="br"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.claude_start", return_value="planning-session-id"),
             patch.object(worker, "_build_pr_body", mock_build_body),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
         ):
-            worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "Fix it", "Detailed issue body."
-            )
-        mock_build_body.assert_called_once_with(ANY, 5, "Detailed issue body.")
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 3, "Do it")
+        assert mock_build_body.call_args[1]["setup_session_id"] == "planning-session-id"
 
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

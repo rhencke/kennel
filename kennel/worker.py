@@ -760,45 +760,38 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
-    def _build_pr_body(self, request: str, issue: int, issue_body: str = "") -> str:
+    def _build_pr_body(
+        self,
+        request: str,
+        issue: int,
+        *,
+        setup_session_id: str,
+    ) -> str:
         """Build the draft PR body: generated description + work-queue section.
 
-        Reads the Fido persona from ``sub/persona.md`` and generates a 2-3
-        sentence description via Claude (Opus).  Falls back to plain text if
-        Claude returns nothing.  Appends the pending task list (read from
-        tasks.json) inside the ``WORK_QUEUE_START/END`` markers used by
-        sync-tasks.sh.
+        Continues *setup_session_id* (the planning session) so Opus writes the
+        description with full context from everything it just planned.  Falls
+        back to plain text if Claude returns nothing.  Appends the pending task
+        list inside the ``WORK_QUEUE_START/END`` markers.
         """
-        persona_path = _sub_dir() / "persona.md"
-        try:
-            persona = persona_path.read_text()
-        except OSError:
-            persona = ""
-
+        assert setup_session_id, "setup_session_id must be non-empty"
         plain = f"{request}\n\nFixes #{issue}."
-        system_prompt = (
-            "You are a GitHub PR description writer."
-            " Write a 2-3 sentence description suitable for a GitHub PR body."
-            " Summarize the problem being solved and how this PR addresses it."
-            " No markdown headers."
-            f" The last line must be a blank line followed by 'Fixes #{issue}.'"
-            " on its own line."
+        task_list = tasks.list_tasks(self.work_dir)
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
+
+        continuation_prompt = (
+            "Based on the planning above, write a specific 2-3 sentence pull"
+            " request description for this PR. Reference the concrete tasks by"
+            " name. No markdown headers. Do not include a 'Fixes #N.' line."
         )
-        body_section = f"\n\nIssue body:\n{issue_body}" if issue_body else ""
-        desc = claude.print_prompt_json(
-            prompt=f"{persona}\n\nIssue title: {request}{body_section}\n\n"
-            "Write a 2-3 sentence pull request description summarizing"
-            " the problem and how this PR solves it.",
-            key="description",
-            model="claude-opus-4-6",
-            system_prompt=system_prompt,
-        )
-        if not desc:
+        desc = claude.resume_status(setup_session_id, continuation_prompt, timeout=60)
+
+        if desc:
+            desc = f"{desc.rstrip()}\n\nFixes #{issue}."
+        else:
             log.warning("Opus returned no description — falling back to plain text")
             desc = plain
 
-        task_list = tasks.list_tasks(self.work_dir)
-        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
         next_task = _pick_next_task(task_list)
         if pending:
             lines = []
@@ -927,7 +920,7 @@ class Worker:
             return None
 
         # Build PR body with tasks already populated by setup
-        pr_body = self._build_pr_body(request, issue, issue_body)
+        pr_body = self._build_pr_body(request, issue, setup_session_id=session_id)
 
         # Create draft PR
         url = self.gh.create_pr(

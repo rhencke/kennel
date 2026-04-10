@@ -94,13 +94,16 @@ def add_task(
     with _locked(path, write=True) as lock:
         existing = lock.read()
         for t in existing:
-            if t["status"] != TaskStatus.PENDING:
-                continue
             if comment_id is not None:
+                # Never re-create a task for the same comment, regardless of status.
                 if (t.get("thread") or {}).get("comment_id") == comment_id:
-                    log.info("task already exists for comment_id %s", comment_id)
+                    log.info(
+                        "task already exists for comment_id %s (status: %s)",
+                        comment_id,
+                        t["status"],
+                    )
                     return t
-            elif t["title"] == title:
+            elif t["status"] == TaskStatus.PENDING and t["title"] == title:
                 log.info("task already exists: %s", title[:80])
                 return t
         existing.append(task)
