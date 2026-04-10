@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class RepoMembership:
+    """Cached membership info for a repo — who gets to direct fido's work.
+
+    Populated once at server startup (``server.populate_memberships``) via
+    ``GH.get_collaborators``, then shared as a field on both
+    :class:`RepoConfig` (used by event dispatch at webhook time) and
+    :class:`~kennel.worker.RepoContext` (used by workers at task execution
+    time).  Single source of truth for "who is allowed to comment on or
+    approve fido's PRs on this repo".
+
+    The bot account itself is always excluded from ``collaborators``.
+    """
+
+    collaborators: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class RepoConfig:
     name: str  # "rhencke/confusio"
     work_dir: Path  # /home/rhencke/workspace/confusio
+    membership: RepoMembership = field(default_factory=RepoMembership)
 
 
 @dataclass(frozen=True)
@@ -21,7 +39,6 @@ class Config:
     repos: dict[str, RepoConfig]  # keyed by full_name
     allowed_bots: frozenset[str]
     log_level: str
-    self_repo: str | None  # which repo is kennel itself (for self-restart)
     sub_dir: Path  # path to sub/ skill files
 
     @classmethod
@@ -45,11 +62,6 @@ class Config:
         )
         parser.add_argument(
             "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
-        )
-        parser.add_argument(
-            "--self-repo",
-            default=None,
-            help="Repo name that is kennel itself (for self-restart on merge)",
         )
         parser.add_argument(
             "repos",
@@ -83,6 +95,5 @@ class Config:
                 b.strip() for b in args.allowed_bots.split(",") if b.strip()
             ),
             log_level=args.log_level.upper(),
-            self_repo=args.self_repo,
             sub_dir=Path(__file__).resolve().parent.parent / "sub",
         )

@@ -296,6 +296,22 @@ class GH:
         data = self._get("/user")
         return data["login"]
 
+    def get_collaborators(self, repo: str) -> list[str]:
+        """Return logins of collaborators with write+ permission on *repo*.
+
+        Filters to users whose permission level is ``admin``, ``maintain``, or
+        ``push`` (GitHub's ``write`` equivalent).  Preserves the order returned
+        by the API so callers can use ``[0]`` as a stable "primary reviewer".
+        """
+        result: list[str] = []
+        for user in self._paginate(f"{self.BASE}/repos/{repo}/collaborators"):
+            perm = user.get("role_name") or ""
+            if perm in ("admin", "maintain", "write"):
+                login = user.get("login")
+                if login:
+                    result.append(login)
+        return result
+
     def get_repo_info(
         self,
         cwd: Path | str | None = None,
@@ -389,11 +405,18 @@ class GH:
         data = self._get(f"/repos/{repo}/pulls/{pr}")
         return data.get("body") or ""
 
-    def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
-        """Add a reviewer to a PR."""
+    def add_pr_reviewers(self, repo: str, pr: int | str, reviewers: list[str]) -> None:
+        """Request review from one or more users on a PR.
+
+        GitHub's API accepts a list in a single call, so there is no
+        singular form — always pass the full set of collaborators to
+        request from.
+        """
+        if not reviewers:
+            return
         self._post(
             f"/repos/{repo}/pulls/{pr}/requested_reviewers",
-            reviewers=[reviewer],
+            reviewers=list(reviewers),
         )
 
     def pr_checks(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
@@ -589,6 +612,10 @@ class GitHub:
         """Return the authenticated GitHub username."""
         return self._gh.get_user()
 
+    def get_collaborators(self, repo: str) -> list[str]:
+        """Return logins of collaborators with write+ permission on *repo*."""
+        return self._gh.get_collaborators(repo)
+
     def get_default_branch(
         self, cwd: Path | str | None = None, runner: Any = subprocess.run
     ) -> str:
@@ -667,9 +694,9 @@ class GitHub:
         """Return just the PR body text."""
         return self._gh.get_pr_body(repo, pr)
 
-    def add_pr_reviewer(self, repo: str, pr: int | str, reviewer: str) -> None:
-        """Add a reviewer to a PR."""
-        self._gh.add_pr_reviewer(repo, pr, reviewer)
+    def add_pr_reviewers(self, repo: str, pr: int | str, reviewers: list[str]) -> None:
+        """Request review from one or more users on a PR."""
+        self._gh.add_pr_reviewers(repo, pr, reviewers)
 
     def pr_checks(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return check statuses for a PR."""

@@ -86,6 +86,7 @@ def add_task(
     """
     if not isinstance(task_type, TaskType):
         raise TypeError(f"task_type must be TaskType, got {type(task_type).__name__}")
+    title = " ".join(title.split())
     task: dict[str, Any] = {
         "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
         "title": title,

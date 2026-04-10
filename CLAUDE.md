@@ -5,25 +5,36 @@ GitHub webhook listener + fido orchestrator. Receives GitHub events, triages com
 ## Architecture
 
 ```
-kennel (single process)
+kennel (single process, runs from /home/rhencke/kennel-runner/)
   ├─ HTTP server: receives webhooks, routes by repo
   ├─ Per-repo fido workers: bash work.sh (temporary, becoming Python threads)
   ├─ Per-repo task sync: tasks.json → PR body
-  └─ Self-restart: exec on kennel repo merge
+  └─ Self-restart: git pull runner clone, exec uv run kennel
 ```
 
 Multi-repo: one kennel process handles multiple repos. Each repo has its own tasks.json, lock files, and worker process.
 
 **Concurrency model**: one fido per repo, one issue per fido, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two fidos max, running in parallel, each on their own issue.
 
+## Runner vs workspace clones
+
+Kennel runs from a dedicated **runner clone** at `/home/rhencke/kennel-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/kennel/`.
+
+- **Runner clone** — always on `main`, never dirty, never has feature branches. Kennel imports its Python code from here. Self-restart does `git pull` here.
+- **Workspace clone** — where fido edits source files, commits, and pushes feature branches. Never used to run the server.
+
+Launching: `/home/rhencke/start-kennel.sh` (local, outside git) execs `uv run kennel ...` from the runner clone. The `start.sh` files inside both clones are for reference/local dev only.
+
+Self-restart logic: `_self_restart` in `server.py` derives the runner clone from `Path(__file__).resolve().parents[1]`, checks the git remote matches the merged PR's repo, pulls with exponential backoff (10s → 30s → 60s, 10-minute budget), then `os.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])` with cwd set to the runner clone. This replaces the previous in-place restart that ran `git reset --hard` in the workspace clone and clobbered fido's in-progress work.
+
 ## Running
 
 ```bash
-./start.sh
-# or:
-uv run kennel --port 9000 --secret-file ~/.kennel-secret \
-  rhencke/confusio:/path/to/confusio \
-  rhencke/kennel:/path/to/kennel
+/home/rhencke/start-kennel.sh
+# or directly from the runner clone:
+cd /home/rhencke/kennel-runner && uv run kennel --port 9000 --secret-file ~/.kennel-secret \
+  rhencke/confusio:/home/rhencke/workspace/confusio \
+  rhencke/kennel:/home/rhencke/workspace/kennel
 ```
 
 ## Testing

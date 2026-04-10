@@ -19,13 +19,20 @@ from kennel.server import WebhookHandler
 
 
 def _config(tmp_path: Path) -> Config:
+    from kennel.config import RepoMembership
+
     return Config(
         port=0,  # will bind to random port
         secret=b"test-secret",
-        repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+        repos={
+            "owner/repo": RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                membership=RepoMembership(collaborators=frozenset({"owner"})),
+            ),
+        },
         allowed_bots=frozenset({"copilot[bot]"}),
         log_level="WARNING",
-        self_repo=None,
         sub_dir=tmp_path / "sub",
     )
 
@@ -42,8 +49,11 @@ def _restore_handler_fns():
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
         "_fn_create_task": WebhookHandler._fn_create_task,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
-        "_fn_subprocess_run": WebhookHandler._fn_subprocess_run,
-        "_fn_os_execv": WebhookHandler._fn_os_execv,
+        "_fn_runner_dir": WebhookHandler._fn_runner_dir,
+        "_fn_get_self_repo": WebhookHandler._fn_get_self_repo,
+        "_fn_pull_with_backoff": WebhookHandler._fn_pull_with_backoff,
+        "_fn_os_chdir": WebhookHandler._fn_os_chdir,
+        "_fn_os_execvp": WebhookHandler._fn_os_execvp,
     }
     yield
     for attr, val in saved.items():
@@ -480,6 +490,75 @@ class TestProcessAction:
         # server still alive — no crash
 
 
+class TestPopulateMemberships:
+    def test_populates_from_get_collaborators(self, tmp_path: Path) -> None:
+        from kennel.config import RepoMembership
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "fido-bot"
+        mock_gh.get_collaborators.return_value = ["alice", "bob"]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        assert cfg.repos["owner/repo"].membership == RepoMembership(
+            collaborators=frozenset({"alice", "bob"})
+        )
+
+    def test_filters_bot_user_from_collaborators(self, tmp_path: Path) -> None:
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "fido-bot"
+        mock_gh.get_collaborators.return_value = ["alice", "fido-bot", "bob"]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        result = cfg.repos["owner/repo"].membership.collaborators
+        assert result == frozenset({"alice", "bob"})
+        assert "fido-bot" not in result
+
+    def test_iterates_all_repos(self, tmp_path: Path) -> None:
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "o/r1": RepoConfig(name="o/r1", work_dir=tmp_path),
+                "o/r2": RepoConfig(name="o/r2", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "bot"
+        mock_gh.get_collaborators.side_effect = lambda name: {
+            "o/r1": ["alice"],
+            "o/r2": ["bob", "carol"],
+        }[name]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        assert cfg.repos["o/r1"].membership.collaborators == frozenset({"alice"})
+        assert cfg.repos["o/r2"].membership.collaborators == frozenset({"bob", "carol"})
+
+
 class TestRun:
     """Tests for the run() entry point."""
 
@@ -490,7 +569,6 @@ class TestRun:
             repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -507,6 +585,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -530,6 +609,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -554,6 +634,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -576,6 +657,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
+            _populate_memberships=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -593,7 +675,6 @@ class TestRun:
             },
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -611,6 +692,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -641,7 +723,6 @@ class TestRun:
             repos={"owner/myrepo": RepoConfig(name="owner/myrepo", work_dir=tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -659,6 +740,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         repo_handler = next(
@@ -679,7 +761,6 @@ def _self_restart_cfg(tmp_path: Path) -> Config:
         repos={"owner/kennel": RepoConfig(name="owner/kennel", work_dir=tmp_path)},
         allowed_bots=frozenset(),
         log_level="WARNING",
-        self_repo="owner/kennel",
         sub_dir=tmp_path / "sub",
     )
 
@@ -694,8 +775,145 @@ _MERGE_PAYLOAD = {
 }
 
 
+class TestGetSelfRepo:
+    def test_parses_ssh_remote(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(
+            return_value=MagicMock(
+                stdout="git@github.com:owner/kennel.git\n", returncode=0
+            )
+        )
+        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+
+    def test_parses_https_remote(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(
+            return_value=MagicMock(
+                stdout="https://github.com/owner/kennel.git\n", returncode=0
+            )
+        )
+        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+
+    def test_parses_remote_without_git_suffix(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(
+            return_value=MagicMock(
+                stdout="https://github.com/owner/kennel\n", returncode=0
+            )
+        )
+        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+
+    def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
+        assert _get_self_repo(tmp_path, _run=mock_run) is None
+
+    def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(side_effect=FileNotFoundError())
+        assert _get_self_repo(tmp_path, _run=mock_run) is None
+
+    def test_returns_none_on_unparseable_url(self, tmp_path: Path) -> None:
+        from kennel.server import _get_self_repo
+
+        mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n", returncode=0))
+        assert _get_self_repo(tmp_path, _run=mock_run) is None
+
+
+class TestRunnerDir:
+    def test_returns_package_parent(self) -> None:
+        from kennel.server import _runner_dir
+
+        result = _runner_dir()
+        assert (result / "kennel" / "server.py").exists()
+
+
+class TestPullWithBackoff:
+    def test_success_on_first_try(self, tmp_path: Path) -> None:
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        mock_sleep = MagicMock()
+        assert _pull_with_backoff(
+            tmp_path, _run=mock_run, _sleep=mock_sleep, _monotonic=lambda: 0.0
+        )
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_success_after_retry(self, tmp_path: Path) -> None:
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(
+            side_effect=[
+                subprocess.CalledProcessError(1, []),
+                MagicMock(returncode=0),
+            ]
+        )
+        mock_sleep = MagicMock()
+        times = iter([0.0, 1.0, 1.0])
+        assert _pull_with_backoff(
+            tmp_path,
+            _run=mock_run,
+            _sleep=mock_sleep,
+            _monotonic=lambda: next(times),
+        )
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(10)
+
+    def test_gives_up_after_all_retries_fail(self, tmp_path: Path) -> None:
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
+        mock_sleep = MagicMock()
+        times = iter([0.0, 1.0, 1.0, 12.0, 12.0, 43.0, 43.0, 104.0])
+        assert not _pull_with_backoff(
+            tmp_path,
+            _run=mock_run,
+            _sleep=mock_sleep,
+            _monotonic=lambda: next(times),
+        )
+        # 4 attempts: initial + 3 retries
+        assert mock_run.call_count == 4
+        # 3 sleeps at 10s, 30s, 60s between retries
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [10, 30, 60]
+
+    def test_gives_up_when_budget_exhausted(self, tmp_path: Path) -> None:
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
+        mock_sleep = MagicMock()
+        # First attempt at t=0, elapsed=595; next delay of 10s would exceed 600s budget.
+        times = iter([0.0, 595.0, 595.0])
+        assert not _pull_with_backoff(
+            tmp_path,
+            _run=mock_run,
+            _sleep=mock_sleep,
+            _monotonic=lambda: next(times),
+        )
+        # Slept zero times because budget was exhausted before any sleep.
+        mock_sleep.assert_not_called()
+
+    def test_returns_false_on_file_not_found(self, tmp_path: Path) -> None:
+        from kennel.server import _pull_with_backoff
+
+        mock_run = MagicMock(side_effect=FileNotFoundError())
+        mock_sleep = MagicMock()
+        times = iter([0.0, 1.0, 1.0, 12.0, 12.0, 43.0, 43.0, 104.0])
+        assert not _pull_with_backoff(
+            tmp_path,
+            _run=mock_run,
+            _sleep=mock_sleep,
+            _monotonic=lambda: next(times),
+        )
+
+
 class TestSelfRestart:
-    """Tests for the self-restart flow (self_repo merge triggers exec)."""
+    """Tests for the self-restart flow."""
 
     def _make_server(self, tmp_path: Path):
         cfg = _self_restart_cfg(tmp_path)
@@ -708,74 +926,93 @@ class TestSelfRestart:
         t.start()
         return srv, f"http://127.0.0.1:{port}", cfg, mock_registry
 
-    def test_self_restart_triggers_on_kennel_merge(self, tmp_path: Path) -> None:
+    def test_triggers_exec_on_matching_repo(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            mock_run = MagicMock(return_value=MagicMock(returncode=0))
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+            WebhookHandler._fn_pull_with_backoff = lambda _d: True
+            mock_chdir = MagicMock()
             mock_exec = MagicMock()
-            WebhookHandler._fn_subprocess_run = mock_run
-            WebhookHandler._fn_os_execv = mock_exec
+            WebhookHandler._fn_os_chdir = mock_chdir
+            WebhookHandler._fn_os_execvp = mock_exec
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             time.sleep(0.2)
-            mock_exec.assert_called_once()
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            calls = mock_run.call_args_list
-            cmds = [c.args[0] for c in calls]
-            assert ["git", "checkout", "main"] in cmds, (
-                "expected git checkout main before pull"
-            )
-            assert ["git", "reset", "--hard"] in cmds, (
-                "expected git reset --hard before pull"
-            )
-            assert ["git", "clean", "-fd"] in cmds, "expected git clean -fd before pull"
-            assert ["git", "pull"] in cmds, "expected git pull"
-            reset_idx = cmds.index(["git", "reset", "--hard"])
-            clean_idx = cmds.index(["git", "clean", "-fd"])
-            checkout_idx = cmds.index(["git", "checkout", "main"])
-            pull_idx = cmds.index(["git", "pull"])
-            assert reset_idx < clean_idx, "reset must precede clean"
-            assert clean_idx < checkout_idx, "clean must precede checkout main"
-            assert checkout_idx < pull_idx, "checkout main must precede pull"
+            mock_chdir.assert_called_once_with(tmp_path)
+            mock_exec.assert_called_once()
+            args = mock_exec.call_args.args
+            assert args[0] == "uv"
+            assert args[1][:3] == ["uv", "run", "kennel"]
         finally:
             srv.shutdown()
 
-    def test_self_restart_stop_and_join_precedes_git(self, tmp_path: Path) -> None:
+    def test_skips_when_self_repo_mismatch(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "other/repo"
+            mock_pull = MagicMock()
+            mock_exec = MagicMock()
+            WebhookHandler._fn_pull_with_backoff = mock_pull
+            WebhookHandler._fn_os_execvp = mock_exec
+            _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            time.sleep(0.2)
+            mock_registry.stop_and_join.assert_not_called()
+            mock_pull.assert_not_called()
+            mock_exec.assert_not_called()
+        finally:
+            srv.shutdown()
+
+    def test_skips_when_self_repo_unknown(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: None
+            mock_exec = MagicMock()
+            WebhookHandler._fn_os_execvp = mock_exec
+            _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            time.sleep(0.2)
+            mock_registry.stop_and_join.assert_not_called()
+            mock_exec.assert_not_called()
+        finally:
+            srv.shutdown()
+
+    def test_skips_exec_when_pull_gives_up(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+            WebhookHandler._fn_pull_with_backoff = lambda _d: False
+            mock_exec = MagicMock()
+            WebhookHandler._fn_os_execvp = mock_exec
+            _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            time.sleep(0.2)
+            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_exec.assert_not_called()
+        finally:
+            srv.shutdown()
+
+    def test_stop_and_join_precedes_pull(self, tmp_path: Path) -> None:
         call_order: list[str] = []
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         mock_registry.stop_and_join.side_effect = lambda *_a, **_kw: call_order.append(
             "stop_and_join"
         )
         try:
-            mock_run = MagicMock(
-                side_effect=lambda *_a, **_kw: (
-                    call_order.append("git") or MagicMock(returncode=0)
-                )
-            )
-            WebhookHandler._fn_subprocess_run = mock_run
-            WebhookHandler._fn_os_execv = MagicMock()
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+
+            def fake_pull(_d):
+                call_order.append("pull")
+                return True
+
+            WebhookHandler._fn_pull_with_backoff = fake_pull
+            WebhookHandler._fn_os_chdir = MagicMock()
+            WebhookHandler._fn_os_execvp = MagicMock()
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             time.sleep(0.2)
         finally:
             srv.shutdown()
-        assert call_order[0] == "stop_and_join", (
-            "stop_and_join must come before any git command"
-        )
-        assert "git" in call_order[1:], "git commands must follow stop_and_join"
-
-    def test_self_restart_aborts_on_git_failure(self, tmp_path: Path) -> None:
-        srv, url, cfg, mock_registry = self._make_server(tmp_path)
-        try:
-            mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
-            mock_exec = MagicMock()
-            WebhookHandler._fn_subprocess_run = mock_run
-            WebhookHandler._fn_os_execv = mock_exec
-            # First command fails; subsequent commands and exec should be skipped.
-            status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-            assert status == 200
-            time.sleep(0.2)
-            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            mock_run.assert_called_once()
-            mock_exec.assert_not_called()
-        finally:
-            srv.shutdown()
+        assert call_order == ["stop_and_join", "pull"]

@@ -89,6 +89,18 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         assert gh.get_user() == "fido"
 
+    def test_get_collaborators_delegates(self) -> None:
+        gh, mock_s = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "alice", "role_name": "admin"},
+            {"login": "bob", "role_name": "write"},
+            {"login": "carol", "role_name": "read"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("owner/repo") == ["alice", "bob"]
+
     def test_get_default_branch_delegates(self) -> None:
         gh, mock_s = self._github()
         remote_resp = _completed("https://github.com/o/r.git\n")
@@ -261,12 +273,17 @@ class TestGitHubClass:
         result = gh.get_pr_body("o/r", 10)
         assert result == "some body"
 
-    def test_add_pr_reviewer_delegates(self) -> None:
+    def test_add_pr_reviewers_delegates(self) -> None:
         gh, mock_s = self._github()
         mock_resp = MagicMock()
         mock_s.post.return_value = mock_resp
-        gh.add_pr_reviewer("o/r", 10, "alice")
-        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["alice"]
+        gh.add_pr_reviewers("o/r", 10, ["alice", "bob"])
+        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["alice", "bob"]
+
+    def test_add_pr_reviewers_empty_is_noop(self) -> None:
+        gh, mock_s = self._github()
+        gh.add_pr_reviewers("o/r", 10, [])
+        mock_s.post.assert_not_called()
 
     def test_pr_checks_delegates(self) -> None:
         gh, mock_s = self._github()
@@ -1067,6 +1084,57 @@ class TestGHClass:
         assert url.endswith("/user")
         assert result == "fido"
 
+    def test_get_collaborators_filters_by_permission(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "admin-user", "role_name": "admin"},
+            {"login": "maint-user", "role_name": "maintain"},
+            {"login": "write-user", "role_name": "write"},
+            {"login": "triage-user", "role_name": "triage"},
+            {"login": "read-user", "role_name": "read"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_collaborators("owner/repo")
+        assert result == ["admin-user", "maint-user", "write-user"]
+        url = mock_s.get.call_args.args[0]
+        assert url.endswith("/repos/owner/repo/collaborators")
+
+    def test_get_collaborators_preserves_order(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "second", "role_name": "write"},
+            {"login": "first", "role_name": "admin"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        # API order preserved — caller uses [0] as "primary reviewer"
+        assert gh.get_collaborators("o/r") == ["second", "first"]
+
+    def test_get_collaborators_skips_users_missing_login(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"role_name": "admin"},
+            {"login": "alice", "role_name": "write"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("o/r") == ["alice"]
+
+    def test_get_collaborators_handles_missing_role(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "alice"},
+            {"login": "bob", "role_name": "admin"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("o/r") == ["bob"]
+
     def test_get_repo_info_https(self) -> None:
         gh = GH("test-token")
         mock_run = MagicMock(
@@ -1229,14 +1297,22 @@ class TestGHClass:
         result = gh.get_pr_body("o/r", 10)
         assert result == ""
 
-    def test_add_pr_reviewer(self) -> None:
+    def test_add_pr_reviewers(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
         mock_s.post.return_value = mock_resp
-        gh.add_pr_reviewer("o/r", 10, "rhencke")
+        gh.add_pr_reviewers("o/r", 10, ["rhencke", "alice"])
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls/10/requested_reviewers" in url
-        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["rhencke"]
+        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == [
+            "rhencke",
+            "alice",
+        ]
+
+    def test_add_pr_reviewers_empty_skips_post(self) -> None:
+        gh, mock_s = self._gh()
+        gh.add_pr_reviewers("o/r", 10, [])
+        mock_s.post.assert_not_called()
 
     def test_pr_checks_returns_list(self) -> None:
         gh, mock_s = self._gh()

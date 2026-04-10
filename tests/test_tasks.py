@@ -66,6 +66,23 @@ class TestAddTask:
         assert t1["id"] == t2["id"]
         assert len(list_tasks(tmp_path)) == 1
 
+    def test_sanitizes_multiline_title(self, tmp_path: Path) -> None:
+        task = add_task(
+            tmp_path,
+            title="first line\n\nsecond paragraph\n- bullet\n- another",
+            task_type=TaskType.SPEC,
+        )
+        assert task["title"] == "first line second paragraph - bullet - another"
+        assert "\n" not in task["title"]
+
+    def test_collapses_whitespace_in_title(self, tmp_path: Path) -> None:
+        task = add_task(
+            tmp_path,
+            title="  too   many    spaces  \t\there  ",
+            task_type=TaskType.SPEC,
+        )
+        assert task["title"] == "too many spaces here"
+
     def test_does_not_deduplicate_completed_tasks(self, tmp_path: Path) -> None:
         t1 = add_task(tmp_path, title="done task", task_type=TaskType.SPEC)
         complete_by_id(tmp_path, t1["id"])
