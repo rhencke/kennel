@@ -184,6 +184,11 @@ def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Pat
     return system_file, prompt_file
 
 
+def _sanitize_status_text(text: str) -> str:
+    """Strip leading/trailing whitespace and collapse newlines to a single space."""
+    return re.sub(r"\s*\n\s*", " ", text).strip()
+
+
 def _sanitize_slug(raw: str, fallback: str) -> str:
     """Sanitize a branch name slug: lowercase, hyphens only, max 40 chars.
 
@@ -685,6 +690,8 @@ class Worker:
             if not text:
                 log.warning("set_status: claude returned empty — skipping")
                 return
+
+            text = _sanitize_status_text(text)
 
             for _ in range(3):
                 if len(text) <= 80 or not session_id:

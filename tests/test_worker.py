@@ -25,6 +25,7 @@ from kennel.worker import (
     _pick_next_task,
     _resolve_git_dir,
     _sanitize_slug,
+    _sanitize_status_text,
     _thread_repo,
     acquire_lock,
     build_prompt,
@@ -1941,6 +1942,31 @@ class TestSanitizeSlug:
         result = _sanitize_slug("x", "Add New Feature!")
         assert result == result.lower()
         assert "!" not in result
+
+
+class TestSanitizeStatusText:
+    """Tests for _sanitize_status_text."""
+
+    def test_plain_text_unchanged(self) -> None:
+        assert _sanitize_status_text("working on tests") == "working on tests"
+
+    def test_strips_leading_whitespace(self) -> None:
+        assert _sanitize_status_text("  hello") == "hello"
+
+    def test_strips_trailing_whitespace(self) -> None:
+        assert _sanitize_status_text("hello  ") == "hello"
+
+    def test_collapses_newline_to_space(self) -> None:
+        assert _sanitize_status_text("line one\nline two") == "line one line two"
+
+    def test_collapses_newline_with_surrounding_whitespace(self) -> None:
+        assert _sanitize_status_text("line one  \n  line two") == "line one line two"
+
+    def test_collapses_multiple_newlines(self) -> None:
+        assert _sanitize_status_text("a\nb\nc") == "a b c"
+
+    def test_strips_and_collapses_combined(self) -> None:
+        assert _sanitize_status_text("  foo\nbar  ") == "foo bar"
 
 
 class TestGit:
