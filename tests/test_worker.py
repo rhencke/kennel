@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
@@ -508,6 +510,65 @@ class TestWorker:
         prompt_arg = mock_gen.call_args[1]["prompt"]
         assert "owner/repo-a" in prompt_arg
         assert "owner/repo-b" in prompt_arg
+
+    def test_set_status_acquires_status_lock_when_registry_present(
+        self, tmp_path: Path
+    ) -> None:
+        gh = self._make_gh()
+        registry = MagicMock()
+        registry.get_all_activities.return_value = []
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh, repo_name="owner/repo", registry=registry).set_status(
+            "working", **self._ss(tmp_path, text="working")
+        )
+        registry.status_update.assert_called_once()
+
+    def test_set_status_serializes_concurrent_calls_via_registry_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """Concurrent set_status calls on different workers sharing a registry serialize."""
+        from kennel.registry import WorkerRegistry
+
+        registry = WorkerRegistry(MagicMock())
+        inside_count = 0
+        max_concurrent = 0
+        counter_lock = threading.Lock()
+
+        def slow_generate(*args, **kwargs) -> tuple[str, str]:
+            nonlocal inside_count, max_concurrent
+            with counter_lock:
+                inside_count += 1
+                max_concurrent = max(max_concurrent, inside_count)
+            time.sleep(0.005)
+            with counter_lock:
+                inside_count -= 1
+            return ("status text", "sess-1")
+
+        workers = [
+            Worker(
+                tmp_path, self._make_gh(), repo_name=f"owner/repo{i}", registry=registry
+            )
+            for i in range(3)
+        ]
+        threads = [
+            threading.Thread(
+                target=w.set_status,
+                args=("working",),
+                kwargs={
+                    "_generate_status_with_session": slow_generate,
+                    "_generate_status_emoji": MagicMock(return_value="🐕"),
+                    "_resume_status": MagicMock(return_value=""),
+                    "_sub_dir_fn": lambda: tmp_path / "nosub",
+                },
+            )
+            for w in workers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert max_concurrent == 1
 
     # --- get_current_issue ---
 

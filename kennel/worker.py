@@ -8,7 +8,7 @@ import logging
 import re
 import subprocess
 import threading
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Protocol
@@ -662,48 +662,54 @@ class Worker:
 
         prompts = Prompts(persona)
 
-        if self._registry is not None:
-            self._registry.report_activity(self._repo_name, what, busy)
-            activities = [
-                (a.repo_name, a.what, a.busy)
-                for a in self._registry.get_all_activities()
-            ]
-        else:
-            activities = [(self.work_dir.name, what, busy)]
-
-        # Call 1: generate status text
-        text, session_id = _generate_status_with_session(
-            prompt=prompts.status_text_prompt(activities),
-            system_prompt=prompts.status_text_system_prompt(),
+        ctx = (
+            self._registry.status_update()
+            if self._registry is not None
+            else nullcontext()
         )
-        if not text:
-            log.warning("set_status: claude returned empty — skipping")
-            return
+        with ctx:
+            if self._registry is not None:
+                self._registry.report_activity(self._repo_name, what, busy)
+                activities = [
+                    (a.repo_name, a.what, a.busy)
+                    for a in self._registry.get_all_activities()
+                ]
+            else:
+                activities = [(self.work_dir.name, what, busy)]
 
-        for _ in range(3):
-            if len(text) <= 80 or not session_id:
-                break
-            retry_raw = _resume_status(
-                session_id,
-                f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
+            # Call 1: generate status text
+            text, session_id = _generate_status_with_session(
+                prompt=prompts.status_text_prompt(activities),
+                system_prompt=prompts.status_text_system_prompt(),
             )
-            if not retry_raw:
-                break
-            text = retry_raw.strip()
+            if not text:
+                log.warning("set_status: claude returned empty — skipping")
+                return
 
-        if len(text) > 80:
-            text = text[:80]
+            for _ in range(3):
+                if len(text) <= 80 or not session_id:
+                    break
+                retry_raw = _resume_status(
+                    session_id,
+                    f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
+                )
+                if not retry_raw:
+                    break
+                text = retry_raw.strip()
 
-        # Call 2: generate emoji
-        emoji = _generate_status_emoji(
-            prompt=prompts.status_emoji_prompt(text),
-            system_prompt=prompts.status_emoji_system_prompt(),
-        )
-        if not emoji:
-            emoji = ":dog:"
+            if len(text) > 80:
+                text = text[:80]
 
-        self.gh.set_user_status(text, emoji, busy=busy)
-        log.info("set_status: %s %s", emoji, text)
+            # Call 2: generate emoji
+            emoji = _generate_status_emoji(
+                prompt=prompts.status_emoji_prompt(text),
+                system_prompt=prompts.status_emoji_system_prompt(),
+            )
+            if not emoji:
+                emoji = ":dog:"
+
+            self.gh.set_user_status(text, emoji, busy=busy)
+            log.info("set_status: %s %s", emoji, text)
 
     def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
         """Find the next eligible open issue assigned to gh_user.
