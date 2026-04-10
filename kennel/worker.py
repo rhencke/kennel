@@ -16,6 +16,12 @@ from typing import IO, Any, Protocol
 from kennel import claude, hooks, tasks
 from kennel.github import GitHub
 from kennel.prompts import Prompts
+from kennel.state import (
+    _resolve_git_dir,
+    clear_state,
+    load_state,
+    save_state,
+)
 from kennel.types import TaskStatus, TaskType
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
@@ -135,36 +141,6 @@ def create_compact_script(fido_dir: Path) -> Path:
     return script_path
 
 
-def _state_lock(fido_dir: Path, exclusive: bool = False) -> IO[str]:
-    """Open and flock state.lock in fido_dir. Caller must close the returned fd."""
-    lock_path = fido_dir / "state.lock"
-    lock_path.touch(exist_ok=True)
-    lock_fd = open(lock_path)  # noqa: SIM115
-    fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-    return lock_fd
-
-
-def load_state(fido_dir: Path) -> dict[str, Any]:
-    """Load state.json from fido_dir, returning an empty dict if absent."""
-    with _state_lock(fido_dir):
-        state_path = fido_dir / "state.json"
-        if not state_path.exists():
-            return {}
-        return json.loads(state_path.read_text())
-
-
-def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-    """Write state to state.json in fido_dir."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").write_text(json.dumps(state))
-
-
-def clear_state(fido_dir: Path) -> None:
-    """Remove state.json from fido_dir (no-op if absent)."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").unlink(missing_ok=True)
-
-
 def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
     """Write system and prompt files for a sub-Claude session.
 
@@ -200,18 +176,6 @@ def _sanitize_slug(raw: str, fallback: str) -> str:
         clean = re.sub(r"\(closes\s*#\d+\)", "", fallback, flags=re.IGNORECASE)
         slug = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")[:40]
     return slug
-
-
-def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
-    """Return the absolute .git directory for *work_dir*."""
-    result = _run(
-        ["git", "rev-parse", "--absolute-git-dir"],
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return Path(result.stdout.strip())
 
 
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:

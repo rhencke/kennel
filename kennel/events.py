@@ -629,8 +629,8 @@ def _maybe_abort_for_new_task(
     pending for later (ABORT_KEEP).  Equal or lower priority does not
     preempt.
     """
+    from kennel.state import load_state
     from kennel.tasks import list_tasks
-    from kennel.worker import load_state
 
     fido_dir = repo_cfg.work_dir / ".git" / "fido"
     if not (fido_dir / "state.json").exists():

@@ -11,6 +11,12 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from kennel.state import (
+    _resolve_git_dir,
+    clear_state,
+    load_state,
+    save_state,
+)
 from kennel.worker import (
     LockHeld,
     RepoContext,
@@ -23,7 +29,6 @@ from kennel.worker import (
     _auto_complete_ask_tasks,
     _format_work_queue,
     _pick_next_task,
-    _resolve_git_dir,
     _sanitize_slug,
     _sanitize_status_text,
     _thread_repo,
@@ -32,12 +37,9 @@ from kennel.worker import (
     ci_ready_for_review,
     claude_run,
     claude_start,
-    clear_state,
     create_compact_script,
     latest_decisive_review,
-    load_state,
     run,
-    save_state,
     should_rerequest_review,
     sync_tasks,
     sync_tasks_background,
