@@ -6,13 +6,16 @@ import fcntl
 import json
 import logging
 import random
+import re
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
+from kennel.prompts import rescope_prompt as _rescope_prompt_default
 from kennel.state import _resolve_git_dir, load_state
 from kennel.types import TaskStatus, TaskType
 
@@ -375,6 +378,131 @@ def sync_tasks(
             log.exception("sync_tasks: failed to update PR body")
     finally:
         sync_lock_fd.close()
+
+
+def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
+    """Parse the Opus rescope response into a list of task items.
+
+    Scans *raw* for a JSON object containing a ``"tasks"`` list.  Tries the
+    full string first (happy path), then falls back to a greedy regex scan so
+    that minor Opus preamble does not break parsing.
+
+    Returns the ``tasks`` list, or ``None`` if no valid response is found.
+    """
+    candidates = [raw.strip()]
+    for m in re.finditer(r"\{.*\}", raw, re.DOTALL):
+        candidates.append(m.group())
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            tasks = obj.get("tasks")
+            if isinstance(tasks, list):
+                return tasks
+        except json.JSONDecodeError, AttributeError:
+            continue
+    return None
+
+
+def _apply_reorder(
+    current: list[dict[str, Any]],
+    ordered_items: list[dict[str, Any]],
+    original_ids: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Apply Opus-ordered items to the current task list.
+
+    Rules (in priority order):
+    - CI tasks always come first.
+    - Non-CI pending tasks follow in Opus dependency order.
+    - In-progress tasks that Opus dropped are reinstated at the front (safety net).
+    - Tasks added after the original snapshot (IDs not in *original_ids*) are
+      appended at the end so they are never silently dropped.
+    - Completed tasks are always preserved at the end in their original order.
+    - Title/description are updated from Opus's output; all other fields kept.
+    - Opus-returned IDs absent from *current* or duplicated are ignored.
+    """
+    by_id = {t["id"]: t for t in current}
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for item in ordered_items:
+        tid = item.get("id", "")
+        if not tid or tid not in by_id:
+            continue
+        if tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+        orig = dict(by_id[tid])
+        if item.get("title"):
+            orig["title"] = item["title"]
+        if "description" in item:
+            orig["description"] = item["description"]
+        merged.append(orig)
+
+    # Safety net: never silently drop an in-progress task.
+    for t in current:
+        if t.get("status") == TaskStatus.IN_PROGRESS and t["id"] not in seen_ids:
+            merged.insert(0, t)
+            seen_ids.add(t["id"])
+
+    ci = [t for t in merged if t.get("type") == TaskType.CI]
+    non_ci = [t for t in merged if t.get("type") != TaskType.CI]
+    completed = [t for t in current if t.get("status") == TaskStatus.COMPLETED]
+
+    # Tasks added while Opus was thinking — preserve them rather than drop.
+    newly_added = [
+        t
+        for t in current
+        if t["id"] not in original_ids
+        and t["id"] not in seen_ids
+        and t.get("status") != TaskStatus.COMPLETED
+    ]
+
+    return ci + non_ci + completed + newly_added
+
+
+def reorder_tasks(
+    work_dir: Path,
+    commit_summary: str,
+    *,
+    _print_prompt=_claude_print_prompt,
+    _rescope_prompt_fn=_rescope_prompt_default,
+) -> None:
+    """Reorder pending tasks by Opus dependency analysis.
+
+    Reads the task list, asks Opus to reorder/rewrite/drop tasks based on
+    dependency analysis and recent commits, then atomically writes the result.
+
+    The task list is read twice: once before the Opus call (to build the
+    prompt) and once inside the write-lock (to pick up any tasks added while
+    Opus was thinking).  Tasks added in that window are preserved at the end
+    of the list rather than silently dropped.
+
+    CI tasks always stay first; completed tasks are always preserved.
+    An empty or unparseable Opus response leaves the task list unchanged.
+    """
+    task_list = list_tasks(work_dir)
+    if not task_list:
+        log.info("reorder_tasks: no tasks — skipping")
+        return
+
+    original_ids = frozenset(t["id"] for t in task_list)
+    prompt = _rescope_prompt_fn(task_list, commit_summary)
+    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    if not raw:
+        log.warning("reorder_tasks: Opus returned empty response — skipping")
+        return
+
+    ordered_items = _parse_reorder_response(raw)
+    if ordered_items is None:
+        log.warning("reorder_tasks: could not parse Opus response — skipping")
+        return
+
+    path = _task_file(work_dir)
+    with _locked(path, write=True) as lock:
+        current = lock.read()
+        result = _apply_reorder(current, ordered_items, original_ids)
+        lock.write(result)
+    log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 
 
 def sync_tasks_background(
