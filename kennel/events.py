@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -182,6 +184,31 @@ def dispatch(
     return None
 
 
+def _load_persona(config: Config) -> str:
+    """Read persona.md from sub_dir; return empty string if missing."""
+    try:
+        return (config.sub_dir / "persona.md").read_text()
+    except FileNotFoundError:
+        return ""
+
+
+def _open_defer_issue(
+    gh: Any, repo: str, pr_url: str, title: str, comment: str
+) -> str | None:
+    """Create a tracking issue for a DEFER triage result.
+
+    Returns the new issue URL, or None if creation failed.
+    """
+    issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
+    try:
+        url = gh.create_issue(repo, title, issue_body)
+        log.info("opened tracking issue for DEFER: %s", url)
+        return url
+    except Exception:
+        log.exception("failed to open tracking issue for DEFER")
+        return None
+
+
 def _comment_lock(work_dir: Path, comment_id: int) -> Path:
     """Return path to a per-comment lockfile."""
     lock_dir = work_dir / ".git" / "fido" / "comments"
@@ -205,13 +232,7 @@ def maybe_react(
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
-    persona_path = config.sub_dir / "persona.md"
-    try:
-        persona = persona_path.read_text()
-    except FileNotFoundError:
-        persona = ""
-
-    prompts = Prompts(persona)
+    prompts = Prompts(_load_persona(config))
     reaction = (
         _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15)
         .lower()
@@ -253,8 +274,6 @@ def reply_to_comment(
         return (False, "ACT", action.comment_body or action.prompt)
 
     # Per-comment lock — prevents kennel and work.sh from both replying
-    import fcntl
-
     cid = info.get("comment_id")
     if cid:
         lock_path = _comment_lock(repo_cfg.work_dir, cid)
@@ -269,14 +288,7 @@ def reply_to_comment(
         lock_fd = None
 
     gh = _gh if _gh is not None else get_github()
-
-    persona_path = config.sub_dir / "persona.md"
-    try:
-        persona = persona_path.read_text()
-    except FileNotFoundError:
-        persona = ""
-
-    prompts = Prompts(persona)
+    prompts = Prompts(_load_persona(config))
     comment = action.comment_body
 
     context: dict[str, Any] = dict(action.context) if action.context else {}
@@ -312,12 +324,7 @@ def reply_to_comment(
     issue_url: str | None = None
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_body = f"Deferred from {pr_url}\n\n> {comment}"
-        try:
-            issue_url = gh.create_issue(info["repo"], title, issue_body)
-            log.info("opened tracking issue for DEFER: %s", issue_url)
-        except Exception:
-            log.exception("failed to open tracking issue for DEFER")
+        issue_url = _open_defer_issue(gh, info["repo"], pr_url, title, comment)
 
     # Step 3: Opus reply based on triage
     instr = reply_instruction(category, comment, title, context, issue_url=issue_url)
@@ -328,7 +335,12 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
+    body = _print_prompt(
+        prompts.persona_wrap(instr),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=30,
+    )
 
     if not body:
         body = (
@@ -526,13 +538,13 @@ def reply_to_issue_comment(
     comment = action.comment_body or ""
 
     # Extract PR number from prompt
-    import re
-
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
-    # Fetch full conversation history for context
     gh = _gh if _gh is not None else get_github()
+    repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
+
+    # Fetch full conversation history for context
     conversation_context = ""
     if number:
         try:
@@ -554,44 +566,34 @@ def reply_to_issue_comment(
     if conversation_context:
         context["conversation"] = conversation_context
 
-    persona_path = config.sub_dir / "persona.md"
-    try:
-        persona = persona_path.read_text()
-    except FileNotFoundError:
-        persona = ""
-
-    prompts = Prompts(persona)
+    prompts = Prompts(_load_persona(config))
     category, title = _triage(
         comment, action.is_bot, context or None, _print_prompt=_print_prompt
     )
     log.info("issue comment triage: %s — %s", category, title)
 
-    gh = _gh if _gh is not None else get_github()
-
     # For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER":
-        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-        try:
-            issue_url = gh.create_issue(repo_full, title, issue_body)
-            log.info("opened tracking issue for DEFER: %s", issue_url)
-        except Exception:
-            log.exception("failed to open tracking issue for DEFER")
+        issue_url = _open_defer_issue(gh, repo_full, pr_url, title, comment)
 
     instr = issue_reply_instruction(
         category, comment, title, action.context, issue_url=issue_url
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
+    body = _print_prompt(
+        prompts.persona_wrap(instr),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=30,
+    )
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     try:
-        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
         gh.comment_issue(repo_full, number, body)
         log.info("reply posted")
     except Exception:
@@ -600,7 +602,6 @@ def reply_to_issue_comment(
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
     if _cid:
-        repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
         maybe_react(
             comment,
             _cid,
