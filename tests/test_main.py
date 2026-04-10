@@ -62,7 +62,7 @@ class TestMain:
     def test_sync_tasks_subcommand_dispatches(self, tmp_path) -> None:
         """'kennel sync-tasks <path>' should invoke sync_tasks."""
         with (
-            patch("kennel.worker.sync_tasks") as mock_sync,
+            patch("kennel.tasks.sync_tasks") as mock_sync,
             patch("kennel.github.GitHub"),
         ):
             main(["sync-tasks", str(tmp_path)])
@@ -72,7 +72,7 @@ class TestMain:
     def test_sync_tasks_subcommand_defaults_to_cwd(self) -> None:
         """'kennel sync-tasks' without path uses cwd."""
         with (
-            patch("kennel.worker.sync_tasks") as mock_sync,
+            patch("kennel.tasks.sync_tasks") as mock_sync,
             patch("kennel.github.GitHub"),
         ):
             main(["sync-tasks"])

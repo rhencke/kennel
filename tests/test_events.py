@@ -1744,13 +1744,13 @@ class TestLaunchSync:
     def test_calls_sync_tasks_background(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        with patch("kennel.worker.sync_tasks_background") as mock_sync:
+        with patch("kennel.tasks.sync_tasks_background") as mock_sync:
             launch_sync(cfg, self._repo_cfg(tmp_path), _gh=mock_gh)
         mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.worker.sync_tasks_background"):
+        with patch("kennel.tasks.sync_tasks_background"):
             launch_sync(
                 cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
             )  # should not raise

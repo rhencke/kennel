@@ -629,8 +629,8 @@ def _maybe_abort_for_new_task(
     pending for later (ABORT_KEEP).  Equal or lower priority does not
     preempt.
     """
+    from kennel.state import load_state
     from kennel.tasks import list_tasks
-    from kennel.worker import load_state
 
     fido_dir = repo_cfg.work_dir / ".git" / "fido"
     if not (fido_dir / "state.json").exists():
@@ -690,7 +690,7 @@ def create_task(
 
 def launch_sync(config: Config, repo_cfg: RepoConfig, *, _gh=None) -> None:
     """Sync tasks.json → PR body in a background thread."""
-    from kennel.worker import sync_tasks_background
+    from kennel.tasks import sync_tasks_background
 
     gh = _gh if _gh is not None else get_github()
     sync_tasks_background(repo_cfg.work_dir, gh)

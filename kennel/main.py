@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> None:
         from pathlib import Path
 
         from kennel.github import GitHub
-        from kennel.worker import sync_tasks
+        from kennel.tasks import sync_tasks
 
         work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
         sync_tasks(work_dir, GitHub())
