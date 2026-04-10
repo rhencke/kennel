@@ -328,7 +328,12 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
+    body = _print_prompt(
+        prompts.persona_wrap(instr),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=30,
+    )
 
     if not body:
         body = (
@@ -585,7 +590,12 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = _print_prompt(prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30)
+    body = _print_prompt(
+        prompts.persona_wrap(instr),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=30,
+    )
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 

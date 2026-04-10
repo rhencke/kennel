@@ -442,6 +442,24 @@ class TestStatusEmojiPrompt:
 # ── Prompts class ─────────────────────────────────────────────────────────────
 
 
+class TestPromptsReplySystemPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").reply_system_prompt()
+        assert "I am Fido." in result
+
+    def test_prohibits_preamble_phrases(self) -> None:
+        result = Prompts("persona").reply_system_prompt()
+        assert "Here's" in result or "preamble" in result
+
+    def test_output_only_instruction(self) -> None:
+        result = Prompts("persona").reply_system_prompt()
+        assert "ONLY" in result
+
+    def test_no_meta_commentary(self) -> None:
+        result = Prompts("persona").reply_system_prompt()
+        assert "meta-commentary" in result or "Here's the reply" in result
+
+
 class TestPromptsPersonaWrap:
     def test_includes_persona(self) -> None:
         result = Prompts("I am Fido.").persona_wrap("Write a reply.")

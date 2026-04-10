@@ -228,10 +228,28 @@ class Prompts:
     def __init__(self, persona: str) -> None:
         self.persona = persona
 
+    def reply_system_prompt(self) -> str:
+        """Return the system prompt for reply generation.
+
+        Instils the Fido persona and strictly forbids preamble framing so Opus
+        outputs the comment text directly rather than prefacing it with phrases
+        like "Here's the reply:" or "Sure, here's...".
+        """
+        return (
+            f"{self.persona}\n\n"
+            "You are responding to a GitHub PR comment. "
+            "Output ONLY the comment text — no preamble, no framing. "
+            "Do NOT start with 'Here\\'s', 'Sure', 'Certainly', 'Of course', or any similar phrase. "
+            "Do NOT include meta-commentary like 'Here\\'s the reply:' or 'Here\\'s my response:'. "
+            "Start directly with the comment content. No quotes, no explanation."
+        )
+
     def persona_wrap(self, instruction: str) -> str:
         """Wrap an instruction with the Fido persona and output constraint.
 
         The result is ready to pass as the ``-p`` argument to ``claude --print``.
+        Pair with :meth:`reply_system_prompt` as the ``system_prompt`` argument
+        to reinforce the no-preamble constraint at the system level.
         """
         return (
             f"{self.persona}\n\n{instruction}\n\n"
