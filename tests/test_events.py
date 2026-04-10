@@ -9,6 +9,7 @@ from kennel.events import (
     _comment_lock,
     _get_commit_summary,
     _is_allowed,
+    _notify_thread_change,
     _reorder_tasks_background,
     _summarize_as_action_item,
     _triage,
@@ -1749,11 +1750,14 @@ class TestCreateTask:
                 repo_cfg,
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "abc1234 add thing",
-                _reorder_background_fn=lambda wd, cs: reorder_called.append((wd, cs)),
+                _reorder_background_fn=lambda wd, cs, cfg: reorder_called.append(
+                    (wd, cs, cfg)
+                ),
             )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
         assert reorder_called[0][1] == "abc1234 add thing"
+        assert reorder_called[0][2] is cfg
 
     def test_spec_task_does_not_trigger_reorder(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1801,7 +1805,7 @@ class TestCreateTask:
                 repo_cfg,
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "custom summary",
-                _reorder_background_fn=lambda wd, cs: summaries.append(cs),
+                _reorder_background_fn=lambda wd, cs, cfg: summaries.append(cs),
             )
         assert summaries == ["custom summary"]
 
@@ -1853,10 +1857,24 @@ class TestGetCommitSummary:
 
 
 class TestReorderTasksBackground:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         started: list = []
         _reorder_tasks_background(
-            tmp_path, "some commits", _start=lambda t: started.append(t)
+            tmp_path,
+            "some commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
         )
         assert len(started) == 1
         t = started[0]
@@ -1865,7 +1883,7 @@ class TestReorderTasksBackground:
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         started: list = []
         _reorder_tasks_background(
-            tmp_path, "commits", _start=lambda t: started.append(t)
+            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
         )
         assert tmp_path.name in started[0].name
 
@@ -1874,16 +1892,125 @@ class TestReorderTasksBackground:
 
         started: list = []
         _reorder_tasks_background(
-            tmp_path, "commits", _start=lambda t: started.append(t)
+            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
         )
         assert started[0]._target is reorder_tasks
 
     def test_thread_args_are_work_dir_and_commit_summary(self, tmp_path: Path) -> None:
         started: list = []
         _reorder_tasks_background(
-            tmp_path, "feat: add parser", _start=lambda t: started.append(t)
+            tmp_path,
+            "feat: add parser",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
         )
         assert started[0]._args == (tmp_path, "feat: add parser")
+
+
+class TestNotifyThreadChange:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _task(self, **overrides) -> dict:
+        t = {
+            "id": "t1",
+            "title": "Fix the thing",
+            "status": "pending",
+            "type": "thread",
+            "thread": {
+                "repo": "owner/repo",
+                "pr": 42,
+                "comment_id": 999,
+                "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
+            },
+        }
+        t.update(overrides)
+        return t
+
+    def test_dropped_posts_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "dropped"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="Noted!"), _gh=mock_gh
+        )
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Noted!")
+
+    def test_modified_posts_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {
+            "task": self._task(),
+            "kind": "modified",
+            "new_title": "Updated title",
+            "new_description": "",
+        }
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="Updated!"), _gh=mock_gh
+        )
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Updated!")
+
+    def test_missing_thread_skips_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        task["thread"] = {}
+        change = {"task": task, "kind": "dropped"}
+        _notify_thread_change(change, cfg, _print_prompt=MagicMock(), _gh=mock_gh)
+        mock_gh.comment_issue.assert_not_called()
+
+    def test_empty_opus_uses_fallback_for_dropped(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "dropped"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "Fix the thing" in body
+
+    def test_empty_opus_uses_fallback_for_modified(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {
+            "task": self._task(),
+            "kind": "modified",
+            "new_title": "New title",
+            "new_description": "",
+        }
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "New title" in body
+
+    def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "dropped"}
+        with patch("kennel.events.get_github", return_value=mock_gh):
+            _notify_thread_change(
+                change, cfg, _print_prompt=MagicMock(return_value="ok")
+            )
+        mock_gh.comment_issue.assert_called_once()
+
+    def test_comment_issue_exception_does_not_raise(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.comment_issue.side_effect = RuntimeError("api error")
+        change = {"task": self._task(), "kind": "dropped"}
+        # Should not raise
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
+        )
 
 
 class TestLaunchSync:

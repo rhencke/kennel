@@ -7,6 +7,7 @@ import pytest
 
 from kennel.tasks import (
     _apply_reorder,
+    _compute_thread_changes,
     _parse_reorder_response,
     add_task,
     complete_by_id,
@@ -572,3 +573,161 @@ class TestReorderTasks:
         result = list_tasks(tmp_path)
         ids = [t["id"] for t in result]
         assert new_task_id[0] in ids  # not silently dropped
+
+    def test_on_changes_called_when_thread_task_dropped(self, tmp_path: Path) -> None:
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 99,
+            "url": "https://example.com",
+        }
+        t1 = add_task(
+            tmp_path, title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        t2 = self._add(tmp_path, "Keep this")
+        received: list = []
+        raw = self._response(
+            [{"id": t2["id"], "title": "Keep this", "description": ""}]
+        )
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        assert len(received) == 1
+        assert received[0]["kind"] == "dropped"
+        assert received[0]["task"]["id"] == t1["id"]
+
+    def test_on_changes_called_when_thread_task_modified(self, tmp_path: Path) -> None:
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 99,
+            "url": "https://example.com",
+        }
+        t1 = add_task(
+            tmp_path, title="Old title", task_type=TaskType.THREAD, thread=thread
+        )
+        received: list = []
+        raw = self._response(
+            [{"id": t1["id"], "title": "New title", "description": ""}]
+        )
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        assert len(received) == 1
+        assert received[0]["kind"] == "modified"
+        assert received[0]["new_title"] == "New title"
+
+    def test_on_changes_not_called_when_no_thread_tasks_changed(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Spec task")
+        received: list = []
+        raw = self._response(
+            [{"id": t1["id"], "title": "Spec task", "description": ""}]
+        )
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        assert received == []
+
+    def test_on_changes_none_does_not_error(self, tmp_path: Path) -> None:
+        thread = {"repo": "r/r", "pr": 1, "comment_id": 42, "url": "https://x.com"}
+        t1 = add_task(
+            tmp_path, title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        t2 = self._add(tmp_path, "Keep")
+        raw = self._response([{"id": t2["id"], "title": "Keep", "description": ""}])
+        # Should not raise even though t1 is dropped and _on_changes is None
+        reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: raw, _on_changes=None)
+        # t1 should be gone
+        assert all(t["id"] != t1["id"] for t in list_tasks(tmp_path))
+
+
+# ── _compute_thread_changes ───────────────────────────────────────────────────
+
+
+class TestComputeThreadChanges:
+    def _t(
+        self,
+        task_id: str,
+        title: str,
+        status: str = "pending",
+        thread: dict | None = None,
+        description: str = "",
+    ) -> dict:
+        t: dict = {
+            "id": task_id,
+            "title": title,
+            "type": "thread" if thread else "spec",
+            "status": status,
+            "description": description,
+        }
+        if thread:
+            t["thread"] = thread
+        return t
+
+    def _thread(self) -> dict:
+        return {"repo": "r/r", "pr": 1, "comment_id": 42, "url": "https://x.com"}
+
+    def test_dropped_thread_task(self) -> None:
+        original = [self._t("1", "Thread task", thread=self._thread())]
+        result: list = []
+        changes = _compute_thread_changes(original, result, frozenset({"1"}))
+        assert len(changes) == 1
+        assert changes[0]["kind"] == "dropped"
+        assert changes[0]["task"]["id"] == "1"
+
+    def test_modified_title(self) -> None:
+        original = [self._t("1", "Old title", thread=self._thread())]
+        result = [self._t("1", "New title", thread=self._thread())]
+        changes = _compute_thread_changes(original, result, frozenset({"1"}))
+        assert len(changes) == 1
+        assert changes[0]["kind"] == "modified"
+        assert changes[0]["new_title"] == "New title"
+
+    def test_modified_description(self) -> None:
+        original = [self._t("1", "Task", thread=self._thread(), description="old")]
+        result = [self._t("1", "Task", thread=self._thread(), description="new")]
+        changes = _compute_thread_changes(original, result, frozenset({"1"}))
+        assert len(changes) == 1
+        assert changes[0]["kind"] == "modified"
+        assert changes[0]["new_description"] == "new"
+
+    def test_unchanged_thread_task_not_reported(self) -> None:
+        t = self._t("1", "Task", thread=self._thread())
+        changes = _compute_thread_changes([t], [t], frozenset({"1"}))
+        assert changes == []
+
+    def test_spec_task_not_reported_even_if_dropped(self) -> None:
+        t = self._t("1", "Spec task")  # no thread
+        changes = _compute_thread_changes([t], [], frozenset({"1"}))
+        assert changes == []
+
+    def test_completed_task_not_reported(self) -> None:
+        t = self._t("1", "Done", status="completed", thread=self._thread())
+        changes = _compute_thread_changes([t], [], frozenset({"1"}))
+        assert changes == []
+
+    def test_task_not_in_original_ids_not_reported(self) -> None:
+        t = self._t("1", "New task", thread=self._thread())
+        changes = _compute_thread_changes([t], [], frozenset())
+        assert changes == []
+
+    def test_multiple_changes_returned(self) -> None:
+        thread = self._thread()
+        t1 = self._t("1", "Dropped", thread=thread)
+        t2 = self._t("2", "Old", thread=thread)
+        r2 = self._t("2", "New", thread=thread)
+        changes = _compute_thread_changes([t1, t2], [r2], frozenset({"1", "2"}))
+        kinds = {c["kind"] for c in changes}
+        assert "dropped" in kinds
+        assert "modified" in kinds

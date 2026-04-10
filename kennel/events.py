@@ -681,18 +681,112 @@ def _get_commit_summary(work_dir: Path) -> str:
         return ""
 
 
+def _notify_thread_change(
+    change: dict[str, Any],
+    config: Config,
+    *,
+    _print_prompt=None,
+    _gh=None,
+) -> None:
+    """Post a brief comment notifying a commenter that their task was rescoped.
+
+    Called for each thread task that was dropped or modified during dependency
+    analysis.  Uses Opus (in Fido's voice) to generate the message; falls back
+    to a plain factual note if Opus returns nothing.
+
+    Posts via the issue comments API so the notification appears regardless of
+    whether the original comment was an inline review comment or a top-level
+    PR comment.
+    """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+    gh = _gh if _gh is not None else get_github()
+
+    task = change["task"]
+    thread = task.get("thread") or {}
+    comment_id = thread.get("comment_id")
+    repo = thread.get("repo", "")
+    pr = thread.get("pr")
+    url = thread.get("url", "")
+    if not (comment_id and repo and pr):
+        return
+
+    kind = change["kind"]
+    original_title = task.get("title", "")
+    prompts = Prompts(_load_persona(config))
+
+    if kind == "dropped":
+        instruction = (
+            f"The task you were planning from a PR comment has been removed from "
+            f"your work queue — a subsequent comment changed the requirements and "
+            f"this work is no longer needed.\n\n"
+            f"Original task: {original_title}\n"
+            f"Comment: {url}\n\n"
+            "Write a very brief PR comment letting the reviewer know their original "
+            "task has been dropped and is no longer needed. Reference the comment URL."
+        )
+        fallback = (
+            f"FYI — the task from your comment ('{original_title}') has been "
+            f"removed from my queue: a subsequent change made it unnecessary."
+        )
+    else:
+        new_title = change.get("new_title", "")
+        instruction = (
+            f"The task you were planning from a PR comment has been updated to "
+            f"reflect new requirements.\n\n"
+            f"Original task: {original_title}\n"
+            f"Updated task: {new_title}\n"
+            f"Comment: {url}\n\n"
+            "Write a very brief PR comment letting the reviewer know their original "
+            "task has been updated. Reference the comment URL."
+        )
+        fallback = (
+            f"FYI — the task from your comment has been updated to: '{new_title}' "
+            f"based on new requirements."
+        )
+
+    body = _print_prompt(
+        prompts.persona_wrap(instruction),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=15,
+    )
+    if not body:
+        body = fallback
+
+    try:
+        gh.comment_issue(repo, pr, body)
+        log.info("notified thread %s (%s)", comment_id, kind)
+    except Exception:
+        log.exception("failed to notify thread %s", comment_id)
+
+
 def _reorder_tasks_background(
     work_dir: Path,
     commit_summary: str,
+    config: Config,
     *,
     _start=threading.Thread.start,
+    _gh=None,
 ) -> None:
-    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread."""
+    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
+
+    Passes an ``_on_changes`` callback so that any thread tasks dropped or
+    modified during rescoping trigger a notification reply to the original
+    comment.
+    """
     from kennel.tasks import reorder_tasks
+
+    gh = _gh if _gh is not None else get_github()
+
+    def on_changes(changes: list[dict[str, Any]]) -> None:
+        for change in changes:
+            _notify_thread_change(change, config, _gh=gh)
 
     t = threading.Thread(
         target=reorder_tasks,
         args=(work_dir, commit_summary),
+        kwargs={"_on_changes": on_changes},
         name=f"reorder-{work_dir.name}",
         daemon=True,
     )
@@ -734,7 +828,7 @@ def create_task(
     launch_sync(config, repo_cfg)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
-        _reorder_background_fn(repo_cfg.work_dir, commit_summary)
+        _reorder_background_fn(repo_cfg.work_dir, commit_summary, config)
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task

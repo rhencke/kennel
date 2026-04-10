@@ -460,12 +460,55 @@ def _apply_reorder(
     return ci + non_ci + completed + newly_added
 
 
+def _compute_thread_changes(
+    original: list[dict[str, Any]],
+    result: list[dict[str, Any]],
+    original_ids: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Return change records for thread tasks that were dropped or modified.
+
+    Only tasks in *original_ids* (those Opus knew about) with a ``thread``
+    attachment are reported.  Completed tasks are excluded.
+
+    Each record is one of:
+    - ``{"task": ..., "kind": "dropped"}``
+    - ``{"task": ..., "kind": "modified", "new_title": ..., "new_description": ...}``
+    """
+    result_by_id = {t["id"]: t for t in result}
+    changes: list[dict[str, Any]] = []
+    for t in original:
+        if t["id"] not in original_ids:
+            continue
+        if not t.get("thread"):
+            continue
+        if t.get("status") == TaskStatus.COMPLETED:
+            continue
+        tid = t["id"]
+        if tid not in result_by_id:
+            changes.append({"task": t, "kind": "dropped"})
+        else:
+            r = result_by_id[tid]
+            if r.get("title") != t.get("title") or r.get("description") != t.get(
+                "description"
+            ):
+                changes.append(
+                    {
+                        "task": t,
+                        "kind": "modified",
+                        "new_title": r.get("title", ""),
+                        "new_description": r.get("description", ""),
+                    }
+                )
+    return changes
+
+
 def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
     _print_prompt=_claude_print_prompt,
     _rescope_prompt_fn=_rescope_prompt_default,
+    _on_changes=None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -479,6 +522,9 @@ def reorder_tasks(
 
     CI tasks always stay first; completed tasks are always preserved.
     An empty or unparseable Opus response leaves the task list unchanged.
+
+    If *_on_changes* is provided and any thread tasks were dropped or modified,
+    it is called with a list of change records (see :func:`_compute_thread_changes`).
     """
     task_list = list_tasks(work_dir)
     if not task_list:
@@ -502,6 +548,12 @@ def reorder_tasks(
         current = lock.read()
         result = _apply_reorder(current, ordered_items, original_ids)
         lock.write(result)
+
+    if _on_changes is not None:
+        changes = _compute_thread_changes(current, result, original_ids)
+        if changes:
+            _on_changes(changes)
+
     log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 
 
