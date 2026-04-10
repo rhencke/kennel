@@ -6,13 +6,16 @@ import fcntl
 import json
 import logging
 import random
+import re
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
+from kennel.prompts import rescope_prompt as _rescope_prompt_default
 from kennel.state import _resolve_git_dir, load_state
 from kennel.types import TaskStatus, TaskType
 
@@ -183,12 +186,11 @@ def remove_task(work_dir: Path, task_id: str) -> bool:
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     """Format a task list into work-queue markdown.
 
-    Priority order: CI failures → comment-originated → others.
+    Priority order: CI failures → everything else (preserving list order).
     Completed tasks appear in a collapsible ``<details>`` section.
     Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
     """
     ci_pending: list[tuple[str, str]] = []
-    comment_pending: list[tuple[str, str]] = []
     other_pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
 
@@ -207,12 +209,10 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
             title = t.get("title", "")
             if title.startswith("CI failure:"):
                 ci_pending.append((display, task_type))
-            elif t.get("thread"):
-                comment_pending.append((display, task_type))
             else:
                 other_pending.append((display, task_type))
 
-    pending = ci_pending + comment_pending + other_pending
+    pending = ci_pending + other_pending
     lines: list[str] = []
     for i, (display, task_type) in enumerate(pending):
         suffix = " **→ next**" if i == 0 else ""
@@ -376,6 +376,229 @@ def sync_tasks(
             log.exception("sync_tasks: failed to update PR body")
     finally:
         sync_lock_fd.close()
+
+
+def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
+    """Parse the Opus rescope response into a list of task items.
+
+    Scans *raw* for a JSON object containing a ``"tasks"`` list.  Tries the
+    full string first (happy path), then falls back to a greedy regex scan so
+    that minor Opus preamble does not break parsing.
+
+    Returns the ``tasks`` list, or ``None`` if no valid response is found.
+    """
+    candidates = [raw.strip()]
+    for m in re.finditer(r"\{.*\}", raw, re.DOTALL):
+        candidates.append(m.group())
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            tasks = obj.get("tasks")
+            if isinstance(tasks, list):
+                return tasks
+        except json.JSONDecodeError, AttributeError:
+            continue
+    return None
+
+
+def _apply_reorder(
+    current: list[dict[str, Any]],
+    ordered_items: list[dict[str, Any]],
+    original_ids: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Apply Opus-ordered items to the current task list.
+
+    Rules (in priority order):
+    - CI tasks always come first.
+    - Non-CI pending tasks follow in Opus dependency order.
+    - Pending/in_progress tasks that Opus omits are marked completed; the caller
+      detects affected in-progress tasks and signals an abort so the worker picks
+      the new next task.
+    - Tasks added after the original snapshot (IDs not in *original_ids*) are
+      appended at the end so they are never silently dropped.
+    - Completed tasks are always preserved at the end in their original order.
+    - Title/description are updated from Opus's output; all other fields kept.
+    - Opus-returned IDs absent from *current* or duplicated are ignored.
+    """
+    by_id = {t["id"]: t for t in current}
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for item in ordered_items:
+        tid = item.get("id", "")
+        if not tid or tid not in by_id:
+            continue
+        if tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+        orig = dict(by_id[tid])
+        if item.get("title"):
+            orig["title"] = item["title"]
+        if "description" in item:
+            orig["description"] = item["description"]
+        merged.append(orig)
+
+    ci = [t for t in merged if t.get("type") == TaskType.CI]
+    non_ci = [t for t in merged if t.get("type") != TaskType.CI]
+    completed = [t for t in current if t.get("status") == TaskStatus.COMPLETED]
+
+    # Tasks Opus omitted that were pending/in_progress — mark them completed
+    # rather than silently removing them.  The caller detects in-progress ones
+    # and triggers a worker abort so the next task is picked up cleanly.
+    newly_completed = [
+        {**t, "status": str(TaskStatus.COMPLETED)}
+        for t in current
+        if t["id"] in original_ids
+        and t["id"] not in seen_ids
+        and t.get("status") != TaskStatus.COMPLETED
+    ]
+
+    # Tasks added while Opus was thinking — preserve them rather than drop.
+    newly_added = [
+        t
+        for t in current
+        if t["id"] not in original_ids
+        and t["id"] not in seen_ids
+        and t.get("status") != TaskStatus.COMPLETED
+    ]
+
+    return ci + non_ci + completed + newly_completed + newly_added
+
+
+def _compute_thread_changes(
+    original: list[dict[str, Any]],
+    result: list[dict[str, Any]],
+    original_ids: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Return change records for thread tasks that were completed or modified.
+
+    Only tasks in *original_ids* (those Opus knew about) with a ``thread``
+    attachment are reported.  Already-completed tasks are excluded.
+
+    Each record is one of:
+    - ``{"task": ..., "kind": "completed"}`` — Opus omitted it; now marked done
+    - ``{"task": ..., "kind": "modified", "new_title": ..., "new_description": ...}``
+    """
+    result_by_id = {t["id"]: t for t in result}
+    changes: list[dict[str, Any]] = []
+    for t in original:
+        if t["id"] not in original_ids:
+            continue
+        if not t.get("thread"):
+            continue
+        if t.get("status") == TaskStatus.COMPLETED:
+            continue
+        tid = t["id"]
+        r = result_by_id.get(tid)
+        if r is None or r.get("status") == TaskStatus.COMPLETED:
+            changes.append({"task": t, "kind": "completed"})
+        elif r.get("title") != t.get("title") or r.get("description") != t.get(
+            "description"
+        ):
+            changes.append(
+                {
+                    "task": t,
+                    "kind": "modified",
+                    "new_title": r.get("title", ""),
+                    "new_description": r.get("description", ""),
+                }
+            )
+    return changes
+
+
+def reorder_tasks(
+    work_dir: Path,
+    commit_summary: str,
+    *,
+    _print_prompt=_claude_print_prompt,
+    _rescope_prompt_fn=_rescope_prompt_default,
+    _on_changes=None,
+    _on_inprogress_affected=None,
+) -> None:
+    """Reorder pending tasks by Opus dependency analysis.
+
+    Reads the task list, asks Opus to reorder/rewrite/drop tasks based on
+    dependency analysis and recent commits, then atomically writes the result.
+
+    The task list is read twice: once before the Opus call (to build the
+    prompt) and once inside the write-lock (to pick up any tasks added while
+    Opus was thinking).  Tasks added in that window are preserved at the end
+    of the list rather than silently dropped.
+
+    CI tasks always stay first; completed tasks are always preserved.
+    An empty or unparseable Opus response leaves the task list unchanged.
+
+    If *_on_changes* is provided and any thread tasks were completed or modified,
+    it is called with a list of change records (see :func:`_compute_thread_changes`).
+
+    If *_on_inprogress_affected* is provided and the currently in-progress task
+    is marked completed or modified by Opus, it is called with no arguments so
+    the caller can abort the running worker and restart on the new next task.
+    When the in-progress task is modified its status is reset to ``pending`` so
+    the worker loop picks it up again with the updated title/description.
+    """
+    task_list = list_tasks(work_dir)
+    if not task_list:
+        log.info("reorder_tasks: no tasks — skipping")
+        return
+
+    original_ids = frozenset(t["id"] for t in task_list)
+    prompt = _rescope_prompt_fn(task_list, commit_summary)
+    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    if not raw:
+        log.warning("reorder_tasks: Opus returned empty response — skipping")
+        return
+
+    ordered_items = _parse_reorder_response(raw)
+    if ordered_items is None:
+        log.warning("reorder_tasks: could not parse Opus response — skipping")
+        return
+
+    path = _task_file(work_dir)
+    inprogress_affected = False
+    with _locked(path, write=True) as lock:
+        current = lock.read()
+        inprogress = next(
+            (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
+        )
+        result = _apply_reorder(current, ordered_items, original_ids)
+        if inprogress is not None:
+            inprogress_in_result = next(
+                (t for t in result if t["id"] == inprogress["id"]), None
+            )
+            if (
+                inprogress_in_result is None
+                or inprogress_in_result.get("status") == TaskStatus.COMPLETED
+            ):
+                # Opus omitted the in-progress task — marked completed.
+                inprogress_affected = True
+                log.info(
+                    "reorder_tasks: in-progress task marked completed by Opus: %s",
+                    inprogress.get("title", "")[:60],
+                )
+            elif inprogress_in_result.get("title") != inprogress.get(
+                "title"
+            ) or inprogress_in_result.get("description") != inprogress.get(
+                "description"
+            ):
+                # Opus modified the in-progress task — reset to pending.
+                inprogress_affected = True
+                inprogress_in_result["status"] = str(TaskStatus.PENDING)
+                log.info(
+                    "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
+                    inprogress_in_result.get("title", "")[:60],
+                )
+        lock.write(result)
+
+    if _on_changes is not None:
+        changes = _compute_thread_changes(current, result, original_ids)
+        if changes:
+            _on_changes(changes)
+
+    if inprogress_affected and _on_inprogress_affected is not None:
+        _on_inprogress_affected()
+
+    log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 
 
 def sync_tasks_background(

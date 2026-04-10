@@ -244,8 +244,7 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
     (case-insensitive).  Among the remaining candidates the priority order is:
 
     1. Tasks with ``type`` == ``TaskType.CI``
-    2. Tasks with ``type`` == ``TaskType.THREAD``
-    3. Everything else (first in list wins)
+    2. Everything else (first in list wins, including thread tasks)
     """
     pending = [
         t
@@ -258,9 +257,6 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     for t in pending:
         if t.get("type") == TaskType.CI:
-            return t
-    for t in pending:
-        if t.get("type") == TaskType.THREAD:
             return t
     return pending[0]
 

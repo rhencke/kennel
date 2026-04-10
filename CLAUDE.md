@@ -106,7 +106,17 @@ kennel task <work_dir> list                                # list all tasks as J
 
 ### Priority order
 
-`_pick_next_task` selects by type: `ci` first, `thread` second, `spec` last.
+`_pick_next_task` selects by type: `ci` first, then first in list wins (thread and spec tasks share equal priority).
+
+### Dynamic task reordering (rescoping)
+
+When a `thread`-type task is created (PR comment feedback), `create_task()` triggers a background Opus call via `reorder_tasks()` to reorder and rewrite the pending task list based on dependency analysis.
+
+- Only fires for `thread` tasks — `spec` tasks created during initial setup are already ordered by the planner
+- Double-read pattern: task list is read before the Opus call (for the prompt), then re-read inside the write lock (to pick up concurrent additions). Tasks added while Opus is thinking are preserved as `newly_added` rather than dropped
+- Pending tasks Opus omits are marked completed (not removed); in-progress tasks that are omitted also trigger `_on_inprogress_affected` so the worker aborts and picks the new next task
+- Thread tasks that are completed by rescoping or modified trigger a `comment_issue` notification to the original commenter via `_notify_thread_change()`
+- Prompt builder: `rescope_prompt()` in `prompts.py`; response parser: `_parse_reorder_response()` in `tasks.py`
 
 ### Notes
 

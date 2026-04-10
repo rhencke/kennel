@@ -224,9 +224,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 if cid and cid in _replied_comments:
                     log.info("already replied to comment %s — skipping", cid)
                     handled = True
-                    category, title = None, None
+                    category, titles = None, []
                 else:
-                    posted, category, title = type(self)._fn_reply_to_comment(
+                    posted, category, titles = type(self)._fn_reply_to_comment(
                         action, self.config, repo_cfg
                     )
                     if cid and posted:
@@ -234,17 +234,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
-                # ACT, DO → add to work queue.
-                if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
-                    pass  # No task needed
-                elif title:
-                    type(self)._fn_create_task(
-                        title,
-                        self.config,
-                        repo_cfg,
-                        thread=action.reply_to,
-                        registry=self.registry,
-                    )
+                # ACT, DO → add each task title to work queue.
+                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                    for title in titles or []:
+                        type(self)._fn_create_task(
+                            title,
+                            self.config,
+                            repo_cfg,
+                            thread=action.reply_to,
+                            registry=self.registry,
+                        )
 
             if action.review_comments:
                 type(self)._fn_reply_to_review(
@@ -254,19 +253,20 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                category, title = type(self)._fn_reply_to_issue_comment(
+                category, titles = type(self)._fn_reply_to_issue_comment(
                     action, self.config, repo_cfg
                 )
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER") and title:
-                    type(self)._fn_create_task(
-                        title,
-                        self.config,
-                        repo_cfg,
-                        thread=action.thread,
-                        registry=self.registry,
-                    )
+                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                    for title in titles:
+                        type(self)._fn_create_task(
+                            title,
+                            self.config,
+                            repo_cfg,
+                            thread=action.thread,
+                            registry=self.registry,
+                        )
 
             # Non-comment events just trigger kennel worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)

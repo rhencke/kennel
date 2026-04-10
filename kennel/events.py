@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import logging
 import re
+import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,6 +112,7 @@ def dispatch(
                 "pr": number,
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
+                "author": user,
             },
             comment_body=comment_body,
             is_bot=is_bot,
@@ -156,6 +159,7 @@ def dispatch(
                 "pr": number,
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
+                "author": user,
             }
             if number and comment_id
             else None,
@@ -263,18 +267,20 @@ def reply_to_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (posted, triage_category, task_title).
+    Returns (posted, triage_category, task_titles).
     posted is True only when the reply was successfully sent to GitHub.
+    task_titles is a list: one entry for non-task categories (used as reply
+    context), or one or more entries for ACT/DO (each becomes a task).
     Uses a per-comment lockfile to prevent races with work.sh.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     info = action.reply_to
     if not info or not action.comment_body:
-        return (False, "ACT", action.comment_body or action.prompt)
+        return (False, "ACT", [action.comment_body or action.prompt])
 
     # Per-comment lock — prevents kennel and work.sh from both replying
     cid = info.get("comment_id")
@@ -286,7 +292,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return (False, "ACT", action.comment_body[:80])
+            return (False, "ACT", [action.comment_body[:80]])
     else:
         lock_fd = None
 
@@ -318,19 +324,21 @@ def reply_to_comment(
             )
 
     # Step 1: Haiku triage
-    category, title = _triage(
+    category, titles = _triage(
         comment, action.is_bot, context, _print_prompt=_print_prompt
     )
-    log.info("triage: %s — %s", category, title)
+    log.info("triage: %s — %s", category, titles)
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_url = _open_defer_issue(gh, info["repo"], pr_url, title, comment)
+        issue_url = _open_defer_issue(gh, info["repo"], pr_url, titles[0], comment)
 
     # Step 3: Opus reply based on triage
-    instr = reply_instruction(category, comment, title, context, issue_url=issue_url)
+    instr = reply_instruction(
+        category, comment, ", ".join(titles), context, issue_url=issue_url
+    )
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -380,7 +388,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (posted, category, title)
+    return (posted, category, titles)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -508,23 +516,37 @@ def _triage(
     context: dict[str, Any] | None = None,
     *,
     _print_prompt=None,
-) -> tuple[str, str]:
-    """Ask Opus to triage a comment. Returns (prefix, title)."""
+) -> tuple[str, list[str]]:
+    """Ask Opus to triage a comment. Returns (category, titles).
+
+    A comment may produce zero or many tasks: titles is a list with one entry
+    for ANSWER/ASK/DEFER/DUMP (used as reply context), or one or more entries
+    for ACT/DO (each becomes a separate work-queue task).
+    """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
     text = _print_prompt(prompt, "claude-opus-4-6", timeout=15)
-    line = text.splitlines()[0] if text else ""
-    if ":" in line:
+    category: str | None = None
+    titles: list[str] = []
+    for line in text.splitlines() if text else []:
+        if ":" not in line:
+            continue
         prefix, title = line.split(":", 1)
         prefix = prefix.strip().upper()
         title = title.strip()
-        if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
-            return prefix, title
+        if prefix not in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
+            continue
+        if category is None:
+            category = prefix
+        if prefix == category and title:
+            titles.append(title)
+    if category is not None and titles:
+        return category, titles
     # Fallback: ACT for humans, DO for bots; summarize comment into action item
     category = "DO" if is_bot else "ACT"
     title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
-    return category, title
+    return category, [title]
 
 
 def reply_to_issue_comment(
@@ -534,7 +556,7 @@ def reply_to_issue_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[str, str]:
+) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event)."""
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -570,19 +592,19 @@ def reply_to_issue_comment(
         context["conversation"] = conversation_context
 
     prompts = Prompts(_load_persona(config))
-    category, title = _triage(
+    category, titles = _triage(
         comment, action.is_bot, context or None, _print_prompt=_print_prompt
     )
-    log.info("issue comment triage: %s — %s", category, title)
+    log.info("issue comment triage: %s — %s", category, titles)
 
     # For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_url = _open_defer_issue(gh, repo_full, pr_url, title, comment)
+        issue_url = _open_defer_issue(gh, repo_full, pr_url, titles[0], comment)
 
     instr = issue_reply_instruction(
-        category, comment, title, action.context, issue_url=issue_url
+        category, comment, ", ".join(titles), action.context, issue_url=issue_url
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
@@ -615,7 +637,7 @@ def reply_to_issue_comment(
             _gh=gh,
         )
 
-    return (category, title)
+    return (category, titles)
 
 
 _TYPE_PRIORITY = {TaskType.CI: 0, TaskType.THREAD: 1, TaskType.SPEC: 2}
@@ -662,18 +684,182 @@ def _maybe_abort_for_new_task(
         registry.abort_task(repo_cfg.name)
 
 
+def _get_commit_summary(work_dir: Path) -> str:
+    """Return a short ``git log --oneline`` summary of recent commits.
+
+    Used to give Opus context about what has already been implemented when
+    it reorders the pending task list.  Returns an empty string on any error
+    (e.g. not a git repository, git not found, timeout).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-20"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _notify_thread_change(
+    change: dict[str, Any],
+    config: Config,
+    *,
+    _print_prompt=None,
+    _gh=None,
+) -> None:
+    """Post a brief comment notifying a commenter that their task was rescoped.
+
+    Called for each thread task that was dropped or modified during dependency
+    analysis.  Uses Opus (in Fido's voice) to generate the message; falls back
+    to a plain factual note if Opus returns nothing.
+
+    Posts via the issue comments API so the notification appears regardless of
+    whether the original comment was an inline review comment or a top-level
+    PR comment.
+    """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+    gh = _gh if _gh is not None else get_github()
+
+    task = change["task"]
+    thread = task.get("thread") or {}
+    comment_id = thread.get("comment_id")
+    repo = thread.get("repo", "")
+    pr = thread.get("pr")
+    url = thread.get("url", "")
+    author = thread.get("author", "")
+    if not (comment_id and repo and pr):
+        return
+
+    kind = change["kind"]
+    original_title = task.get("title", "")
+    prompts = Prompts(_load_persona(config))
+    mention = f"@{author} " if author else ""
+
+    if kind == "completed":
+        instruction = (
+            f"A task originating from a PR comment has been marked done — it was "
+            f"covered by work already committed and is no longer in the active queue.\n\n"
+            f"Original task: {original_title}\n"
+            f"Comment author: {author or '(unknown)'}\n"
+            f"Comment: {url}\n\n"
+            "Write a very brief PR comment notifying the comment author (mention them "
+            "with @username if known) that their task has been marked done because it "
+            "was covered by recent commits. Reference the comment URL."
+        )
+        fallback = (
+            f"{mention}FYI — the task from your comment ('{original_title}') has been "
+            f"marked done: it was covered by recent commits."
+        )
+    else:
+        new_title = change.get("new_title", "")
+        instruction = (
+            f"The task you were planning from a PR comment has been updated to "
+            f"reflect new requirements.\n\n"
+            f"Original task: {original_title}\n"
+            f"Updated task: {new_title}\n"
+            f"Comment author: {author or '(unknown)'}\n"
+            f"Comment: {url}\n\n"
+            "Write a very brief PR comment notifying the comment author (mention them "
+            "with @username if known) that their original task has been updated. "
+            "Reference the comment URL."
+        )
+        fallback = (
+            f"{mention}FYI — the task from your comment has been updated to: "
+            f"'{new_title}' based on new requirements."
+        )
+
+    body = _print_prompt(
+        prompts.persona_wrap(instruction),
+        "claude-opus-4-6",
+        system_prompt=prompts.reply_system_prompt(),
+        timeout=15,
+    )
+    if not body:
+        body = fallback
+
+    try:
+        gh.comment_issue(repo, pr, body)
+        log.info("notified thread %s (%s)", comment_id, kind)
+    except Exception:
+        log.exception("failed to notify thread %s", comment_id)
+
+
+def _reorder_tasks_background(
+    work_dir: Path,
+    commit_summary: str,
+    config: Config,
+    repo_cfg: RepoConfig | None = None,
+    registry: WorkerRegistry | None = None,
+    *,
+    _start=threading.Thread.start,
+    _gh=None,
+) -> None:
+    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
+
+    Passes an ``_on_changes`` callback so that any thread tasks dropped or
+    modified during rescoping trigger a notification reply to the original
+    comment.
+
+    If *repo_cfg* and *registry* are provided, also passes an
+    ``_on_inprogress_affected`` callback that aborts the running worker whenever
+    the in-progress task is dropped or modified by the rescope, so the worker
+    loop restarts on the new next task.
+    """
+    from kennel.tasks import reorder_tasks
+
+    gh = _gh if _gh is not None else get_github()
+
+    def on_changes(changes: list[dict[str, Any]]) -> None:
+        for change in changes:
+            _notify_thread_change(change, config, _gh=gh)
+
+    kwargs: dict[str, Any] = {"_on_changes": on_changes}
+    if registry is not None and repo_cfg is not None:
+
+        def on_inprogress_affected() -> None:
+            log.info(
+                "reorder_tasks_background: in-progress task affected — aborting %s",
+                repo_cfg.name,
+            )
+            registry.abort_task(repo_cfg.name)
+
+        kwargs["_on_inprogress_affected"] = on_inprogress_affected
+
+    t = threading.Thread(
+        target=reorder_tasks,
+        args=(work_dir, commit_summary),
+        kwargs=kwargs,
+        name=f"reorder-{work_dir.name}",
+        daemon=True,
+    )
+    _start(t)
+
+
 def create_task(
     prompt: str,
     config: Config,
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
+    *,
+    _get_commit_summary_fn=_get_commit_summary,
+    _reorder_background_fn=_reorder_tasks_background,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
-    PR comment tasks (those with a thread) carry a thread payload that causes
-    ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
-    without inserting them out-of-order in the list.
+    PR comment tasks (those with a thread) are added to the task list at the
+    position determined by the rescoping reorder — they receive spec-level
+    priority (first in list wins among non-CI tasks).
+
+    When *thread* is set (a PR comment task), also triggers a background
+    dependency-analysis reorder via Opus so that remaining spec tasks are
+    resequenced to account for the new requirement.  Spec tasks created during
+    initial setup are not rescoped — the planner already ordered them.
 
     If *registry* is given, checks whether the new task has higher priority
     than the current in-progress task; if so, signals abort so the worker
@@ -687,6 +873,11 @@ def create_task(
         repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
     )
     launch_sync(config, repo_cfg)
+    if thread:
+        commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
+        _reorder_background_fn(
+            repo_cfg.work_dir, commit_summary, config, repo_cfg, registry
+        )
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task

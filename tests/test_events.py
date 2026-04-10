@@ -7,7 +7,10 @@ from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
+    _get_commit_summary,
     _is_allowed,
+    _notify_thread_change,
+    _reorder_tasks_background,
     _summarize_as_action_item,
     _triage,
     create_task,
@@ -194,6 +197,29 @@ class TestDispatchReviewComment:
         assert result.reply_to is not None
         assert result.comment_body == "fix this"
 
+    def test_reply_to_includes_author(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 124,
+                "body": "nit",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
+        assert result is not None
+        assert result.reply_to is not None
+        assert result.reply_to["author"] == "owner"
+
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         payload = {
@@ -298,6 +324,7 @@ class TestDispatchIssueComment:
             result.thread["url"]
             == "https://github.com/owner/repo/pull/10#issuecomment-456"
         )
+        assert result.thread["author"] == "owner"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -395,29 +422,29 @@ class TestSummarizeAsActionItem:
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
-        cat, title = _triage(
+        cat, titles = _triage(
             "please add tests",
             is_bot=False,
             _print_prompt=MagicMock(return_value="ACT: add tests"),
         )
         assert cat == "ACT"
-        assert title == "add tests"
+        assert titles == ["add tests"]
 
     def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
         pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, title = _triage("do stuff", is_bot=False, _print_prompt=pp)
+        cat, titles = _triage("do stuff", is_bot=False, _print_prompt=pp)
         assert cat == "ACT"
-        assert title == "implement the thing"
+        assert titles == ["implement the thing"]
 
     def test_fallback_for_bot(self, tmp_path: Path) -> None:
         pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, title = _triage("do stuff", is_bot=True, _print_prompt=pp)
+        cat, titles = _triage("do stuff", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
-        assert title == "implement the thing"
+        assert titles == ["implement the thing"]
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
-        cat, title = _triage(
+        cat, titles = _triage(
             "nit comment",
             is_bot=False,
             context=ctx,
@@ -427,21 +454,21 @@ class TestTriage:
 
     def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
         pp = MagicMock(side_effect=["WEIRD: something", "do the thing"])
-        cat, title = _triage("hi", is_bot=False, _print_prompt=pp)
+        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
         assert cat == "ACT"
-        assert title == "do the thing"
+        assert titles == ["do the thing"]
 
     def test_timeout_falls_back(self, tmp_path: Path) -> None:
         pp = MagicMock(side_effect=["", "do the thing"])
-        cat, title = _triage("hi", is_bot=True, _print_prompt=pp)
+        cat, titles = _triage("hi", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
         pp = MagicMock(side_effect=["TASK: add caching", "add result caching"])
-        cat, title = _triage("cache results", is_bot=True, _print_prompt=pp)
+        cat, titles = _triage("cache results", is_bot=True, _print_prompt=pp)
         assert cat == "DO"
-        assert title == "add result caching"
+        assert titles == ["add result caching"]
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
         """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
@@ -458,9 +485,49 @@ class TestTriage:
 
     def test_defaults_to_claude_print_prompt(self) -> None:
         with patch("kennel.claude.print_prompt", return_value="ACT: do it") as mock_pp:
-            cat, title = _triage("do it", is_bot=False)
+            cat, titles = _triage("do it", is_bot=False)
         mock_pp.assert_called_once()
         assert cat == "ACT"
+
+    def test_multiple_act_lines_returns_all_titles(self) -> None:
+        response = "ACT: add unit tests\nACT: update documentation"
+        cat, titles = _triage(
+            "please add tests and docs",
+            is_bot=False,
+            _print_prompt=MagicMock(return_value=response),
+        )
+        assert cat == "ACT"
+        assert titles == ["add unit tests", "update documentation"]
+
+    def test_mixed_categories_uses_first(self) -> None:
+        """Only lines matching the first valid category are collected."""
+        response = "ACT: add tests\nDEFER: out of scope"
+        cat, titles = _triage(
+            "comment",
+            is_bot=False,
+            _print_prompt=MagicMock(return_value=response),
+        )
+        assert cat == "ACT"
+        assert titles == ["add tests"]
+
+    def test_zero_act_tasks_falls_back(self) -> None:
+        """ACT with empty title is treated as parse failure → fallback."""
+        pp = MagicMock(side_effect=["ACT: ", "do the thing"])
+        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
+        # empty title → stripped to "" → falsy → no titles collected → fallback
+        assert cat == "ACT"
+        assert titles == ["do the thing"]
+
+    def test_lines_without_colon_are_skipped(self) -> None:
+        """Preamble lines without a colon are ignored; valid lines are still parsed."""
+        response = "thinking\nACT: add unit tests"
+        cat, titles = _triage(
+            "add tests",
+            is_bot=False,
+            _print_prompt=MagicMock(return_value=response),
+        )
+        assert cat == "ACT"
+        assert titles == ["add unit tests"]
 
 
 class TestMaybeReact:
@@ -577,7 +644,7 @@ class TestReplyToComment:
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert not posted
         assert cat == "ACT"
 
@@ -587,7 +654,7 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert not posted
         assert cat == "ACT"
 
@@ -613,7 +680,7 @@ class TestReplyToComment:
                 return "ACT: add logging"
             return "I will add logging."
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -622,7 +689,7 @@ class TestReplyToComment:
         )
         assert posted
         assert cat == "ACT"
-        assert "logging" in title.lower()
+        assert "logging" in titles[0].lower()
 
     def test_full_flow_ask(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -640,7 +707,7 @@ class TestReplyToComment:
                 return "ASK: need more info"
             return "What specifically?"
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -666,7 +733,7 @@ class TestReplyToComment:
                 return "ANSWER: explain choice"
             return "I did this because..."
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -693,7 +760,7 @@ class TestReplyToComment:
             return "On it!"
 
         mock_gh = MagicMock()
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -702,7 +769,7 @@ class TestReplyToComment:
         )
         assert posted
         assert cat == "DO"
-        assert title == "add result caching"
+        assert titles == ["add result caching"]
         mock_gh.create_issue.assert_not_called()
 
     def test_full_flow_defer(self, tmp_path: Path) -> None:
@@ -723,7 +790,7 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -754,7 +821,7 @@ class TestReplyToComment:
                 return "DUMP: not applicable"
             return "Not applicable here."
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -783,7 +850,7 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -809,7 +876,7 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -835,7 +902,7 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -862,7 +929,9 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            posted, cat, titles = reply_to_comment(
+                action, cfg, self._repo_cfg(tmp_path)
+            )
             assert not posted  # locked — no reply sent
             assert cat == "ACT"  # returns without posting
         finally:
@@ -885,7 +954,7 @@ class TestReplyToComment:
                 return "ACT: do it"
             return "ok"
 
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -894,6 +963,34 @@ class TestReplyToComment:
         )
         assert posted
         assert cat == "ACT"
+
+    def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
+        """A single comment may produce multiple ACT tasks."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 77},
+            comment_body="add tests and update docs",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add unit tests\nACT: update documentation"
+            return "On it!"
+
+        posted, cat, titles = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
+        assert posted
+        assert cat == "ACT"
+        assert titles == ["add unit tests", "update documentation"]
 
 
 class TestReplyToReview:
@@ -1017,7 +1114,7 @@ class TestReplyToIssueComment:
                 return "ACT: fix the bug"
             return "I'll fix that."
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1034,7 +1131,7 @@ class TestReplyToIssueComment:
                 return "ASK: unclear"
             return "What do you mean?"
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action("unclear"),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1051,7 +1148,7 @@ class TestReplyToIssueComment:
                 return "ANSWER: it works this way"
             return "Yes, because..."
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action("why?"),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1068,7 +1165,7 @@ class TestReplyToIssueComment:
                 return "DUMP: nope"
             return "That won't work here."
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action("do it differently"),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1088,7 +1185,7 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action("big refactor"),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1114,7 +1211,7 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action("big refactor"),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1131,7 +1228,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1148,7 +1245,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
@@ -1175,7 +1272,7 @@ class TestReplyToIssueComment:
 
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -1198,7 +1295,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -1217,7 +1314,7 @@ class TestReplyToIssueComment:
             return "ok"
 
         with patch("kennel.claude.print_prompt", side_effect=fake_pp) as mock_pp:
-            cat, title = reply_to_issue_comment(
+            cat, titles = reply_to_issue_comment(
                 action, cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
             )
         assert mock_pp.called
@@ -1239,9 +1336,9 @@ class TestReplyToIssueComment:
             return "ok"
 
         with patch(
-            "kennel.events._triage", wraps=lambda *a, **kw: ("ACT", "do it")
+            "kennel.events._triage", wraps=lambda *a, **kw: ("ACT", ["do it"])
         ) as mock_triage:
-            cat, title = reply_to_issue_comment(
+            cat, titles = reply_to_issue_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
@@ -1267,7 +1364,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        cat, title = reply_to_issue_comment(
+        cat, titles = reply_to_issue_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -1275,6 +1372,25 @@ class TestReplyToIssueComment:
             _gh=mock_gh,
         )
         assert cat == "ACT"
+
+    def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
+        """A top-level comment may produce multiple ACT tasks."""
+        cfg = self._cfg(tmp_path)
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: add unit tests\nACT: update documentation"
+            return "On it!"
+
+        cat, titles = reply_to_issue_comment(
+            self._action("add tests and update docs"),
+            cfg,
+            self._repo_cfg(tmp_path),
+            _print_prompt=fake_pp,
+            _gh=MagicMock(),
+        )
+        assert cat == "ACT"
+        assert titles == ["add unit tests", "update documentation"]
 
 
 class TestCreateTask:
@@ -1745,6 +1861,393 @@ class TestCreateTask:
             )
         registry.abort_task.assert_not_called()
 
+    def test_thread_task_triggers_reorder_background(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 5}
+        fake_task = {
+            "id": "t1",
+            "title": "Comment task",
+            "status": "pending",
+            "type": "thread",
+            "thread": thread,
+        }
+        reorder_called: list[tuple] = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _get_commit_summary_fn=lambda wd: "abc1234 add thing",
+                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: (
+                    reorder_called.append((wd, cs, cfg, rc, reg))
+                ),
+            )
+        assert len(reorder_called) == 1
+        assert reorder_called[0][0] == tmp_path
+        assert reorder_called[0][1] == "abc1234 add thing"
+        assert reorder_called[0][2] is cfg
+        assert reorder_called[0][3] is repo_cfg
+        assert reorder_called[0][4] is None  # no registry passed
+
+    def test_spec_task_does_not_trigger_reorder(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fake_task = {
+            "id": "t1",
+            "title": "Spec task",
+            "status": "pending",
+            "type": "spec",
+        }
+        reorder_called: list = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "Spec task",
+                cfg,
+                repo_cfg,
+                _reorder_background_fn=lambda *a: reorder_called.append(a),
+            )
+        assert reorder_called == []
+
+    def test_commit_summary_comes_from_get_commit_summary_fn(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 7}
+        fake_task = {
+            "id": "t1",
+            "title": "t",
+            "status": "pending",
+            "type": "thread",
+            "thread": thread,
+        }
+        summaries: list[str] = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "t",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _get_commit_summary_fn=lambda wd: "custom summary",
+                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: summaries.append(
+                    cs
+                ),
+            )
+        assert summaries == ["custom summary"]
+
+
+class TestGetCommitSummary:
+    def test_returns_git_log_output(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=0, stdout="abc123 add thing\n", stderr=""
+        )
+        with patch(
+            "kennel.events.subprocess.run", return_value=fake_result
+        ) as mock_run:
+            result = _get_commit_summary(tmp_path)
+        assert result == "abc123 add thing"
+        mock_run.assert_called_once_with(
+            ["git", "log", "--oneline", "-20"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+        with patch("kennel.events.subprocess.run", side_effect=FileNotFoundError):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_on_timeout(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        with patch(
+            "kennel.events.subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
+        ):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_stdout_when_git_fails(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=128, stdout="", stderr="not a git repo"
+        )
+        with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+
+class TestReorderTasksBackground:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def test_starts_daemon_thread(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path,
+            "some commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+        )
+        assert len(started) == 1
+        t = started[0]
+        assert t.daemon is True
+
+    def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
+        )
+        assert tmp_path.name in started[0].name
+
+    def test_thread_target_is_reorder_tasks(self, tmp_path: Path) -> None:
+        from kennel.tasks import reorder_tasks
+
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
+        )
+        assert started[0]._target is reorder_tasks
+
+    def test_thread_args_are_work_dir_and_commit_summary(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path,
+            "feat: add parser",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+        )
+        assert started[0]._args == (tmp_path, "feat: add parser")
+
+    def test_on_changes_callback_notifies_thread_changes(self, tmp_path: Path) -> None:
+        started: list = []
+        mock_gh = MagicMock()
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _gh=mock_gh,
+        )
+        on_changes = started[0]._kwargs["_on_changes"]
+        change = {
+            "task": {
+                "id": "t1",
+                "title": "Fix it",
+                "status": "pending",
+                "type": "thread",
+                "thread": {
+                    "repo": "owner/repo",
+                    "pr": 1,
+                    "comment_id": 42,
+                    "url": "https://github.com/owner/repo/pull/1#issuecomment-42",
+                    "author": "bob",
+                },
+            },
+            "kind": "completed",
+        }
+        with patch("kennel.events._notify_thread_change") as mock_notify:
+            on_changes([change])
+        mock_notify.assert_called_once_with(change, self._cfg(tmp_path), _gh=mock_gh)
+
+    def test_on_inprogress_affected_aborts_worker_via_registry(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+        )
+        on_inprogress_affected = started[0]._kwargs["_on_inprogress_affected"]
+        on_inprogress_affected()
+        registry.abort_task.assert_called_once_with("owner/repo")
+
+    def test_on_inprogress_affected_not_in_kwargs_when_no_registry(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+        )
+        assert "_on_inprogress_affected" not in started[0]._kwargs
+
+
+class TestNotifyThreadChange:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _task(self, **overrides) -> dict:
+        t = {
+            "id": "t1",
+            "title": "Fix the thing",
+            "status": "pending",
+            "type": "thread",
+            "thread": {
+                "repo": "owner/repo",
+                "pr": 42,
+                "comment_id": 999,
+                "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
+                "author": "alice",
+            },
+        }
+        t.update(overrides)
+        return t
+
+    def test_completed_posts_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "completed"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="Noted!"), _gh=mock_gh
+        )
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Noted!")
+
+    def test_modified_posts_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {
+            "task": self._task(),
+            "kind": "modified",
+            "new_title": "Updated title",
+            "new_description": "",
+        }
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="Updated!"), _gh=mock_gh
+        )
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Updated!")
+
+    def test_missing_thread_skips_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        task["thread"] = {}
+        change = {"task": task, "kind": "completed"}
+        _notify_thread_change(change, cfg, _print_prompt=MagicMock(), _gh=mock_gh)
+        mock_gh.comment_issue.assert_not_called()
+
+    def test_empty_opus_uses_fallback_for_completed(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "completed"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "Fix the thing" in body
+        assert "@alice" in body
+
+    def test_empty_opus_uses_fallback_for_modified(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {
+            "task": self._task(),
+            "kind": "modified",
+            "new_title": "New title",
+            "new_description": "",
+        }
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "New title" in body
+        assert "@alice" in body
+
+    def test_fallback_no_author_omits_mention(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        task["thread"] = {
+            "repo": "owner/repo",
+            "pr": 42,
+            "comment_id": 999,
+            "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
+        }
+        change = {"task": task, "kind": "completed"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "@" not in body
+
+    def test_author_in_opus_instruction(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        captured_prompt: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            captured_prompt.append(prompt)
+            return "ok"
+
+        change = {"task": self._task(), "kind": "completed"}
+        _notify_thread_change(change, cfg, _print_prompt=fake_pp, _gh=MagicMock())
+        assert "alice" in captured_prompt[0]
+
+    def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "completed"}
+        with patch("kennel.events.get_github", return_value=mock_gh):
+            _notify_thread_change(
+                change, cfg, _print_prompt=MagicMock(return_value="ok")
+            )
+        mock_gh.comment_issue.assert_called_once()
+
+    def test_comment_issue_exception_does_not_raise(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.comment_issue.side_effect = RuntimeError("api error")
+        change = {"task": self._task(), "kind": "completed"}
+        # Should not raise
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
+        )
+
+    def test_default_print_prompt_uses_claude(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "completed"}
+        with patch("kennel.events.claude.print_prompt", return_value="Auto reply"):
+            _notify_thread_change(change, cfg, _gh=mock_gh)
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
+
 
 class TestLaunchSync:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -1961,10 +2464,10 @@ class TestReplyToCommentElseBranch:
         # fallback "ACT"/"DO". We need to force an unlisted category past _triage.
         # Monkey-patch _triage directly to return a fake category.
         with (
-            patch("kennel.events._triage", return_value=("UNKNOWN_CAT", "do it")),
+            patch("kennel.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
             patch("kennel.events.needs_more_context", return_value=False),
         ):
-            posted, cat, title = reply_to_comment(
+            posted, cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
@@ -1993,7 +2496,7 @@ class TestReplyToCommentElseBranch:
 
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        posted, cat, title = reply_to_comment(
+        posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
@@ -2109,7 +2612,7 @@ class TestReplyToCommentTerseEnrichment:
         def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
             if context is not None:
                 captured_context.update(context)
-            return ("ACT", "handle same comment")
+            return ("ACT", ["handle same comment"])
 
         mock_gh = MagicMock()
         mock_gh.fetch_sibling_threads.return_value = [
@@ -2181,7 +2684,7 @@ class TestReplyToCommentTerseEnrichment:
             return "On it."
 
         with patch("kennel.events.needs_more_context", return_value=True):
-            posted, cat, title = reply_to_comment(
+            posted, cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
@@ -2207,7 +2710,7 @@ class TestReplyToCommentTerseEnrichment:
         def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
             if context is not None:
                 captured_context.update(context)
-            return ("ACT", "check caret comment")
+            return ("ACT", ["check caret comment"])
 
         mock_gh = MagicMock()
         mock_gh.fetch_sibling_threads.return_value = []

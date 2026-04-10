@@ -4411,10 +4411,12 @@ class TestPickNextTask:
         ci = self._task("Fix tests", task_type="ci")
         assert _pick_next_task([thread_task, ci]) is ci
 
-    def test_thread_type_takes_priority_over_spec(self) -> None:
+    def test_thread_type_uses_list_order_same_as_spec(self) -> None:
         regular = self._task("Regular work", task_type="spec")
         thread_task = self._task("PR comment: rename var", task_type="thread")
-        assert _pick_next_task([regular, thread_task]) is thread_task
+        # Thread tasks no longer jump the queue — first in list wins.
+        assert _pick_next_task([regular, thread_task]) is regular
+        assert _pick_next_task([thread_task, regular]) is thread_task
 
     def test_returns_first_pending_when_no_special(self) -> None:
         first = self._task("First task")
@@ -7460,7 +7462,7 @@ class TestFormatWorkQueue:
         assert "CI failure: lint" in lines[0]
         assert "Normal task" in lines[1]
 
-    def test_thread_task_has_priority_over_other_pending(self) -> None:
+    def test_thread_task_preserves_list_order_same_as_spec(self) -> None:
         tasks = [
             {"title": "Normal", "status": "pending", "type": "spec"},
             {
@@ -7472,8 +7474,9 @@ class TestFormatWorkQueue:
         ]
         result = _format_work_queue(tasks)
         lines = [ln for ln in result.splitlines() if "- [ ]" in ln]
-        assert "Thread task" in lines[0]
-        assert "Normal" in lines[1]
+        # Thread tasks no longer jump the queue — list order is preserved.
+        assert "Normal" in lines[0]
+        assert "Thread task" in lines[1]
 
     def test_thread_task_with_url_becomes_link(self) -> None:
         tasks = [
