@@ -30,6 +30,8 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
     parts: list[str] = []
     if ctx.get("pr_title"):
         parts.append(f"PR: {ctx['pr_title']}")
+    if ctx.get("pr_body"):
+        parts.append(f"PR description:\n{ctx['pr_body']}")
     if ctx.get("file"):
         parts.append(f"File: {ctx['file']}")
     if ctx.get("diff_hunk"):

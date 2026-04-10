@@ -56,15 +56,27 @@ class TestTriageContextBlock:
         assert "Diff:" in result
         assert "@@ -1,2 +1,3 @@" in result
 
+    def test_pr_body(self) -> None:
+        result = triage_context_block({"pr_body": "Adds caching to the parser."})
+        assert "PR description:" in result
+        assert "Adds caching to the parser." in result
+
+    def test_empty_pr_body_omitted(self) -> None:
+        result = triage_context_block({"pr_body": ""})
+        assert "PR description:" not in result
+
     def test_all_fields(self) -> None:
         result = triage_context_block(
             {
                 "pr_title": "Refactor",
+                "pr_body": "Refactors the parser.",
                 "file": "app.py",
                 "diff_hunk": "- old\n+ new",
             }
         )
         assert "PR: Refactor" in result
+        assert "PR description:" in result
+        assert "Refactors the parser." in result
         assert "File: app.py" in result
         assert "Diff:" in result
         assert "- old\n+ new" in result

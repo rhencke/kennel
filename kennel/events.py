@@ -110,7 +110,7 @@ def dispatch(
             is_bot=is_bot,
             context={
                 "pr_title": pr.get("title", ""),
-                "pr_body": (pr.get("body", "") or "")[:500],
+                "pr_body": pr.get("body", "") or "",
                 "file": comment.get("path", ""),
                 "line": comment.get("line"),
                 "diff_hunk": comment.get("diff_hunk", ""),
@@ -143,7 +143,7 @@ def dispatch(
             is_bot=is_bot,
             context={
                 "pr_title": issue.get("title", ""),
-                "pr_body": (issue.get("body", "") or "")[:500],
+                "pr_body": issue.get("body", "") or "",
                 "comment_id": comment_id,
             },
             thread={
