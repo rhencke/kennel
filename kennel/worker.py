@@ -84,10 +84,16 @@ class RepoContext:
     """GitHub repo metadata discovered at worker startup."""
 
     repo: str  # "owner/repo"
-    owner: str
+    owner: str  # URL slug (used in API paths); NOT the human reviewer
     repo_name: str
-    gh_user: str  # authenticated GitHub username
+    gh_user: str  # authenticated GitHub username (the bot itself)
     default_branch: str
+    collaborators: tuple[str, ...] = ()  # humans with write+, bot excluded
+
+    @property
+    def primary_reviewer(self) -> str:
+        """First collaborator — the default reviewer to request reviews from."""
+        return self.collaborators[0] if self.collaborators else self.owner
 
 
 @dataclass
@@ -388,12 +394,16 @@ class Worker:
         owner, repo_name = repo.split("/", 1)
         gh_user = self.gh.get_user()
         default_branch = self.gh.get_default_branch(cwd=self.work_dir)
+        collaborators = tuple(
+            c for c in self.gh.get_collaborators(repo) if c != gh_user
+        )
         return RepoContext(
             repo=repo,
             owner=owner,
             repo_name=repo_name,
             gh_user=gh_user,
             default_branch=default_branch,
+            collaborators=collaborators,
         )
 
     def get_current_issue(self, fido_dir: Path, repo: str) -> int | None:
@@ -857,7 +867,7 @@ class Worker:
         self,
         threads_data: dict[str, Any],
         gh_user: str,
-        owner: str,
+        collaborators: tuple[str, ...],
     ) -> list[dict[str, Any]]:
         """Return unresolved review threads for the comments sub-Claude.
 
@@ -865,7 +875,7 @@ class Worker:
         - it is not resolved,
         - it has at least one comment,
         - the last commenter is not *gh_user* (awaiting a response), and
-        - the last commenter is either *owner* or ends with ``[bot]``.
+        - the last commenter is either in *collaborators* or ends with ``[bot]``.
         """
         nodes = (
             threads_data.get("data", {})
@@ -886,7 +896,7 @@ class Worker:
             last_author = last_comment.get("author", {}).get("login", "")
             if last_author == gh_user:
                 continue
-            if last_author != owner and not last_author.endswith("[bot]"):
+            if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
             result.append(
                 {
@@ -971,7 +981,9 @@ class Worker:
         threads_data = self.gh.get_review_threads(
             repo_ctx.owner, repo_ctx.repo_name, pr_number
         )
-        threads = self._filter_threads(threads_data, repo_ctx.gh_user, repo_ctx.owner)
+        threads = self._filter_threads(
+            threads_data, repo_ctx.gh_user, repo_ctx.collaborators
+        )
         if not threads:
             return False
         log.info("unresolved threads: %d", len(threads))
@@ -1304,10 +1316,12 @@ class Worker:
         is_draft = reviews_data.get("isDraft", False)
         requested_reviewers = reviews_data.get("requestedReviewers", [])
 
-        owner_reviews = [
-            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
+        collab_reviews = [
+            r
+            for r in reviews
+            if r.get("author", {}).get("login") in repo_ctx.collaborators
         ]
-        _latest_decisive = latest_decisive_review(owner_reviews)
+        _latest_decisive = latest_decisive_review(collab_reviews)
         latest_state = (
             _latest_decisive.get("state", "NONE") if _latest_decisive else "NONE"
         )
@@ -1346,7 +1360,7 @@ class Worker:
             return 0
 
         if latest_state == "CHANGES_REQUESTED":
-            if not should_rerequest_review(owner_reviews, commits):
+            if not should_rerequest_review(collab_reviews, commits):
                 log.info(
                     "PR #%s: CHANGES_REQUESTED review newer than latest commit — skipping re-request",
                     pr_number,

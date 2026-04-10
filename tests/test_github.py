@@ -89,6 +89,18 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         assert gh.get_user() == "fido"
 
+    def test_get_collaborators_delegates(self) -> None:
+        gh, mock_s = self._github()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "alice", "role_name": "admin"},
+            {"login": "bob", "role_name": "write"},
+            {"login": "carol", "role_name": "read"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("owner/repo") == ["alice", "bob"]
+
     def test_get_default_branch_delegates(self) -> None:
         gh, mock_s = self._github()
         remote_resp = _completed("https://github.com/o/r.git\n")
@@ -1066,6 +1078,57 @@ class TestGHClass:
         url = mock_s.get.call_args.args[0]
         assert url.endswith("/user")
         assert result == "fido"
+
+    def test_get_collaborators_filters_by_permission(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "admin-user", "role_name": "admin"},
+            {"login": "maint-user", "role_name": "maintain"},
+            {"login": "write-user", "role_name": "write"},
+            {"login": "triage-user", "role_name": "triage"},
+            {"login": "read-user", "role_name": "read"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_collaborators("owner/repo")
+        assert result == ["admin-user", "maint-user", "write-user"]
+        url = mock_s.get.call_args.args[0]
+        assert url.endswith("/repos/owner/repo/collaborators")
+
+    def test_get_collaborators_preserves_order(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "second", "role_name": "write"},
+            {"login": "first", "role_name": "admin"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        # API order preserved — caller uses [0] as "primary reviewer"
+        assert gh.get_collaborators("o/r") == ["second", "first"]
+
+    def test_get_collaborators_skips_users_missing_login(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"role_name": "admin"},
+            {"login": "alice", "role_name": "write"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("o/r") == ["alice"]
+
+    def test_get_collaborators_handles_missing_role(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"login": "alice"},
+            {"login": "bob", "role_name": "admin"},
+        ]
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_collaborators("o/r") == ["bob"]
 
     def test_get_repo_info_https(self) -> None:
         gh = GH("test-token")

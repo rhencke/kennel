@@ -296,6 +296,22 @@ class GH:
         data = self._get("/user")
         return data["login"]
 
+    def get_collaborators(self, repo: str) -> list[str]:
+        """Return logins of collaborators with write+ permission on *repo*.
+
+        Filters to users whose permission level is ``admin``, ``maintain``, or
+        ``push`` (GitHub's ``write`` equivalent).  Preserves the order returned
+        by the API so callers can use ``[0]`` as a stable "primary reviewer".
+        """
+        result: list[str] = []
+        for user in self._paginate(f"{self.BASE}/repos/{repo}/collaborators"):
+            perm = user.get("role_name") or ""
+            if perm in ("admin", "maintain", "write"):
+                login = user.get("login")
+                if login:
+                    result.append(login)
+        return result
+
     def get_repo_info(
         self,
         cwd: Path | str | None = None,
@@ -588,6 +604,10 @@ class GitHub:
     def get_user(self) -> str:
         """Return the authenticated GitHub username."""
         return self._gh.get_user()
+
+    def get_collaborators(self, repo: str) -> list[str]:
+        """Return logins of collaborators with write+ permission on *repo*."""
+        return self._gh.get_collaborators(repo)
 
     def get_default_branch(
         self, cwd: Path | str | None = None, runner: Any = subprocess.run
