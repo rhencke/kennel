@@ -265,8 +265,14 @@ class TestMakeThread:
         result = _make_thread(
             cfg, mock_registry, _GitHub=mock_gh_cls, _WorkerThread=mock_wt_cls
         )
+        from kennel.config import RepoMembership
+
         mock_wt_cls.assert_called_once_with(
-            tmp_path, "foo/bar", mock_gh_cls.return_value, mock_registry
+            tmp_path,
+            "foo/bar",
+            mock_gh_cls.return_value,
+            mock_registry,
+            RepoMembership(),
         )
         assert result is mock_wt_cls.return_value
 

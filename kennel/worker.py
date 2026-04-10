@@ -9,11 +9,12 @@ import re
 import subprocess
 import threading
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
+from kennel.config import RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
 from kennel.state import (
@@ -88,12 +89,12 @@ class RepoContext:
     repo_name: str
     gh_user: str  # authenticated GitHub username (the bot itself)
     default_branch: str
-    collaborators: tuple[str, ...] = ()  # humans with write+, bot excluded
+    membership: RepoMembership = field(default_factory=RepoMembership)
 
     @property
-    def primary_reviewer(self) -> str:
-        """First collaborator — the default reviewer to request reviews from."""
-        return self.collaborators[0] if self.collaborators else self.owner
+    def collaborators(self) -> frozenset[str]:
+        """Shortcut for ``self.membership.collaborators``."""
+        return self.membership.collaborators
 
 
 @dataclass
@@ -338,12 +339,14 @@ class Worker:
         abort_task: threading.Event | None = None,
         repo_name: str = "",
         registry: ActivityReporter | None = None,
+        membership: RepoMembership | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
         self._abort_task = abort_task if abort_task is not None else threading.Event()
         self._repo_name = repo_name
         self._registry = registry
+        self._membership = membership if membership is not None else RepoMembership()
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -389,21 +392,23 @@ class Worker:
     # ------------------------------------------------------------------
 
     def discover_repo_context(self) -> RepoContext:
-        """Discover repo metadata for self.work_dir using the GitHub API."""
+        """Discover repo metadata for self.work_dir using the GitHub API.
+
+        The membership (collaborators list) is taken from ``self._membership``,
+        which is populated at kennel server startup — no per-iteration API
+        call for collaborators.
+        """
         repo = self.gh.get_repo_info(cwd=self.work_dir)
         owner, repo_name = repo.split("/", 1)
         gh_user = self.gh.get_user()
         default_branch = self.gh.get_default_branch(cwd=self.work_dir)
-        collaborators = tuple(
-            c for c in self.gh.get_collaborators(repo) if c != gh_user
-        )
         return RepoContext(
             repo=repo,
             owner=owner,
             repo_name=repo_name,
             gh_user=gh_user,
             default_branch=default_branch,
-            collaborators=collaborators,
+            membership=self._membership,
         )
 
     def get_current_issue(self, fido_dir: Path, repo: str) -> int | None:
@@ -1366,17 +1371,19 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            if repo_ctx.owner not in requested_reviewers:
+            missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
+            if missing:
                 checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
                 required = self.gh.get_required_checks(
                     repo_ctx.repo, repo_ctx.default_branch
                 )
                 if ci_ready_for_review(checks, required):
                     log.info(
-                        "PR #%s: changes requested — all addressed, CI passing — re-requesting review",
+                        "PR #%s: changes requested — all addressed, CI passing — re-requesting review from %s",
                         pr_number,
+                        ", ".join(missing),
                     )
-                    self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                    self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
                 else:
                     log.info(
                         "PR #%s: changes requested — all addressed, but CI not yet passing — deferring re-request",
@@ -1403,7 +1410,8 @@ class Worker:
                 return 0
             log.info("PR #%s: work complete — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
-            if repo_ctx.owner not in requested_reviewers:
+            missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
+            if missing:
                 checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
                 required = self.gh.get_required_checks(
                     repo_ctx.repo, repo_ctx.default_branch
@@ -1412,9 +1420,9 @@ class Worker:
                     log.info(
                         "PR #%s: CI passing — requesting review from %s",
                         pr_number,
-                        repo_ctx.owner,
+                        ", ".join(missing),
                     )
-                    self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                    self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
                 else:
                     log.info(
                         "PR #%s: CI not yet passing — deferring review request",
@@ -1422,7 +1430,8 @@ class Worker:
                     )
             return 1
 
-        if repo_ctx.owner not in requested_reviewers and latest_state == "NONE":
+        missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
+        if missing and latest_state == "NONE":
             checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
             required = self.gh.get_required_checks(
                 repo_ctx.repo, repo_ctx.default_branch
@@ -1431,9 +1440,9 @@ class Worker:
                 log.info(
                     "PR #%s: CI passing — requesting review from %s",
                     pr_number,
-                    repo_ctx.owner,
+                    ", ".join(missing),
                 )
-                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
             else:
                 log.info(
                     "PR #%s: CI not yet passing — waiting before requesting review",
@@ -1529,12 +1538,14 @@ class WorkerThread(threading.Thread):
         repo_name: str,
         gh: GitHub,
         registry: ActivityReporter | None = None,
+        membership: RepoMembership | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
+        self._membership = membership if membership is not None else RepoMembership()
         self._wake = threading.Event()
         self._abort_task = threading.Event()
         self._stop = False
@@ -1564,6 +1575,7 @@ class WorkerThread(threading.Thread):
                     self._abort_task,
                     self._repo_name,
                     self._registry,
+                    self._membership,
                 ).run()
             except Exception:
                 log.exception("WorkerThread %s: unexpected error", self.name)

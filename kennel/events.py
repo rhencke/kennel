@@ -36,10 +36,13 @@ class Action:
     )
 
 
-def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
-    """Check if user is the repo owner or an allowed bot."""
-    owner = payload.get("repository", {}).get("owner", {}).get("login", "")
-    return user == owner or user in config.allowed_bots
+def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
+    """Check if user is a repo collaborator or an allowed bot.
+
+    ``repo_cfg.membership.collaborators`` is populated at server startup
+    (``server.populate_memberships``) and excludes the bot itself.
+    """
+    return user in repo_cfg.membership.collaborators or user in config.allowed_bots
 
 
 def dispatch(
@@ -72,7 +75,7 @@ def dispatch(
         review_id = review.get("id")
         if not number:
             return None
-        if not _is_allowed(user, payload, config):
+        if not _is_allowed(user, repo_cfg, config):
             log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
             return None
         log.info("review on PR #%s: %s by %s", number, state, user)
@@ -94,7 +97,7 @@ def dispatch(
             return None
         if not number:
             return None
-        if not _is_allowed(user, payload, config):
+        if not _is_allowed(user, repo_cfg, config):
             log.debug("ignoring comment on PR #%s by %s (not allowed)", number, user)
             return None
         comment_body = comment.get("body", "") or ""
@@ -130,7 +133,7 @@ def dispatch(
         if user.lower() in ("fidocancode", "fido-can-code"):
             log.debug("ignoring own comment on PR")
             return None
-        if not _is_allowed(user, payload, config):
+        if not _is_allowed(user, repo_cfg, config):
             log.debug("ignoring comment by %s (not allowed)", user)
             return None
         number = issue.get("number")

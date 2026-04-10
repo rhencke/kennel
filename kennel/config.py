@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class RepoMembership:
+    """Cached membership info for a repo — who gets to direct fido's work.
+
+    Populated once at server startup (``server.populate_memberships``) via
+    ``GH.get_collaborators``, then shared as a field on both
+    :class:`RepoConfig` (used by event dispatch at webhook time) and
+    :class:`~kennel.worker.RepoContext` (used by workers at task execution
+    time).  Single source of truth for "who is allowed to comment on or
+    approve fido's PRs on this repo".
+
+    The bot account itself is always excluded from ``collaborators``.
+    """
+
+    collaborators: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class RepoConfig:
     name: str  # "rhencke/confusio"
     work_dir: Path  # /home/rhencke/workspace/confusio
+    membership: RepoMembership = field(default_factory=RepoMembership)
 
 
 @dataclass(frozen=True)

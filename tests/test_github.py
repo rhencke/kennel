@@ -273,12 +273,17 @@ class TestGitHubClass:
         result = gh.get_pr_body("o/r", 10)
         assert result == "some body"
 
-    def test_add_pr_reviewer_delegates(self) -> None:
+    def test_add_pr_reviewers_delegates(self) -> None:
         gh, mock_s = self._github()
         mock_resp = MagicMock()
         mock_s.post.return_value = mock_resp
-        gh.add_pr_reviewer("o/r", 10, "alice")
-        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["alice"]
+        gh.add_pr_reviewers("o/r", 10, ["alice", "bob"])
+        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["alice", "bob"]
+
+    def test_add_pr_reviewers_empty_is_noop(self) -> None:
+        gh, mock_s = self._github()
+        gh.add_pr_reviewers("o/r", 10, [])
+        mock_s.post.assert_not_called()
 
     def test_pr_checks_delegates(self) -> None:
         gh, mock_s = self._github()
@@ -1292,14 +1297,22 @@ class TestGHClass:
         result = gh.get_pr_body("o/r", 10)
         assert result == ""
 
-    def test_add_pr_reviewer(self) -> None:
+    def test_add_pr_reviewers(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
         mock_s.post.return_value = mock_resp
-        gh.add_pr_reviewer("o/r", 10, "rhencke")
+        gh.add_pr_reviewers("o/r", 10, ["rhencke", "alice"])
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls/10/requested_reviewers" in url
-        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["rhencke"]
+        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == [
+            "rhencke",
+            "alice",
+        ]
+
+    def test_add_pr_reviewers_empty_skips_post(self) -> None:
+        gh, mock_s = self._gh()
+        gh.add_pr_reviewers("o/r", 10, [])
+        mock_s.post.assert_not_called()
 
     def test_pr_checks_returns_list(self) -> None:
         gh, mock_s = self._gh()

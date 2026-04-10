@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -14,7 +15,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from kennel.config import Config, RepoConfig
+from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
     create_task,
     dispatch,
@@ -23,6 +24,7 @@ from kennel.events import (
     reply_to_issue_comment,
     reply_to_review,
 )
+from kennel.github import GitHub
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.worker import RepoContextFilter, RepoNameFilter
 
@@ -320,6 +322,26 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pass
 
 
+def populate_memberships(
+    config: Config, *, _gh_factory: Callable[[], GitHub] = GitHub
+) -> None:
+    """Fetch collaborators for each repo once at startup and store on RepoConfig.
+
+    Mutates ``config.repos`` in place — each :class:`RepoConfig` is replaced
+    with a new instance carrying a populated :class:`RepoMembership`.  Uses
+    one GitHub client instance for all repos.  Bot account (gh_user) is
+    excluded from every collaborator set.
+    """
+    gh = _gh_factory()
+    bot_user = gh.get_user()
+    for name, repo_cfg in list(config.repos.items()):
+        collabs = frozenset(c for c in gh.get_collaborators(name) if c != bot_user)
+        log.info("%s: collaborators = %s", name, sorted(collabs) or "(none)")
+        config.repos[name] = dataclasses.replace(
+            repo_cfg, membership=RepoMembership(collaborators=collabs)
+        )
+
+
 def run(
     *,
     _from_args=Config.from_args,
@@ -328,6 +350,7 @@ def run(
     _path_home=Path.home,
     _basic_config=logging.basicConfig,
     _stderr=sys.stderr,
+    _populate_memberships=populate_memberships,
 ) -> None:
     config = _from_args()
 
@@ -355,6 +378,8 @@ def run(
         datefmt="%H:%M:%S",
         handlers=handlers,
     )
+
+    _populate_memberships(config)
 
     WebhookHandler.config = config
     WebhookHandler.registry = _make_registry(config.repos)

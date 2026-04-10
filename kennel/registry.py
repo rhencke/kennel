@@ -123,7 +123,13 @@ def _make_thread(
     _WorkerThread=WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with a live GitHub client."""
-    return _WorkerThread(repo_cfg.work_dir, repo_cfg.name, _GitHub(), registry)
+    return _WorkerThread(
+        repo_cfg.work_dir,
+        repo_cfg.name,
+        _GitHub(),
+        registry,
+        repo_cfg.membership,
+    )
 
 
 def make_registry(

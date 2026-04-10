@@ -19,10 +19,18 @@ from kennel.server import WebhookHandler
 
 
 def _config(tmp_path: Path) -> Config:
+    from kennel.config import RepoMembership
+
     return Config(
         port=0,  # will bind to random port
         secret=b"test-secret",
-        repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+        repos={
+            "owner/repo": RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                membership=RepoMembership(collaborators=frozenset({"owner"})),
+            ),
+        },
         allowed_bots=frozenset({"copilot[bot]"}),
         log_level="WARNING",
         sub_dir=tmp_path / "sub",
@@ -481,6 +489,75 @@ class TestProcessAction:
         # server still alive — no crash
 
 
+class TestPopulateMemberships:
+    def test_populates_from_get_collaborators(self, tmp_path: Path) -> None:
+        from kennel.config import RepoMembership
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "fido-bot"
+        mock_gh.get_collaborators.return_value = ["alice", "bob"]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        assert cfg.repos["owner/repo"].membership == RepoMembership(
+            collaborators=frozenset({"alice", "bob"})
+        )
+
+    def test_filters_bot_user_from_collaborators(self, tmp_path: Path) -> None:
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "fido-bot"
+        mock_gh.get_collaborators.return_value = ["alice", "fido-bot", "bob"]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        result = cfg.repos["owner/repo"].membership.collaborators
+        assert result == frozenset({"alice", "bob"})
+        assert "fido-bot" not in result
+
+    def test_iterates_all_repos(self, tmp_path: Path) -> None:
+        from kennel.server import populate_memberships
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={
+                "o/r1": RepoConfig(name="o/r1", work_dir=tmp_path),
+                "o/r2": RepoConfig(name="o/r2", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_user.return_value = "bot"
+        mock_gh.get_collaborators.side_effect = lambda name: {
+            "o/r1": ["alice"],
+            "o/r2": ["bob", "carol"],
+        }[name]
+        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        assert cfg.repos["o/r1"].membership.collaborators == frozenset({"alice"})
+        assert cfg.repos["o/r2"].membership.collaborators == frozenset({"bob", "carol"})
+
+
 class TestRun:
     """Tests for the run() entry point."""
 
@@ -507,6 +584,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -530,6 +608,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -554,6 +633,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -576,6 +656,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
+            _populate_memberships=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -610,6 +691,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -657,6 +739,7 @@ class TestRun:
             _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
+            _populate_memberships=MagicMock(),
         )
 
         repo_handler = next(

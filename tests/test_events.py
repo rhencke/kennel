@@ -34,7 +34,13 @@ def _config(tmp_path: Path) -> Config:
 
 
 def _repo_cfg(tmp_path: Path) -> RepoConfig:
-    return RepoConfig(name="owner/repo", work_dir=tmp_path)
+    from kennel.config import RepoMembership
+
+    return RepoConfig(
+        name="owner/repo",
+        work_dir=tmp_path,
+        membership=RepoMembership(collaborators=frozenset({"owner"})),
+    )
 
 
 def _payload(repo_owner: str = "owner") -> dict:
@@ -91,20 +97,43 @@ class TestNeedsMoreContext:
 
 
 class TestIsAllowed:
-    def test_owner_allowed(self, tmp_path: Path) -> None:
-        cfg = _config(tmp_path)
-        payload = _payload("owner")
-        assert _is_allowed("owner", payload, cfg)
+    def _repo_cfg(
+        self, tmp_path: Path, collaborators: frozenset[str] = frozenset({"owner"})
+    ) -> RepoConfig:
+        from kennel.config import RepoMembership
 
-    def test_bot_allowed(self, tmp_path: Path) -> None:
+        return RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=collaborators),
+        )
+
+    def test_collaborator_allowed(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        payload = _payload("owner")
-        assert _is_allowed("copilot[bot]", payload, cfg)
+        rc = self._repo_cfg(tmp_path)
+        assert _is_allowed("owner", rc, cfg)
+
+    def test_any_collaborator_allowed(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        rc = self._repo_cfg(
+            tmp_path, collaborators=frozenset({"alice", "bob", "rhencke"})
+        )
+        assert _is_allowed("rhencke", rc, cfg)
+
+    def test_bot_allowed_even_without_collab(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        rc = self._repo_cfg(tmp_path, collaborators=frozenset())
+        assert _is_allowed("copilot[bot]", rc, cfg)
 
     def test_random_user_denied(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        payload = _payload("owner")
-        assert not _is_allowed("rando", payload, cfg)
+        rc = self._repo_cfg(tmp_path)
+        assert not _is_allowed("rando", rc, cfg)
+
+    def test_empty_collaborators_denies_all_humans(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        rc = self._repo_cfg(tmp_path, collaborators=frozenset())
+        assert not _is_allowed("anyone", rc, cfg)
 
 
 class TestDispatchPing:

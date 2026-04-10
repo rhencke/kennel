@@ -11,6 +11,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from kennel.config import RepoMembership
 from kennel.state import (
     _resolve_git_dir,
     clear_state,
@@ -238,15 +239,14 @@ class TestRepoContext:
             repo_name="myrepo",
             gh_user="bot",
             default_branch="main",
-            collaborators=("alice", "carol"),
+            membership=RepoMembership(collaborators=frozenset({"alice", "carol"})),
         )
         assert ctx.repo == "alice/myrepo"
         assert ctx.owner == "alice"
         assert ctx.repo_name == "myrepo"
         assert ctx.gh_user == "bot"
         assert ctx.default_branch == "main"
-        assert ctx.collaborators == ("alice", "carol")
-        assert ctx.primary_reviewer == "alice"
+        assert ctx.collaborators == frozenset({"alice", "carol"})
 
     def test_collaborators_default_empty(self) -> None:
         ctx = RepoContext(
@@ -256,7 +256,7 @@ class TestRepoContext:
             gh_user="bot",
             default_branch="main",
         )
-        assert ctx.collaborators == ()
+        assert ctx.collaborators == frozenset()
 
 
 class TestWorker:
@@ -265,16 +265,12 @@ class TestWorker:
         repo: str = "owner/myrepo",
         user: str = "fido-bot",
         branch: str = "main",
-        collaborators: list[str] | None = None,
     ) -> MagicMock:
         gh = MagicMock()
         gh.get_repo_info.return_value = repo
         gh.get_user.return_value = user
         gh.get_default_branch.return_value = branch
         gh.get_pr.return_value = {"body": ""}
-        gh.get_collaborators.return_value = (
-            collaborators if collaborators is not None else ["owner"]
-        )
         return gh
 
     # --- discover_repo_context ---
@@ -325,27 +321,22 @@ class TestWorker:
         assert result.owner == "org"
         assert result.repo_name == "repo"
 
-    def test_discover_collaborators(self, tmp_path: Path) -> None:
-        gh = self._make_gh(collaborators=["alice", "bob"])
-        result = Worker(tmp_path, gh).discover_repo_context()
-        assert result.collaborators == ("alice", "bob")
+    def test_discover_uses_injected_membership(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        membership = RepoMembership(collaborators=frozenset({"alice", "bob"}))
+        result = Worker(tmp_path, gh, membership=membership).discover_repo_context()
+        assert result.membership is membership
+        assert result.collaborators == frozenset({"alice", "bob"})
 
-    def test_discover_filters_bot_from_collaborators(self, tmp_path: Path) -> None:
-        gh = self._make_gh(user="fido-bot", collaborators=["alice", "fido-bot", "bob"])
+    def test_discover_default_membership_empty(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
         result = Worker(tmp_path, gh).discover_repo_context()
-        assert result.collaborators == ("alice", "bob")
-        assert "fido-bot" not in result.collaborators
+        assert result.collaborators == frozenset()
 
-    def test_primary_reviewer_first_collaborator(self, tmp_path: Path) -> None:
-        gh = self._make_gh(collaborators=["alice", "bob"])
-        result = Worker(tmp_path, gh).discover_repo_context()
-        assert result.primary_reviewer == "alice"
-
-    def test_primary_reviewer_falls_back_to_owner(self, tmp_path: Path) -> None:
-        gh = self._make_gh(user="fido-bot", collaborators=["fido-bot"])
-        result = Worker(tmp_path, gh).discover_repo_context()
-        assert result.collaborators == ()
-        assert result.primary_reviewer == result.owner
+    def test_discover_does_not_call_get_collaborators(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        Worker(tmp_path, gh).discover_repo_context()
+        gh.get_collaborators.assert_not_called()
 
     # --- set_status ---
 
@@ -1065,7 +1056,7 @@ class TestWorkerFindNextIssue:
             repo_name=repo_name,
             gh_user=gh_user,
             default_branch="main",
-            collaborators=(owner,),
+            membership=RepoMembership(collaborators=frozenset({owner})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -2363,7 +2354,7 @@ class TestFindOrCreatePr:
             repo_name=repo_name,
             gh_user=gh_user,
             default_branch=default_branch,
-            collaborators=(owner,),
+            membership=RepoMembership(collaborators=frozenset({owner})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -3319,7 +3310,7 @@ class TestHandleCi:
             repo_name="repo",
             gh_user="fido-bot",
             default_branch="main",
-            collaborators=("owner",),
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -3771,13 +3762,13 @@ class TestFilterThreads:
 
     def test_returns_empty_when_no_nodes(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        assert w._filter_threads({}, "fido-bot", ("owner",)) == []
+        assert w._filter_threads({}, "fido-bot", frozenset({"owner"})) == []
 
     def test_excludes_resolved_threads(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = self._make_node(resolved=True)
         data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", ("owner",)) == []
+        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
 
     def test_excludes_threads_where_last_author_is_gh_user(
         self, tmp_path: Path
@@ -3785,7 +3776,7 @@ class TestFilterThreads:
         w = self._make_worker(tmp_path)
         node = self._make_node(last_author="fido-bot", last_body="done")
         data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", ("owner",)) == []
+        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
 
     def test_excludes_threads_where_last_author_is_neither_owner_nor_bot(
         self, tmp_path: Path
@@ -3793,27 +3784,29 @@ class TestFilterThreads:
         w = self._make_worker(tmp_path)
         node = self._make_node(last_author="random-user", last_body="comment")
         data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", ("owner",)) == []
+        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
 
     def test_includes_thread_from_owner(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = self._make_node(last_author="owner")
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert len(result) == 1
 
     def test_includes_thread_from_bot(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = self._make_node(last_author="my-app[bot]", last_body="bot comment")
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert len(result) == 1
 
     def test_includes_thread_from_any_collaborator(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = self._make_node(last_author="bob")
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("alice", "bob", "carol"))
+        result = w._filter_threads(
+            data, "fido-bot", frozenset({"alice", "bob", "carol"})
+        )
         assert len(result) == 1
 
     def test_maps_fields_correctly(self, tmp_path: Path) -> None:
@@ -3828,7 +3821,7 @@ class TestFilterThreads:
             url="https://github.com/x",
         )
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["id"] == "tid-42"
         assert result[0]["first_author"] == "owner"
         assert result[0]["first_db_id"] == 99
@@ -3842,21 +3835,21 @@ class TestFilterThreads:
         w = self._make_worker(tmp_path)
         node = self._make_node(first_author="my-app[bot]", last_author="owner")
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["is_bot"] is True
 
     def test_is_bot_false_when_first_author_is_human(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = self._make_node(first_author="owner", last_author="owner")
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["is_bot"] is False
 
     def test_excludes_threads_with_no_comments(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = {"id": "x", "isResolved": False, "comments": {"nodes": []}}
         data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", ("owner",)) == []
+        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
 
     def test_total_counts_all_comments(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
@@ -3874,7 +3867,7 @@ class TestFilterThreads:
             ],
         )
         data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", ("owner",))
+        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["total"] == 3
 
 
@@ -3892,7 +3885,7 @@ class TestResolveAddressedThreads:
             repo_name="repo",
             gh_user="fido-bot",
             default_branch="main",
-            collaborators=("owner",),
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
 
     def _make_threads_data(self, nodes: list) -> dict:
@@ -4103,7 +4096,7 @@ class TestHandleThreads:
             repo_name="repo",
             gh_user="fido-bot",
             default_branch="main",
-            collaborators=("owner",),
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -4765,7 +4758,7 @@ class TestExecuteTask:
             repo_name="repo",
             gh_user="fido-bot",
             default_branch="main",
-            collaborators=("owner",),
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -5885,7 +5878,7 @@ class TestHandlePromoteMerge:
             repo_name="myrepo",
             gh_user="fido-bot",
             default_branch="main",
-            collaborators=(owner,),
+            membership=RepoMembership(collaborators=frozenset({owner})),
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
@@ -6151,7 +6144,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_ci_failing_skips_reviewer(self, tmp_path: Path) -> None:
         """CI not passing — re-request deferred until CI is green."""
@@ -6164,7 +6157,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = ["ci"]
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_ci_failing_returns_0(self, tmp_path: Path) -> None:
         """CI not passing — returns 0 (waiting for CI)."""
@@ -6228,7 +6221,7 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         # APPROVED is latest — should merge, not re-request
         gh.pr_merge.assert_called_once()
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     # --- CHANGES_REQUESTED then APPROVED merge scenario ---
 
@@ -6462,7 +6455,7 @@ class TestHandlePromoteMerge:
         }
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_newer_than_commit_returns_0(
         self, tmp_path: Path
@@ -6507,7 +6500,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_older_than_commit_returns_0(
         self, tmp_path: Path
@@ -6548,7 +6541,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once()
+        gh.add_pr_reviewers.assert_called_once()
 
     def test_changes_requested_no_commits_re_requests(self, tmp_path: Path) -> None:
         """No commits in data — fall back to re-requesting."""
@@ -6569,7 +6562,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once()
+        gh.add_pr_reviewers.assert_called_once()
 
     def test_changes_requested_newer_than_commit_logs_skip(
         self, tmp_path: Path, caplog
@@ -6616,7 +6609,7 @@ class TestHandlePromoteMerge:
         }
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     # --- decisive review state (APPROVED/CHANGES_REQUESTED vs COMMENTED) ---
 
@@ -6660,7 +6653,7 @@ class TestHandlePromoteMerge:
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_then_commented_rerequests(self, tmp_path: Path) -> None:
         """CHANGES_REQUESTED followed by COMMENTED: decisive state is
@@ -6679,7 +6672,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_then_commented_does_not_merge(
         self, tmp_path: Path
@@ -6735,7 +6728,7 @@ class TestHandlePromoteMerge:
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with patch("kennel.worker.tasks.list_tasks", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_with_completed_tasks_returns_1(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -6761,7 +6754,7 @@ class TestHandlePromoteMerge:
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with patch("kennel.worker.tasks.list_tasks", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_draft_pending_tasks_block_promote(self, tmp_path: Path) -> None:
         """Pending tasks prevent promote — all tasks must be complete."""
@@ -6797,7 +6790,7 @@ class TestHandlePromoteMerge:
             "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_promote_ci_not_passing_defers_review(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -6811,7 +6804,7 @@ class TestHandlePromoteMerge:
             "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_draft_promote_ci_not_passing_still_calls_pr_ready(
         self, tmp_path: Path
@@ -6857,7 +6850,7 @@ class TestHandlePromoteMerge:
             "kennel.worker.tasks.list_tasks", return_value=self._completed_tasks()
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_promote_uses_default_branch_for_required_checks(
         self, tmp_path: Path
@@ -6885,7 +6878,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = ["ci / test"]
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_non_draft_no_review_ci_not_passing_skips_review(
         self, tmp_path: Path
@@ -6899,7 +6892,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = ["ci / test"]
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_non_draft_no_review_returns_0(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -6931,7 +6924,7 @@ class TestHandlePromoteMerge:
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_checks.assert_not_called()
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_non_draft_commented_review_polls_ci(self, tmp_path: Path) -> None:
         """COMMENTED review has no decisive state — treated as NONE, CI polled."""
@@ -7124,7 +7117,7 @@ class TestHandlePromoteMerge:
         ]
         with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_non_draft_review_not_requested(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -7132,7 +7125,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with patch("kennel.worker.tasks.list_tasks", return_value=[self._ask_task()]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_changes_requested_rerequest_skipped(
         self, tmp_path: Path
@@ -7144,7 +7137,7 @@ class TestHandlePromoteMerge:
         )
         with patch("kennel.worker.tasks.list_tasks", return_value=[self._ask_task()]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewer.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_returns_zero(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -7955,7 +7948,13 @@ class TestWorkerThread:
         captured: list = []
 
         def fake_worker_init(
-            self_w, work_dir, gh, abort_task=None, repo_name="", registry=None
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
