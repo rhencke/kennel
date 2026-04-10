@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -15,6 +16,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
     create_task,
@@ -351,6 +353,8 @@ def run(
     _basic_config=logging.basicConfig,
     _stderr=sys.stderr,
     _populate_memberships=populate_memberships,
+    _signal=signal.signal,
+    _kill_active_children=kill_active_children,
 ) -> None:
     config = _from_args()
 
@@ -385,10 +389,21 @@ def run(
     WebhookHandler.registry = _make_registry(config.repos)
 
     server = _HTTPServer(("", config.port), WebhookHandler)
+
+    def _shutdown_handler(signum: int, _frame: object) -> None:
+        log.info("kennel received signal %d — terminating claude children", signum)
+        _kill_active_children()
+        server.server_close()
+        sys.exit(0)
+
+    _signal(signal.SIGTERM, _shutdown_handler)
+    _signal(signal.SIGINT, _shutdown_handler)
+
     repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
     log.info("kennel listening on :%d — repos: %s", config.port, repos_str)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         log.info("shutting down")
+        _kill_active_children()
         server.server_close()

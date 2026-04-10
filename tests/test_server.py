@@ -590,6 +590,87 @@ class TestRun:
         mock_server.serve_forever.assert_called_once()
         mock_server.server_close.assert_called_once()
 
+    def test_run_keyboard_interrupt_kills_children(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_kill = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _signal=MagicMock(),
+            _kill_active_children=mock_kill,
+        )
+        mock_kill.assert_called_once()
+
+    def test_run_installs_sigterm_and_sigint_handlers(self, tmp_path: Path) -> None:
+        import signal as _sig
+
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        installed: dict[int, object] = {}
+
+        def fake_signal(signum, handler):
+            installed[signum] = handler
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _signal=fake_signal,
+            _kill_active_children=MagicMock(),
+        )
+        assert _sig.SIGTERM in installed
+        assert _sig.SIGINT in installed
+
+    def test_shutdown_handler_kills_children_and_exits(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_kill = MagicMock()
+        captured: dict[int, object] = {}
+
+        def fake_signal(signum, handler):
+            captured[signum] = handler
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _signal=fake_signal,
+            _kill_active_children=mock_kill,
+        )
+        # Reset call counts from the KeyboardInterrupt path so we can verify
+        # the signal handler invokes the same teardown.
+        mock_kill.reset_mock()
+        mock_server.server_close.reset_mock()
+
+        import signal as _sig
+
+        handler = captured[_sig.SIGTERM]
+        with pytest.raises(SystemExit):
+            handler(_sig.SIGTERM, None)
+        mock_kill.assert_called_once()
+        mock_server.server_close.assert_called_once()
+
     def test_run_format_includes_repo_name(self, tmp_path: Path) -> None:
         from kennel.server import run
 

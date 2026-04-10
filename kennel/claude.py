@@ -7,11 +7,61 @@ import logging
 import re
 import select
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+# Tracked long-running claude subprocesses (the streaming ones), so kennel
+# can clean them up on shutdown.  Short-lived ``subprocess.run`` calls cap
+# at 30s and aren't tracked.  Use ``kill_active_children`` from a signal
+# handler to terminate everything before exiting.
+_active_children: set[subprocess.Popen] = set()
+_active_children_lock = threading.Lock()
+
+
+def _register_child(proc: subprocess.Popen) -> None:
+    with _active_children_lock:
+        _active_children.add(proc)
+
+
+def _unregister_child(proc: subprocess.Popen) -> None:
+    with _active_children_lock:
+        _active_children.discard(proc)
+
+
+def kill_active_children(grace_seconds: float = 2.0) -> None:
+    """Send SIGTERM to every tracked claude subprocess, then SIGKILL stragglers.
+
+    Called from kennel's shutdown signal handler so children don't outlive
+    the parent and reparent to PID 1.  Safe to call multiple times.
+    """
+    with _active_children_lock:
+        children = list(_active_children)
+    if not children:
+        return
+    log.info("kennel shutdown: terminating %d claude child(ren)", len(children))
+    for proc in children:
+        try:
+            proc.terminate()
+        except OSError, ProcessLookupError:
+            pass
+    deadline = time.monotonic() + grace_seconds
+    for proc in children:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except OSError, ProcessLookupError, subprocess.TimeoutExpired:
+                pass
+        except OSError, ProcessLookupError:
+            pass
 
 
 def _claude(
@@ -174,33 +224,37 @@ def _run_streaming(
         text=True,
         cwd=cwd,
     )
+    _register_child(proc)
 
-    last_activity = time.monotonic()
+    try:
+        last_activity = time.monotonic()
 
-    while True:
-        ready, _, _ = selector([proc.stdout], [], [], 10.0)
-        if ready:
-            line = proc.stdout.readline()
-            if not line:
-                break  # EOF
-            yield line
-            log.debug(line.rstrip())
-            last_activity = time.monotonic()
-        elif proc.poll() is not None:
-            break  # process exited
-        elif time.monotonic() - last_activity > idle_timeout:
-            log.warning("claude idle for %.0fs — killing", idle_timeout)
-            proc.kill()
-            proc.wait()
-            raise ClaudeStreamError(-1)
+        while True:
+            ready, _, _ = selector([proc.stdout], [], [], 10.0)
+            if ready:
+                line = proc.stdout.readline()
+                if not line:
+                    break  # EOF
+                yield line
+                log.debug(line.rstrip())
+                last_activity = time.monotonic()
+            elif proc.poll() is not None:
+                break  # process exited
+            elif time.monotonic() - last_activity > idle_timeout:
+                log.warning("claude idle for %.0fs — killing", idle_timeout)
+                proc.kill()
+                proc.wait()
+                raise ClaudeStreamError(-1)
 
-    proc.wait()
-    # Drain any remaining output
-    remaining = proc.stdout.read()
-    if remaining:
-        yield remaining
-    if proc.returncode != 0:
-        raise ClaudeStreamError(proc.returncode)
+        proc.wait()
+        # Drain any remaining output
+        remaining = proc.stdout.read()
+        if remaining:
+            yield remaining
+        if proc.returncode != 0:
+            raise ClaudeStreamError(proc.returncode)
+    finally:
+        _unregister_child(proc)
 
 
 def print_prompt_from_file(
