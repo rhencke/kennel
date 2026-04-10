@@ -8,6 +8,7 @@ import logging
 import re
 import subprocess
 import threading
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Protocol
@@ -64,6 +65,8 @@ class ActivityReporter(Protocol):
     def report_activity(self, repo_name: str, what: str, busy: bool) -> None: ...
 
     def get_all_activities(self) -> list[Any]: ...
+
+    def status_update(self) -> AbstractContextManager[None]: ...
 
 
 class LockHeld(Exception):

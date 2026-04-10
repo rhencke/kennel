@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from kennel.config import RepoConfig
@@ -42,6 +43,7 @@ class WorkerRegistry:
         self._factory = thread_factory
         self._activities: dict[str, WorkerActivity] = {}
         self._activity_lock = threading.Lock()
+        self._status_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*."""
@@ -79,6 +81,18 @@ class WorkerRegistry:
         """Return a snapshot of all registered workers' current activities."""
         with self._activity_lock:
             return list(self._activities.values())
+
+    @contextmanager
+    def status_update(self) -> Generator[None, None, None]:
+        """Context manager that serializes GitHub status updates across workers.
+
+        Only one worker may generate and publish a status at a time.  Callers
+        should hold this for the entire report-activity → generate-status →
+        set-user-status flow so that an idle worker cannot overwrite a busy
+        worker's status.
+        """
+        with self._status_lock:
+            yield
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""

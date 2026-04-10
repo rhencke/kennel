@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -209,6 +210,36 @@ class TestWorkerRegistry:
         assert set(final) == set(repos)
         for repo in repos:
             assert final[repo].what == f"step {n_writes - 1}"
+
+    def test_status_update_is_context_manager(self) -> None:
+        reg, _ = self._make_registry()
+        with reg.status_update():
+            pass  # must not raise
+
+    def test_status_update_serializes_concurrent_callers(self) -> None:
+        """Only one caller may be inside status_update() at a time."""
+        reg, _ = self._make_registry()
+        inside_count = 0
+        max_concurrent = 0
+        counter_lock = threading.Lock()
+
+        def task() -> None:
+            nonlocal inside_count, max_concurrent
+            with reg.status_update():
+                with counter_lock:
+                    inside_count += 1
+                    max_concurrent = max(max_concurrent, inside_count)
+                time.sleep(0.001)
+                with counter_lock:
+                    inside_count -= 1
+
+        threads = [threading.Thread(target=task) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert max_concurrent == 1
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
