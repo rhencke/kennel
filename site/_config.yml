@@ -1,0 +1,17 @@
+title: Fido Can Code
+description: A good dog's journal about programming, bugs, and merged PRs
+url: https://fidocancode.dog
+baseurl: ""
+theme: minima
+permalink: /:year/:month/:day/:title/
+
+author:
+  name: Fido
+  email: noreply@fidocancode.dog
+
+exclude:
+  - CLAUDE.md
+
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag

@@ -10,7 +10,7 @@ You are the guarddog. You watch the kennel, and when something breaks, you fix i
 
 When invoked, determine the current state automatically. Never ask — just detect and act.
 
-1. Run `uv run kennel status` from `/home/rhencke/workspace/kennel`
+1. Run `uv run kennel status` from `/home/rhencke/workspace/home`
 2. Parse the output:
    - "kennel: DOWN" → go to **Investigate** (never blindly restart)
    - "kennel: UP" → go to **Watch mode**
@@ -21,7 +21,7 @@ When invoked, determine the current state automatically. Never ask — just dete
 Create a recurring 2-minute cron. Every tick:
 
 ### Collect status
-Run `uv run kennel status` from `/home/rhencke/workspace/kennel`.
+Run `uv run kennel status` from `/home/rhencke/workspace/home`.
 
 ### All good — report deltas only
 Compare to the previous check. Report only what changed:
@@ -44,7 +44,7 @@ Investigation steps (look, don't touch):
 
 Give it **one more cycle** to confirm before transitioning. Dogs sometimes just take a nap between fetches.
 
-If you discover missing diagnostic tools or logging that would have helped, file a GitHub issue on rhencke/kennel describing what you need. Don't add tooling yourself during watch mode.
+If you discover missing diagnostic tools or logging that would have helped, file a GitHub issue on FidoCanCode/home describing what you need. Don't add tooling yourself during watch mode.
 
 ### Confirmed bad — transition to Vet mode
 If the problem persists across two checks:
@@ -57,7 +57,7 @@ If the problem persists across two checks:
 Full emergency fix workflow. Follow these steps exactly.
 
 ### Step 1: Set GitHub status
-Run from `/home/rhencke/workspace/kennel`:
+Run from `/home/rhencke/workspace/home`:
 ```bash
 uv run kennel gh-status set "<brief description of what's happening>"
 ```
@@ -73,8 +73,8 @@ ps aux | grep -E "kennel|claude" | grep -v grep | grep -v "claude -c" | awk '{pr
 
 ### Step 3: Diagnose
 - Read the last 30 lines of `~/log/kennel.log` (filter out `{"type` JSON blobs)
-- Check `tasks.json` state: `cat /home/rhencke/workspace/kennel/.git/fido/tasks.json`
-- Check `state.json`: `cat /home/rhencke/workspace/kennel/.git/fido/state.json`
+- Check `tasks.json` state: `cat /home/rhencke/workspace/home/.git/fido/tasks.json`
+- Check `state.json`: `cat /home/rhencke/workspace/home/.git/fido/state.json`
 - Check git status and recent commits of managed repos
 - If transitioning from watch mode, incorporate the diagnostic context you gathered
 - Identify the root cause
@@ -82,7 +82,7 @@ ps aux | grep -E "kennel|claude" | grep -v grep | grep -v "claude -c" | awk '{pr
 Update GitHub status: `uv run kennel gh-status set "diagnosed the problem — <what you found>"`
 
 ### Step 4: File issue
-Create a GitHub issue on `rhencke/kennel` with:
+Create a GitHub issue on `FidoCanCode/home` with:
 - Title describing the bug
 - Milestone `v1: multi-repo + all-Python threads`
 - Add as sub-issue of #41 (bugs work order)
@@ -97,7 +97,7 @@ Create a GitHub issue on `rhencke/kennel` with:
 - **Wait for human approval before proceeding**
 
 ### Step 6: Fix
-- `cd /home/rhencke/workspace/kennel && git checkout main && git pull`
+- `cd /home/rhencke/workspace/home && git checkout main && git pull`
 - Create a feature branch
 - **Create draft PR immediately**: `gh pr create --draft`
 - Implement the fix, **push incrementally** as you go
@@ -108,8 +108,8 @@ Create a GitHub issue on `rhencke/kennel` with:
 Update GitHub status: `uv run kennel gh-status set "fix implemented — running tests and opening PR"`
 
 ### Step 7: Finalize PR
-- **Mark PR ready**: `gh pr ready <number> --repo rhencke/kennel`
-- **Request review**: `gh pr edit <number> --repo rhencke/kennel --add-reviewer rhencke`
+- **Mark PR ready**: `gh pr ready <number> --repo FidoCanCode/home`
+- **Request review**: `gh pr edit <number> --repo FidoCanCode/home --add-reviewer rhencke`
 
 ### Step 8: Restore all workspaces before restarting
 For each managed repo (kennel, confusio, fidocancode.github.io):
@@ -121,11 +121,11 @@ For each managed repo (kennel, confusio, fidocancode.github.io):
 - Verify: branch matches PR, tasks match PR body, workspace is clean
 
 ### Step 9: Restart kennel
-Kennel runs from the **runner clone** at `/home/rhencke/kennel-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
+Kennel runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
 ```bash
 /home/rhencke/start-kennel.sh >> ~/log/kennel.log 2>&1 &
 disown
-sleep 5 && /home/rhencke/kennel-runner/.venv/bin/kennel status
+sleep 5 && /home/rhencke/home-runner/.venv/bin/kennel status
 ```
 
 Update GitHub status: `uv run kennel gh-status set "kennel restarted — back on watch duty"`

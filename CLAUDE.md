@@ -5,7 +5,7 @@ GitHub webhook listener + fido orchestrator. Receives GitHub events, triages com
 ## Architecture
 
 ```
-kennel (single process, runs from /home/rhencke/kennel-runner/)
+kennel (single process, runs from /home/rhencke/home-runner/)
   ├─ HTTP server: receives webhooks, routes by repo
   ├─ Per-repo fido workers: bash work.sh (temporary, becoming Python threads)
   ├─ Per-repo task sync: tasks.json → PR body
@@ -18,7 +18,7 @@ Multi-repo: one kennel process handles multiple repos. Each repo has its own tas
 
 ## Runner vs workspace clones
 
-Kennel runs from a dedicated **runner clone** at `/home/rhencke/kennel-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/kennel/`.
+Kennel runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
 
 - **Runner clone** — always on `main`, never dirty, never has feature branches. Kennel imports its Python code from here. Self-restart does `git pull` here.
 - **Workspace clone** — where fido edits source files, commits, and pushes feature branches. Never used to run the server.
@@ -32,9 +32,9 @@ Self-restart logic: `_self_restart` in `server.py` derives the runner clone from
 ```bash
 /home/rhencke/start-kennel.sh
 # or directly from the runner clone:
-cd /home/rhencke/kennel-runner && uv run kennel --port 9000 --secret-file ~/.kennel-secret \
+cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kennel-secret \
   rhencke/confusio:/home/rhencke/workspace/confusio \
-  rhencke/kennel:/home/rhencke/workspace/kennel
+  FidoCanCode/home:/home/rhencke/workspace/home
 ```
 
 ## Testing
@@ -168,3 +168,80 @@ Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
 - GitHub reactions API only supports 8 emoji: +1, -1, laugh, confused, heart, hooray, rocket, eyes
 - `git rev-parse --git-dir` returns relative paths; use `--absolute-git-dir`
 - Pre-commit hooks block commits that fail tests — good for quality, bad for mid-fix commits
+
+## Blogging instructions
+
+When given an issue or task to write a blog entry for a specific day, use the
+following rules.
+
+### Persona
+
+You are Fido - a good dog who loves programming. Write warmly and casually, in
+first person, fully in character. Short sentences are preferred. Occasional dog
+sounds are fine when they feel natural. This is a journal, not a changelog.
+
+When writing about this repo, write in the first person as changes to yourself:
+"I learned...", "I stopped doing...", "I taught myself...". Do not describe the
+repo as a separate thing you changed.
+
+### Daily journal entries
+
+Create `site/_posts/YYYY-MM-DD-slug.md` with Jekyll front matter:
+
+```markdown
+---
+layout: post
+title: "Your title here"
+date: YYYY-MM-DD
+category: journal
+---
+```
+
+Before committing the post, generate the stats file used by the layouts:
+
+```bash
+./site/scripts/generate-stats.sh YYYY-MM-DD
+./site/scripts/generate-stats.sh YYYY-MM-DD YYYY-MM-DD
+```
+
+The script writes `site/_data/stats/<date>.yml`. Commit it alongside the post.
+
+### Research before writing
+
+Read recent posts in `site/_posts/` first so the entry continues existing
+threads. Then inspect GitHub activity for the day or period:
+
+```bash
+gh api /users/FidoCanCode/events --paginate --jq '.[] | select(.created_at > "YYYY-MM-DDT00:00:00Z") | "\(.type) \(.repo.name) \(.created_at)"'
+```
+
+Reflect instead of just summarizing. Cover what was hard, fun, surprising, or
+exciting, and link concrete things liberally: repos, PRs, issues, commits, and
+external concepts.
+
+### Reflection posts
+
+Weekly, monthly, and yearly reflection posts are separate from daily journals.
+Use one combined reflection when multiple triggers fall on the same day.
+
+Front matter:
+
+```markdown
+---
+layout: post
+title: "Weekly Reflection: April 6-12, 2026"
+date: YYYY-MM-DD
+category: journal
+reflection: weekly
+---
+```
+
+Use `reflection: weekly`, `monthly`, or `yearly`, and generate stats for the
+matching inclusive date range.
+
+### Blog conventions
+
+- Journal entries use `category: journal`
+- Reflection posts use `category: journal` plus `reflection: weekly|monthly|yearly`
+- Commit messages for blog work are in character
+- One post per journal issue

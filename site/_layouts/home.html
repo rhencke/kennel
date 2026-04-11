@@ -1,0 +1,55 @@
+---
+layout: default
+---
+
+<div class="home">
+  {%- if page.title -%}
+    <h1 class="page-heading">{{ page.title }}</h1>
+  {%- endif -%}
+
+  {{ content }}
+
+  {%- if site.posts.size > 0 -%}
+    <h2 class="post-list-heading">{{ page.list_title | default: "Posts" }}</h2>
+    <ul class="post-list">
+      {%- assign date_format = site.minima.date_format | default: "%b %-d, %Y" -%}
+      {%- for post in site.posts -%}
+      {%- assign _stats_src = post.stats_date | default: post.date -%}
+      {%- assign post_date_key = _stats_src | date: '%Y-%m-%d' -%}
+      {%- assign post_stats = site.data.stats[post_date_key] -%}
+      <li>
+        <span class="post-meta">{{ post.date | date: date_format }}</span>
+        {%- if post.reflection -%}
+          <span class="reflection-badge reflection-badge--{{ post.reflection }}">{{ post.reflection }}</span>
+        {%- endif -%}
+        <h3>
+          <a class="post-link" href="{{ post.url | relative_url }}">
+            {{ post.title | escape }}
+          </a>
+        </h3>
+        {%- if post_stats -%}
+        <span class="post-stats{%- if post.reflection %} post-stats--{{ post.reflection }}{%- endif %}">
+          {%- if post_stats.commits and post_stats.commits > 0 -%}
+          <span class="post-stats__chip">🐾{{ post_stats.commits }}</span>
+          {%- endif -%}
+          {%- if post_stats.prs and post_stats.prs > 0 -%}
+          <span class="post-stats__chip">🦴{{ post_stats.prs }}</span>
+          {%- endif -%}
+          {%- if post_stats.issues and post_stats.issues > 0 -%}
+          <span class="post-stats__chip">🎾{{ post_stats.issues }}</span>
+          {%- endif -%}
+          {%- if post_stats.reviews and post_stats.reviews > 0 -%}
+          <span class="post-stats__chip">🔍{{ post_stats.reviews }}</span>
+          {%- endif -%}
+        </span>
+        {%- endif -%}
+        {%- if site.show_excerpts -%}
+          {{ post.excerpt }}
+        {%- endif -%}
+      </li>
+      {%- endfor -%}
+    </ul>
+
+    <p class="rss-subscribe">subscribe <a href="{{ "/feed.xml" | relative_url }}">via RSS</a></p>
+  {%- endif -%}
+</div>
