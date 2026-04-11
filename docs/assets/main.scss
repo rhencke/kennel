@@ -1,0 +1,536 @@
+---
+# Front matter required so Jekyll processes this as Sass.
+---
+
+// ---------------------------------------------------------------------------
+// fidocancode.dog — custom stylesheet
+//
+// Overrides the minima theme.  Variables defined BEFORE the @import override
+// minima's defaults; rules AFTER it add new styles or replace existing ones.
+//
+// Palette: warm cream + golden retriever brown + soft gold accent.
+// Type:    system sans for body, system serif for post titles.
+// ---------------------------------------------------------------------------
+
+// ---- minima variable overrides ----
+$base-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+                   "Inter", system-ui, sans-serif;
+$base-font-size:   17px;
+$base-font-weight: 400;
+$small-font-size:  $base-font-size * 0.875;
+$base-line-height: 1.65;
+
+$spacing-unit:     30px;
+
+$text-color:       #3a2f25;
+$background-color: #fdfaf5;
+$brand-color:      #8b5a3c;     // warm brown
+$brand-color-light:#c9a37a;     // softer tan
+$brand-color-dark: #5a3d20;     // darker brown
+
+$grey-color:       #8a7866;
+$grey-color-light: lighten($grey-color, 30%);
+$grey-color-dark:  darken($grey-color, 25%);
+
+$table-text-align: left;
+
+@import "minima";
+
+// ---- typography refinements ----
+body {
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+               "Hoefler Text", serif;
+  letter-spacing: -0.01em;
+  color: $brand-color-dark;
+}
+
+h1 { font-size: 2.1em; line-height: 1.2; margin-top: 0; }
+h2 { font-size: 1.55em; margin-top: 1.6em; }
+h3 { font-size: 1.25em; margin-top: 1.4em; }
+
+a {
+  color: $brand-color;
+  text-decoration: none;
+  border-bottom: 1px solid rgba($brand-color, 0.25);
+  transition: border-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    color: $brand-color-dark;
+    border-bottom-color: $brand-color;
+    text-decoration: none;
+  }
+}
+
+p { margin-bottom: 1.1em; }
+
+strong { color: $brand-color-dark; }
+
+em { color: lighten($text-color, 5%); }
+
+blockquote {
+  font-style: italic;
+  color: lighten($text-color, 12%);
+  border-left: 3px solid $brand-color-light;
+  padding: 0.2em 0 0.2em 1.2em;
+  margin: 1.4em 0;
+  background: linear-gradient(90deg, rgba($brand-color-light, 0.08) 0%, transparent 100%);
+}
+
+ul, ol {
+  padding-left: 1.4em;
+  li { margin-bottom: 0.35em; }
+}
+
+hr {
+  border: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba($brand-color, 0.3), transparent);
+  margin: 2.5em 0;
+}
+
+// ---- code blocks ----
+code, pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+  font-size: 0.88em;
+}
+
+code {
+  background: rgba($brand-color, 0.08);
+  color: $brand-color-dark;
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+  border: 1px solid rgba($brand-color, 0.12);
+}
+
+// Minima wraps fenced blocks as:
+//   <div class="highlighter-rouge"><div class="highlight"><pre class="highlight">…
+// Its .highlighter-rouge .highlight rule (specificity 0,2,0) beats a plain
+// `pre` rule (0,0,1), so we need equal-or-higher specificity selectors to
+// keep the dark background and override the #eef minima default.
+pre,
+.highlighter-rouge .highlight,
+.highlighter-rouge pre.highlight {
+  background: #1a1008;
+  color: #f5ead8;
+  padding: 1em 1.2em;
+  border-radius: 8px;
+  border: 1px solid rgba($brand-color, 0.2);
+  box-shadow: 0 2px 8px rgba(58, 47, 37, 0.08);
+  overflow-x: auto;
+  line-height: 1.55;
+
+  code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+// Minima ships a light-theme Rouge palette (.highlight .c { color:#998 } etc.)
+// Those dark-on-light token colors read poorly on our dark code block background.
+// Override every token class scoped to .highlighter-rouge .highlight so they use
+// a warm dark-theme palette. Specificity (0,2,1) beats minima's (0,1,1).
+.highlighter-rouge .highlight {
+  // comments — muted warm gray, italic
+  .c, .cm, .cp, .c1, .cs { color: #a08878; font-style: italic; }
+  // keywords — amber/gold
+  .k, .kc, .kd, .kp, .kr, .kn, .ow { color: #e8b060; font-weight: bold; }
+  // keyword type — softer amber
+  .kt { color: #d4a850; }
+  // strings (all variants) — sage green
+  .s, .sb, .sc, .sd, .s2, .se, .sh, .si, .sx, .s1, .ss, .sr { color: #98c880; }
+  // numbers (all variants) — warm orange
+  .m, .mf, .mh, .mi, .mo, .il { color: #f0a060; }
+  // names: builtins/pseudo — soft teal
+  .nb, .bp { color: #70c8b0; }
+  // names: class/type — sky blue
+  .nc, .kt { color: #78c0d8; }
+  // names: function/exception — warm yellow
+  .nf, .ne { color: #d8c060; }
+  // names: constant/entity/tag — coral
+  .no, .ni, .nt { color: #e89070; }
+  // names: namespace/attribute — near-base, slightly accented
+  .nn, .na { color: #c8b898; }
+  // names: variable (all variants) — soft lavender
+  .nv, .vc, .vg, .vi { color: #c0a0d0; }
+  // operators — slightly lighter than base
+  .o { color: #d8cbb8; }
+  // whitespace
+  .w { color: #604030; }
+  // generic: deleted — red
+  .gd { color: #f08080; background-color: #380808; }
+  .gd .x { color: #f08080; background-color: #500c0c; }
+  // generic: inserted — green
+  .gi { color: #90d060; background-color: #0a2808; }
+  .gi .x { color: #a8e078; background-color: #0e3a0a; }
+  // generic: emphasis/strong
+  .ge { font-style: italic; }
+  .gs { font-weight: bold; }
+  // generic: error/traceback — bright red
+  .gr, .gt { color: #f06060; }
+  // generic: heading/subheading — prompt gold
+  .gh, .gu { color: #c8a060; }
+  // generic: output/prompt
+  .go { color: #807060; }
+  .gp { color: #d0a858; }
+  // error token — bright red on dark red bg
+  .err { color: #ff6060; background-color: #3a0808; }
+}
+
+// ---- site header ----
+.site-header {
+  border-top: 0;
+  border-bottom: 1px solid rgba($brand-color, 0.15);
+  background: $background-color;
+  min-height: 60px;
+  position: relative;
+
+  &::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -3px;
+    height: 3px;
+    background: linear-gradient(90deg, $brand-color 0%, $brand-color-light 50%, transparent 100%);
+  }
+}
+
+.site-title {
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-weight: 700;
+  font-size: 1.55em;
+  color: $brand-color-dark !important;
+  letter-spacing: -0.01em;
+  border-bottom: 0 !important;
+
+  &::before {
+    content: "🐕  ";
+    margin-right: 0.1em;
+  }
+
+  &:hover { color: $brand-color !important; }
+}
+
+.site-nav .page-link {
+  color: $grey-color-dark;
+  border-bottom: 0;
+
+  &:hover {
+    color: $brand-color;
+    border-bottom: 0;
+  }
+}
+
+// ---- post layout ----
+.post-header { margin-bottom: 2em; }
+
+.post-title {
+  font-size: 2.4em;
+  line-height: 1.15;
+  margin-bottom: 0.3em;
+  letter-spacing: -0.015em;
+}
+
+.post-meta {
+  color: $grey-color;
+  font-size: 0.9em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.post-content {
+  font-size: 1.05em;
+  line-height: 1.7;
+
+  h2 { color: $brand-color-dark; border-bottom: 1px solid rgba($brand-color, 0.15); padding-bottom: 0.25em; }
+  h3 { color: $brand-color; }
+}
+
+// ---- reflection post styling ----
+.post-kicker {
+  font-size: 0.75em;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: $brand-color;
+  margin: 0 0 0.5em;
+  font-family: $base-font-family;
+}
+
+.post--reflection {
+  .post-header {
+    padding: 1.4em 1.6em 1.2em;
+    background: linear-gradient(135deg, rgba($brand-color, 0.05) 0%, rgba($brand-color-light, 0.08) 100%);
+    border-left: 4px solid $brand-color;
+    border-radius: 0 8px 8px 0;
+    margin-bottom: 2.2em;
+  }
+}
+
+.post--reflection-yearly {
+  .post-header {
+    border-left-color: $brand-color-dark;
+    background: linear-gradient(135deg, rgba($brand-color-dark, 0.06) 0%, rgba($brand-color, 0.1) 100%);
+  }
+
+  .post-kicker {
+    color: $brand-color-dark;
+  }
+}
+
+// ---- post list (home page) ----
+.post-list {
+  list-style: none;
+  margin-left: 0;
+
+  > li {
+    margin-bottom: 2em;
+    padding-bottom: 1.5em;
+    border-bottom: 1px dashed rgba($brand-color, 0.18);
+
+    &:last-child { border-bottom: 0; }
+  }
+}
+
+.post-list h2, .post-list .post-link {
+  font-size: 1.7em;
+  font-family: "Iowan Old Style", Georgia, serif;
+}
+
+.post-link {
+  display: block;
+  color: $brand-color-dark;
+  border-bottom: 0;
+
+  &:hover {
+    color: $brand-color;
+    border-bottom: 0;
+  }
+}
+
+// ---- reflection badge (home page post list) ----
+.reflection-badge {
+  display: inline-block;
+  padding: 0.1em 0.65em;
+  margin-left: 0.5em;
+  border-radius: 999px;
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  background: rgba($brand-color, 0.1);
+  color: $brand-color;
+  border: 1px solid rgba($brand-color, 0.25);
+
+  &--weekly {
+    background: rgba(#cf8a14, 0.12);
+    color: #7a5200;
+    border-color: rgba(#cf8a14, 0.35);
+  }
+
+  &--monthly {
+    background: rgba(#b06000, 0.12);
+    color: #5e3700;
+    border-color: rgba(#b06000, 0.35);
+  }
+
+  &--yearly {
+    background: linear-gradient(90deg, rgba(#cf8a14, 0.18), rgba(#9a7200, 0.22));
+    color: #4a3800;
+    border-color: rgba(#9a7200, 0.45);
+    font-size: 0.75em;
+  }
+}
+
+// ---- footer ----
+.site-footer {
+  border-top: 1px solid rgba($brand-color, 0.15);
+  background: lighten($background-color, 1%);
+  color: $grey-color;
+  padding: $spacing-unit 0;
+
+  .footer-heading { color: $brand-color-dark; }
+  a { color: $grey-color-dark; }
+}
+
+// ---------------------------------------------------------------------------
+// fetch report — daily stats card and index strip
+// ---------------------------------------------------------------------------
+
+.fetch-report {
+  margin: 1.8em 0 2.2em;
+  background: linear-gradient(135deg, #fffaf2 0%, #fdf2e3 100%);
+  border: 1px solid rgba($brand-color, 0.18);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgba($brand-color-dark, 0.04),
+    0 4px 12px rgba($brand-color-dark, 0.05);
+  overflow: hidden;
+  font-family: $base-font-family;
+}
+
+// period kicker: sits above the soundbar on weekly/monthly/yearly posts
+.fetch-report__period {
+  padding: 0.35em 1.2em;
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid rgba($brand-color, 0.12);
+  color: $brand-color;
+  background: rgba($brand-color, 0.04);
+}
+
+// weekly — amber stripe, warm amber tint
+.fetch-report--weekly {
+  border-top: none;
+  border-left: 5px solid #cf8a14;
+  background: linear-gradient(135deg, #fffdf0 0%, #fef3cc 100%);
+
+  .fetch-report__period {
+    color: #7a5200;
+    background: rgba(#cf8a14, 0.1);
+    border-bottom-color: rgba(#cf8a14, 0.2);
+  }
+}
+
+// monthly — deeper amber, richer tint, slightly larger numbers
+.fetch-report--monthly {
+  border-top: none;
+  border-left: 5px solid #b06000;
+  background: linear-gradient(135deg, #fff8ef 0%, #fde3b0 100%);
+
+  .fetch-report__period {
+    color: #5e3700;
+    background: rgba(#b06000, 0.1);
+    border-bottom-color: rgba(#b06000, 0.2);
+  }
+
+  .fetch-report__count { font-size: 1.95em; }
+}
+
+// yearly — gold stripe, golden background, largest numbers
+.fetch-report--yearly {
+  border-top: none;
+  border-left: 6px solid #9a7200;
+  background: linear-gradient(135deg, #fefae5 0%, #fde880 50%, #fdd84a 100%);
+
+  .fetch-report__period {
+    color: #4a3800;
+    background: rgba(#9a7200, 0.12);
+    border-bottom-color: rgba(#9a7200, 0.25);
+  }
+
+  .fetch-report__count {
+    font-size: 2.1em;
+    color: #3a2c00;
+  }
+}
+
+// soundbar: one stat per column, all in a row
+.fetch-report__stats {
+  display: flex;
+  flex-direction: row;
+}
+
+.fetch-report__stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1em;
+  padding: 1em 0.5em;
+  border-right: 1px solid rgba($brand-color, 0.12);
+  transition: background 0.15s ease;
+
+  &:last-child { border-right: none; }
+  &:hover { background: rgba($brand-color, 0.04); }
+}
+
+.fetch-report__icon {
+  font-size: 1.1em;
+  line-height: 1;
+}
+
+.fetch-report__count {
+  font-weight: 800;
+  color: $brand-color-dark;
+  font-size: 1.7em;
+  line-height: 1.1;
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-feature-settings: "tnum" 1;
+}
+
+.fetch-report__label {
+  color: $brand-color;
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fetch-report__repos {
+  padding: 0.55em 1.4em;
+  border-top: 1px solid rgba($brand-color, 0.12);
+  font-size: 0.8em;
+  color: $brand-color-light;
+  .fetch-report__sep { color: rgba($brand-color, 0.4); }
+
+  a {
+    color: $brand-color;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+
+    &:hover { color: $brand-color-dark; }
+  }
+}
+
+// ---- inline per-post stats chips ----
+.post-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35em 0.5em;
+  margin-top: 0.3em;
+}
+
+.post-stats__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  padding: 0.15em 0.6em;
+  background: $background-color;
+  border: 1px solid rgba($brand-color, 0.2);
+  border-radius: 999px;
+  color: $brand-color-dark;
+  font-size: 0.82em;
+  font-weight: 700;
+  font-feature-settings: "tnum" 1;
+}
+
+.post-stats--weekly .post-stats__chip {
+  background: rgba(#cf8a14, 0.1);
+  border-color: rgba(#cf8a14, 0.35);
+  color: #7a5200;
+}
+
+.post-stats--monthly .post-stats__chip {
+  background: rgba(#b06000, 0.1);
+  border-color: rgba(#b06000, 0.35);
+  color: #5e3700;
+}
+
+.post-stats--yearly .post-stats__chip {
+  background: linear-gradient(90deg, rgba(#cf8a14, 0.14), rgba(#9a7200, 0.18));
+  border-color: rgba(#9a7200, 0.45);
+  color: #4a3800;
+}

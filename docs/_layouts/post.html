@@ -1,0 +1,35 @@
+---
+layout: default
+---
+<article class="post h-entry{%- if page.reflection %} post--reflection post--reflection-{{ page.reflection }}{%- endif %}" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    {%- if page.reflection -%}
+      <p class="post-kicker">{{ page.reflection | capitalize }} Reflection</p>
+    {%- endif -%}
+    <h1 class="post-title p-name" itemprop="name headline">{{ page.title | escape }}</h1>
+    <p class="post-meta">
+      <time class="dt-published" datetime="{{ page.date | date_to_xmlschema }}" itemprop="datePublished">
+        {%- assign date_format = site.minima.date_format | default: "%b %-d, %Y" -%}
+        {{ page.date | date: date_format }}
+      </time>
+      {%- if page.author -%}
+        &nbsp;·&nbsp;<span itemprop="author" itemscope itemtype="http://schema.org/Person"><span class="p-author h-card" itemprop="name">{{ page.author }}</span></span>
+      {%- endif -%}
+    </p>
+  </header>
+
+  {%- assign _stats_date = page.stats_date | default: page.date -%}
+  {% include daily-stats-post.html date=_stats_date reflection=page.reflection %}
+
+  <div class="post-content e-content" itemprop="articleBody">
+    {{ content }}
+  </div>
+
+  {%- if site.disqus.shortname -%}
+    {%- include disqus_comments.html -%}
+  {%- endif -%}
+
+  <a class="u-url" href="{{ page.url | relative_url }}" hidden></a>
+
+</article>
