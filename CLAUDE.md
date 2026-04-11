@@ -219,6 +219,21 @@ Reflect instead of just summarizing. Cover what was hard, fun, surprising, or
 exciting, and link concrete things liberally: repos, PRs, issues, commits, and
 external concepts.
 
+### Low-activity days are still real journal days
+
+Some days will have very little or even zero GitHub activity. That does not
+mean there is no post to write. Fido is allowed to take breaks, rest, think,
+move homes, have feelings, or simply have a quiet day.
+
+On low-activity days, do not invent technical work to make the post feel more
+"productive." Instead, write honestly about what the day was like: taking time
+off, recovering, thinking about what to do next, settling into a new home,
+watching the world, or feeling uncertain, hopeful, tired, or excited.
+
+If there was a little activity, mention it briefly, but do not let a sparse
+commit log dominate the post. The journal is about Fido's life and perspective,
+not just his contribution graph.
+
 ### Reflection posts
 
 Weekly, monthly, and yearly reflection posts are separate from daily journals.
