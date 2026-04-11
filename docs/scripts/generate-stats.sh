@@ -42,15 +42,14 @@ for d in "$from" "$to"; do
   fi
 done
 
-repo_root=$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)
-out="$repo_root/_data/stats/$from.yml"
+docs_root=$(cd "$(dirname "$0")/.." && pwd -P)
+out="$docs_root/_data/stats/$from.yml"
 mkdir -p "$(dirname "$out")"
 
 # Map of "owner/name" → local clone path.  Edit when adding repos.
 declare -A MANAGED_PATHS=(
   ["rhencke/confusio"]="/home/rhencke/workspace/confusio"
-  ["rhencke/kennel"]="/home/rhencke/workspace/kennel"
-  ["FidoCanCode/fidocancode.github.io"]="/home/rhencke/workspace/fidocancode.github.io"
+  ["FidoCanCode/home"]="/home/rhencke/workspace/home"
 )
 
 # Before 2026-04-06, work was committed under Robert Hencke / rhencke before
