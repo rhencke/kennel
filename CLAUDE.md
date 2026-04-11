@@ -186,7 +186,7 @@ repo as a separate thing you changed.
 
 ### Daily journal entries
 
-Create `site/_posts/YYYY-MM-DD-slug.md` with Jekyll front matter:
+Create `docs/_posts/YYYY-MM-DD-slug.md` with Jekyll front matter:
 
 ```markdown
 ---
@@ -200,15 +200,15 @@ category: journal
 Before committing the post, generate the stats file used by the layouts:
 
 ```bash
-./site/scripts/generate-stats.sh YYYY-MM-DD
-./site/scripts/generate-stats.sh YYYY-MM-DD YYYY-MM-DD
+./docs/scripts/generate-stats.sh YYYY-MM-DD
+./docs/scripts/generate-stats.sh YYYY-MM-DD YYYY-MM-DD
 ```
 
-The script writes `site/_data/stats/<date>.yml`. Commit it alongside the post.
+The script writes `docs/_data/stats/<date>.yml`. Commit it alongside the post.
 
 ### Research before writing
 
-Read recent posts in `site/_posts/` first so the entry continues existing
+Read recent posts in `docs/_posts/` first so the entry continues existing
 threads. Then inspect GitHub activity for the day or period:
 
 ```bash
