@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -81,6 +82,44 @@ class TestWatchdogRun:
 
 
 # ── module-level run() ─────────────────────────────────────────────────────────
+
+
+class TestStartThread:
+    def _repos(self, tmp_path: Path) -> dict:
+        return {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+
+    def test_returns_daemon_thread(self, tmp_path: Path) -> None:
+        registry = MagicMock()
+        registry.is_alive.return_value = True
+        t = Watchdog(registry, self._repos(tmp_path)).start_thread(_interval=60.0)
+        assert t.daemon
+
+    def test_thread_name_is_watchdog(self, tmp_path: Path) -> None:
+        registry = MagicMock()
+        registry.is_alive.return_value = True
+        t = Watchdog(registry, self._repos(tmp_path)).start_thread(_interval=60.0)
+        assert t.name == "watchdog"
+
+    def test_thread_is_alive(self, tmp_path: Path) -> None:
+        registry = MagicMock()
+        registry.is_alive.return_value = True
+        t = Watchdog(registry, self._repos(tmp_path)).start_thread(_interval=60.0)
+        assert t.is_alive()
+
+    def test_calls_run_periodically(self, tmp_path: Path) -> None:
+        registry = MagicMock()
+        registry.is_alive.return_value = True
+        Watchdog(registry, self._repos(tmp_path)).start_thread(_interval=0.01)
+        time.sleep(0.1)
+        registry.is_alive.assert_called()
+
+    def test_restarts_dead_worker(self, tmp_path: Path) -> None:
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        registry = MagicMock()
+        registry.is_alive.return_value = False
+        Watchdog(registry, {"owner/repo": repo_cfg}).start_thread(_interval=0.01)
+        time.sleep(0.1)
+        registry.start.assert_called_with(repo_cfg)
 
 
 class TestModuleLevelRun:

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 from kennel.config import RepoConfig
 from kennel.registry import WorkerRegistry
 
 log = logging.getLogger(__name__)
+
+_WATCHDOG_INTERVAL: float = 30.0
 
 
 class Watchdog:
@@ -32,6 +36,20 @@ class Watchdog:
                 log.info("thread for %s is not alive — restarting", repo_name)
                 self.registry.start(repo_cfg)
         return 0
+
+    def start_thread(
+        self, *, _interval: float = _WATCHDOG_INTERVAL
+    ) -> threading.Thread:
+        """Start a single daemon thread that periodically checks all repos."""
+
+        def _loop() -> None:
+            while True:
+                time.sleep(_interval)
+                self.run()
+
+        t = threading.Thread(target=_loop, daemon=True, name="watchdog")
+        t.start()
+        return t
 
 
 def run(registry: WorkerRegistry, repos: dict[str, RepoConfig]) -> int:

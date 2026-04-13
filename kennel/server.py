@@ -41,26 +41,6 @@ _replied_comments: set[int] = set()
 # exceeds _PULL_BUDGET_SECONDS, even if a retry window remains.
 _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
-_WATCHDOG_INTERVAL: float = 30.0
-
-
-def _start_watchdog_thread(
-    registry: WorkerRegistry,
-    repos: dict[str, RepoConfig],
-    *,
-    _interval: float = _WATCHDOG_INTERVAL,
-) -> threading.Thread:
-    """Start a daemon thread that periodically runs the watchdog."""
-    watchdog = Watchdog(registry, repos)
-
-    def _loop() -> None:
-        while True:
-            time.sleep(_interval)
-            watchdog.run()
-
-    t = threading.Thread(target=_loop, daemon=True, name="watchdog")
-    t.start()
-    return t
 
 
 def _runner_dir() -> Path:
@@ -454,7 +434,7 @@ def run(
     _signal=signal.signal,
     _kill_active_children=kill_active_children,
     _startup_pull=_startup_pull,
-    _start_watchdog=_start_watchdog_thread,
+    _Watchdog=Watchdog,
 ) -> None:
     config = _from_args()
 
@@ -490,7 +470,7 @@ def run(
     WebhookHandler.config = config
     registry = _make_registry(config.repos)
     WebhookHandler.registry = registry
-    _start_watchdog(registry, config.repos)
+    _Watchdog(registry, config.repos).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

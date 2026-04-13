@@ -852,7 +852,7 @@ class TestRun:
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
         mock_make_registry = MagicMock(return_value=mock_registry)
-        mock_start_watchdog = MagicMock()
+        mock_watchdog_cls = MagicMock()
 
         run(
             _from_args=lambda: fake_cfg,
@@ -862,58 +862,11 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
-            _start_watchdog=mock_start_watchdog,
+            _Watchdog=mock_watchdog_cls,
         )
 
-        mock_start_watchdog.assert_called_once_with(mock_registry, fake_cfg.repos)
-
-
-class TestStartWatchdogThread:
-    def _repos(self, tmp_path: Path) -> dict:
-        return {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-
-    def test_returns_daemon_thread(self, tmp_path: Path) -> None:
-        from kennel.server import _start_watchdog_thread
-
-        mock_registry = MagicMock()
-        mock_registry.is_alive.return_value = True
-        t = _start_watchdog_thread(mock_registry, self._repos(tmp_path), _interval=60.0)
-        assert t.daemon
-
-    def test_thread_name_is_watchdog(self, tmp_path: Path) -> None:
-        from kennel.server import _start_watchdog_thread
-
-        mock_registry = MagicMock()
-        mock_registry.is_alive.return_value = True
-        t = _start_watchdog_thread(mock_registry, self._repos(tmp_path), _interval=60.0)
-        assert t.name == "watchdog"
-
-    def test_thread_is_alive(self, tmp_path: Path) -> None:
-        from kennel.server import _start_watchdog_thread
-
-        mock_registry = MagicMock()
-        mock_registry.is_alive.return_value = True
-        t = _start_watchdog_thread(mock_registry, self._repos(tmp_path), _interval=60.0)
-        assert t.is_alive()
-
-    def test_calls_watchdog_run_periodically(self, tmp_path: Path) -> None:
-        from kennel.server import _start_watchdog_thread
-
-        mock_registry = MagicMock()
-        mock_registry.is_alive.return_value = True
-        _start_watchdog_thread(mock_registry, self._repos(tmp_path), _interval=0.01)
-        time.sleep(0.1)
-        mock_registry.is_alive.assert_called()
-
-    def test_restarts_dead_worker(self, tmp_path: Path) -> None:
-        from kennel.server import _start_watchdog_thread
-
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        mock_registry = MagicMock()
-        mock_registry.is_alive.return_value = False
-        _start_watchdog_thread(mock_registry, {"owner/repo": repo_cfg}, _interval=0.01)
-        time.sleep(0.1)
-        mock_registry.start.assert_called_with(repo_cfg)
+        mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
+        mock_watchdog_cls.return_value.start_thread.assert_called_once()
 
 
 def _self_restart_cfg(tmp_path: Path) -> Config:
