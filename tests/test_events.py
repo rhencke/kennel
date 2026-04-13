@@ -3144,7 +3144,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="<body>Fresh desc.\n\nFixes #42.</body>"),
+            _print_prompt=MagicMock(
+                return_value="<body>Fresh desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
@@ -3160,7 +3162,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="<body>New desc.\n\nFixes #42.</body>"),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
