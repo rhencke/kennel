@@ -118,6 +118,7 @@ def dispatch(
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
                 "author": user,
+                "comment_type": "pulls",
             },
             comment_body=comment_body,
             is_bot=is_bot,
@@ -165,6 +166,7 @@ def dispatch(
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
                 "author": user,
+                "comment_type": "issues",
             }
             if number and comment_id
             else None,
@@ -727,9 +729,9 @@ def _notify_thread_change(
     analysis.  Uses Opus (in Fido's voice) to generate the message; falls back
     to a plain factual note if Opus returns nothing.
 
-    Posts via the issue comments API so the notification appears regardless of
-    whether the original comment was an inline review comment or a top-level
-    PR comment.
+    For review comments (comment_type='pulls') replies in-thread via the pull
+    review comment API; for issue comments (comment_type='issues') posts via
+    the issue comments API.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -742,13 +744,13 @@ def _notify_thread_change(
     pr = thread.get("pr")
     url = thread.get("url", "")
     author = thread.get("author", "")
+    comment_type = thread.get("comment_type", "issues")
     if not (comment_id and repo and pr):
         return
 
     kind = change["kind"]
     original_title = task.get("title", "")
     prompts = Prompts(_load_persona(config))
-    mention = f"@{author} " if author else ""
 
     if kind == "completed":
         instruction = (
@@ -757,12 +759,11 @@ def _notify_thread_change(
             f"Original task: {original_title}\n"
             f"Comment author: {author or '(unknown)'}\n"
             f"Comment: {url}\n\n"
-            "Write a very brief PR comment notifying the comment author (mention them "
-            "with @username if known) that their task has been marked done because it "
-            "was covered by recent commits. Reference the comment URL."
+            "Write a very brief reply notifying the commenter that their task has been "
+            "marked done because it was covered by recent commits. Reference the comment URL."
         )
         fallback = (
-            f"{mention}FYI — the task from your comment ('{original_title}') has been "
+            f"FYI — the task from your comment ('{original_title}') has been "
             f"marked done: it was covered by recent commits."
         )
     else:
@@ -774,12 +775,11 @@ def _notify_thread_change(
             f"Updated task: {new_title}\n"
             f"Comment author: {author or '(unknown)'}\n"
             f"Comment: {url}\n\n"
-            "Write a very brief PR comment notifying the comment author (mention them "
-            "with @username if known) that their original task has been updated. "
-            "Reference the comment URL."
+            "Write a very brief reply notifying the commenter that their original task "
+            "has been updated. Reference the comment URL."
         )
         fallback = (
-            f"{mention}FYI — the task from your comment has been updated to: "
+            f"FYI — the task from your comment has been updated to: "
             f"'{new_title}' based on new requirements."
         )
 
@@ -793,7 +793,10 @@ def _notify_thread_change(
         body = fallback
 
     try:
-        gh.comment_issue(repo, pr, body)
+        if comment_type == "pulls":
+            gh.reply_to_review_comment(repo, pr, body, comment_id)
+        else:
+            gh.comment_issue(repo, pr, body)
         log.info("notified thread %s (%s)", comment_id, kind)
     except Exception:
         log.exception("failed to notify thread %s", comment_id)

@@ -221,6 +221,7 @@ class TestDispatchReviewComment:
         assert result is not None
         assert result.reply_to is not None
         assert result.reply_to["author"] == "owner"
+        assert result.reply_to["comment_type"] == "pulls"
 
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -327,6 +328,7 @@ class TestDispatchIssueComment:
             == "https://github.com/owner/repo/pull/10#issuecomment-456"
         )
         assert result.thread["author"] == "owner"
+        assert result.thread["comment_type"] == "issues"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -2367,6 +2369,7 @@ class TestNotifyThreadChange:
                 "comment_id": 999,
                 "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
                 "author": "alice",
+                "comment_type": "issues",
             },
         }
         t.update(overrides)
@@ -2413,7 +2416,7 @@ class TestNotifyThreadChange:
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "Fix the thing" in body
-        assert "@alice" in body
+        assert "@" not in body
 
     def test_empty_opus_uses_fallback_for_modified(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2429,24 +2432,48 @@ class TestNotifyThreadChange:
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "New title" in body
-        assert "@alice" in body
+        assert "@" not in body
 
-    def test_fallback_no_author_omits_mention(self, tmp_path: Path) -> None:
+    def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
-        task["thread"] = {
-            "repo": "owner/repo",
-            "pr": 42,
-            "comment_id": 999,
-            "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
-        }
+        task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+            change,
+            cfg,
+            _print_prompt=MagicMock(return_value="In-thread reply"),
+            _gh=mock_gh,
         )
-        body = mock_gh.comment_issue.call_args[0][2]
-        assert "@" not in body
+        mock_gh.reply_to_review_comment.assert_called_once_with(
+            "owner/repo", 42, "In-thread reply", 999
+        )
+        mock_gh.comment_issue.assert_not_called()
+
+    def test_review_comment_exception_does_not_raise(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network")
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
+        change = {"task": task, "kind": "completed"}
+        # Should not raise
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
+        )
+
+    def test_no_comment_type_defaults_to_issue_comment(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        del task["thread"]["comment_type"]
+        change = {"task": task, "kind": "completed"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value="Fallback"), _gh=mock_gh
+        )
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Fallback")
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_author_in_opus_instruction(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
