@@ -61,13 +61,6 @@ uv run ruff format --check .
 | `events.py` | Event dispatch, Opus triage/reply, reactions, task creation |
 | `tasks.py` | tasks.json CRUD with flock |
 
-### Bash scripts (temporary, being rewritten to Python)
-
-| Script | Purpose |
-|--------|---------|
-| `sync-tasks.sh` | Sync tasks.json → PR body |
-| `start.sh` | Env setup + exec kennel |
-
 ### Sub-skills (`sub/`)
 
 Markdown instruction files passed to sub-Claude as system prompts:
