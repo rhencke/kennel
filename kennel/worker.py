@@ -641,11 +641,11 @@ class Worker:
         issue: int,
         issue_title: str,
         issue_body: str = "",
-    ) -> tuple[int, str] | None:
+    ) -> tuple[int, str]:
         """Find or create the branch and draft PR for *issue*.
 
-        Returns ``(pr_number, slug)`` for an open or freshly-created PR,
-        or ``None`` if setup produced no tasks.
+        Returns ``(pr_number, slug)`` for an open or freshly-created PR.
+        Raises ``RuntimeError`` if setup produces no tasks.
 
         Workflow:
         - **Existing closed PR**: ignore it and create a fresh PR.
@@ -692,11 +692,7 @@ class Worker:
                 with State(fido_dir).modify() as state:
                     state["setup_session_id"] = session_id
                 if not self._tasks.list():
-                    log.warning(
-                        "setup produced no tasks — skipping PR #%s, will retry",
-                        pr_number,
-                    )
-                    return None
+                    raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
                 pr_number,
@@ -742,8 +738,7 @@ class Worker:
             state["setup_session_id"] = session_id
 
         if not self._tasks.list():
-            log.warning("setup produced no tasks — skipping PR creation, will retry")
-            return None
+            raise RuntimeError("setup produced no tasks")
 
         # Create draft PR, then write the description using the same function
         # used for post-rescope rewrites so both paths share one code path.
@@ -1501,12 +1496,9 @@ class Worker:
                 self.post_pickup_comment(
                     repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
                 )
-                result = self.find_or_create_pr(
+                pr_number, slug = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
-                if result is None:
-                    return 0
-                pr_number, slug = result
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
