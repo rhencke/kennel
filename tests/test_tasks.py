@@ -769,6 +769,50 @@ class TestReorderTasks:
         task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
         assert task1["status"] == "completed"
 
+    def test_on_done_called_after_successful_reorder(self, tmp_path: Path) -> None:
+        t1 = self._add(tmp_path, "Task A")
+        raw = self._response([{"id": t1["id"], "title": "Task A", "description": ""}])
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == [1]
+
+    def test_on_done_not_called_when_no_tasks(self, tmp_path: Path) -> None:
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "{}",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
+    def test_on_done_not_called_on_empty_opus_response(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "Task A")
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
+    def test_on_done_not_called_on_unparseable_response(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "Task A")
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "not json at all",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ from kennel.prompts import (
     Prompts,
     issue_reply_instruction,
     reply_instruction,
+    rewrite_description_prompt,
     triage_prompt,
 )
 from kennel.registry import WorkerRegistry
@@ -789,6 +790,90 @@ def _notify_thread_change(
         log.exception("failed to notify thread %s", comment_id)
 
 
+def _rewrite_pr_description(
+    work_dir: Path,
+    gh: Any,
+    *,
+    _print_prompt=None,
+    _list_tasks=None,
+    _load_state_fn=None,
+) -> None:
+    """Rewrite the PR description summary after a successful rescope.
+
+    Fetches the current PR body, asks Opus to rewrite the description section
+    (everything before ``---``) to match the updated task list, and writes the
+    result back.  The work-queue section (``<!-- WORK_QUEUE_START/END -->``) is
+    preserved unchanged.
+
+    Silently skips when there is no active issue, no open PR, no ``---``
+    divider in the body, or when Opus returns an empty response.
+    """
+    from kennel.state import load_state as _load_state_default
+    from kennel.tasks import list_tasks as _list_tasks_default
+
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+    if _list_tasks is None:
+        _list_tasks = _list_tasks_default
+    if _load_state_fn is None:
+        _load_state_fn = _load_state_default
+
+    fido_dir = work_dir / ".git" / "fido"
+    if not (fido_dir / "state.json").exists():
+        log.info("_rewrite_pr_description: no state.json — skipping")
+        return
+
+    state = _load_state_fn(fido_dir)
+    issue = state.get("issue")
+    if not issue:
+        log.info("_rewrite_pr_description: no active issue in state — skipping")
+        return
+
+    try:
+        repo = gh.get_repo_info(cwd=work_dir)
+        user = gh.get_user()
+    except Exception:
+        log.exception("_rewrite_pr_description: failed to get repo info")
+        return
+
+    pr_data = gh.find_pr(repo, issue, user)
+    if pr_data is None or pr_data.get("state") != "OPEN":
+        log.info("_rewrite_pr_description: no open PR for issue #%s — skipping", issue)
+        return
+
+    pr_number = pr_data["number"]
+    task_list = _list_tasks(work_dir)
+
+    try:
+        body = gh.get_pr_body(repo, pr_number)
+    except Exception:
+        log.exception("_rewrite_pr_description: failed to get PR body")
+        return
+
+    divider = "\n\n---\n\n"
+    if divider not in body:
+        log.info(
+            "_rewrite_pr_description: no --- divider in PR #%s body — skipping",
+            pr_number,
+        )
+        return
+
+    prompt = rewrite_description_prompt(body, task_list)
+    new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    if not new_desc:
+        log.warning("_rewrite_pr_description: Opus returned empty — skipping")
+        return
+
+    rest = body.split(divider, 1)[1]
+    new_body = f"{new_desc.strip()}{divider}{rest}"
+
+    try:
+        gh.edit_pr_body(repo, pr_number, new_body)
+        log.info("_rewrite_pr_description: PR #%s description updated", pr_number)
+    except Exception:
+        log.exception("_rewrite_pr_description: failed to update PR body")
+
+
 def _reorder_tasks_background(
     work_dir: Path,
     commit_summary: str,
@@ -798,6 +883,8 @@ def _reorder_tasks_background(
     *,
     _start=threading.Thread.start,
     _gh=None,
+    _print_prompt=None,
+    _rewrite_fn=None,
 ) -> None:
     """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
 
@@ -809,16 +896,24 @@ def _reorder_tasks_background(
     ``_on_inprogress_affected`` callback that aborts the running worker whenever
     the in-progress task is dropped or modified by the rescope, so the worker
     loop restarts on the new next task.
+
+    Passes an ``_on_done`` callback that rewrites the PR description after a
+    successful reorder, so the human-facing summary stays in sync with the
+    updated plan.
     """
     from kennel.tasks import reorder_tasks
 
     gh = _gh if _gh is not None else get_github()
+    rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
             _notify_thread_change(change, config, _gh=gh)
 
-    kwargs: dict[str, Any] = {"_on_changes": on_changes}
+    def on_done() -> None:
+        rewrite_fn(work_dir, gh, _print_prompt=_print_prompt)
+
+    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
     if registry is not None and repo_cfg is not None:
 
         def on_inprogress_affected() -> None:

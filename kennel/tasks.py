@@ -514,6 +514,7 @@ def reorder_tasks(
     _rescope_prompt_fn=_rescope_prompt_default,
     _on_changes=None,
     _on_inprogress_affected=None,
+    _on_done=None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -536,6 +537,9 @@ def reorder_tasks(
     the caller can abort the running worker and restart on the new next task.
     When the in-progress task is modified its status is reset to ``pending`` so
     the worker loop picks it up again with the updated title/description.
+
+    If *_on_done* is provided, it is called after a successful reorder write so
+    callers can trigger follow-up work (e.g. rewriting the PR description).
     """
     task_list = list_tasks(work_dir)
     if not task_list:
@@ -599,6 +603,9 @@ def reorder_tasks(
         _on_inprogress_affected()
 
     log.info("reorder_tasks: applied reorder — %d tasks", len(result))
+
+    if _on_done is not None:
+        _on_done()
 
 
 def sync_tasks_background(
