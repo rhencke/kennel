@@ -15,6 +15,15 @@ import requests as _requests
 
 log = logging.getLogger(__name__)
 
+
+class GraphQLError(Exception):
+    """Raised when a GitHub GraphQL response contains an errors field."""
+
+    def __init__(self, errors: list[Any]) -> None:
+        super().__init__(f"GraphQL errors: {errors}")
+        self.errors = errors
+
+
 # ── Requests-based GitHub API client ─────────────────────────────────────────
 
 
@@ -81,7 +90,10 @@ class GH:
             json={"query": query, "variables": variables},
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if "errors" in data:
+            raise GraphQLError(data["errors"])
+        return data
 
     def add_reaction(
         self, repo: str, comment_type: str, comment_id: int | str, content: str
@@ -234,9 +246,6 @@ class GH:
                 number=int(issue_number),
                 cursor=cursor,
             )
-            if "errors" in data:
-                log.warning("find_pr GraphQL error: %s", data["errors"])
-                return None
             items = (
                 data.get("data", {})
                 .get("repository", {})

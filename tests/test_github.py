@@ -9,6 +9,7 @@ import pytest
 from kennel.github import (
     GH,
     GitHub,
+    GraphQLError,
     _get_gh,
     _gh_token,
     get_github,
@@ -538,16 +539,22 @@ class TestGHClass:
         assert body["variables"] == {"login": "fido"}
         assert result == {"data": {}}
 
-    def test_graphql_raises_on_error(self) -> None:
+    def test_graphql_raises_on_http_error(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = Exception("500")
         mock_s.post.return_value = mock_resp
-        try:
+        with pytest.raises(Exception, match="500"):
             gh._graphql("query {}")
-            assert False, "should have raised"
-        except Exception as e:
-            assert "500" in str(e)
+
+    def test_graphql_raises_on_payload_error(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errors": [{"message": "not found"}]}
+        mock_s.post.return_value = mock_resp
+        with pytest.raises(GraphQLError) as exc_info:
+            gh._graphql("query {}")
+        assert exc_info.value.errors == [{"message": "not found"}]
 
     def test_add_reaction_pulls(self) -> None:
         gh, mock_s = self._gh()
@@ -1060,12 +1067,13 @@ class TestGHClass:
         mock_s.post.return_value.json.return_value = self._gql_timeline([node])
         assert gh.find_pr("o/r", 5, "fido") is None
 
-    def test_find_pr_returns_none_on_graphql_error(self) -> None:
+    def test_find_pr_raises_on_graphql_error(self) -> None:
         gh, mock_s = self._gh()
         mock_s.post.return_value.json.return_value = {
             "errors": [{"message": "something went wrong"}]
         }
-        assert gh.find_pr("o/r", 1, "fido") is None
+        with pytest.raises(GraphQLError):
+            gh.find_pr("o/r", 1, "fido")
 
     def test_find_pr_returns_none_on_empty_timeline(self) -> None:
         gh, mock_s = self._gh()
