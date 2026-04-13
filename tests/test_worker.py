@@ -1021,26 +1021,6 @@ class TestWorker:
             mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text"
         )
 
-    def test_run_returns_0_when_find_or_create_pr_returns_none(
-        self, tmp_path: Path
-    ) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        gh = self._make_gh()
-        gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=2),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=None),
-        ):
-            assert worker.run() == 0
-
 
 class TestWorkerFindNextIssue:
     """Tests for Worker.find_next_issue."""
@@ -2426,6 +2406,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", mock_start),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
@@ -2442,12 +2423,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", return_value="sess"),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert f"Work dir: {tmp_path}" in context
 
-    def test_open_pr_setup_no_tasks_returns_none(self, tmp_path: Path) -> None:
+    def test_open_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
@@ -2457,9 +2439,9 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
+            pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
-            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert result is None
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
     def test_open_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2627,6 +2609,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "new branch" in caplog.text
@@ -2645,6 +2628,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", mock_start),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
@@ -2663,6 +2647,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", return_value="s"),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -2712,6 +2697,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert git_calls[0] == ["fetch", "origin"]
@@ -2739,6 +2725,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["branch", "-D", "slug"] in git_calls
@@ -2775,8 +2762,8 @@ class TestFindOrCreatePr:
         assert slug == slug.lower()
         assert "!" not in slug
 
-    def test_no_pr_setup_no_tasks_returns_none(self, tmp_path: Path) -> None:
-        """New-PR path: setup produces no tasks → return None, skip PR creation."""
+    def test_no_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
+        """New-PR path: setup produces no tasks → raises RuntimeError, skips PR creation."""
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = None
         fido_dir = self._fido_dir(tmp_path)
@@ -2786,9 +2773,9 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
-            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert result is None
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         gh.create_pr.assert_not_called()
 
     def test_no_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
@@ -3138,7 +3125,7 @@ class TestRunSeedTasksIntegration:
             worker.run()
         mock_seed.assert_called_once_with("owner/repo", 42)
 
-    def test_seed_not_called_when_find_or_create_pr_returns_none(
+    def test_seed_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path
     ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -3155,8 +3142,13 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(
+                worker,
+                "find_or_create_pr",
+                side_effect=RuntimeError("setup produced no tasks"),
+            ),
             patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
+            pytest.raises(RuntimeError),
         ):
             worker.run()
         mock_seed.assert_not_called()
@@ -3741,7 +3733,7 @@ class TestRunHandleCiIntegration:
             result = worker.run()
         assert result == 0
 
-    def test_handle_ci_not_called_when_find_or_create_pr_returns_none(
+    def test_handle_ci_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path
     ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -3758,9 +3750,14 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(
+                worker,
+                "find_or_create_pr",
+                side_effect=RuntimeError("setup produced no tasks"),
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", mock_handle_ci),
+            pytest.raises(RuntimeError),
         ):
             worker.run()
         mock_handle_ci.assert_not_called()

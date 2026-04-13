@@ -171,7 +171,8 @@ class TestListTasks:
 
     def test_corrupt_json(self, tmp_path: Path) -> None:
         _task_file(tmp_path).write_text("not json")
-        assert list_tasks(tmp_path) == []
+        with pytest.raises(ValueError, match="corrupt tasks.json"):
+            list_tasks(tmp_path)
 
     def test_raises_on_missing_type_field(self, tmp_path: Path) -> None:
         tf = _task_file(tmp_path)

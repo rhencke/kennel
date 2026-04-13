@@ -52,9 +52,8 @@ def _locked(path: Path, write: bool = False):
                 return []
             try:
                 result = json.loads(text)
-            except json.JSONDecodeError:
-                log.warning("corrupt tasks.json — resetting")
-                return []
+            except json.JSONDecodeError as e:
+                raise ValueError(f"corrupt tasks.json: {e}") from e
             for t in result:
                 if "type" not in t:
                     raise ValueError(
