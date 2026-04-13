@@ -796,24 +796,24 @@ class Worker:
         keywords = {check_name.lower(), "ci", "lint", "format"}
         result = []
         for node in nodes:
-            if node.get("isResolved"):
+            if node["isResolved"]:
                 continue
-            comments = node.get("comments", {}).get("nodes", [])
+            comments = node["comments"]["nodes"]
             if not comments:
                 continue
             last = comments[-1]
-            if last.get("author", {}).get("login") == gh_user:
+            if (last.get("author") or {}).get("login") == gh_user:
                 continue
-            bodies = " ".join(c.get("body", "").lower() for c in comments)
+            bodies = " ".join(c["body"].lower() for c in comments)
             if not any(kw in bodies for kw in keywords):
                 continue
             result.append(
                 {
-                    "first_author": comments[0].get("author", {}).get("login", ""),
-                    "first_body": comments[0].get("body", ""),
-                    "last_author": last.get("author", {}).get("login", ""),
-                    "last_body": last.get("body", ""),
-                    "url": comments[0].get("url", ""),
+                    "first_author": (comments[0].get("author") or {}).get("login", ""),
+                    "first_body": comments[0]["body"],
+                    "last_author": (last.get("author") or {}).get("login", ""),
+                    "last_body": last["body"],
+                    "url": comments[0]["url"],
                 }
             )
         return result
@@ -901,30 +901,29 @@ class Worker:
         """
         result = []
         for node in nodes:
-            if node.get("isResolved"):
+            if node["isResolved"]:
                 continue
-            comments = node.get("comments", {}).get("nodes", [])
+            comments = node["comments"]["nodes"]
             if not comments:
                 continue
             first_comment = comments[0]
             last_comment = comments[-1]
-            last_author = last_comment.get("author", {}).get("login", "")
+            last_author = (last_comment.get("author") or {}).get("login", "")
             if last_author == gh_user:
                 continue
             if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
+            first_login = (first_comment.get("author") or {}).get("login", "")
             result.append(
                 {
-                    "id": node.get("id", ""),
-                    "is_bot": first_comment.get("author", {})
-                    .get("login", "")
-                    .endswith("[bot]"),
-                    "first_author": first_comment.get("author", {}).get("login", ""),
+                    "id": node["id"],
+                    "is_bot": first_login.endswith("[bot]"),
+                    "first_author": first_login,
                     "first_db_id": first_comment.get("databaseId"),
-                    "first_body": first_comment.get("body", ""),
+                    "first_body": first_comment["body"],
                     "last_author": last_author,
-                    "last_body": last_comment.get("body", ""),
-                    "url": first_comment.get("url", ""),
+                    "last_body": last_comment["body"],
+                    "url": first_comment["url"],
                     "total": len(comments),
                 }
             )
@@ -947,12 +946,12 @@ class Worker:
         )
         resolved_any = False
         for node in nodes:
-            if node.get("isResolved"):
+            if node["isResolved"]:
                 continue
-            comments = node.get("comments", {}).get("nodes", [])
+            comments = node["comments"]["nodes"]
             if not comments:
                 continue
-            last_author = comments[-1].get("author", {}).get("login", "")
+            last_author = (comments[-1].get("author") or {}).get("login", "")
             if last_author != repo_ctx.gh_user:
                 continue
             comment_ids = [
@@ -961,10 +960,10 @@ class Worker:
             if any(self._tasks.has_pending_for_comment(cid) for cid in comment_ids):
                 log.info(
                     "skipping resolve for thread %s — pending sibling tasks remain",
-                    node.get("id", ""),
+                    node["id"],
                 )
                 continue
-            thread_id = node.get("id", "")
+            thread_id = node["id"]
             self.gh.resolve_thread(thread_id)
             log.info("resolved thread %s", thread_id)
             resolved_any = True

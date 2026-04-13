@@ -274,8 +274,8 @@ def _auto_complete_ask_tasks(
 
     resolved_ids: set[int] = set()
     for node in nodes:
-        if node.get("isResolved"):
-            comments = node.get("comments", {}).get("nodes", [])
+        if node["isResolved"]:
+            comments = node["comments"]["nodes"]
             if comments and comments[0].get("databaseId"):
                 resolved_ids.add(int(comments[0]["databaseId"]))
 

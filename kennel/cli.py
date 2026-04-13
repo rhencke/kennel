@@ -53,9 +53,9 @@ class Cmd:
             owner, repo_name = repo.split("/", 1)
             threads = self._github.get_review_threads(owner, repo_name, pr)
             for t in threads:
-                if t.get("isResolved"):
+                if t["isResolved"]:
                     continue
-                nodes = t.get("comments", {}).get("nodes", [])
+                nodes = t["comments"]["nodes"]
                 if nodes and nodes[0].get("databaseId") == comment_id:
                     self._github.resolve_thread(t["id"])
                     log.info("thread resolved: %s", t["id"])
