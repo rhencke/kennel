@@ -381,25 +381,38 @@ class TestWorker:
         )
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
-    def test_set_status_uses_what_as_fallback_when_claude_returns_empty(
+    def test_set_status_uses_what_as_fallback_when_claude_fails(
         self, tmp_path: Path
     ) -> None:
+        from kennel.claude import ClaudeError
+
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(tmp_path, gh).set_status(
-            "idle", **self._ss(tmp_path, text="", session_id="")
+            "idle",
+            **{
+                **self._ss(tmp_path),
+                "_generate_status_with_session": MagicMock(
+                    side_effect=ClaudeError("fail")
+                ),
+            },
         )
         gh.set_user_status.assert_called_once()
         call_args = gh.set_user_status.call_args[0]
         assert call_args[0] == "idle"
 
-    def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
-        # generate_status_emoji returns empty → :dog: fallback
+    def test_set_status_emoji_fallback_when_claude_fails(self, tmp_path: Path) -> None:
+        # generate_status_emoji raises → :dog: fallback
+        from kennel.claude import ClaudeError
+
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(tmp_path, gh).set_status(
             "idle",
-            **self._ss(tmp_path, text="Sniffing out endpoints", emoji=""),
+            **{
+                **self._ss(tmp_path, text="Sniffing out endpoints"),
+                "_generate_status_emoji": MagicMock(side_effect=ClaudeError("fail")),
+            },
         )
         gh.set_user_status.assert_called_once_with(
             "Sniffing out endpoints", ":dog:", busy=True
@@ -414,6 +427,27 @@ class TestWorker:
             "something",
             **self._ss(tmp_path, text=long_text, resume_side_effect=[""]),
         )
+        called_text = gh.set_user_status.call_args[0][0]
+        assert len(called_text) == 80
+
+    def test_set_status_resumes_status_breaks_on_claude_error(
+        self, tmp_path: Path
+    ) -> None:
+        # _resume_status raises ClaudeError → retry loop stops, text truncated
+        from kennel.claude import ClaudeError
+
+        gh = self._make_gh()
+        long_text = "x" * 100
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_resume = MagicMock(side_effect=ClaudeError("fail"))
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **{
+                **self._ss(tmp_path, text=long_text, session_id="sess-1"),
+                "_resume_status": mock_resume,
+            },
+        )
+        mock_resume.assert_called_once()
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -481,16 +515,24 @@ class TestWorker:
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
-    def test_set_status_logs_warning_on_empty_response(
+    def test_set_status_logs_warning_on_claude_failure(
         self, tmp_path: Path, caplog
     ) -> None:
         import logging
+
+        from kennel.claude import ClaudeError
 
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.WARNING, logger="kennel"):
             Worker(tmp_path, gh).set_status(
-                "idle", **self._ss(tmp_path, text="", session_id="")
+                "idle",
+                **{
+                    **self._ss(tmp_path),
+                    "_generate_status_with_session": MagicMock(
+                        side_effect=ClaudeError("fail")
+                    ),
+                },
             )
         assert "fallback" in caplog.text
 
@@ -1267,6 +1309,24 @@ class TestWorkerPostPickupComment:
         with (
             patch("kennel.worker._sub_dir", return_value=tmp_path),
             patch("kennel.worker.claude.generate_reply", return_value=""),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
+        gh.comment_issue.assert_called_once_with(
+            "owner/repo", 5, "Picking up issue: A task"
+        )
+
+    def test_falls_back_to_plain_text_when_claude_fails(self, tmp_path: Path) -> None:
+        from kennel.claude import ClaudeError
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        with (
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+            patch(
+                "kennel.worker.claude.generate_reply",
+                side_effect=ClaudeError("fail"),
+            ),
         ):
             (tmp_path / "persona.md").write_text("I am Fido.")
             worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
@@ -2845,6 +2905,37 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "42" in caplog.text
+
+    def test_no_pr_branch_name_falls_back_on_claude_error(self, tmp_path: Path) -> None:
+        """generate_branch_name raises ClaudeError → slug derived from issue title."""
+        from kennel.claude import ClaudeError
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/99"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch(
+                "kennel.worker.claude.generate_branch_name",
+                side_effect=ClaudeError("fail"),
+            ),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker._write_pr_description"),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
+            )
+        assert result is not None
+        _, slug = result
+        # slug derived from "Fix the bug" via _sanitize_slug
+        assert slug  # non-empty
+        assert slug == slug.lower()
 
 
 class TestSeedTasksFromPrBody:

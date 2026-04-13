@@ -504,6 +504,18 @@ class TestReorderTasks:
         reorder_tasks(tmp_path, "", _print_prompt=lambda *a, **k: "")
         assert list_tasks(tmp_path) == result_before
 
+    def test_skips_on_claude_error(self, tmp_path: Path) -> None:
+        from kennel.claude import ClaudeError
+
+        self._add(tmp_path, "Task A")
+        result_before = list_tasks(tmp_path)
+
+        def failing(*a, **k):
+            raise ClaudeError("fail")
+
+        reorder_tasks(tmp_path, "", _print_prompt=failing)
+        assert list_tasks(tmp_path) == result_before
+
     def test_skips_on_unparseable_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = list_tasks(tmp_path)

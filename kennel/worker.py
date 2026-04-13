@@ -538,14 +538,13 @@ class Worker:
                 activities = [(self.work_dir.name, what, busy)]
 
             # Call 1: generate status text
-            text, session_id = _generate_status_with_session(
-                prompt=prompts.status_text_prompt(activities),
-                system_prompt=prompts.status_text_system_prompt(),
-            )
-            if not text:
-                log.warning(
-                    "set_status: claude returned empty — using plain-text fallback"
+            try:
+                text, session_id = _generate_status_with_session(
+                    prompt=prompts.status_text_prompt(activities),
+                    system_prompt=prompts.status_text_system_prompt(),
                 )
+            except claude.ClaudeError:
+                log.warning("set_status: claude failed — using plain-text fallback")
                 text = what[:80]
                 session_id = ""
 
@@ -554,10 +553,13 @@ class Worker:
             for _ in range(3):
                 if len(text) <= 80 or not session_id:
                     break
-                retry_raw = _resume_status(
-                    session_id,
-                    f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
-                )
+                try:
+                    retry_raw = _resume_status(
+                        session_id,
+                        f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
+                    )
+                except claude.ClaudeError:
+                    break
                 if not retry_raw:
                     break
                 text = retry_raw.strip()
@@ -566,11 +568,12 @@ class Worker:
                 text = text[:80]
 
             # Call 2: generate emoji
-            emoji = _generate_status_emoji(
-                prompt=prompts.status_emoji_prompt(text),
-                system_prompt=prompts.status_emoji_system_prompt(),
-            )
-            if not emoji:
+            try:
+                emoji = _generate_status_emoji(
+                    prompt=prompts.status_emoji_prompt(text),
+                    system_prompt=prompts.status_emoji_system_prompt(),
+                )
+            except claude.ClaudeError:
                 emoji = ":dog:"
 
             self.gh.set_user_status(text, emoji, busy=busy)
@@ -702,12 +705,15 @@ class Worker:
             return pr_number, slug
 
         # Generate branch slug via Haiku
-        raw_slug = claude.generate_branch_name(
-            "Output ONLY a git branch name: 2-4 lowercase words separated by"
-            " hyphens, no issue numbers, summarising this request."
-            " No explanation, no punctuation, just the branch name."
-            f"\n\nRequest: {request}"
-        )
+        try:
+            raw_slug = claude.generate_branch_name(
+                "Output ONLY a git branch name: 2-4 lowercase words separated by"
+                " hyphens, no issue numbers, summarising this request."
+                " No explanation, no punctuation, just the branch name."
+                f"\n\nRequest: {request}"
+            )
+        except claude.ClaudeError:
+            raw_slug = ""
         slug = _sanitize_slug(raw_slug, request)
         log.info("new branch: %s", slug)
 
@@ -1286,7 +1292,10 @@ class Worker:
 
         prompts = Prompts(persona)
         prompt = prompts.pickup_comment_prompt(issue_title)
-        msg = claude.generate_reply(prompt)
+        try:
+            msg = claude.generate_reply(prompt)
+        except claude.ClaudeError:
+            msg = ""
         if not msg:
             msg = f"Picking up issue: {issue_title}"
 

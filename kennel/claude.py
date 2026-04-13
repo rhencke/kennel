@@ -80,7 +80,11 @@ def _claude(
     )
 
 
-class ClaudeStreamError(Exception):
+class ClaudeError(Exception):
+    """Raised when a Claude subprocess call fails."""
+
+
+class ClaudeStreamError(ClaudeError):
     """Raised by _run_streaming when the subprocess exits with a non-zero code or times out."""
 
     def __init__(self, returncode: int) -> None:
@@ -150,11 +154,12 @@ def print_prompt(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Run claude --print with a prompt, return stdout (empty string on failure).
+    """Run claude --print with a prompt, return stdout.
 
     Uses -p to pass the prompt as a positional argument (no tool access).
     Retries up to ``_EMPTY_RETRY_COUNT`` times (with a short delay) when
     Claude exits 0 but produces no output, to handle transient empty responses.
+    Raises ``ClaudeError`` on subprocess failure or empty output after all retries.
     """
     args: list[str] = ["--model", model, "--print"]
     if system_prompt is not None:
@@ -163,24 +168,26 @@ def print_prompt(
     for attempt in range(_EMPTY_RETRY_COUNT + 1):
         try:
             result = _claude(*args, timeout=timeout, runner=runner)
-            if result.returncode != 0:
-                return ""
-            text = result.stdout.strip()
-            if text:
-                return text
-            if result.stderr:
-                log.warning("print_prompt: stderr=%r", result.stderr[:200])
-            log.debug("print_prompt: stdout=%r", result.stdout[:200])
-            if attempt < _EMPTY_RETRY_COUNT:
-                log.warning(
-                    "print_prompt: empty output on attempt %d — retrying",
-                    attempt + 1,
-                )
-                _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
+        except subprocess.TimeoutExpired:
+            raise ClaudeError("claude timed out") from None
+        except FileNotFoundError:
+            raise ClaudeError("claude CLI not found") from None
+        if result.returncode != 0:
+            raise ClaudeError(f"claude exited {result.returncode}")
+        text = result.stdout.strip()
+        if text:
+            return text
+        if result.stderr:
+            log.warning("print_prompt: stderr=%r", result.stderr[:200])
+        log.debug("print_prompt: stdout=%r", result.stdout[:200])
+        if attempt < _EMPTY_RETRY_COUNT:
+            log.warning(
+                "print_prompt: empty output on attempt %d — retrying",
+                attempt + 1,
+            )
+            _sleep(_EMPTY_RETRY_DELAY)
     log.warning("print_prompt: empty output after %d attempts", _EMPTY_RETRY_COUNT + 1)
-    return ""
+    raise ClaudeError("empty output after retries")
 
 
 def print_prompt_json(
@@ -209,8 +216,6 @@ def print_prompt_json(
     raw = print_prompt(
         prompt, model, system_prompt=full_system, timeout=timeout, runner=runner
     )
-    if not raw:
-        return ""
     # Try parsing whole output, then scan for JSON objects (handles preamble).
     candidates = [raw] + [m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)]
     for candidate in candidates:
@@ -291,8 +296,8 @@ def print_prompt_from_file(
 ) -> str:
     """Run claude --print reading system prompt and user prompt from files.
 
-    Returns stdout on success, empty string on failure.  Kills the process
-    if no output is produced for *idle_timeout* seconds (default 30 min).
+    Returns stdout on success.  Kills the process if no output is produced for
+    *idle_timeout* seconds (default 30 min).  Raises ``ClaudeError`` on failure.
     """
     cmd = [
         "claude",
@@ -310,8 +315,8 @@ def print_prompt_from_file(
         return "".join(
             streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()
-    except ClaudeStreamError, FileNotFoundError:
-        return ""
+    except FileNotFoundError as e:
+        raise ClaudeError("claude CLI not found") from e
 
 
 def resume_session(
@@ -325,8 +330,8 @@ def resume_session(
 ) -> str:
     """Continue an existing claude session by ID, feeding prompt_file on stdin.
 
-    Returns stdout on success, empty string on failure.  Kills the process
-    if no output is produced for *idle_timeout* seconds (default 30 min).
+    Returns stdout on success.  Kills the process if no output is produced for
+    *idle_timeout* seconds (default 30 min).  Raises ``ClaudeError`` on failure.
     """
     cmd = [
         "claude",
@@ -344,8 +349,8 @@ def resume_session(
         return "".join(
             streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()
-    except ClaudeStreamError, FileNotFoundError:
-        return ""
+    except FileNotFoundError as e:
+        raise ClaudeError("claude CLI not found") from e
 
 
 # ── Specialised wrappers used by events.py ───────────────────────────────────
@@ -359,17 +364,22 @@ def triage_comment(
 ) -> str:
     """Ask claude to triage a PR comment. Returns the raw first line of output.
 
-    Returns empty string on timeout or if the CLI is not found.
+    Raises ``ClaudeError`` on subprocess failure or empty output.
     """
     try:
         result = _claude(
             "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().splitlines()[0]
-        return ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    except subprocess.TimeoutExpired:
+        raise ClaudeError("claude timed out") from None
+    except FileNotFoundError:
+        raise ClaudeError("claude CLI not found") from None
+    if result.returncode != 0:
+        raise ClaudeError(f"claude exited {result.returncode}")
+    first = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    if not first:
+        raise ClaudeError("empty response")
+    return first
 
 
 def generate_reply(
@@ -378,14 +388,22 @@ def generate_reply(
     timeout: int = 30,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a short reply. Returns stripped output or empty string."""
+    """Ask claude to generate a short reply. Returns stripped output.
+
+    Raises ``ClaudeError`` on subprocess failure.  Empty output (exit 0) is
+    returned as an empty string — the caller is responsible for fallback.
+    """
     try:
         result = _claude(
             "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
         )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    except subprocess.TimeoutExpired:
+        raise ClaudeError("claude timed out") from None
+    except FileNotFoundError:
+        raise ClaudeError("claude CLI not found") from None
+    if result.returncode != 0:
+        raise ClaudeError(f"claude exited {result.returncode}")
+    return result.stdout.strip()
 
 
 def generate_branch_name(
@@ -394,16 +412,24 @@ def generate_branch_name(
     timeout: int = 15,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a git branch name slug. Returns first line of output."""
+    """Ask claude to generate a git branch name slug. Returns first line of output.
+
+    Raises ``ClaudeError`` on subprocess failure.  Empty output (exit 0) is
+    returned as an empty string — the caller is responsible for fallback.
+    """
     try:
         result = _claude(
             "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().splitlines()[0]
-        return ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    except subprocess.TimeoutExpired:
+        raise ClaudeError("claude timed out") from None
+    except FileNotFoundError:
+        raise ClaudeError("claude CLI not found") from None
+    if result.returncode != 0:
+        raise ClaudeError(f"claude exited {result.returncode}")
+    if result.stdout.strip():
+        return result.stdout.strip().splitlines()[0]
+    return ""
 
 
 def generate_status(
@@ -455,9 +481,9 @@ def generate_status_with_session(
 
     Uses stream-json output format to capture the session_id alongside the
     response text, enabling follow-up calls (e.g., ``resume_status`` to
-    shorten a long response).  Returns ``("", "")`` on failure.
-    Retries up to ``_EMPTY_RETRY_COUNT`` times when Claude exits 0 but
-    produces no output.
+    shorten a long response).  Retries up to ``_EMPTY_RETRY_COUNT`` times
+    when Claude exits 0 but produces no output.  Raises ``ClaudeError`` on
+    subprocess failure or empty output after all retries.
     """
     for attempt in range(_EMPTY_RETRY_COUNT + 1):
         try:
@@ -476,31 +502,31 @@ def generate_status_with_session(
                 timeout=timeout,
                 runner=runner,
             )
-            if result.returncode != 0:
-                return "", ""
-            raw = result.stdout.strip()
-            text = extract_result_text(raw)
-            sid = extract_session_id(raw)
-            if text:
-                return text, sid
-            if result.stderr:
-                log.warning(
-                    "generate_status_with_session: stderr=%r", result.stderr[:200]
-                )
-            log.debug("generate_status_with_session: stdout=%r", result.stdout[:200])
-            if attempt < _EMPTY_RETRY_COUNT:
-                log.warning(
-                    "generate_status_with_session: empty output on attempt %d — retrying",
-                    attempt + 1,
-                )
-                _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return "", ""
+        except subprocess.TimeoutExpired:
+            raise ClaudeError("claude timed out") from None
+        except FileNotFoundError:
+            raise ClaudeError("claude CLI not found") from None
+        if result.returncode != 0:
+            raise ClaudeError(f"claude exited {result.returncode}")
+        raw = result.stdout.strip()
+        text = extract_result_text(raw)
+        sid = extract_session_id(raw)
+        if text:
+            return text, sid
+        if result.stderr:
+            log.warning("generate_status_with_session: stderr=%r", result.stderr[:200])
+        log.debug("generate_status_with_session: stdout=%r", result.stdout[:200])
+        if attempt < _EMPTY_RETRY_COUNT:
+            log.warning(
+                "generate_status_with_session: empty output on attempt %d — retrying",
+                attempt + 1,
+            )
+            _sleep(_EMPTY_RETRY_DELAY)
     log.warning(
         "generate_status_with_session: empty output after %d attempts",
         _EMPTY_RETRY_COUNT + 1,
     )
-    return "", ""
+    raise ClaudeError("empty output after retries")
 
 
 def resume_status(
@@ -513,8 +539,9 @@ def resume_status(
     """Resume an existing claude session to refine a status response.
 
     Passes *prompt* as a positional argument (``-p``), so no file is needed.
-    Returns the response text extracted from stream-json output, or an empty
-    string on failure.
+    Returns the response text extracted from stream-json output, or empty
+    string if the result field is absent.  Raises ``ClaudeError`` on
+    subprocess failure.
     """
     try:
         result = _claude(
@@ -532,8 +559,10 @@ def resume_status(
             timeout=timeout,
             runner=runner,
         )
-        if result.returncode != 0:
-            return ""
-        return extract_result_text(result.stdout.strip())
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    except subprocess.TimeoutExpired:
+        raise ClaudeError("claude timed out") from None
+    except FileNotFoundError:
+        raise ClaudeError("claude CLI not found") from None
+    if result.returncode != 0:
+        raise ClaudeError(f"claude exited {result.returncode}")
+    return extract_result_text(result.stdout.strip())

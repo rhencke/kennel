@@ -31,12 +31,15 @@ def generate_persona_status(
     _print_prompt: Callable[..., str] = claude.print_prompt,
 ) -> str:
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
-    result = _print_prompt(
-        prompt=f"Rewrite this status in Fido's voice: {message}",
-        model="claude-opus-4-6",
-        system_prompt=system,
-        timeout=15,
-    )
+    try:
+        result = _print_prompt(
+            prompt=f"Rewrite this status in Fido's voice: {message}",
+            model="claude-opus-4-6",
+            system_prompt=system,
+            timeout=15,
+        )
+    except claude.ClaudeError:
+        return message[:80]
     return result if result else message[:80]
 
 
@@ -47,13 +50,16 @@ def generate_persona_emoji(
     _print_prompt_json: Callable[..., str] = claude.print_prompt_json,
 ) -> str:
     system = f"{persona}\n\n{_EMOJI_SYSTEM}" if persona else _EMOJI_SYSTEM
-    result = _print_prompt_json(
-        prompt=f"Pick an emoji for this status: {status_text}",
-        key="emoji",
-        model="claude-opus-4-6",
-        system_prompt=system,
-        timeout=15,
-    )
+    try:
+        result = _print_prompt_json(
+            prompt=f"Pick an emoji for this status: {status_text}",
+            key="emoji",
+            model="claude-opus-4-6",
+            system_prompt=system,
+            timeout=15,
+        )
+    except claude.ClaudeError:
+        return ":dog:"
     return result if result else ":dog:"
 
 

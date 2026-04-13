@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from kennel.claude import ClaudeError
 from kennel.gh_status import (
     generate_persona_emoji,
     generate_persona_status,
@@ -27,6 +28,13 @@ class TestGeneratePersonaStatus:
         result = generate_persona_status(
             "at the vet", "persona", _print_prompt=lambda **kw: ""
         )
+        assert result == "at the vet"
+
+    def test_claude_error_falls_back_to_raw(self) -> None:
+        def failing(**kw):
+            raise ClaudeError("fail")
+
+        result = generate_persona_status("at the vet", "persona", _print_prompt=failing)
         assert result == "at the vet"
 
     def test_long_message_truncated_on_fallback(self) -> None:
@@ -52,6 +60,13 @@ class TestGeneratePersonaEmoji:
         result = generate_persona_emoji(
             "test", "persona", _print_prompt_json=lambda **kw: ""
         )
+        assert result == ":dog:"
+
+    def test_claude_error_falls_back_to_dog(self) -> None:
+        def failing(**kw):
+            raise ClaudeError("fail")
+
+        result = generate_persona_emoji("test", "persona", _print_prompt_json=failing)
         assert result == ":dog:"
 
     def test_empty_persona(self) -> None:

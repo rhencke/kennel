@@ -5,7 +5,10 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from kennel.claude import (
+    ClaudeError,
     ClaudeStreamError,
     _claude,
     _register_child,
@@ -68,33 +71,27 @@ class TestPrintPrompt:
         mock_run = MagicMock(return_value=_completed("  hello world  \n"))
         assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == "hello world"
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed("err", returncode=1))
         mock_sleep = MagicMock()
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
         mock_sleep = MagicMock()
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
         mock_sleep = MagicMock()
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
@@ -110,13 +107,11 @@ class TestPrintPrompt:
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
 
-    def test_returns_empty_after_all_retries_exhausted(self) -> None:
+    def test_raises_after_all_retries_exhausted(self) -> None:
         mock_run = MagicMock(return_value=_completed(""))
         mock_sleep = MagicMock()
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
 
@@ -150,19 +145,28 @@ class TestPrintPrompt:
     def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
         mock_run = MagicMock(return_value=_completed("", stderr="Rate limit exceeded"))
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+            with pytest.raises(ClaudeError):
+                print_prompt(
+                    "q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock()
+                )
         assert "Rate limit exceeded" in caplog.text
 
     def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
         mock_run = MagicMock(return_value=_completed("   \n  "))
         with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+            with pytest.raises(ClaudeError):
+                print_prompt(
+                    "q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock()
+                )
         assert "stdout=" in caplog.text
 
     def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
         mock_run = MagicMock(return_value=_completed(""))
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+            with pytest.raises(ClaudeError):
+                print_prompt(
+                    "q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock()
+                )
         assert "stderr=" not in caplog.text
 
 
@@ -199,35 +203,27 @@ class TestPrintPromptJson:
             == ""
         )
 
-    def test_returns_empty_on_empty_output(self) -> None:
+    def test_raises_on_empty_output(self) -> None:
         mock_run = MagicMock(return_value=_completed(""))
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(
             return_value=_completed('{"description": "x"}', returncode=1)
         )
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert (
+        with pytest.raises(ClaudeError):
             print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
 
     def test_appends_json_instruction_to_system_prompt(self) -> None:
         mock_run = MagicMock(return_value=_completed('{"description": "x"}'))
@@ -392,29 +388,29 @@ class TestPrintPromptFromFile:
         )
         assert result == "session output"
 
-    def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
+    def test_raises_on_nonzero(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
-    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=FileNotFoundError)
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
@@ -452,32 +448,41 @@ class TestResumeSession:
         )
         assert result == "continued"
 
-    def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
+    def test_raises_on_nonzero(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
-    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=FileNotFoundError)
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
@@ -513,21 +518,25 @@ class TestTriageComment:
         mock_run = MagicMock(return_value=_completed("ACT: fix the thing\nextra"))
         assert triage_comment("triage this", runner=mock_run) == "ACT: fix the thing"
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed("ACT", returncode=1))
-        assert triage_comment("triage this", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            triage_comment("triage this", runner=mock_run)
 
-    def test_returns_empty_on_empty_output(self) -> None:
+    def test_raises_on_empty_output(self) -> None:
         mock_run = MagicMock(return_value=_completed(""))
-        assert triage_comment("triage this", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            triage_comment("triage this", runner=mock_run)
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        assert triage_comment("triage", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            triage_comment("triage", runner=mock_run)
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert triage_comment("triage", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            triage_comment("triage", runner=mock_run)
 
     def test_default_model_and_timeout(self) -> None:
         mock_run = MagicMock(return_value=_completed("ACT: thing"))
@@ -551,17 +560,20 @@ class TestGenerateReply:
         mock_run = MagicMock(return_value=_completed("  woof!  \n"))
         assert generate_reply("write a reply", runner=mock_run) == "woof!"
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed("err", returncode=1))
-        assert generate_reply("write", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_reply("write", runner=mock_run)
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        assert generate_reply("write", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_reply("write", runner=mock_run)
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert generate_reply("write", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_reply("write", runner=mock_run)
 
     def test_default_model_and_timeout(self) -> None:
         mock_run = MagicMock(return_value=_completed("ok"))
@@ -586,21 +598,24 @@ class TestGenerateBranchName:
             == "add-tests"
         )
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed("slug", returncode=1))
-        assert generate_branch_name("make branch", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_branch_name("make branch", runner=mock_run)
 
     def test_returns_empty_on_empty_output(self) -> None:
         mock_run = MagicMock(return_value=_completed(""))
         assert generate_branch_name("make branch", runner=mock_run) == ""
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        assert generate_branch_name("make branch", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_branch_name("make branch", runner=mock_run)
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert generate_branch_name("make branch", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            generate_branch_name("make branch", runner=mock_run)
 
     def test_default_model_and_timeout(self) -> None:
         mock_run = MagicMock(return_value=_completed("fix-bug"))
@@ -625,15 +640,15 @@ class TestGenerateStatus:
         result = generate_status("working on #42", "be fido", runner=mock_run)
         assert result == "🐶\ncoding up a storm"
 
-    def test_returns_empty_on_failure(self) -> None:
+    def test_raises_on_failure(self) -> None:
         mock_run = MagicMock(return_value=_completed("", returncode=1))
-        result = generate_status("working", "sys", runner=mock_run)
-        assert result == ""
+        with pytest.raises(ClaudeError):
+            generate_status("working", "sys", runner=mock_run)
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        result = generate_status("working", "sys", runner=mock_run)
-        assert result == ""
+        with pytest.raises(ClaudeError):
+            generate_status("working", "sys", runner=mock_run)
 
     def test_passes_system_prompt(self) -> None:
         mock_run = MagicMock(return_value=_completed("🚀\nworking"))
@@ -775,30 +790,33 @@ class TestGenerateStatusWithSession:
         assert text == "🐶\ncoding"
         assert sid == "sess-42"
 
-    def test_returns_empty_pair_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
         mock_sleep = MagicMock()
-        assert generate_status_with_session(
-            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
-        ) == ("", "")
+        with pytest.raises(ClaudeError):
+            generate_status_with_session(
+                "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+            )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
-    def test_returns_empty_pair_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
         mock_sleep = MagicMock()
-        assert generate_status_with_session(
-            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
-        ) == ("", "")
+        with pytest.raises(ClaudeError):
+            generate_status_with_session(
+                "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+            )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
-    def test_returns_empty_pair_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
         mock_sleep = MagicMock()
-        assert generate_status_with_session(
-            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
-        ) == ("", "")
+        with pytest.raises(ClaudeError):
+            generate_status_with_session(
+                "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+            )
         mock_run.assert_called_once()
         mock_sleep.assert_not_called()
 
@@ -832,15 +850,14 @@ class TestGenerateStatusWithSession:
         assert "claude-opus-4-6" in cmd
         assert mock_run.call_args.kwargs["timeout"] == 15
 
-    def test_returns_empty_pair_when_no_result_field_after_retries(self) -> None:
+    def test_raises_when_no_result_field_after_retries(self) -> None:
         no_result = '{"type":"result","session_id":"sid"}'
         mock_run = MagicMock(return_value=_completed(no_result))
         mock_sleep = MagicMock()
-        text, sid = generate_status_with_session(
-            "working", "sys", runner=mock_run, _sleep=mock_sleep
-        )
-        assert text == ""
-        assert sid == ""
+        with pytest.raises(ClaudeError):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=mock_sleep
+            )
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
 
@@ -869,13 +886,14 @@ class TestGenerateStatusWithSession:
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
 
-    def test_returns_empty_pair_after_all_retries_exhausted(self) -> None:
+    def test_raises_after_all_retries_exhausted(self) -> None:
         empty_line = '{"type":"result","session_id":"s1"}'
         mock_run = MagicMock(return_value=_completed(empty_line))
         mock_sleep = MagicMock()
-        assert generate_status_with_session(
-            "working", "sys", runner=mock_run, _sleep=mock_sleep
-        ) == ("", "")
+        with pytest.raises(ClaudeError):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=mock_sleep
+            )
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
 
@@ -885,27 +903,30 @@ class TestGenerateStatusWithSession:
             return_value=_completed(empty_line, stderr="Rate limit exceeded")
         )
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            generate_status_with_session(
-                "working", "sys", runner=mock_run, _sleep=MagicMock()
-            )
+            with pytest.raises(ClaudeError):
+                generate_status_with_session(
+                    "working", "sys", runner=mock_run, _sleep=MagicMock()
+                )
         assert "Rate limit exceeded" in caplog.text
 
     def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
         empty_line = '{"type":"result","session_id":"s1"}'
         mock_run = MagicMock(return_value=_completed(empty_line))
         with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            generate_status_with_session(
-                "working", "sys", runner=mock_run, _sleep=MagicMock()
-            )
+            with pytest.raises(ClaudeError):
+                generate_status_with_session(
+                    "working", "sys", runner=mock_run, _sleep=MagicMock()
+                )
         assert "stdout=" in caplog.text
 
     def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
         empty_line = '{"type":"result","session_id":"s1"}'
         mock_run = MagicMock(return_value=_completed(empty_line))
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            generate_status_with_session(
-                "working", "sys", runner=mock_run, _sleep=MagicMock()
-            )
+            with pytest.raises(ClaudeError):
+                generate_status_with_session(
+                    "working", "sys", runner=mock_run, _sleep=MagicMock()
+                )
         assert "stderr=" not in caplog.text
 
 
@@ -915,10 +936,10 @@ class TestGenerateStatusEmoji:
         result = generate_status_emoji("pick emoji", "be fido", runner=mock_run)
         assert result == "🐕"
 
-    def test_returns_empty_on_failure(self) -> None:
+    def test_raises_on_failure(self) -> None:
         mock_run = MagicMock(return_value=_completed("", returncode=1))
-        result = generate_status_emoji("pick emoji", "sys", runner=mock_run)
-        assert result == ""
+        with pytest.raises(ClaudeError):
+            generate_status_emoji("pick emoji", "sys", runner=mock_run)
 
     def test_passes_correct_flags(self) -> None:
         mock_run = MagicMock(return_value=_completed("🐕"))
@@ -943,17 +964,20 @@ class TestResumeStatus:
         result = resume_status("s-1", "please shorten", runner=mock_run)
         assert result == "🐕\nfetching"
 
-    def test_returns_empty_on_nonzero(self) -> None:
+    def test_raises_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
-        assert resume_status("s-1", "shorten", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            resume_status("s-1", "shorten", runner=mock_run)
 
-    def test_returns_empty_on_timeout(self) -> None:
+    def test_raises_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        assert resume_status("s-1", "shorten", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            resume_status("s-1", "shorten", runner=mock_run)
 
-    def test_returns_empty_on_file_not_found(self) -> None:
+    def test_raises_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert resume_status("s-1", "shorten", runner=mock_run) == ""
+        with pytest.raises(ClaudeError):
+            resume_status("s-1", "shorten", runner=mock_run)
 
     def test_passes_correct_flags(self) -> None:
         mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))

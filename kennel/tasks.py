@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kennel.claude import ClaudeError
 from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
@@ -541,7 +542,11 @@ def reorder_tasks(
 
     original_ids = frozenset(t["id"] for t in task_list)
     prompt = _rescope_prompt_fn(task_list, commit_summary)
-    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    try:
+        raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    except ClaudeError:
+        log.warning("reorder_tasks: Opus failed — skipping")
+        return
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return
