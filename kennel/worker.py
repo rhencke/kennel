@@ -338,8 +338,8 @@ def _write_pr_description(
 
     Generates the description via Opus and writes it back via
     ``gh.edit_pr_body``.  Returns ``True`` if the body was written,
-    ``False`` when skipped (no divider in an existing body, or Opus returned
-    empty).
+    ``False`` when skipped (no divider in an existing body).  When Opus
+    returns empty, falls back to a plain-text ``"Working on #N."`` line.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -374,8 +374,10 @@ def _write_pr_description(
     prompt = rewrite_description_prompt(existing_body, task_list)
     new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
     if not new_desc:
-        log.warning("_write_pr_description: Opus returned empty — skipping")
-        return False
+        log.warning(
+            "_write_pr_description: Opus returned empty — using plain-text fallback"
+        )
+        new_desc = f"Working on #{issue}."
 
     # Ensure "Fixes #N" is always present (Opus preserves it for rewrites via
     # prompt rules; for initial writes we append it here).
@@ -509,8 +511,8 @@ class Worker:
         Makes two separate Opus calls: the first generates short status text
         (≤80 chars), the second picks an emoji.  If the text exceeds 80
         characters, retries up to 3 times in the same session to shorten it,
-        then truncates as a last resort.  Silently skips if Claude returns an
-        empty response for the text call.
+        then truncates as a last resort.  Falls back to ``what[:80]`` if
+        Claude returns an empty response for the text call.
         """
         persona_path = _sub_dir_fn() / "persona.md"
         try:
@@ -541,8 +543,11 @@ class Worker:
                 system_prompt=prompts.status_text_system_prompt(),
             )
             if not text:
-                log.warning("set_status: claude returned empty — skipping")
-                return
+                log.warning(
+                    "set_status: claude returned empty — using plain-text fallback"
+                )
+                text = what[:80]
+                session_id = ""
 
             text = _sanitize_status_text(text)
 

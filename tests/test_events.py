@@ -3093,7 +3093,9 @@ class TestRewritePrDescription:
         )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_skips_when_opus_returns_empty(self, tmp_path: Path) -> None:
+    def test_uses_plain_text_fallback_when_opus_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
@@ -3102,7 +3104,9 @@ class TestRewritePrDescription:
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
-        mock_gh.edit_pr_body.assert_not_called()
+        mock_gh.edit_pr_body.assert_called_once()
+        body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "Working on #42." in body
 
     def test_updates_pr_body_with_new_description(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()

@@ -381,13 +381,17 @@ class TestWorker:
         )
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
-    def test_set_status_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
+    def test_set_status_uses_what_as_fallback_when_claude_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(tmp_path, gh).set_status(
             "idle", **self._ss(tmp_path, text="", session_id="")
         )
-        gh.set_user_status.assert_not_called()
+        gh.set_user_status.assert_called_once()
+        call_args = gh.set_user_status.call_args[0]
+        assert call_args[0] == "idle"
 
     def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
         # generate_status_emoji returns empty → :dog: fallback
@@ -488,7 +492,7 @@ class TestWorker:
             Worker(tmp_path, gh).set_status(
                 "idle", **self._ss(tmp_path, text="", session_id="")
             )
-        assert "empty" in caplog.text
+        assert "fallback" in caplog.text
 
     def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -2221,11 +2225,13 @@ class TestWritePrDescription:
         result, _ = self._call(gh)
         assert result is True
 
-    def test_returns_false_when_opus_empty(self) -> None:
+    def test_uses_plain_text_fallback_when_opus_empty(self) -> None:
         gh = MagicMock()
-        result, _ = self._call(gh, print_return="")
-        assert result is False
-        gh.edit_pr_body.assert_not_called()
+        result, _ = self._call(gh, print_return="", issue=7)
+        assert result is True
+        gh.edit_pr_body.assert_called_once()
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Working on #7." in body
 
     def test_returns_false_when_no_divider_in_existing_body(self) -> None:
         gh = MagicMock()

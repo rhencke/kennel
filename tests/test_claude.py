@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -27,10 +28,10 @@ from kennel.claude import (
 
 
 def _completed(
-    stdout: str = "", returncode: int = 0
+    stdout: str = "", returncode: int = 0, stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=""
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
     )
 
 
@@ -69,15 +70,55 @@ class TestPrintPrompt:
 
     def test_returns_empty_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed("err", returncode=1))
-        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
+        mock_sleep = MagicMock()
+        assert (
+            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
+            == ""
+        )
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
 
     def test_returns_empty_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
+        mock_sleep = MagicMock()
+        assert (
+            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
+            == ""
+        )
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
 
     def test_returns_empty_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == ""
+        mock_sleep = MagicMock()
+        assert (
+            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
+            == ""
+        )
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_retries_on_empty_output_then_succeeds(self) -> None:
+        mock_run = MagicMock(
+            side_effect=[_completed(""), _completed(""), _completed("hello")]
+        )
+        mock_sleep = MagicMock()
+        assert (
+            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
+            == "hello"
+        )
+        assert mock_run.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_returns_empty_after_all_retries_exhausted(self) -> None:
+        mock_run = MagicMock(return_value=_completed(""))
+        mock_sleep = MagicMock()
+        assert (
+            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
+            == ""
+        )
+        assert mock_run.call_count == 3
+        assert mock_sleep.call_count == 2
 
     def test_includes_system_prompt(self) -> None:
         mock_run = MagicMock(return_value=_completed("ok"))
@@ -105,6 +146,24 @@ class TestPrintPrompt:
         mock_run = MagicMock(return_value=_completed("ok"))
         print_prompt("q", "claude-opus-4-6", timeout=7, runner=mock_run)
         assert mock_run.call_args.kwargs["timeout"] == 7
+
+    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed("", stderr="Rate limit exceeded"))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "Rate limit exceeded" in caplog.text
+
+    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed("   \n  "))
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "stdout=" in caplog.text
+
+    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed(""))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "stderr=" not in caplog.text
 
 
 class TestPrintPromptJson:
@@ -718,24 +777,30 @@ class TestGenerateStatusWithSession:
 
     def test_returns_empty_pair_on_nonzero(self) -> None:
         mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
-        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
-            "",
-            "",
-        )
+        mock_sleep = MagicMock()
+        assert generate_status_with_session(
+            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+        ) == ("", "")
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
 
     def test_returns_empty_pair_on_timeout(self) -> None:
         mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
-            "",
-            "",
-        )
+        mock_sleep = MagicMock()
+        assert generate_status_with_session(
+            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+        ) == ("", "")
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
 
     def test_returns_empty_pair_on_file_not_found(self) -> None:
         mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert generate_status_with_session("doing stuff", "sys", runner=mock_run) == (
-            "",
-            "",
-        )
+        mock_sleep = MagicMock()
+        assert generate_status_with_session(
+            "doing stuff", "sys", runner=mock_run, _sleep=mock_sleep
+        ) == ("", "")
+        mock_run.assert_called_once()
+        mock_sleep.assert_not_called()
 
     def test_passes_correct_flags(self) -> None:
         mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
@@ -767,12 +832,17 @@ class TestGenerateStatusWithSession:
         assert "claude-opus-4-6" in cmd
         assert mock_run.call_args.kwargs["timeout"] == 15
 
-    def test_returns_empty_text_when_no_result_field(self) -> None:
+    def test_returns_empty_pair_when_no_result_field_after_retries(self) -> None:
         no_result = '{"type":"result","session_id":"sid"}'
         mock_run = MagicMock(return_value=_completed(no_result))
-        text, sid = generate_status_with_session("working", "sys", runner=mock_run)
+        mock_sleep = MagicMock()
+        text, sid = generate_status_with_session(
+            "working", "sys", runner=mock_run, _sleep=mock_sleep
+        )
         assert text == ""
-        assert sid == "sid"
+        assert sid == ""
+        assert mock_run.call_count == 3
+        assert mock_sleep.call_count == 2
 
     def test_returns_empty_session_when_no_session_id(self) -> None:
         no_sid = '{"type":"result","result":"🐶\\nwoof"}'
@@ -780,6 +850,63 @@ class TestGenerateStatusWithSession:
         text, sid = generate_status_with_session("working", "sys", runner=mock_run)
         assert text == "🐶\nwoof"
         assert sid == ""
+
+    def test_retries_on_empty_output_then_succeeds(self) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(
+            side_effect=[
+                _completed(empty_line),
+                _completed(empty_line),
+                _completed(self._RESULT_LINE),
+            ]
+        )
+        mock_sleep = MagicMock()
+        text, sid = generate_status_with_session(
+            "working", "sys", runner=mock_run, _sleep=mock_sleep
+        )
+        assert text == "🐶\ncoding"
+        assert sid == "sess-42"
+        assert mock_run.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_returns_empty_pair_after_all_retries_exhausted(self) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(return_value=_completed(empty_line))
+        mock_sleep = MagicMock()
+        assert generate_status_with_session(
+            "working", "sys", runner=mock_run, _sleep=mock_sleep
+        ) == ("", "")
+        assert mock_run.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(
+            return_value=_completed(empty_line, stderr="Rate limit exceeded")
+        )
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "Rate limit exceeded" in caplog.text
+
+    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(return_value=_completed(empty_line))
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "stdout=" in caplog.text
+
+    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(return_value=_completed(empty_line))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "stderr=" not in caplog.text
 
 
 class TestGenerateStatusEmoji:
