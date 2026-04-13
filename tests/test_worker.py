@@ -7774,6 +7774,26 @@ class TestSyncTasks:
         assert "Do it" in new_body
         assert "old" not in new_body
 
+    def test_description_section_preserved_after_sync(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        desc = "My PR description.\n\nFixes #1."
+        body = (
+            f"{desc}\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\nold queue\n<!-- WORK_QUEUE_END -->"
+        )
+        gh.get_pr_body.return_value = body
+        task = {"title": "Do it", "status": "pending", "type": "spec"}
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        assert "My PR description." in new_body
+        assert "Fixes #1." in new_body
+
     def test_skips_edit_when_no_queue_markers(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)

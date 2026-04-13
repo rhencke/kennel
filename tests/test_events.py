@@ -1917,6 +1917,20 @@ class TestCreateTask:
             )
         assert reorder_called == []
 
+    def test_spec_task_does_not_call_rewrite_pr_description(
+        self, tmp_path: Path
+    ) -> None:
+        """Normal (non-thread) task creation never triggers a PR description rewrite."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.events.add_task"),
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events._rewrite_pr_description") as mock_rewrite,
+        ):
+            create_task("Spec task", cfg, repo_cfg)  # thread=None
+        mock_rewrite.assert_not_called()
+
     def test_commit_summary_comes_from_get_commit_summary_fn(
         self, tmp_path: Path
     ) -> None:
