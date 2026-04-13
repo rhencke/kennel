@@ -634,3 +634,37 @@ class Tasks:
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
         return list_tasks(self._work_dir)
+
+    def add(
+        self,
+        title: str,
+        task_type: TaskType,
+        description: str = "",
+        status: TaskStatus = TaskStatus.PENDING,
+        thread: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a task. Returns the new (or existing duplicate) task."""
+        return add_task(
+            self._work_dir,
+            title,
+            task_type,
+            description=description,
+            status=status,
+            thread=thread,
+        )
+
+    def complete_by_id(self, task_id: str) -> dict[str, Any] | None:
+        """Mark a task completed. Returns its thread dict or None."""
+        return complete_by_id(self._work_dir, task_id)
+
+    def has_pending_for_comment(self, comment_id: int | str) -> bool:
+        """Return True if any pending task references *comment_id*."""
+        return has_pending_tasks_for_comment(self._work_dir, comment_id)
+
+    def remove(self, task_id: str) -> bool:
+        """Remove a task. Returns True if found."""
+        return remove_task(self._work_dir, task_id)
+
+    def update(self, task_id: str, status: TaskStatus) -> bool:
+        """Update a task's status. Returns True if found."""
+        return update_task(self._work_dir, task_id, status)

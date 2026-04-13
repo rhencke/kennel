@@ -2955,7 +2955,12 @@ class TestSeedTasksFromPrBody:
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_called_once_with(
-            tmp_path, "Fix the bug", task_type=TaskType.SPEC
+            tmp_path,
+            "Fix the bug",
+            TaskType.SPEC,
+            description=ANY,
+            status=ANY,
+            thread=ANY,
         )
 
     def test_adds_multiple_tasks(self, tmp_path: Path) -> None:
@@ -3034,7 +3039,7 @@ class TestSeedTasksFromPrBody:
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch(
                 "kennel.worker.tasks.add_task",
-                side_effect=lambda wd, t, **kw: received.append(t),
+                side_effect=lambda wd, t, tt, **kw: received.append(t),
             ),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 5)

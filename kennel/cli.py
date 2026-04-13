@@ -7,8 +7,8 @@ import json
 import logging
 from pathlib import Path
 
-from kennel import tasks as _tasks_mod
 from kennel.github import GitHub
+from kennel.tasks import Tasks
 from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
@@ -17,12 +17,11 @@ log = logging.getLogger(__name__)
 class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
-    def __init__(self, *, github: GitHub | None = None, tasks=_tasks_mod) -> None:
+    def __init__(self, *, github: GitHub | None = None) -> None:
         if github is None:
             github = GitHub()
 
         self._github = github
-        self._tasks = tasks
 
     def _resolve_thread_if_ours(self, thread: dict) -> None:
         """Resolve the review thread if the last reply came from us."""
@@ -84,8 +83,7 @@ class Cmd:
                 thread["repo"] = repo
             if pr is not None:
                 thread["pr"] = pr
-        task = self._tasks.add_task(
-            work_dir,
+        task = Tasks(work_dir).add(
             title=title,
             task_type=task_type,
             description=description,
@@ -95,12 +93,12 @@ class Cmd:
         return task
 
     def complete(self, work_dir: Path, task_id: str) -> None:
-        thread = self._tasks.complete_by_id(work_dir, task_id)
+        thread = Tasks(work_dir).complete_by_id(task_id)
         if thread:
             self._resolve_thread_if_ours(thread)
 
     def list(self, work_dir: Path) -> None:
-        result = self._tasks.list_tasks(work_dir)
+        result = Tasks(work_dir).list()
         print(json.dumps(result, indent=2))
 
 

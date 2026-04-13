@@ -23,6 +23,7 @@ from kennel.state import (
     load_state,
     save_state,
 )
+from kennel.tasks import Tasks
 from kennel.types import TaskStatus, TaskType
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
@@ -336,6 +337,7 @@ class Worker:
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        _tasks: Tasks | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -343,6 +345,7 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
+        self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -575,7 +578,7 @@ class Worker:
         """
         assert setup_session_id, "setup_session_id must be non-empty"
         plain = f"{request}\n\nFixes #{issue}."
-        task_list = tasks.list_tasks(self.work_dir)
+        task_list = self._tasks.list()
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
 
         continuation_prompt = (
@@ -642,11 +645,11 @@ class Worker:
                 self._git(["checkout", slug])
             except subprocess.CalledProcessError:
                 self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
-            task_list = tasks.list_tasks(self.work_dir)
+            task_list = self._tasks.list()
             if not task_list:
                 # Try seeding from PR body first (recovers from state reset)
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                task_list = tasks.list_tasks(self.work_dir)
+                task_list = self._tasks.list()
             if not task_list:
                 log.info("PR #%s has no tasks — running setup", pr_number)
                 context = (
@@ -664,7 +667,7 @@ class Worker:
                 state = load_state(fido_dir)
                 state["setup_session_id"] = session_id
                 save_state(fido_dir, state)
-                if not tasks.list_tasks(self.work_dir):
+                if not self._tasks.list():
                     log.warning(
                         "setup produced no tasks — skipping PR #%s, will retry",
                         pr_number,
@@ -715,7 +718,7 @@ class Worker:
         state["setup_session_id"] = session_id
         save_state(fido_dir, state)
 
-        if not tasks.list_tasks(self.work_dir):
+        if not self._tasks.list():
             log.warning("setup produced no tasks — skipping PR creation, will retry")
             return None
 
@@ -732,7 +735,7 @@ class Worker:
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
         task_count = len(
-            [t for t in tasks.list_tasks(self.work_dir) if t.get("status") == "pending"]
+            [t for t in self._tasks.list() if t.get("status") == "pending"]
         )
         log.info("PR: #%s opened with %d tasks", pr_number, task_count)
         log.info("PR: #%s  %s", pr_number, url)
@@ -951,10 +954,7 @@ class Worker:
             comment_ids = [
                 c.get("databaseId") for c in comments if c.get("databaseId") is not None
             ]
-            if any(
-                tasks.has_pending_tasks_for_comment(self.work_dir, cid)
-                for cid in comment_ids
-            ):
+            if any(self._tasks.has_pending_for_comment(cid) for cid in comment_ids):
                 log.info(
                     "skipping resolve for thread %s — pending sibling tasks remain",
                     node.get("id", ""),
@@ -1091,7 +1091,7 @@ class Worker:
         """
         log.info("task aborted: %s", task_title)
         self.git_clean()
-        tasks.remove_task(self.work_dir, task_id)
+        self._tasks.remove(task_id)
         state = load_state(fido_dir)
         state.pop("current_task_id", None)
         save_state(fido_dir, state)
@@ -1115,7 +1115,7 @@ class Worker:
         task was found.
         """
         log.info("checking: tasks")
-        task_list = tasks.list_tasks(self.work_dir)
+        task_list = self._tasks.list()
         task = _pick_next_task(task_list)
         if task is None:
             return False
@@ -1161,7 +1161,7 @@ class Worker:
             # If the task was completed externally (e.g. via `kennel task
             # complete`) while we were waiting, stop retrying — the work is
             # already recorded as done and no commits will ever appear.
-            current_task_list = tasks.list_tasks(self.work_dir)
+            current_task_list = self._tasks.list()
             if not any(
                 t["id"] == task["id"] and t.get("status") == TaskStatus.PENDING
                 for t in current_task_list
@@ -1201,7 +1201,7 @@ class Worker:
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            tasks.complete_by_id(self.work_dir, task["id"])
+            self._tasks.complete_by_id(task["id"])
             state = load_state(fido_dir)
             state.pop("current_task_id", None)
             save_state(fido_dir, state)
@@ -1222,7 +1222,7 @@ class Worker:
         No-op if tasks.json is already non-empty, or if no markers /
         unchecked items are found.
         """
-        if tasks.list_tasks(self.work_dir):
+        if self._tasks.list():
             return  # already have tasks — nothing to seed
         pr_data = self.gh.get_pr(repo, pr_number)
         body = pr_data.get("body") or ""
@@ -1253,7 +1253,7 @@ class Worker:
         if not parsed:
             return
         for title, task_type in parsed:
-            tasks.add_task(self.work_dir, title, task_type=task_type)
+            self._tasks.add(title, task_type)
         log.info("seeded %d tasks from PR body", len(parsed))
 
     def post_pickup_comment(
@@ -1341,7 +1341,7 @@ class Worker:
             _latest_decisive.get("state", "NONE") if _latest_decisive else "NONE"
         )
         is_approved = latest_state == "APPROVED"
-        task_list = tasks.list_tasks(self.work_dir)
+        task_list = self._tasks.list()
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
 
         # Merge only if: approved + not draft + no pending tasks

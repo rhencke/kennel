@@ -1395,46 +1395,6 @@ class TestReplyToIssueComment:
 
 
 class TestCreateTask:
-    def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("kennel.events.add_task") as mock_add,
-            patch("kennel.events.launch_sync") as mock_sync,
-        ):
-            create_task("do something", cfg, repo_cfg)
-        mock_add.assert_called_once_with(
-            tmp_path, title="do something", task_type=ANY, thread=None
-        )
-        mock_sync.assert_called_once_with(cfg, repo_cfg)
-
-    def test_passes_thread(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
-        with (
-            patch("kennel.events.add_task") as mock_add,
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("do something", cfg, repo_cfg, thread=thread)
-        mock_add.assert_called_once_with(
-            tmp_path, title="do something", task_type=ANY, thread=thread
-        )
-
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
             port=9000,
@@ -1450,6 +1410,38 @@ class TestCreateTask:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _mock_tasks(self, add_return: dict | None = None) -> MagicMock:
+        t = MagicMock()
+        t.add.return_value = add_return or {
+            "id": "t1",
+            "title": "task",
+            "status": "pending",
+            "type": "spec",
+        }
+        return t
+
+    def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_tasks = self._mock_tasks()
+        with patch("kennel.events.launch_sync") as mock_sync:
+            create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=None
+        )
+        mock_sync.assert_called_once_with(cfg, repo_cfg)
+
+    def test_passes_thread(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
+        mock_tasks = self._mock_tasks()
+        with patch("kennel.events.launch_sync"):
+            create_task("do something", cfg, repo_cfg, thread=thread, _tasks=mock_tasks)
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=thread
+        )
+
     def test_returns_created_task(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1459,11 +1451,9 @@ class TestCreateTask:
             "status": "pending",
             "type": "spec",
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            result = create_task("do something", cfg, repo_cfg)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            result = create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
         assert result == fake_task
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
@@ -1494,11 +1484,11 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread)  # no registry
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task", cfg, repo_cfg, thread=thread, _tasks=mock_tasks
+            )  # no registry
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_new_task_has_no_thread(self, tmp_path: Path) -> None:
@@ -1527,12 +1517,14 @@ class TestCreateTask:
             "type": "spec",
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
-                "Another plain task", cfg, repo_cfg, registry=registry
+                "Another plain task",
+                cfg,
+                repo_cfg,
+                registry=registry,
+                _tasks=mock_tasks,
             )  # no thread
         registry.abort_task.assert_not_called()
 
@@ -1554,11 +1546,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_has_thread(self, tmp_path: Path) -> None:
@@ -1593,16 +1590,15 @@ class TestCreateTask:
             "thread": new_thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "New thread task",
                 cfg,
                 repo_cfg,
                 thread=new_thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_not_called()
 
@@ -1619,11 +1615,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_not_in_tasks_json(self, tmp_path: Path) -> None:
@@ -1643,11 +1644,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_has_no_current_task(self, tmp_path: Path) -> None:
@@ -1667,11 +1673,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def _setup_abort_scenario(
@@ -1715,16 +1726,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # ABORT_KEEP: current task stays in tasks.json
@@ -1745,16 +1755,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # task should still be in tasks.json (ABORT_KEEP)
@@ -1774,16 +1783,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_not_called()
 
@@ -1793,22 +1801,10 @@ class TestCreateTask:
         import json
 
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "thread")
-        fake_task = {
-            "id": "t-ci",
-            "title": "CI fix",
-            "status": "pending",
-            "type": "ci",
-        }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                registry=registry,
-            )
+        fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1819,22 +1815,10 @@ class TestCreateTask:
         import json
 
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "spec")
-        fake_task = {
-            "id": "t-ci",
-            "title": "CI fix",
-            "status": "pending",
-            "type": "ci",
-        }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                registry=registry,
-            )
+        fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1850,15 +1834,10 @@ class TestCreateTask:
             "status": "pending",
             "type": "spec",
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
-                "New spec task",
-                cfg,
-                repo_cfg,
-                registry=registry,
+                "New spec task", cfg, repo_cfg, registry=registry, _tasks=mock_tasks
             )
         registry.abort_task.assert_not_called()
 
@@ -1874,10 +1853,8 @@ class TestCreateTask:
             "thread": thread,
         }
         reorder_called: list[tuple] = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -1887,6 +1864,7 @@ class TestCreateTask:
                 _reorder_background_fn=lambda wd, cs, cfg, rc, reg: (
                     reorder_called.append((wd, cs, cfg, rc, reg))
                 ),
+                _tasks=mock_tasks,
             )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
@@ -1905,15 +1883,14 @@ class TestCreateTask:
             "type": "spec",
         }
         reorder_called: list = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Spec task",
                 cfg,
                 repo_cfg,
                 _reorder_background_fn=lambda *a: reorder_called.append(a),
+                _tasks=mock_tasks,
             )
         assert reorder_called == []
 
@@ -1923,12 +1900,12 @@ class TestCreateTask:
         """Normal (non-thread) task creation never triggers a PR description rewrite."""
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_tasks = self._mock_tasks()
         with (
-            patch("kennel.events.add_task"),
             patch("kennel.events.launch_sync"),
             patch("kennel.events._rewrite_pr_description") as mock_rewrite,
         ):
-            create_task("Spec task", cfg, repo_cfg)  # thread=None
+            create_task("Spec task", cfg, repo_cfg, _tasks=mock_tasks)  # thread=None
         mock_rewrite.assert_not_called()
 
     def test_commit_summary_comes_from_get_commit_summary_fn(
@@ -1945,10 +1922,8 @@ class TestCreateTask:
             "thread": thread,
         }
         summaries: list[str] = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "t",
                 cfg,
@@ -1958,8 +1933,20 @@ class TestCreateTask:
                 _reorder_background_fn=lambda wd, cs, cfg, rc, reg: summaries.append(
                     cs
                 ),
+                _tasks=mock_tasks,
             )
         assert summaries == ["custom summary"]
+
+    def test_default_tasks_creates_task_in_file(self, tmp_path: Path) -> None:
+        """When _tasks is not passed, create_task constructs Tasks(work_dir) itself."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with patch("kennel.events.launch_sync"):
+            result = create_task("do a thing", cfg, repo_cfg)
+        assert result["title"] == "do a thing"
+        from kennel.tasks import list_tasks
+
+        assert any(t["title"] == "do a thing" for t in list_tasks(tmp_path))
 
 
 class TestGetCommitSummary:

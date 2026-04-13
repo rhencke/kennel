@@ -20,7 +20,7 @@ from kennel.prompts import (
     triage_prompt,
 )
 from kennel.registry import WorkerRegistry
-from kennel.tasks import add_task
+from kennel.tasks import Tasks
 from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
@@ -944,6 +944,7 @@ def create_task(
     *,
     _get_commit_summary_fn=_get_commit_summary,
     _reorder_background_fn=_reorder_tasks_background,
+    _tasks: Tasks | None = None,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
@@ -962,11 +963,11 @@ def create_task(
 
     Returns the new task dict.
     """
+    if _tasks is None:
+        _tasks = Tasks(repo_cfg.work_dir)
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
-    new_task = add_task(
-        repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
-    )
+    new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
     launch_sync(config, repo_cfg)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)

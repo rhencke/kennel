@@ -906,3 +906,48 @@ class TestTasks:
         result = Tasks(work_dir).list()
         assert len(result) == 1
         assert result[0]["title"] == "Task A"
+
+    def test_add_delegates_to_add_task(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = Tasks(work_dir).add("Task B", TaskType.CI)
+        assert task["title"] == "Task B"
+        assert task["type"] == "ci"
+
+    def test_complete_by_id_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task C", TaskType.SPEC)
+        Tasks(work_dir).complete_by_id(task["id"])
+        assert list_tasks(work_dir)[0]["status"] == "completed"
+
+    def test_has_pending_for_comment_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Task D", TaskType.THREAD, thread={"comment_id": 7})
+        assert Tasks(work_dir).has_pending_for_comment(7) is True
+        assert Tasks(work_dir).has_pending_for_comment(99) is False
+
+    def test_remove_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task E", TaskType.SPEC)
+        assert Tasks(work_dir).remove(task["id"]) is True
+        assert list_tasks(work_dir) == []
+
+    def test_update_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskStatus, TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task F", TaskType.SPEC)
+        Tasks(work_dir).update(task["id"], TaskStatus.IN_PROGRESS)
+        assert list_tasks(work_dir)[0]["status"] == "in_progress"
