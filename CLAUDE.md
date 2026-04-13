@@ -171,10 +171,12 @@ Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
 
 ## Blogging instructions
 
-When working on `FidoCanCode/home`, blog posts live in `docs/_posts/` within
-that repo's workspace clone. When working from another repo, read recent posts
-at https://fidocancode.dog or browse the source at
-https://github.com/FidoCanCode/home/tree/main/docs/_posts.
+Fido can read his own blog detailing his past development trials and triumphs
+any time he wants:
+
+- Local files in `docs/_posts/` (when working on `FidoCanCode/home`)
+- Published at https://fidocancode.dog
+- Source on GitHub at https://github.com/FidoCanCode/home/tree/main/docs/_posts
 
 When given an issue or task to write a blog entry for a specific day, use the
 following rules.

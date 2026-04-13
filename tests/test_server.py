@@ -51,6 +51,7 @@ def _restore_handler_fns():
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "_fn_get_self_repo": WebhookHandler._fn_get_self_repo,
+        "_fn_get_head": WebhookHandler._fn_get_head,
         "_fn_pull_with_backoff": WebhookHandler._fn_pull_with_backoff,
         "_fn_os_chdir": WebhookHandler._fn_os_chdir,
         "_fn_os_execvp": WebhookHandler._fn_os_execvp,
@@ -586,6 +587,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -606,6 +608,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
         )
@@ -631,6 +634,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
         )
@@ -656,6 +660,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=mock_kill,
         )
@@ -691,6 +696,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -716,6 +722,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -739,6 +746,7 @@ class TestRun:
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -774,6 +782,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -822,6 +831,7 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
         )
 
         repo_handler = next(
@@ -850,9 +860,19 @@ _MERGE_PAYLOAD = {
     "repository": {
         "full_name": "owner/kennel",
         "owner": {"login": "owner"},
+        "default_branch": "main",
     },
     "action": "closed",
     "pull_request": {"number": 1, "merged": True},
+}
+
+_PUSH_PAYLOAD = {
+    "repository": {
+        "full_name": "owner/kennel",
+        "owner": {"login": "owner"},
+        "default_branch": "main",
+    },
+    "ref": "refs/heads/main",
 }
 
 
@@ -904,6 +924,26 @@ class TestGetSelfRepo:
 
         mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n", returncode=0))
         assert _get_self_repo(tmp_path, _run=mock_run) is None
+
+
+class TestGetHead:
+    def test_returns_sha(self, tmp_path: Path) -> None:
+        from kennel.server import _get_head
+
+        run = MagicMock(return_value=MagicMock(stdout="abc123def456\n"))
+        assert _get_head(tmp_path, _run=run) == "abc123def456"
+
+    def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
+        from kennel.server import _get_head
+
+        run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
+        assert _get_head(tmp_path, _run=run) is None
+
+    def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
+        from kennel.server import _get_head
+
+        run = MagicMock(side_effect=FileNotFoundError())
+        assert _get_head(tmp_path, _run=run) is None
 
 
 class TestRunnerDir:
@@ -1043,6 +1083,59 @@ class TestPullWithBackoff:
         )
 
 
+class TestStartupPull:
+    def test_reexecs_when_head_changes(self) -> None:
+        from kennel.server import _startup_pull
+
+        heads = iter(["aaa", "bbb"])
+        mock_exec = MagicMock()
+        _startup_pull(
+            _runner_dir=lambda: Path("/fake"),
+            _get_head=lambda _d: next(heads),
+            _pull=lambda _d: True,
+            _execvp=mock_exec,
+        )
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args.args[0] == "uv"
+
+    def test_skips_exec_when_head_unchanged(self) -> None:
+        from kennel.server import _startup_pull
+
+        mock_exec = MagicMock()
+        _startup_pull(
+            _runner_dir=lambda: Path("/fake"),
+            _get_head=lambda _d: "same_sha",
+            _pull=lambda _d: True,
+            _execvp=mock_exec,
+        )
+        mock_exec.assert_not_called()
+
+    def test_continues_on_pull_failure(self) -> None:
+        from kennel.server import _startup_pull
+
+        mock_exec = MagicMock()
+        _startup_pull(
+            _runner_dir=lambda: Path("/fake"),
+            _get_head=lambda _d: "aaa",
+            _pull=lambda _d: False,
+            _execvp=mock_exec,
+        )
+        mock_exec.assert_not_called()
+
+    def test_execs_when_head_unknown(self) -> None:
+        from kennel.server import _startup_pull
+
+        mock_exec = MagicMock()
+        _startup_pull(
+            _runner_dir=lambda: Path("/fake"),
+            _get_head=lambda _d: None,
+            _pull=lambda _d: True,
+            _execvp=mock_exec,
+        )
+        # Can't compare HEAD — but pull succeeded, so log and continue
+        mock_exec.assert_not_called()
+
+
 class TestSelfRestart:
     """Tests for the self-restart flow."""
 
@@ -1156,3 +1249,36 @@ class TestSelfRestart:
         finally:
             srv.shutdown()
         assert call_order == ["pull", "stop_and_join"]
+
+    def test_push_to_default_branch_triggers_restart(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+            WebhookHandler._fn_pull_with_backoff = lambda _d: True
+            mock_chdir = MagicMock()
+            mock_exec = MagicMock()
+            WebhookHandler._fn_os_chdir = mock_chdir
+            WebhookHandler._fn_os_execvp = mock_exec
+            _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
+            time.sleep(0.2)
+            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_exec.assert_called_once()
+        finally:
+            srv.shutdown()
+
+    def test_push_to_non_default_branch_ignored(self, tmp_path: Path) -> None:
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            mock_pull = MagicMock()
+            mock_exec = MagicMock()
+            WebhookHandler._fn_pull_with_backoff = mock_pull
+            WebhookHandler._fn_os_execvp = mock_exec
+            payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
+            _post_webhook(url, cfg, "push", payload)
+            time.sleep(0.2)
+            mock_pull.assert_not_called()
+            mock_exec.assert_not_called()
+        finally:
+            srv.shutdown()

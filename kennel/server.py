@@ -76,6 +76,25 @@ def _get_self_repo(
     return m.group(1)
 
 
+def _get_head(
+    runner_dir: Path,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str | None:
+    """Return the current HEAD commit hash of the runner clone, or None on error."""
+    try:
+        result = _run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(runner_dir),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError, FileNotFoundError:
+        return None
+
+
 def _pull_with_backoff(
     runner_dir: Path,
     *,
@@ -160,6 +179,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_launch_worker = launch_worker
     _fn_runner_dir = _runner_dir
     _fn_get_self_repo = _get_self_repo
+    _fn_get_head = _get_head
     _fn_pull_with_backoff = _pull_with_backoff
     _fn_os_chdir = os.chdir
     _fn_os_execvp = os.execvp
@@ -205,16 +225,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Respond immediately — don't block on dispatch
         self._respond(200, "ok")
 
-        # Check for self-restart (kennel repo merged).  _self_restart itself
-        # verifies via the runner clone's git remote that the webhook's repo
-        # actually matches kennel — if so it execs a new process and never
-        # returns.  For other merged PRs (e.g. fido's own work) it's a no-op.
+        # Check for self-restart: merged PR or push to default branch.
+        # _self_restart verifies via the runner clone's git remote that the
+        # webhook's repo actually matches kennel — if so it execs a new
+        # process and never returns.  For non-kennel repos it's a no-op.
         if (
             event == "pull_request"
             and payload.get("action") == "closed"
             and payload.get("pull_request", {}).get("merged")
         ):
-            self._self_restart(repo_name)
+            self._self_restart(repo_name, reason="PR merged")
+
+        default_branch = payload.get("repository", {}).get("default_branch", "")
+        if (
+            event == "push"
+            and default_branch
+            and payload.get("ref") == f"refs/heads/{default_branch}"
+        ):
+            self._self_restart(repo_name, reason=f"push to {default_branch}")
 
         if not repo_cfg:
             log.debug("ignoring webhook for unregistered repo: %s", repo_name)
@@ -287,13 +315,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("error processing action")
 
-    def _self_restart(self, repo_name: str) -> None:
+    def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
         runner_dir = type(self)._fn_runner_dir()
         self_repo = type(self)._fn_get_self_repo(runner_dir)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
         log.info(
-            "kennel repo %s merged — syncing runner clone at %s",
+            "self-restart: %s on %s — syncing runner clone at %s",
+            reason,
             repo_name,
             runner_dir,
         )
@@ -302,8 +331,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # kennel repo keeps running its old code rather than being silently
         # left without a worker thread.
         if not type(self)._fn_pull_with_backoff(runner_dir):
-            log.error("self-restart: runner sync gave up — running old version")
+            log.error("self-restart: gave up — running old version (%s)", reason)
             return
+        log.info(
+            "self-restart: runner synced — stopping workers and re-execing (%s)", reason
+        )
         self.registry.stop_and_join(repo_name)
         type(self)._fn_os_chdir(runner_dir)
         type(self)._fn_os_execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
@@ -362,6 +394,33 @@ def populate_memberships(
         )
 
 
+def _startup_pull(
+    *,
+    _runner_dir: Callable[[], Path] = _runner_dir,
+    _get_head: Callable[..., str | None] = _get_head,
+    _pull: Callable[..., bool] = _pull_with_backoff,
+    _execvp: Callable[..., None] = os.execvp,
+) -> None:
+    """Sync the runner clone on startup and re-exec if HEAD changed."""
+    runner_dir = _runner_dir()
+    head_before = _get_head(runner_dir)
+    if not _pull(runner_dir):
+        log.warning("startup: runner sync failed — continuing with current code")
+        return
+    head_after = _get_head(runner_dir)
+    if head_before and head_after and head_before != head_after:
+        log.info(
+            "startup: runner updated %s → %s — re-execing",
+            head_before[:12],
+            head_after[:12],
+        )
+        _execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+    elif head_before and head_after:
+        log.info("startup: runner already up to date at %s", head_before[:12])
+    else:
+        log.info("startup: runner synced (could not compare HEAD)")
+
+
 def run(
     *,
     _from_args=Config.from_args,
@@ -373,6 +432,7 @@ def run(
     _populate_memberships=populate_memberships,
     _signal=signal.signal,
     _kill_active_children=kill_active_children,
+    _startup_pull=_startup_pull,
 ) -> None:
     config = _from_args()
 
@@ -400,6 +460,8 @@ def run(
         datefmt="%H:%M:%S",
         handlers=handlers,
     )
+
+    _startup_pull()
 
     _populate_memberships(config)
 
