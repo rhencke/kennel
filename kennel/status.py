@@ -217,11 +217,11 @@ def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
 def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     """Return the title of the first in_progress task, then the first pending task."""
     for t in task_list:
-        if t.get("status") == "in_progress":
-            return t.get("title")
+        if t["status"] == "in_progress":
+            return t["title"]
     for t in task_list:
-        if t.get("status") == "pending":
-            return t.get("title")
+        if t["status"] == "pending":
+            return t["title"]
     return None
 
 
@@ -248,8 +248,8 @@ def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> Repo
     issue = state.get("issue")
 
     task_list = _read_tasks(fido_dir)
-    pending = sum(1 for t in task_list if t.get("status") == "pending")
-    completed = sum(1 for t in task_list if t.get("status") == "completed")
+    pending = sum(1 for t in task_list if t["status"] == "pending")
+    completed = sum(1 for t in task_list if t["status"] == "completed")
 
     current = _current_task(task_list)
 
