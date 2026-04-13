@@ -138,26 +138,46 @@ def extract_result_text(output: str) -> str:
 # ── Simple print calls (no tool use) ─────────────────────────────────────────
 
 
+_EMPTY_RETRY_COUNT = 2
+_EMPTY_RETRY_DELAY = 1.0
+
+
 def print_prompt(
     prompt: str,
     model: str,
     system_prompt: str | None = None,
     timeout: int = 30,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    _sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Run claude --print with a prompt, return stdout (empty string on failure).
 
     Uses -p to pass the prompt as a positional argument (no tool access).
+    Retries up to ``_EMPTY_RETRY_COUNT`` times (with a short delay) when
+    Claude exits 0 but produces no output, to handle transient empty responses.
     """
     args: list[str] = ["--model", model, "--print"]
     if system_prompt is not None:
         args += ["--system-prompt", system_prompt]
     args += ["-p", prompt]
-    try:
-        result = _claude(*args, timeout=timeout, runner=runner)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
+    for attempt in range(_EMPTY_RETRY_COUNT + 1):
+        try:
+            result = _claude(*args, timeout=timeout, runner=runner)
+            if result.returncode != 0:
+                return ""
+            text = result.stdout.strip()
+            if text:
+                return text
+            if attempt < _EMPTY_RETRY_COUNT:
+                log.warning(
+                    "print_prompt: empty output on attempt %d — retrying",
+                    attempt + 1,
+                )
+                _sleep(_EMPTY_RETRY_DELAY)
+        except subprocess.TimeoutExpired, FileNotFoundError:
+            return ""
+    log.warning("print_prompt: empty output after %d attempts", _EMPTY_RETRY_COUNT + 1)
+    return ""
 
 
 def print_prompt_json(
@@ -426,35 +446,53 @@ def generate_status_with_session(
     model: str = "claude-opus-4-6",
     timeout: int = 15,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    _sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, str]:
     """Generate a GitHub status, returning (status_text, session_id).
 
     Uses stream-json output format to capture the session_id alongside the
     response text, enabling follow-up calls (e.g., ``resume_status`` to
     shorten a long response).  Returns ``("", "")`` on failure.
+    Retries up to ``_EMPTY_RETRY_COUNT`` times when Claude exits 0 but
+    produces no output.
     """
-    try:
-        result = _claude(
-            "--model",
-            model,
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--system-prompt",
-            system_prompt,
-            "--print",
-            "-p",
-            prompt,
-            timeout=timeout,
-            runner=runner,
-        )
-        if result.returncode != 0:
+    for attempt in range(_EMPTY_RETRY_COUNT + 1):
+        try:
+            result = _claude(
+                "--model",
+                model,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--system-prompt",
+                system_prompt,
+                "--print",
+                "-p",
+                prompt,
+                timeout=timeout,
+                runner=runner,
+            )
+            if result.returncode != 0:
+                return "", ""
+            raw = result.stdout.strip()
+            text = extract_result_text(raw)
+            sid = extract_session_id(raw)
+            if text:
+                return text, sid
+            if attempt < _EMPTY_RETRY_COUNT:
+                log.warning(
+                    "generate_status_with_session: empty output on attempt %d — retrying",
+                    attempt + 1,
+                )
+                _sleep(_EMPTY_RETRY_DELAY)
+        except subprocess.TimeoutExpired, FileNotFoundError:
             return "", ""
-        raw = result.stdout.strip()
-        return extract_result_text(raw), extract_session_id(raw)
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return "", ""
+    log.warning(
+        "generate_status_with_session: empty output after %d attempts",
+        _EMPTY_RETRY_COUNT + 1,
+    )
+    return "", ""
 
 
 def resume_status(
