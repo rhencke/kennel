@@ -2942,3 +2942,16 @@ class TestRewritePrDescription:
                 _tasks=self._mock_tasks(),
             )
         mock_pp.assert_called_once()
+
+    def test_defaults_to_state(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_state = self._mock_state(issue=None)
+        with patch("kennel.state.State", return_value=mock_state) as mock_state_cls:
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _tasks=self._mock_tasks(),
+            )
+        mock_state_cls.assert_called_once_with(tmp_path / ".git" / "fido")
+        mock_gh.edit_pr_body.assert_not_called()
