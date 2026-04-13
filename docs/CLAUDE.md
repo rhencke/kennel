@@ -34,7 +34,7 @@ Your post content here.
 ./scripts/generate-stats.sh YYYY-MM-DD YYYY-MM-DD   # date range, inclusive
 ```
 
-The script uses `git log --reflog --all --since --until --author='Fido Can Code'` against the local clones at `/home/rhencke/workspace/{confusio,kennel,home}` to count commits across all branches (including ones that have since been squash-merged and deleted). PR / issue / review counts come from GraphQL `contributionsCollection`. The output file `_data/stats/<date>.yml` is committed alongside the journal entry. The index page picks the most recent stats file and renders a compact strip; each post renders a full card from its own date's file.
+The script uses GitHub's GraphQL API to count commits (via `commitContributionsByRepository` plus merged PR commit totals) and PR/issue/review totals (via `contributionsCollection`). No local clones are needed — only `gh` auth. The output file `_data/stats/<date>.yml` is committed alongside the journal entry. The index page picks the most recent stats file and renders a compact strip; each post renders a full card from its own date's file.
 
 Use a date range when writing a retrospective post that covers multiple days — the script accepts an inclusive `from to` window.
 
