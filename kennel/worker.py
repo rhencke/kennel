@@ -1546,7 +1546,6 @@ class Worker:
 
 _IDLE_TIMEOUT = 60.0  # seconds to wait when there was no work to do
 _RETRY_TIMEOUT = 5.0  # seconds to wait when the lock was contended
-_ERROR_TIMEOUT = 30.0  # seconds to wait after an unexpected exception
 
 
 class WorkerThread(threading.Thread):
@@ -1556,7 +1555,7 @@ class WorkerThread(threading.Thread):
     - ``Worker.run()`` returns 1 → did work, loop immediately.
     - ``Worker.run()`` returns 0 → idle, wait up to ``_IDLE_TIMEOUT``.
     - ``Worker.run()`` returns 2 → lock held, wait up to ``_RETRY_TIMEOUT``.
-    - Unexpected exception → wait up to ``_ERROR_TIMEOUT``, then retry.
+    - Unexpected exception → propagates, killing the thread (watchdog restarts).
 
     Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
     Call :meth:`stop` to request a clean shutdown.
@@ -1598,20 +1597,14 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
         while not self._stop:
-            try:
-                result = Worker(
-                    self.work_dir,
-                    self._gh,
-                    self._abort_task,
-                    self._repo_name,
-                    self._registry,
-                    self._membership,
-                ).run()
-            except Exception:
-                log.exception("WorkerThread %s: unexpected error", self.name)
-                self._wake.wait(timeout=_ERROR_TIMEOUT)
-                self._wake.clear()
-                continue
+            result = Worker(
+                self.work_dir,
+                self._gh,
+                self._abort_task,
+                self._repo_name,
+                self._registry,
+                self._membership,
+            ).run()
 
             if result == 1:
                 # Did work — loop immediately without waiting.
