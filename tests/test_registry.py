@@ -8,7 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from kennel.config import RepoConfig
-from kennel.registry import WorkerActivity, WorkerRegistry, _make_thread, make_registry
+from kennel.registry import (
+    WorkerActivity,
+    WorkerCrash,
+    WorkerRegistry,
+    _make_thread,
+    make_registry,
+)
 
 
 def _repo(name: str, work_dir: Path) -> RepoConfig:
@@ -240,6 +246,84 @@ class TestWorkerRegistry:
             t.join(timeout=5)
 
         assert max_concurrent == 1
+
+    def test_get_crash_info_returns_none_before_any_crash(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_crash_info("foo/bar") is None
+
+    def test_record_crash_stores_error_and_count(self) -> None:
+        reg, _ = self._make_registry()
+        reg.record_crash("foo/bar", "boom")
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert info.death_count == 1
+        assert info.last_error == "boom"
+
+    def test_record_crash_sets_last_crash_time(self) -> None:
+        import datetime as dt
+
+        before = dt.datetime.now()
+        reg, _ = self._make_registry()
+        reg.record_crash("foo/bar", "oops")
+        after = dt.datetime.now()
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert before <= info.last_crash_time <= after
+
+    def test_record_crash_increments_death_count(self) -> None:
+        reg, _ = self._make_registry()
+        reg.record_crash("foo/bar", "err1")
+        reg.record_crash("foo/bar", "err2")
+        reg.record_crash("foo/bar", "err3")
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert info.death_count == 3
+
+    def test_record_crash_updates_last_error(self) -> None:
+        reg, _ = self._make_registry()
+        reg.record_crash("foo/bar", "first")
+        reg.record_crash("foo/bar", "second")
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert info.last_error == "second"
+
+    def test_crash_info_is_per_repo(self) -> None:
+        reg, _ = self._make_registry()
+        reg.record_crash("foo/bar", "bar error")
+        reg.record_crash("foo/baz", "baz error")
+        reg.record_crash("foo/baz", "baz error 2")
+        bar = reg.get_crash_info("foo/bar")
+        baz = reg.get_crash_info("foo/baz")
+        assert bar is not None and bar.death_count == 1
+        assert baz is not None and baz.death_count == 2
+
+    def test_record_crash_is_threadsafe(self) -> None:
+        """Concurrent record_crash calls must not corrupt the death count."""
+        reg, _ = self._make_registry()
+        n = 200
+
+        def crasher() -> None:
+            for _ in range(n):
+                reg.record_crash("foo/bar", "err")
+
+        threads = [threading.Thread(target=crasher) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert info.death_count == 4 * n
+
+    def test_worker_crash_dataclass_fields(self) -> None:
+        import datetime as dt
+
+        ts = dt.datetime(2026, 1, 1, 12, 0, 0)
+        crash = WorkerCrash(death_count=3, last_error="oops", last_crash_time=ts)
+        assert crash.death_count == 3
+        assert crash.last_error == "oops"
+        assert crash.last_crash_time == ts
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]

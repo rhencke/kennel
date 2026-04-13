@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 
 from kennel.config import RepoConfig
 from kennel.github import GitHub
@@ -22,6 +23,15 @@ class WorkerActivity:
     repo_name: str
     what: str
     busy: bool
+
+
+@dataclass
+class WorkerCrash:
+    """Running record of unexpected worker deaths for one repo."""
+
+    death_count: int
+    last_error: str
+    last_crash_time: datetime
 
 
 class WorkerRegistry:
@@ -44,6 +54,8 @@ class WorkerRegistry:
         self._activities: dict[str, WorkerActivity] = {}
         self._activity_lock = threading.Lock()
         self._status_lock = threading.Lock()
+        self._crashes: dict[str, WorkerCrash] = {}
+        self._crash_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*."""
@@ -81,6 +93,25 @@ class WorkerRegistry:
         """Return a snapshot of all registered workers' current activities."""
         with self._activity_lock:
             return list(self._activities.values())
+
+    def record_crash(self, repo_name: str, error: str) -> None:
+        """Record an unexpected worker death for *repo_name*.
+
+        Increments the death count and stores the error message and time of
+        the most recent crash.  Safe to call from any thread.
+        """
+        with self._crash_lock:
+            existing = self._crashes.get(repo_name)
+            self._crashes[repo_name] = WorkerCrash(
+                death_count=(existing.death_count + 1 if existing else 1),
+                last_error=error,
+                last_crash_time=datetime.now(),
+            )
+
+    def get_crash_info(self, repo_name: str) -> WorkerCrash | None:
+        """Return crash history for *repo_name*, or None if it has never crashed."""
+        with self._crash_lock:
+            return self._crashes.get(repo_name)
 
     @contextmanager
     def status_update(self) -> Generator[None, None, None]:
