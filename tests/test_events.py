@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
+from kennel.claude import ClaudeError
 from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
@@ -12,7 +15,6 @@ from kennel.events import (
     _notify_thread_change,
     _reorder_tasks_background,
     _rewrite_pr_description,
-    _summarize_as_action_item,
     _task_snapshot,
     _triage,
     create_task,
@@ -79,10 +81,14 @@ class TestNeedsMoreContext:
         )
 
     def test_subprocess_exception_returns_false(self) -> None:
-        assert not needs_more_context("ditto", _print_prompt=MagicMock(return_value=""))
+        assert not needs_more_context(
+            "ditto", _print_prompt=MagicMock(side_effect=ClaudeError("fail"))
+        )
 
     def test_timeout_returns_false(self) -> None:
-        assert not needs_more_context("same", _print_prompt=MagicMock(return_value=""))
+        assert not needs_more_context(
+            "same", _print_prompt=MagicMock(side_effect=ClaudeError("timed out"))
+        )
 
     def test_empty_output_returns_false(self) -> None:
         assert not needs_more_context(
@@ -364,66 +370,6 @@ class TestCommentLock:
         assert path.parent.is_dir()
 
 
-class TestSummarizeAsActionItem:
-    def test_returns_model_result(self) -> None:
-        pp = MagicMock(return_value="add logging to streamed sub-Claude output")
-        result = _summarize_as_action_item(
-            "Ensure we log at that level too.", _print_prompt=pp
-        )
-        assert result == "add logging to streamed sub-Claude output"
-
-    def test_falls_back_to_comment_body_when_empty(self) -> None:
-        pp = MagicMock(return_value="")
-        result = _summarize_as_action_item("short comment", _print_prompt=pp)
-        assert result == "short comment"
-
-    def test_truncates_long_comment_in_fallback(self) -> None:
-        long_comment = "x" * 200
-        pp = MagicMock(return_value="")
-        result = _summarize_as_action_item(long_comment, _print_prompt=pp)
-        assert result == long_comment[:80]
-
-    def test_strips_whitespace_from_result(self) -> None:
-        pp = MagicMock(return_value="  add tests  ")
-        result = _summarize_as_action_item("add tests please", _print_prompt=pp)
-        assert result == "add tests"
-
-    def test_defaults_to_claude_print_prompt(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="add tests") as mock_pp:
-            result = _summarize_as_action_item("add some tests")
-        mock_pp.assert_called_once()
-        assert result == "add tests"
-
-    def test_short_result_returned_without_retry(self) -> None:
-        short_title = "add unit tests"
-        pp = MagicMock(return_value=short_title)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
-        assert result == short_title
-        pp.assert_called_once()  # no retry needed
-
-    def test_retries_when_result_too_long(self) -> None:
-        long_title = "a" * 81
-        short_title = "add tests"
-        pp = MagicMock(side_effect=[long_title, short_title])
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
-        assert result == short_title
-        assert pp.call_count == 2
-
-    def test_retries_up_to_three_times_then_truncates(self) -> None:
-        long_title = "a" * 81
-        pp = MagicMock(return_value=long_title)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
-        assert result == long_title[:80]
-        assert pp.call_count == 4  # 1 initial + 3 retries
-
-    def test_stops_retrying_once_short_enough(self) -> None:
-        titles = ["a" * 81, "b" * 81, "short title"]
-        pp = MagicMock(side_effect=titles)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
-        assert result == "short title"
-        assert pp.call_count == 3  # 1 initial + 2 retries
-
-
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
         cat, titles = _triage(
@@ -434,17 +380,13 @@ class TestTriage:
         assert cat == "ACT"
         assert titles == ["add tests"]
 
-    def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=False, _print_prompt=pp)
-        assert cat == "ACT"
-        assert titles == ["implement the thing"]
+    def test_raises_on_unparseable_response(self, tmp_path: Path) -> None:
+        with pytest.raises(ClaudeError):
+            _triage("do stuff", is_bot=False, _print_prompt=MagicMock(return_value=""))
 
-    def test_fallback_for_bot(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=True, _print_prompt=pp)
-        assert cat == "DO"
-        assert titles == ["implement the thing"]
+    def test_raises_for_bot_on_unparseable_response(self, tmp_path: Path) -> None:
+        with pytest.raises(ClaudeError):
+            _triage("do stuff", is_bot=True, _print_prompt=MagicMock(return_value=""))
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
@@ -456,23 +398,26 @@ class TestTriage:
         )
         assert cat == "DEFER"
 
-    def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["WEIRD: something", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
-        assert cat == "ACT"
-        assert titles == ["do the thing"]
+    def test_raises_on_unrecognized_category(self, tmp_path: Path) -> None:
+        with pytest.raises(ClaudeError):
+            _triage(
+                "hi",
+                is_bot=False,
+                _print_prompt=MagicMock(return_value="WEIRD: something"),
+            )
 
-    def test_timeout_falls_back(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "do the thing"])
-        cat, titles = _triage("hi", is_bot=True, _print_prompt=pp)
-        assert cat == "DO"
+    def test_raises_on_empty_response(self, tmp_path: Path) -> None:
+        with pytest.raises(ClaudeError):
+            _triage("hi", is_bot=True, _print_prompt=MagicMock(return_value=""))
 
-    def test_task_category_falls_back(self, tmp_path: Path) -> None:
-        """TASK is no longer a valid bot category — falls back to DO."""
-        pp = MagicMock(side_effect=["TASK: add caching", "add result caching"])
-        cat, titles = _triage("cache results", is_bot=True, _print_prompt=pp)
-        assert cat == "DO"
-        assert titles == ["add result caching"]
+    def test_raises_on_task_category(self, tmp_path: Path) -> None:
+        """TASK is no longer a valid bot category — raises ClaudeError."""
+        with pytest.raises(ClaudeError):
+            _triage(
+                "cache results",
+                is_bot=True,
+                _print_prompt=MagicMock(return_value="TASK: add caching"),
+            )
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
         """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
@@ -514,13 +459,14 @@ class TestTriage:
         assert cat == "ACT"
         assert titles == ["add tests"]
 
-    def test_zero_act_tasks_falls_back(self) -> None:
-        """ACT with empty title is treated as parse failure → fallback."""
-        pp = MagicMock(side_effect=["ACT: ", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
-        # empty title → stripped to "" → falsy → no titles collected → fallback
-        assert cat == "ACT"
-        assert titles == ["do the thing"]
+    def test_raises_on_empty_act_title(self) -> None:
+        """ACT with empty title is treated as parse failure → ClaudeError."""
+        with pytest.raises(ClaudeError):
+            _triage(
+                "hi",
+                is_bot=False,
+                _print_prompt=MagicMock(return_value="ACT: "),
+            )
 
     def test_lines_without_colon_are_skipped(self) -> None:
         """Preamble lines without a colon are ignored; valid lines are still parsed."""
@@ -573,27 +519,19 @@ class TestMaybeReact:
         )
         mock_gh.add_reaction.assert_not_called()
 
-    def test_timeout_warns_and_returns(self, tmp_path: Path) -> None:
+    def test_claude_error_returns_early(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
         maybe_react(
             "hi",
             1,
             "pulls",
             "owner/repo",
             cfg,
-            _print_prompt=MagicMock(return_value=""),
+            _print_prompt=MagicMock(side_effect=ClaudeError("fail")),
+            _gh=mock_gh,
         )
-
-    def test_file_not_found_warns_and_returns(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        maybe_react(
-            "hi",
-            1,
-            "pulls",
-            "owner/repo",
-            cfg,
-            _print_prompt=MagicMock(return_value=""),
-        )
+        mock_gh.add_reaction.assert_not_called()
 
     def test_reads_persona_if_present(self, tmp_path: Path) -> None:
         sub_dir = tmp_path / "sub"
@@ -864,7 +802,7 @@ class TestReplyToComment:
         assert posted
         assert cat == "DEFER"
 
-    def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
+    def test_reply_body_claude_error_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -878,7 +816,7 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: do it"
-            return ""  # empty reply triggers fallback
+            raise ClaudeError("reply failed")
 
         posted, cat, titles = reply_to_comment(
             action,
@@ -890,7 +828,7 @@ class TestReplyToComment:
         assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
-    def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
+    def test_triage_claude_error_not_posted(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -902,19 +840,20 @@ class TestReplyToComment:
         def fake_pp(prompt, model, **kwargs):
             if model == "claude-haiku-4-5":
                 return "NO"
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return ""  # simulates timeout — print_prompt returns "" on failure
+            raise ClaudeError("triage failed")
 
+        mock_gh = MagicMock()
         posted, cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
+            _gh=mock_gh,
         )
-        assert posted
+        assert not posted
         assert cat == "ACT"
+        assert titles == []
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
         """Second call with same comment_id is blocked by lock."""
@@ -1224,13 +1163,13 @@ class TestReplyToIssueComment:
         )
         assert cat == "DEFER"
 
-    def test_empty_body_fallback(self, tmp_path: Path) -> None:
+    def test_reply_body_claude_error_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
             if "Triage" in prompt:
                 return "ACT: do it"
-            return ""  # empty reply triggers fallback
+            raise ClaudeError("reply failed")
 
         cat, titles = reply_to_issue_comment(
             self._action(),
@@ -1241,22 +1180,23 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
 
-    def test_timeout_fallback(self, tmp_path: Path) -> None:
+    def test_triage_claude_error_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return ""  # simulates timeout — print_prompt returns "" on failure
+            raise ClaudeError("triage failed")
 
+        mock_gh = MagicMock()
         cat, titles = reply_to_issue_comment(
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
+            _gh=mock_gh,
         )
         assert cat == "ACT"
+        assert titles == []
+        mock_gh.comment_issue.assert_not_called()
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
         """comment_issue failure is caught and does not propagate."""

@@ -247,12 +247,17 @@ def maybe_react(
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompts = Prompts(_load_persona(config))
-    reaction = (
-        _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15)
-        .lower()
-        .split("\n")[0]
-        .strip()
-    )
+    try:
+        reaction = (
+            _print_prompt(
+                prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15
+            )
+            .lower()
+            .split("\n")[0]
+            .strip()
+        )
+    except claude.ClaudeError:
+        return
 
     valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
     if reaction not in valid:
@@ -331,9 +336,15 @@ def reply_to_comment(
             )
 
     # Step 1: Haiku triage
-    category, titles = _triage(
-        comment, action.is_bot, context, _print_prompt=_print_prompt
-    )
+    try:
+        category, titles = _triage(
+            comment, action.is_bot, context, _print_prompt=_print_prompt
+        )
+    except claude.ClaudeError:
+        log.warning("triage failed for comment %s — skipping", cid)
+        if lock_fd:
+            lock_fd.close()
+        return (False, "ACT", [])
     log.info("triage: %s — %s", category, titles)
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply
@@ -353,14 +364,14 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = _print_prompt(
-        prompts.persona_wrap(instr),
-        "claude-opus-4-6",
-        system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
-    )
-
-    if not body:
+    try:
+        body = _print_prompt(
+            prompts.persona_wrap(instr),
+            "claude-opus-4-6",
+            system_prompt=prompts.reply_system_prompt(),
+            timeout=30,
+        )
+    except claude.ClaudeError:
         body = (
             "Looking into this now."
             if category in ("ACT", "DO")
@@ -484,37 +495,11 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = _print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
+    try:
+        answer = _print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
+    except claude.ClaudeError:
+        return False
     return answer.startswith("YES")
-
-
-_MAX_TITLE_LEN = 80
-
-
-def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
-    """Ask Opus to convert a comment into a short imperative action-item title.
-
-    If the result is too long, asks Claude to shorten it up to 3 times before
-    falling back to hard truncation.
-    """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
-    prompt = (
-        "Convert this PR review comment into a short, imperative task title starting with a verb. "
-        "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
-        f"Comment: {comment_body}"
-    )
-    result = _print_prompt(prompt, "claude-opus-4-6", timeout=15).strip()
-    for _ in range(3):
-        if not result or len(result) <= _MAX_TITLE_LEN:
-            break
-        result = _print_prompt(
-            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
-            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
-            "claude-opus-4-6",
-            timeout=15,
-        ).strip()
-    return result[:_MAX_TITLE_LEN] if result else comment_body[:_MAX_TITLE_LEN]
 
 
 def _triage(
@@ -550,10 +535,7 @@ def _triage(
             titles.append(title)
     if category is not None and titles:
         return category, titles
-    # Fallback: ACT for humans, DO for bots; summarize comment into action item
-    category = "DO" if is_bot else "ACT"
-    title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
-    return category, [title]
+    raise claude.ClaudeError("triage produced no valid category")
 
 
 def reply_to_issue_comment(
@@ -599,9 +581,13 @@ def reply_to_issue_comment(
         context["conversation"] = conversation_context
 
     prompts = Prompts(_load_persona(config))
-    category, titles = _triage(
-        comment, action.is_bot, context or None, _print_prompt=_print_prompt
-    )
+    try:
+        category, titles = _triage(
+            comment, action.is_bot, context or None, _print_prompt=_print_prompt
+        )
+    except claude.ClaudeError:
+        log.warning("issue comment triage failed — skipping reply")
+        return ("ACT", [])
     log.info("issue comment triage: %s — %s", category, titles)
 
     # For DEFER, open a tracking issue before crafting the reply
@@ -615,13 +601,14 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = _print_prompt(
-        prompts.persona_wrap(instr),
-        "claude-opus-4-6",
-        system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
-    )
-    if not body:
+    try:
+        body = _print_prompt(
+            prompts.persona_wrap(instr),
+            "claude-opus-4-6",
+            system_prompt=prompts.reply_system_prompt(),
+            timeout=30,
+        )
+    except claude.ClaudeError:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
