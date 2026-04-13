@@ -11,7 +11,9 @@ from kennel.events import (
     _is_allowed,
     _notify_thread_change,
     _reorder_tasks_background,
+    _rewrite_pr_description,
     _summarize_as_action_item,
+    _task_snapshot,
     _triage,
     create_task,
     dispatch,
@@ -1394,46 +1396,6 @@ class TestReplyToIssueComment:
 
 
 class TestCreateTask:
-    def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("kennel.events.add_task") as mock_add,
-            patch("kennel.events.launch_sync") as mock_sync,
-        ):
-            create_task("do something", cfg, repo_cfg)
-        mock_add.assert_called_once_with(
-            tmp_path, title="do something", task_type=ANY, thread=None
-        )
-        mock_sync.assert_called_once_with(cfg, repo_cfg)
-
-    def test_passes_thread(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
-        with (
-            patch("kennel.events.add_task") as mock_add,
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("do something", cfg, repo_cfg, thread=thread)
-        mock_add.assert_called_once_with(
-            tmp_path, title="do something", task_type=ANY, thread=thread
-        )
-
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
             port=9000,
@@ -1449,6 +1411,38 @@ class TestCreateTask:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _mock_tasks(self, add_return: dict | None = None) -> MagicMock:
+        t = MagicMock()
+        t.add.return_value = add_return or {
+            "id": "t1",
+            "title": "task",
+            "status": "pending",
+            "type": "spec",
+        }
+        return t
+
+    def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_tasks = self._mock_tasks()
+        with patch("kennel.events.launch_sync") as mock_sync:
+            create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=None
+        )
+        mock_sync.assert_called_once_with(cfg, repo_cfg)
+
+    def test_passes_thread(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
+        mock_tasks = self._mock_tasks()
+        with patch("kennel.events.launch_sync"):
+            create_task("do something", cfg, repo_cfg, thread=thread, _tasks=mock_tasks)
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=thread
+        )
+
     def test_returns_created_task(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1458,11 +1452,9 @@ class TestCreateTask:
             "status": "pending",
             "type": "spec",
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            result = create_task("do something", cfg, repo_cfg)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            result = create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
         assert result == fake_task
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
@@ -1493,11 +1485,11 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread)  # no registry
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task", cfg, repo_cfg, thread=thread, _tasks=mock_tasks
+            )  # no registry
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_new_task_has_no_thread(self, tmp_path: Path) -> None:
@@ -1526,12 +1518,14 @@ class TestCreateTask:
             "type": "spec",
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
-                "Another plain task", cfg, repo_cfg, registry=registry
+                "Another plain task",
+                cfg,
+                repo_cfg,
+                registry=registry,
+                _tasks=mock_tasks,
             )  # no thread
         registry.abort_task.assert_not_called()
 
@@ -1553,11 +1547,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_has_thread(self, tmp_path: Path) -> None:
@@ -1592,16 +1591,15 @@ class TestCreateTask:
             "thread": new_thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "New thread task",
                 cfg,
                 repo_cfg,
                 thread=new_thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_not_called()
 
@@ -1618,11 +1616,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_not_in_tasks_json(self, tmp_path: Path) -> None:
@@ -1642,11 +1645,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_has_no_current_task(self, tmp_path: Path) -> None:
@@ -1666,11 +1674,16 @@ class TestCreateTask:
             "thread": thread,
         }
         registry = MagicMock()
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task("Comment task", cfg, repo_cfg, thread=thread, registry=registry)
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_not_called()
 
     def _setup_abort_scenario(
@@ -1714,16 +1727,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # ABORT_KEEP: current task stays in tasks.json
@@ -1744,16 +1756,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # task should still be in tasks.json (ABORT_KEEP)
@@ -1773,16 +1784,15 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
                 repo_cfg,
                 thread=thread,
                 registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_not_called()
 
@@ -1792,22 +1802,10 @@ class TestCreateTask:
         import json
 
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "thread")
-        fake_task = {
-            "id": "t-ci",
-            "title": "CI fix",
-            "status": "pending",
-            "type": "ci",
-        }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                registry=registry,
-            )
+        fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1818,22 +1816,10 @@ class TestCreateTask:
         import json
 
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "spec")
-        fake_task = {
-            "id": "t-ci",
-            "title": "CI fix",
-            "status": "pending",
-            "type": "ci",
-        }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                registry=registry,
-            )
+        fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
+            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1849,15 +1835,10 @@ class TestCreateTask:
             "status": "pending",
             "type": "spec",
         }
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
-                "New spec task",
-                cfg,
-                repo_cfg,
-                registry=registry,
+                "New spec task", cfg, repo_cfg, registry=registry, _tasks=mock_tasks
             )
         registry.abort_task.assert_not_called()
 
@@ -1873,10 +1854,8 @@ class TestCreateTask:
             "thread": thread,
         }
         reorder_called: list[tuple] = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -1886,6 +1865,7 @@ class TestCreateTask:
                 _reorder_background_fn=lambda wd, cs, cfg, rc, reg: (
                     reorder_called.append((wd, cs, cfg, rc, reg))
                 ),
+                _tasks=mock_tasks,
             )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
@@ -1904,17 +1884,30 @@ class TestCreateTask:
             "type": "spec",
         }
         reorder_called: list = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "Spec task",
                 cfg,
                 repo_cfg,
                 _reorder_background_fn=lambda *a: reorder_called.append(a),
+                _tasks=mock_tasks,
             )
         assert reorder_called == []
+
+    def test_spec_task_does_not_call_rewrite_pr_description(
+        self, tmp_path: Path
+    ) -> None:
+        """Normal (non-thread) task creation never triggers a PR description rewrite."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_tasks = self._mock_tasks()
+        with (
+            patch("kennel.events.launch_sync"),
+            patch("kennel.events._rewrite_pr_description") as mock_rewrite,
+        ):
+            create_task("Spec task", cfg, repo_cfg, _tasks=mock_tasks)  # thread=None
+        mock_rewrite.assert_not_called()
 
     def test_commit_summary_comes_from_get_commit_summary_fn(
         self, tmp_path: Path
@@ -1930,10 +1923,8 @@ class TestCreateTask:
             "thread": thread,
         }
         summaries: list[str] = []
-        with (
-            patch("kennel.events.add_task", return_value=fake_task),
-            patch("kennel.events.launch_sync"),
-        ):
+        mock_tasks = self._mock_tasks(fake_task)
+        with patch("kennel.events.launch_sync"):
             create_task(
                 "t",
                 cfg,
@@ -1943,8 +1934,20 @@ class TestCreateTask:
                 _reorder_background_fn=lambda wd, cs, cfg, rc, reg: summaries.append(
                     cs
                 ),
+                _tasks=mock_tasks,
             )
         assert summaries == ["custom summary"]
+
+    def test_default_tasks_creates_task_in_file(self, tmp_path: Path) -> None:
+        """When _tasks is not passed, create_task constructs Tasks(work_dir) itself."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with patch("kennel.events.launch_sync"):
+            result = create_task("do a thing", cfg, repo_cfg)
+        assert result["title"] == "do a thing"
+        from kennel.tasks import list_tasks
+
+        assert any(t["title"] == "do a thing" for t in list_tasks(tmp_path))
 
 
 class TestGetCommitSummary:
@@ -2004,13 +2007,29 @@ class TestReorderTasksBackground:
             sub_dir=tmp_path / "sub",
         )
 
+    def _run_thread(self, started: list) -> None:
+        """Run the captured thread's target synchronously."""
+        started[0]._target()
+
+    def _capture_reorder_calls(self) -> tuple[list, callable]:
+        """Return (calls_list, mock_reorder_fn) that records (work_dir, cs, kwargs)."""
+        calls: list = []
+
+        def mock_reorder(work_dir, commit_summary, **kwargs):
+            calls.append((work_dir, commit_summary, kwargs))
+
+        return calls, mock_reorder
+
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "some commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
         assert len(started) == 1
         t = started[0]
@@ -2018,41 +2037,50 @@ class TestReorderTasksBackground:
 
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
-            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
         assert tmp_path.name in started[0].name
 
-    def test_thread_target_is_reorder_tasks(self, tmp_path: Path) -> None:
-        from kennel.tasks import reorder_tasks
-
+    def test_thread_calls_reorder_with_work_dir_and_commit_summary(
+        self, tmp_path: Path
+    ) -> None:
         started: list = []
-        _reorder_tasks_background(
-            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
-        )
-        assert started[0]._target is reorder_tasks
-
-    def test_thread_args_are_work_dir_and_commit_summary(self, tmp_path: Path) -> None:
-        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "feat: add parser",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        assert started[0]._args == (tmp_path, "feat: add parser")
+        self._run_thread(started)
+        assert len(calls) == 1
+        assert calls[0][0] == tmp_path
+        assert calls[0][1] == "feat: add parser"
 
     def test_on_changes_callback_notifies_thread_changes(self, tmp_path: Path) -> None:
         started: list = []
         mock_gh = MagicMock()
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
             _gh=mock_gh,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_changes = started[0]._kwargs["_on_changes"]
+        self._run_thread(started)
+        on_changes = calls[0][2]["_on_changes"]
         change = {
             "task": {
                 "id": "t1",
@@ -2079,6 +2107,7 @@ class TestReorderTasksBackground:
         started: list = []
         registry = MagicMock()
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
@@ -2086,8 +2115,11 @@ class TestReorderTasksBackground:
             repo_cfg=repo_cfg,
             registry=registry,
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_inprogress_affected = started[0]._kwargs["_on_inprogress_affected"]
+        self._run_thread(started)
+        on_inprogress_affected = calls[0][2]["_on_inprogress_affected"]
         on_inprogress_affected()
         registry.abort_task.assert_called_once_with("owner/repo")
 
@@ -2095,13 +2127,221 @@ class TestReorderTasksBackground:
         self, tmp_path: Path
     ) -> None:
         started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        assert "_on_inprogress_affected" not in started[0]._kwargs
+        self._run_thread(started)
+        assert "_on_inprogress_affected" not in calls[0][2]
+
+    def test_on_done_kwarg_calls_rewrite_fn(self, tmp_path: Path) -> None:
+        started: list = []
+        rewrite_calls: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        def mock_rewrite(*a, **kw):
+            rewrite_calls.append((a, kw))
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _rewrite_fn=mock_rewrite,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
+        on_done()
+        assert len(rewrite_calls) == 1
+        args, kwargs = rewrite_calls[0]
+        assert args[0] == tmp_path
+
+    def test_on_done_passes_print_prompt_to_rewrite_fn(self, tmp_path: Path) -> None:
+        started: list = []
+        rewrite_calls: list = []
+        fake_pp = MagicMock()
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        def mock_rewrite(*a, **kw):
+            rewrite_calls.append(kw)
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _rewrite_fn=mock_rewrite,
+            _print_prompt=fake_pp,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
+        on_done()
+        assert rewrite_calls[0].get("_print_prompt") is fake_pp
+
+    def test_coalesces_when_already_running(self, tmp_path: Path) -> None:
+        """Second call while first is running marks pending, does not spawn thread."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+
+        # First call — marks running, spawns thread
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 1
+        assert state[str(tmp_path)]["running"] is True
+
+        # Second call while thread has not run yet — should coalesce, not spawn
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 1  # no second thread spawned
+        assert state[str(tmp_path)]["pending"] is not None
+        assert state[str(tmp_path)]["pending"][0] == "cs2"
+
+    def test_coalesced_call_reruns_after_first_completes(self, tmp_path: Path) -> None:
+        """Thread loops once for the pending coalesced call, then stops."""
+        state: dict = {}
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Simulate a second trigger arriving before the thread runs
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Run the single thread — should execute reorder twice (cs1 then cs2)
+        self._run_thread(started)
+        assert len(calls) == 2
+        assert calls[0][1] == "cs1"
+        assert calls[1][1] == "cs2"
+        assert state[str(tmp_path)]["running"] is False
+        assert state[str(tmp_path)]["pending"] is None
+
+    def test_only_last_pending_call_is_preserved(self, tmp_path: Path) -> None:
+        """Multiple coalesced callers: only the last pending commit_summary is used."""
+        state: dict = {}
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        for cs in ("cs1", "cs2", "cs3", "cs4"):
+            _reorder_tasks_background(
+                tmp_path,
+                cs,
+                self._cfg(tmp_path),
+                _start=lambda t: started.append(t),
+                _reorder_fn=mock_reorder,
+                _coalesce_state=state,
+            )
+        # Only one thread spawned; pending holds cs4 (the latest)
+        assert len(started) == 1
+        assert state[str(tmp_path)]["pending"][0] == "cs4"
+        self._run_thread(started)
+        # Ran cs1 (first call) then cs4 (latest pending); cs2 and cs3 dropped
+        assert len(calls) == 2
+        assert calls[0][1] == "cs1"
+        assert calls[1][1] == "cs4"
+
+    def test_running_flag_cleared_after_no_pending(self, tmp_path: Path) -> None:
+        """After a normal run with no pending call, running is set to False."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        self._run_thread(started)
+        assert state[str(tmp_path)]["running"] is False
+
+    def test_second_call_after_first_completes_spawns_new_thread(
+        self, tmp_path: Path
+    ) -> None:
+        """Once the first thread finishes, a subsequent call spawns a fresh thread."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        self._run_thread(started)  # first thread completes
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 2  # new thread spawned
+
+    def test_different_work_dirs_do_not_interfere(self, tmp_path: Path) -> None:
+        """Coalescing is per work_dir; different dirs get independent threads."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+
+        _reorder_tasks_background(
+            dir_a,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        _reorder_tasks_background(
+            dir_b,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 2  # each dir gets its own thread
 
 
 class TestNotifyThreadChange:
@@ -2728,3 +2968,319 @@ class TestReplyToCommentTerseEnrichment:
             )
 
         assert "sibling_threads" not in captured_context
+
+
+# ── _rewrite_pr_description ───────────────────────────────────────────────────
+
+
+class TestRewritePrDescription:
+    def _pr_body(self, desc: str = "Does something useful.\n\nFixes #42.") -> str:
+        return (
+            f"{desc}\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\n- [ ] do a thing\n<!-- WORK_QUEUE_END -->"
+        )
+
+    def _mock_gh(self, body: str | None = None) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido"
+        gh.find_pr.return_value = {"number": 99, "state": "OPEN"}
+        gh.get_pr_body.return_value = body if body is not None else self._pr_body()
+        return gh
+
+    def _mock_state(self, issue: int | None = 42) -> MagicMock:
+        state = MagicMock()
+        state.load.return_value = {"issue": issue} if issue else {}
+        return state
+
+    def _mock_tasks(self, task_list: list | None = None) -> MagicMock:
+        tasks = MagicMock()
+        tasks.list.return_value = task_list if task_list is not None else []
+        return tasks
+
+    def test_skips_when_no_issue_in_state(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(issue=None),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_on_get_repo_exception(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_gh.get_repo_info.side_effect = RuntimeError("network error")
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_when_no_open_pr(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_gh.find_pr.return_value = None
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_when_pr_not_open(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_gh.find_pr.return_value = {"number": 99, "state": "MERGED"}
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_on_get_pr_body_exception(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_gh.get_pr_body.side_effect = RuntimeError("API error")
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_when_no_divider_in_body(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh(
+            body="No divider here. <!-- WORK_QUEUE_START -->x<!-- WORK_QUEUE_END -->"
+        )
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_skips_when_opus_returns_empty(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value=""),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_updates_pr_body_with_new_description(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New description.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        mock_gh.edit_pr_body.assert_called_once()
+        new_body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "New description." in new_body
+
+    def test_preserves_work_queue_section(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="Updated description.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        new_body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "<!-- WORK_QUEUE_START -->" in new_body
+        assert "do a thing" in new_body
+        assert "<!-- WORK_QUEUE_END -->" in new_body
+
+    def test_description_replaces_only_before_divider(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="Fresh desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        new_body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "Does something useful." not in new_body
+        assert "Fresh desc." in new_body
+        assert "## Work queue" in new_body
+
+    def test_handles_edit_pr_body_exception(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_gh.edit_pr_body.side_effect = RuntimeError("write failed")
+        # Should not propagate the exception
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+
+    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
+        mock_pp.assert_called_once()
+
+    def test_defaults_to_state(self, tmp_path: Path) -> None:
+        mock_gh = self._mock_gh()
+        mock_state = self._mock_state(issue=None)
+        with patch("kennel.state.State", return_value=mock_state) as mock_state_cls:
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _tasks=self._mock_tasks(),
+            )
+        mock_state_cls.assert_called_once_with(tmp_path / ".git" / "fido")
+        mock_gh.edit_pr_body.assert_not_called()
+
+    def test_does_not_retry_when_task_list_unchanged(self, tmp_path: Path) -> None:
+        """When task list is stable, description is written exactly once."""
+        task = {"id": "t1", "status": "pending", "title": "Do a thing"}
+        tasks = MagicMock()
+        tasks.list.return_value = [task]  # same list every call
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        mock_gh.edit_pr_body.assert_called_once()
+
+    def test_retries_when_task_list_changes_during_opus(self, tmp_path: Path) -> None:
+        """If task list changes while Opus runs, the description is rewritten."""
+        task_before = {"id": "t1", "status": "pending", "title": "Do a thing"}
+        task_after = {"id": "t2", "status": "pending", "title": "New task"}
+        tasks = MagicMock()
+        # list() called: before attempt 1, after attempt 1, before attempt 2, after attempt 2
+        tasks.list.side_effect = [
+            [task_before],  # snapshot before attempt 1
+            [task_after],  # snapshot after attempt 1 (changed → retry)
+            [task_after],  # snapshot before attempt 2
+            [task_after],  # snapshot after attempt 2 (stable → done)
+        ]
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        assert mock_gh.edit_pr_body.call_count == 2
+
+    def test_stops_after_max_retries(self, tmp_path: Path) -> None:
+        """Never retries more than _max_retries times even if task list keeps changing."""
+        tasks = MagicMock()
+        call_count = [0]
+
+        def ever_changing():
+            n = call_count[0]
+            call_count[0] += 1
+            return [{"id": str(n), "status": "pending", "title": f"task {n}"}]
+
+        tasks.list.side_effect = ever_changing
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+            _max_retries=3,
+        )
+        assert mock_gh.edit_pr_body.call_count == 3
+
+    def test_no_retry_when_write_skipped(self, tmp_path: Path) -> None:
+        """When _write_pr_description returns False (e.g. no divider), no retry."""
+        task_before = {"id": "t1", "status": "pending", "title": "Before"}
+        task_after = {"id": "t2", "status": "pending", "title": "After"}
+        tasks = MagicMock()
+        tasks.list.side_effect = [
+            [task_before],  # snapshot before
+            [task_after],  # snapshot after (would differ — but write was skipped)
+        ]
+        mock_gh = self._mock_gh(body="No divider here. Nothing.")
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+        assert tasks.list.call_count == 1  # no after-snapshot read
+
+    def test_refetches_pr_body_on_retry(self, tmp_path: Path) -> None:
+        """PR body is re-fetched on each attempt so work-queue stays current."""
+        task_before = {"id": "t1", "status": "pending", "title": "Before"}
+        task_after = {"id": "t2", "status": "pending", "title": "After"}
+        tasks = MagicMock()
+        tasks.list.side_effect = [
+            [task_before],
+            [task_after],  # changed → retry
+            [task_after],
+            [task_after],  # stable
+        ]
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        assert mock_gh.get_pr_body.call_count == 2  # once per attempt
+
+
+# ── _task_snapshot ────────────────────────────────────────────────────────────
+
+
+class TestTaskSnapshot:
+    def test_returns_id_status_title_tuples(self) -> None:
+        tasks = [
+            {"id": "a", "status": "pending", "title": "Do A"},
+            {"id": "b", "status": "completed", "title": "Done B"},
+        ]
+        assert _task_snapshot(tasks) == [
+            ("a", "pending", "Do A"),
+            ("b", "completed", "Done B"),
+        ]
+
+    def test_empty_list(self) -> None:
+        assert _task_snapshot([]) == []
+
+    def test_missing_fields_default_to_empty_string(self) -> None:
+        tasks = [{"id": "x"}]
+        assert _task_snapshot(tasks) == [("x", "", "")]
+
+    def test_order_is_preserved(self) -> None:
+        tasks = [
+            {"id": "z", "status": "pending", "title": "Z"},
+            {"id": "a", "status": "pending", "title": "A"},
+        ]
+        result = _task_snapshot(tasks)
+        assert result[0][0] == "z"
+        assert result[1][0] == "a"

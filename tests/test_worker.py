@@ -13,6 +13,7 @@ import pytest
 
 from kennel.config import RepoMembership
 from kennel.state import (
+    State,
     _resolve_git_dir,
     clear_state,
     load_state,
@@ -37,6 +38,7 @@ from kennel.worker import (
     _sanitize_slug,
     _sanitize_status_text,
     _thread_repo,
+    _write_pr_description,
     acquire_lock,
     build_prompt,
     ci_ready_for_review,
@@ -1617,6 +1619,33 @@ class TestClearState:
         assert load_state(fido_dir) == {}
 
 
+class TestState:
+    def test_load_returns_empty_when_fido_dir_absent(self, tmp_path: Path) -> None:
+        state = State(tmp_path / "nonexistent")
+        assert state.load() == {}
+
+    def test_load_returns_state_when_present(self, tmp_path: Path) -> None:
+        import json
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "state.json").write_text(json.dumps({"issue": 7}))
+        assert State(fido_dir).load() == {"issue": 7}
+
+    def test_save_persists_data(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"issue": 42})
+        assert load_state(fido_dir) == {"issue": 42}
+
+    def test_clear_removes_state_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).clear()
+        assert not (fido_dir / "state.json").exists()
+
+
 class TestBuildPrompt:
     """Tests for build_prompt."""
 
@@ -2153,182 +2182,167 @@ class TestGitClean:
         assert order == ["checkout", "clean"]
 
 
-class TestBuildPrBody:
-    """Tests for Worker._build_pr_body."""
-
-    def _make_worker(self, tmp_path: Path) -> "Worker":
-        return Worker(tmp_path, MagicMock())
+class TestWritePrDescription:
+    """Tests for the module-level _write_pr_description function."""
 
     def _pending_task(self, title: str, task_type: str = "spec") -> dict:
         return {"id": "1", "title": title, "status": "pending", "type": task_type}
 
-    def test_returns_string(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="PR desc."),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body(
-                "Fix the thing (closes #1)", 1, setup_session_id="s"
-            )
-        assert isinstance(result, str)
+    def _call(
+        self,
+        gh,
+        task_list=None,
+        existing_body="",
+        print_return="Desc.\n\nFixes #1.",
+        issue=1,
+        pr_number=42,
+    ):
+        mock_pp = MagicMock(return_value=print_return)
+        return (
+            _write_pr_description(
+                gh,
+                "owner/repo",
+                pr_number,
+                issue,
+                task_list or [],
+                existing_body,
+                _print_prompt=mock_pp,
+            ),
+            mock_pp,
+        )
 
-    def test_raises_if_setup_session_id_empty(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with pytest.raises(AssertionError):
-            worker._build_pr_body("req", 1, setup_session_id="")
+    def test_writes_to_github(self) -> None:
+        gh = MagicMock()
+        self._call(gh)
+        gh.edit_pr_body.assert_called_once()
 
-    def test_contains_work_queue_start_marker(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "<!-- WORK_QUEUE_START -->" in result
+    def test_returns_true_when_written(self) -> None:
+        gh = MagicMock()
+        result, _ = self._call(gh)
+        assert result is True
 
-    def test_contains_work_queue_end_marker(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "<!-- WORK_QUEUE_END -->" in result
+    def test_returns_false_when_opus_empty(self) -> None:
+        gh = MagicMock()
+        result, _ = self._call(gh, print_return="")
+        assert result is False
+        gh.edit_pr_body.assert_not_called()
 
-    def test_pending_tasks_shown_as_checkboxes(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        pending = [self._pending_task("Write tests"), self._pending_task("Fix lint")]
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=pending),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "- [ ] Write tests" in result
-        assert "- [ ] Fix lint" in result
+    def test_returns_false_when_no_divider_in_existing_body(self) -> None:
+        gh = MagicMock()
+        result, _ = self._call(gh, existing_body="no divider here")
+        assert result is False
+        gh.edit_pr_body.assert_not_called()
 
-    def test_first_task_has_next_marker(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        pending = [self._pending_task("First task"), self._pending_task("Second task")]
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=pending),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "- [ ] First task **→ next**" in result
+    def test_initial_write_contains_work_queue_start_marker(self) -> None:
+        gh = MagicMock()
+        self._call(gh)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "<!-- WORK_QUEUE_START -->" in body
 
-    def test_second_task_has_no_next_marker(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        pending = [self._pending_task("First task"), self._pending_task("Second task")]
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=pending),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "- [ ] Second task **→ next**" not in result
-        assert "- [ ] Second task\n" in result or result.endswith("- [ ] Second task")
+    def test_initial_write_contains_work_queue_end_marker(self) -> None:
+        gh = MagicMock()
+        self._call(gh)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "<!-- WORK_QUEUE_END -->" in body
 
-    def test_next_marker_follows_pick_next_task_priority(self, tmp_path: Path) -> None:
+    def test_initial_write_contains_separator(self) -> None:
+        gh = MagicMock()
+        self._call(gh)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "---" in body
+
+    def test_pending_tasks_shown_as_checkboxes(self) -> None:
+        gh = MagicMock()
+        tasks = [self._pending_task("Write tests"), self._pending_task("Fix lint")]
+        self._call(gh, task_list=tasks)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "- [ ] Write tests" in body
+        assert "- [ ] Fix lint" in body
+
+    def test_first_task_has_next_marker(self) -> None:
+        gh = MagicMock()
+        tasks = [self._pending_task("First task"), self._pending_task("Second task")]
+        self._call(gh, task_list=tasks)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "- [ ] First task **→ next**" in body
+
+    def test_second_task_has_no_next_marker(self) -> None:
+        gh = MagicMock()
+        tasks = [self._pending_task("First task"), self._pending_task("Second task")]
+        self._call(gh, task_list=tasks)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "- [ ] Second task **→ next**" not in body
+        assert "- [ ] Second task\n" in body or body.endswith("- [ ] Second task")
+
+    def test_next_marker_follows_pick_next_task_priority(self) -> None:
         """CI failure task second in list should still get the → next marker."""
-        worker = self._make_worker(tmp_path)
+        gh = MagicMock()
         regular = self._pending_task("Regular work")
         ci = {"id": "2", "title": "CI failure: lint", "status": "pending", "type": "ci"}
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[regular, ci]),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "- [ ] CI failure: lint **→ next**" in result
-        assert "- [ ] Regular work **→ next**" not in result
+        self._call(gh, task_list=[regular, ci])
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "- [ ] CI failure: lint **→ next**" in body
+        assert "- [ ] Regular work **→ next**" not in body
 
-    def test_no_tasks_shows_placeholder(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "<!-- no tasks yet -->" in result
+    def test_no_tasks_shows_placeholder(self) -> None:
+        gh = MagicMock()
+        self._call(gh, task_list=[])
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "<!-- no tasks yet -->" in body
 
-    def test_falls_back_to_plain_when_claude_returns_empty(
-        self, tmp_path: Path, caplog
-    ) -> None:
-        import logging
-
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value=""),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            caplog.at_level(logging.WARNING, logger="kennel"),
-        ):
-            result = worker._build_pr_body("Fix auth", 7, setup_session_id="s")
-        assert "Fix auth" in result
-        assert "Fixes #7." in result
-        assert "falling back" in caplog.text.lower()
-
-    def test_contains_separator(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="desc"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "---" in result
-
-    def test_desc_has_fixes_line_appended(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.resume_status", return_value="Specific summary."
-            ),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            result = worker._build_pr_body("req", 99, setup_session_id="s")
-        assert "Specific summary." in result
-        assert "Fixes #99." in result
-
-    def test_skips_completed_tasks(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
+    def test_skips_completed_tasks(self) -> None:
+        gh = MagicMock()
         task_list = [
             {"id": "1", "title": "Done task", "status": "completed"},
             {"id": "2", "title": "Pending task", "status": "pending"},
         ]
-        with (
-            patch("kennel.worker.claude.resume_status", return_value="d"),
-            patch("kennel.worker.tasks.list_tasks", return_value=task_list),
-        ):
-            result = worker._build_pr_body("req", 1, setup_session_id="s")
-        assert "Done task" not in result
-        assert "Pending task" in result
+        self._call(gh, task_list=task_list)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Done task" not in body
+        assert "Pending task" in body
 
-    def test_resume_status_passes_session_id_and_prompt(self, tmp_path: Path) -> None:
-        worker = self._make_worker(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.resume_status", return_value="d"
-            ) as mock_resume,
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-        ):
-            worker._build_pr_body("req", 1, setup_session_id="my-session")
-        args = mock_resume.call_args
-        assert args[0][0] == "my-session"
-        assert "specific" in args[0][1].lower()
+    def test_fixes_line_appended_when_missing(self) -> None:
+        gh = MagicMock()
+        self._call(
+            gh, print_return="Summary without fixes line.", issue=99, pr_number=5
+        )
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Fixes #99." in body
 
-    def test_falls_back_to_plain_when_resume_returns_empty(
-        self, tmp_path: Path, caplog
-    ) -> None:
-        import logging
+    def test_fixes_line_not_duplicated_when_present(self) -> None:
+        gh = MagicMock()
+        self._call(
+            gh,
+            print_return="Summary.\n\nFixes #1.",
+            issue=1,
+        )
+        body = gh.edit_pr_body.call_args[0][2]
+        assert body.count("Fixes #1.") == 1
 
-        worker = self._make_worker(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_status", return_value=""),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            caplog.at_level(logging.WARNING, logger="kennel"),
-        ):
-            result = worker._build_pr_body("Fix it", 5, setup_session_id="sess")
-        assert "Fix it" in result
-        assert "Fixes #5." in result
-        assert "falling back" in caplog.text.lower()
+    def test_rewrite_preserves_rest_section(self) -> None:
+        gh = MagicMock()
+        existing = (
+            "Old description.\n\nFixes #1.\n\n---\n\n"
+            "## Work queue\n\n<!-- WORK_QUEUE_START -->\n"
+            "- [ ] do a thing\n<!-- WORK_QUEUE_END -->"
+        )
+        self._call(gh, existing_body=existing)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "do a thing" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
+        assert "Old description." not in body
+
+    def test_rewrite_skips_when_no_divider(self) -> None:
+        gh = MagicMock()
+        result, _ = self._call(gh, existing_body="no divider here")
+        assert result is False
+        gh.edit_pr_body.assert_not_called()
+
+    def test_defaults_to_claude_print_prompt(self) -> None:
+        gh = MagicMock()
+        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+            _write_pr_description(gh, "owner/repo", 1, 1, [])
+        mock_pp.assert_called_once()
 
 
 class TestFindOrCreatePr:
@@ -2578,7 +2592,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "Do thing", "status": "pending"}],
@@ -2604,7 +2618,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
@@ -2623,7 +2637,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", mock_start),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -2641,7 +2655,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", return_value="s"),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -2659,7 +2673,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="pr-body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
@@ -2669,32 +2683,10 @@ class TestFindOrCreatePr:
         gh.create_pr.assert_called_once_with(
             "owner/proj",
             "Do the work (closes #7)",
-            "pr-body",
+            ANY,
             "main",
             "do-work",
         )
-
-    def test_no_pr_passes_setup_session_id_to_build_pr_body(
-        self, tmp_path: Path
-    ) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
-        fido_dir = self._fido_dir(tmp_path)
-        mock_build_body = MagicMock(return_value="body")
-        with (
-            patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="br"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="planning-session-id"),
-            patch.object(worker, "_build_pr_body", mock_build_body),
-            patch(
-                "kennel.worker.tasks.list_tasks",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 3, "Do it")
-        assert mock_build_body.call_args[1]["setup_session_id"] == "planning-session-id"
 
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2712,7 +2704,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -2739,7 +2731,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -2765,7 +2757,7 @@ class TestFindOrCreatePr:
             ),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
@@ -2805,7 +2797,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
@@ -2828,7 +2820,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
@@ -2851,7 +2843,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude.generate_branch_name", return_value="work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
-            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
@@ -2927,7 +2919,12 @@ class TestSeedTasksFromPrBody:
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_called_once_with(
-            tmp_path, "Fix the bug", task_type=TaskType.SPEC
+            tmp_path,
+            "Fix the bug",
+            TaskType.SPEC,
+            description=ANY,
+            status=ANY,
+            thread=ANY,
         )
 
     def test_adds_multiple_tasks(self, tmp_path: Path) -> None:
@@ -3006,7 +3003,7 @@ class TestSeedTasksFromPrBody:
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch(
                 "kennel.worker.tasks.add_task",
-                side_effect=lambda wd, t, **kw: received.append(t),
+                side_effect=lambda wd, t, tt, **kw: received.append(t),
             ),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 5)
@@ -7773,6 +7770,26 @@ class TestSyncTasks:
         new_body = gh.edit_pr_body.call_args[0][2]
         assert "Do it" in new_body
         assert "old" not in new_body
+
+    def test_description_section_preserved_after_sync(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        desc = "My PR description.\n\nFixes #1."
+        body = (
+            f"{desc}\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\nold queue\n<!-- WORK_QUEUE_END -->"
+        )
+        gh.get_pr_body.return_value = body
+        task = {"title": "Do it", "status": "pending", "type": "spec"}
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        assert "My PR description." in new_body
+        assert "Fixes #1." in new_body
 
     def test_skips_edit_when_no_queue_markers(self, tmp_path: Path) -> None:
         gh = MagicMock()

@@ -16,13 +16,12 @@ from typing import IO, Any, Protocol
 from kennel import claude, hooks, tasks
 from kennel.config import RepoMembership
 from kennel.github import GitHub
-from kennel.prompts import Prompts
+from kennel.prompts import Prompts, rewrite_description_prompt
 from kennel.state import (
+    State,
     _resolve_git_dir,
-    clear_state,
-    load_state,
-    save_state,
 )
+from kennel.tasks import Tasks
 from kennel.types import TaskStatus, TaskType
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
@@ -320,6 +319,75 @@ def ci_ready_for_review(
     return all(states.get(name) == "SUCCESS" for name in required_checks)
 
 
+def _write_pr_description(
+    gh: Any,
+    repo: str,
+    pr_number: int,
+    issue: int,
+    task_list: list[dict[str, Any]],
+    existing_body: str = "",
+    *,
+    _print_prompt=None,
+) -> bool:
+    """Write or rewrite the PR description.
+
+    Handles both initial PR creation (``existing_body=""``; builds work-queue
+    section from *task_list*) and post-rescope rewrites (``existing_body``
+    contains the current body; preserves the rest section after the ``---``
+    divider).
+
+    Generates the description via Opus and writes it back via
+    ``gh.edit_pr_body``.  Returns ``True`` if the body was written,
+    ``False`` when skipped (no divider in an existing body, or Opus returned
+    empty).
+    """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+
+    divider = "\n\n---\n\n"
+
+    # For a rewrite, only proceed when the divider is present so we know
+    # where the description section ends.  For initial write (empty body)
+    # skip this guard and build the rest section fresh.
+    if existing_body and divider not in existing_body:
+        log.info(
+            "_write_pr_description: no --- divider in PR #%s body — skipping", pr_number
+        )
+        return False
+
+    # Preserve the existing rest section or build the work-queue from scratch.
+    if divider in existing_body:
+        rest = existing_body.split(divider, 1)[1]
+    else:
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
+        next_task = _pick_next_task(task_list)
+        if pending:
+            lines = [
+                f"- [ ] {t['title']}{' **→ next**' if t is next_task else ''}"
+                for t in pending
+            ]
+            queue = "\n".join(lines)
+        else:
+            queue = "<!-- no tasks yet -->"
+        rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+
+    prompt = rewrite_description_prompt(existing_body, task_list)
+    new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    if not new_desc:
+        log.warning("_write_pr_description: Opus returned empty — skipping")
+        return False
+
+    # Ensure "Fixes #N" is always present (Opus preserves it for rewrites via
+    # prompt rules; for initial writes we append it here).
+    if f"Fixes #{issue}" not in new_desc:
+        new_desc = f"{new_desc.rstrip()}\n\nFixes #{issue}."
+
+    new_body = f"{new_desc.strip()}{divider}{rest}"
+    gh.edit_pr_body(repo, pr_number, new_body)
+    log.info("_write_pr_description: PR #%s description written", pr_number)
+    return True
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -336,6 +404,7 @@ class Worker:
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        _tasks: Tasks | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -343,6 +412,7 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
+        self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -413,14 +483,14 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state = load_state(fido_dir)
-        issue = state.get("issue")
+        state_obj = State(fido_dir)
+        issue = state_obj.load().get("issue")
         if issue is None:
             return None
         issue_data = self.gh.view_issue(repo, issue)
         if issue_data["state"] == "CLOSED":
             log.info("issue #%s: closed — advancing", issue)
-            clear_state(fido_dir)
+            state_obj.clear()
             return None
         return int(issue)
 
@@ -520,7 +590,7 @@ class Worker:
                 number = issue["number"]
                 title = issue["title"]
                 log.info("starting issue #%s: %s", number, title)
-                save_state(fido_dir, {"issue": number})
+                State(fido_dir).save({"issue": number})
                 self.set_status(f"Picking up issue #{number}: {title}")
                 return number
 
@@ -559,53 +629,6 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
-    def _build_pr_body(
-        self,
-        request: str,
-        issue: int,
-        *,
-        setup_session_id: str,
-    ) -> str:
-        """Build the draft PR body: generated description + work-queue section.
-
-        Continues *setup_session_id* (the planning session) so Opus writes the
-        description with full context from everything it just planned.  Falls
-        back to plain text if Claude returns nothing.  Appends the pending task
-        list inside the ``WORK_QUEUE_START/END`` markers.
-        """
-        assert setup_session_id, "setup_session_id must be non-empty"
-        plain = f"{request}\n\nFixes #{issue}."
-        task_list = tasks.list_tasks(self.work_dir)
-        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
-
-        continuation_prompt = (
-            "Based on the planning above, write a specific 2-3 sentence pull"
-            " request description for this PR. Reference the concrete tasks by"
-            " name. No markdown headers. Do not include a 'Fixes #N.' line."
-        )
-        desc = claude.resume_status(setup_session_id, continuation_prompt, timeout=60)
-
-        if desc:
-            desc = f"{desc.rstrip()}\n\nFixes #{issue}."
-        else:
-            log.warning("Opus returned no description — falling back to plain text")
-            desc = plain
-
-        next_task = _pick_next_task(task_list)
-        if pending:
-            lines = []
-            for t in pending:
-                marker = " **→ next**" if t is next_task else ""
-                lines.append(f"- [ ] {t['title']}{marker}")
-            queue = "\n".join(lines)
-        else:
-            queue = "<!-- no tasks yet -->"
-
-        return (
-            f"{desc}\n\n---\n\n## Work queue\n\n"
-            f"<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
-        )
-
     def find_or_create_pr(
         self,
         fido_dir: Path,
@@ -642,11 +665,11 @@ class Worker:
                 self._git(["checkout", slug])
             except subprocess.CalledProcessError:
                 self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
-            task_list = tasks.list_tasks(self.work_dir)
+            task_list = self._tasks.list()
             if not task_list:
                 # Try seeding from PR body first (recovers from state reset)
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                task_list = tasks.list_tasks(self.work_dir)
+                task_list = self._tasks.list()
             if not task_list:
                 log.info("PR #%s has no tasks — running setup", pr_number)
                 context = (
@@ -661,10 +684,9 @@ class Worker:
                 build_prompt(fido_dir, "setup", context)
                 session_id = claude_start(fido_dir, cwd=self.work_dir)
                 log.info("setup session: %s", session_id)
-                state = load_state(fido_dir)
-                state["setup_session_id"] = session_id
-                save_state(fido_dir, state)
-                if not tasks.list_tasks(self.work_dir):
+                with State(fido_dir).modify() as state:
+                    state["setup_session_id"] = session_id
+                if not self._tasks.list():
                     log.warning(
                         "setup produced no tasks — skipping PR #%s, will retry",
                         pr_number,
@@ -711,28 +733,28 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         session_id = claude_start(fido_dir, cwd=self.work_dir)
         log.info("setup session: %s", session_id)
-        state = load_state(fido_dir)
-        state["setup_session_id"] = session_id
-        save_state(fido_dir, state)
+        with State(fido_dir).modify() as state:
+            state["setup_session_id"] = session_id
 
-        if not tasks.list_tasks(self.work_dir):
+        if not self._tasks.list():
             log.warning("setup produced no tasks — skipping PR creation, will retry")
             return None
 
-        # Build PR body with tasks already populated by setup
-        pr_body = self._build_pr_body(request, issue, setup_session_id=session_id)
-
-        # Create draft PR
+        # Create draft PR, then write the description using the same function
+        # used for post-rescope rewrites so both paths share one code path.
         url = self.gh.create_pr(
             repo_ctx.repo,
             request,
-            pr_body,
+            f"Fixes #{issue}.",
             repo_ctx.default_branch,
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
+        _write_pr_description(
+            self.gh, repo_ctx.repo, pr_number, issue, self._tasks.list()
+        )
         task_count = len(
-            [t for t in tasks.list_tasks(self.work_dir) if t.get("status") == "pending"]
+            [t for t in self._tasks.list() if t.get("status") == "pending"]
         )
         log.info("PR: #%s opened with %d tasks", pr_number, task_count)
         log.info("PR: #%s  %s", pr_number, url)
@@ -951,10 +973,7 @@ class Worker:
             comment_ids = [
                 c.get("databaseId") for c in comments if c.get("databaseId") is not None
             ]
-            if any(
-                tasks.has_pending_tasks_for_comment(self.work_dir, cid)
-                for cid in comment_ids
-            ):
+            if any(self._tasks.has_pending_for_comment(cid) for cid in comment_ids):
                 log.info(
                     "skipping resolve for thread %s — pending sibling tasks remain",
                     node.get("id", ""),
@@ -1091,10 +1110,9 @@ class Worker:
         """
         log.info("task aborted: %s", task_title)
         self.git_clean()
-        tasks.remove_task(self.work_dir, task_id)
-        state = load_state(fido_dir)
-        state.pop("current_task_id", None)
-        save_state(fido_dir, state)
+        self._tasks.remove(task_id)
+        with State(fido_dir).modify() as state:
+            state.pop("current_task_id", None)
         self._abort_task.clear()
         tasks.sync_tasks(self.work_dir, self.gh)
 
@@ -1115,7 +1133,7 @@ class Worker:
         task was found.
         """
         log.info("checking: tasks")
-        task_list = tasks.list_tasks(self.work_dir)
+        task_list = self._tasks.list()
         task = _pick_next_task(task_list)
         if task is None:
             return False
@@ -1141,10 +1159,9 @@ class Worker:
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        state = load_state(fido_dir)
-        setup_session_id = state.get("setup_session_id", "")
-        state["current_task_id"] = task["id"]
-        save_state(fido_dir, state)
+        with State(fido_dir).modify() as state:
+            setup_session_id = state.get("setup_session_id", "")
+            state["current_task_id"] = task["id"]
         session_id, output = claude_run(
             fido_dir, session_id=setup_session_id, cwd=self.work_dir
         )
@@ -1161,7 +1178,7 @@ class Worker:
             # If the task was completed externally (e.g. via `kennel task
             # complete`) while we were waiting, stop retrying — the work is
             # already recorded as done and no commits will ever appear.
-            current_task_list = tasks.list_tasks(self.work_dir)
+            current_task_list = self._tasks.list()
             if not any(
                 t["id"] == task["id"] and t.get("status") == TaskStatus.PENDING
                 for t in current_task_list
@@ -1194,17 +1211,15 @@ class Worker:
                 return True
 
         if session_id:
-            state = load_state(fido_dir)
-            state["setup_session_id"] = session_id
-            save_state(fido_dir, state)
+            with State(fido_dir).modify() as state:
+                state["setup_session_id"] = session_id
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            tasks.complete_by_id(self.work_dir, task["id"])
-            state = load_state(fido_dir)
-            state.pop("current_task_id", None)
-            save_state(fido_dir, state)
+            self._tasks.complete_by_id(task["id"])
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh)
         return True
 
@@ -1222,7 +1237,7 @@ class Worker:
         No-op if tasks.json is already non-empty, or if no markers /
         unchecked items are found.
         """
-        if tasks.list_tasks(self.work_dir):
+        if self._tasks.list():
             return  # already have tasks — nothing to seed
         pr_data = self.gh.get_pr(repo, pr_number)
         body = pr_data.get("body") or ""
@@ -1253,7 +1268,7 @@ class Worker:
         if not parsed:
             return
         for title, task_type in parsed:
-            tasks.add_task(self.work_dir, title, task_type=task_type)
+            self._tasks.add(title, task_type)
         log.info("seeded %d tasks from PR body", len(parsed))
 
     def post_pickup_comment(
@@ -1341,7 +1356,7 @@ class Worker:
             _latest_decisive.get("state", "NONE") if _latest_decisive else "NONE"
         )
         is_approved = latest_state == "APPROVED"
-        task_list = tasks.list_tasks(self.work_dir)
+        task_list = self._tasks.list()
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
 
         # Merge only if: approved + not draft + no pending tasks
@@ -1358,7 +1373,7 @@ class Worker:
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
             (fido_dir / "tasks.json").write_text("[]")
-            clear_state(fido_dir)
+            State(fido_dir).clear()
             self._git(["checkout", repo_ctx.default_branch])
             self._git(
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False

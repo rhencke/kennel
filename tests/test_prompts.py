@@ -10,6 +10,7 @@ from kennel.prompts import (
     reply_context_block,
     reply_instruction,
     rescope_prompt,
+    rewrite_description_prompt,
     triage_categories,
     triage_context_block,
     triage_prompt,
@@ -714,3 +715,107 @@ class TestPromptsStoresPersona:
         assert "persona A" in p1.status_text_prompt(activities)
         assert "persona B" in p2.status_text_prompt(activities)
         assert "persona A" not in p2.status_text_prompt(activities)
+
+
+# ── rewrite_description_prompt ────────────────────────────────────────────────
+
+
+class TestRewriteDescriptionPrompt:
+    def _task(
+        self,
+        title: str,
+        task_id: str = "1",
+        status: str = "pending",
+        description: str = "",
+    ) -> dict:
+        return {
+            "id": task_id,
+            "title": title,
+            "status": status,
+            "description": description,
+        }
+
+    def _body(self, desc: str = "Does something useful.\n\nFixes #5.") -> str:
+        return (
+            f"{desc}\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\n- [ ] do a thing\n<!-- WORK_QUEUE_END -->"
+        )
+
+    def test_includes_current_description(self) -> None:
+        result = rewrite_description_prompt(
+            self._body("Implements the feature.\n\nFixes #7."),
+            [self._task("New task")],
+        )
+        assert "Implements the feature." in result
+
+    def test_excludes_work_queue_section_from_context(self) -> None:
+        result = rewrite_description_prompt(self._body(), [self._task("A task")])
+        assert "WORK_QUEUE_START" not in result
+        assert "do a thing" not in result
+
+    def test_includes_pending_tasks(self) -> None:
+        result = rewrite_description_prompt(
+            self._body(),
+            [self._task("Add caching layer")],
+        )
+        assert "Add caching layer" in result
+
+    def test_excludes_completed_tasks(self) -> None:
+        result = rewrite_description_prompt(
+            self._body(),
+            [
+                self._task("Done already", status="completed"),
+                self._task("Still pending"),
+            ],
+        )
+        assert "Done already" not in result
+
+    def test_empty_pending_shows_none(self) -> None:
+        result = rewrite_description_prompt(
+            self._body(),
+            [self._task("Finished", status="completed")],
+        )
+        assert "(none)" in result
+
+    def test_task_description_included(self) -> None:
+        result = rewrite_description_prompt(
+            self._body(),
+            [self._task("Cache results", description="use Redis")],
+        )
+        assert "use Redis" in result
+
+    def test_fixes_line_preservation_rule_stated(self) -> None:
+        result = rewrite_description_prompt(self._body(), [])
+        assert "Fixes #N" in result or "Fixes #" in result
+        assert "preserve" in result.lower() or "exactly" in result.lower()
+
+    def test_no_work_queue_content_rule_stated(self) -> None:
+        result = rewrite_description_prompt(self._body(), [])
+        assert "work queue" in result.lower()
+
+    def test_output_only_constraint_stated(self) -> None:
+        result = rewrite_description_prompt(self._body(), [])
+        assert "ONLY" in result or "only" in result
+        assert "preamble" in result or "no preamble" in result
+
+    def test_extracts_description_at_divider(self) -> None:
+        body = "My description.\n\nFixes #3.\n\n---\n\nStuff below divider."
+        result = rewrite_description_prompt(body, [])
+        assert "My description." in result
+        assert "Stuff below divider." not in result
+
+    def test_fallback_to_wq_marker_when_no_divider(self) -> None:
+        body = "Short desc.\n<!-- WORK_QUEUE_START -->\n- [ ] task\n<!-- WORK_QUEUE_END -->"
+        result = rewrite_description_prompt(body, [])
+        assert "Short desc." in result
+        assert "WORK_QUEUE_START" not in result
+
+    def test_fallback_to_full_body_when_no_markers(self) -> None:
+        body = "Plain description with no markers."
+        result = rewrite_description_prompt(body, [])
+        assert "Plain description with no markers." in result
+
+    def test_empty_task_list(self) -> None:
+        result = rewrite_description_prompt(self._body(), [])
+        assert isinstance(result, str)
+        assert "(none)" in result

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from kennel.tasks import (
+    Tasks,
     _apply_reorder,
     _compute_thread_changes,
     _parse_reorder_response,
@@ -769,6 +770,50 @@ class TestReorderTasks:
         task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
         assert task1["status"] == "completed"
 
+    def test_on_done_called_after_successful_reorder(self, tmp_path: Path) -> None:
+        t1 = self._add(tmp_path, "Task A")
+        raw = self._response([{"id": t1["id"], "title": "Task A", "description": ""}])
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: raw,
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == [1]
+
+    def test_on_done_not_called_when_no_tasks(self, tmp_path: Path) -> None:
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "{}",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
+    def test_on_done_not_called_on_empty_opus_response(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "Task A")
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
+    def test_on_done_not_called_on_unparseable_response(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "Task A")
+        done_calls: list = []
+        reorder_tasks(
+            tmp_path,
+            "",
+            _print_prompt=lambda *a, **k: "not json at all",
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────
 
@@ -849,3 +894,76 @@ class TestComputeThreadChanges:
         kinds = {c["kind"] for c in changes}
         assert "completed" in kinds
         assert "modified" in kinds
+
+
+class TestTasks:
+    def test_list_delegates_to_list_tasks(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Task A", TaskType.SPEC)
+        result = Tasks(work_dir).list()
+        assert len(result) == 1
+        assert result[0]["title"] == "Task A"
+
+    def test_add_delegates_to_add_task(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = Tasks(work_dir).add("Task B", TaskType.CI)
+        assert task["title"] == "Task B"
+        assert task["type"] == "ci"
+
+    def test_complete_by_id_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task C", TaskType.SPEC)
+        Tasks(work_dir).complete_by_id(task["id"])
+        assert list_tasks(work_dir)[0]["status"] == "completed"
+
+    def test_has_pending_for_comment_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Task D", TaskType.THREAD, thread={"comment_id": 7})
+        assert Tasks(work_dir).has_pending_for_comment(7) is True
+        assert Tasks(work_dir).has_pending_for_comment(99) is False
+
+    def test_remove_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task E", TaskType.SPEC)
+        assert Tasks(work_dir).remove(task["id"]) is True
+        assert list_tasks(work_dir) == []
+
+    def test_update_delegates(self, tmp_path: Path) -> None:
+        from kennel.types import TaskStatus, TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        task = add_task(work_dir, "Task F", TaskType.SPEC)
+        Tasks(work_dir).update(task["id"], TaskStatus.IN_PROGRESS)
+        assert list_tasks(work_dir)[0]["status"] == "in_progress"
+
+    def test_modify_yields_empty_list_when_no_tasks(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        with Tasks(work_dir).modify() as tasks:
+            assert tasks == []
+
+    def test_modify_persists_changes(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Existing task", TaskType.SPEC)
+        with Tasks(work_dir).modify() as tasks:
+            tasks[0]["title"] = "Modified task"
+        assert list_tasks(work_dir)[0]["title"] == "Modified task"

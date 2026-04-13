@@ -19,10 +19,15 @@ from kennel.prompts import (
     triage_prompt,
 )
 from kennel.registry import WorkerRegistry
-from kennel.tasks import add_task
+from kennel.tasks import Tasks
 from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
+
+# Per-work_dir coalescing state for _reorder_tasks_background.
+# Ensures at most one Opus call in-flight + one pending per repo.
+_reorder_coalesce: dict[str, dict] = {}
+_reorder_coalesce_lock = threading.Lock()
 
 
 @dataclass
@@ -647,6 +652,9 @@ def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
     registry: WorkerRegistry,
+    *,
+    _state=None,
+    _tasks=None,
 ) -> None:
     """Abort the current task if the new task has higher priority.
 
@@ -655,18 +663,20 @@ def _maybe_abort_for_new_task(
     pending for later (ABORT_KEEP).  Equal or lower priority does not
     preempt.
     """
-    from kennel.state import load_state
-    from kennel.tasks import list_tasks
+    from kennel.state import State
+    from kennel.tasks import Tasks
 
-    fido_dir = repo_cfg.work_dir / ".git" / "fido"
-    if not (fido_dir / "state.json").exists():
-        return
-    state = load_state(fido_dir)
+    if _state is None:
+        _state = State(repo_cfg.work_dir / ".git" / "fido")
+    if _tasks is None:
+        _tasks = Tasks(repo_cfg.work_dir)
+
+    state = _state.load()
     current_task_id = state.get("current_task_id")
     if not current_task_id:
         return
 
-    task_list = list_tasks(repo_cfg.work_dir)
+    task_list = _tasks.list()
     current_task = next((t for t in task_list if t["id"] == current_task_id), None)
     if current_task is None:
         return
@@ -789,36 +799,125 @@ def _notify_thread_change(
         log.exception("failed to notify thread %s", comment_id)
 
 
-def _reorder_tasks_background(
-    work_dir: Path,
-    commit_summary: str,
-    config: Config,
-    repo_cfg: RepoConfig | None = None,
-    registry: WorkerRegistry | None = None,
-    *,
-    _start=threading.Thread.start,
-    _gh=None,
-) -> None:
-    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
+def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple]:
+    """Summarise task_list as an ordered list of (id, status, title) tuples.
 
-    Passes an ``_on_changes`` callback so that any thread tasks dropped or
-    modified during rescoping trigger a notification reply to the original
-    comment.
-
-    If *repo_cfg* and *registry* are provided, also passes an
-    ``_on_inprogress_affected`` callback that aborts the running worker whenever
-    the in-progress task is dropped or modified by the rescope, so the worker
-    loop restarts on the new next task.
+    Used by :func:`_rewrite_pr_description` to detect whether the task list
+    changed while Opus was generating the PR description.
     """
-    from kennel.tasks import reorder_tasks
+    return [(t["id"], t.get("status", ""), t.get("title", "")) for t in task_list]
 
-    gh = _gh if _gh is not None else get_github()
+
+def _rewrite_pr_description(
+    work_dir: Path,
+    gh: Any,
+    *,
+    _print_prompt=None,
+    _state=None,
+    _tasks=None,
+    _max_retries: int = 3,
+) -> None:
+    """Rewrite the PR description summary after a successful rescope.
+
+    Delegates to :func:`kennel.worker._write_pr_description` so that initial
+    PR creation and post-rescope rewrites share one code path.
+
+    Silently skips when there is no active issue or no open PR for it.
+    Skips (and logs) when the PR body fetch fails or when the shared writer
+    skips (no ``---`` divider, or Opus returned empty).
+
+    Retries up to *_max_retries* times when the task list changes while Opus
+    is generating the description, so the written description always reflects
+    the state of the task list at the moment Opus returned.  The PR body is
+    re-fetched on each retry so the work-queue section stays current.
+    """
+    from kennel.state import State
+    from kennel.tasks import Tasks
+    from kennel.worker import _write_pr_description
+
+    if _state is None:
+        _state = State(work_dir / ".git" / "fido")
+    if _tasks is None:
+        _tasks = Tasks(work_dir)
+
+    state = _state.load()
+    issue = state.get("issue")
+    if not issue:
+        log.info("_rewrite_pr_description: no active issue in state — skipping")
+        return
+
+    try:
+        repo = gh.get_repo_info(cwd=work_dir)
+        user = gh.get_user()
+    except Exception:
+        log.exception("_rewrite_pr_description: failed to get repo info")
+        return
+
+    pr_data = gh.find_pr(repo, issue, user)
+    if pr_data is None or pr_data.get("state") != "OPEN":
+        log.info("_rewrite_pr_description: no open PR for issue #%s — skipping", issue)
+        return
+
+    pr_number = pr_data["number"]
+
+    for attempt in range(_max_retries):
+        task_list = _tasks.list()
+        snapshot_before = _task_snapshot(task_list)
+
+        try:
+            body = gh.get_pr_body(repo, pr_number)
+        except Exception:
+            log.exception("_rewrite_pr_description: failed to get PR body")
+            return
+
+        try:
+            written = _write_pr_description(
+                gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+            )
+        except Exception:
+            log.exception("_rewrite_pr_description: failed to update PR body")
+            return
+
+        if not written:
+            return
+
+        snapshot_after = _task_snapshot(_tasks.list())
+        if snapshot_after == snapshot_before:
+            return
+
+        log.info(
+            "_rewrite_pr_description: task list changed during rewrite — retrying"
+            " (attempt %d/%d)",
+            attempt + 1,
+            _max_retries,
+        )
+
+    log.warning(
+        "_rewrite_pr_description: task list still changing after %d attempts"
+        " — description may be slightly stale",
+        _max_retries,
+    )
+
+
+def _make_reorder_kwargs(
+    work_dir: Path,
+    config: Config,
+    repo_cfg: RepoConfig | None,
+    registry: WorkerRegistry | None,
+    gh: Any,
+    print_prompt: Any,
+    rewrite_fn: Any,
+) -> dict[str, Any]:
+    """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
             _notify_thread_change(change, config, _gh=gh)
 
-    kwargs: dict[str, Any] = {"_on_changes": on_changes}
+    def on_done() -> None:
+        rewrite_fn(work_dir, gh, _print_prompt=print_prompt)
+
+    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
     if registry is not None and repo_cfg is not None:
 
         def on_inprogress_affected() -> None:
@@ -829,11 +928,80 @@ def _reorder_tasks_background(
             registry.abort_task(repo_cfg.name)
 
         kwargs["_on_inprogress_affected"] = on_inprogress_affected
+    return kwargs
+
+
+def _reorder_tasks_background(
+    work_dir: Path,
+    commit_summary: str,
+    config: Config,
+    repo_cfg: RepoConfig | None = None,
+    registry: WorkerRegistry | None = None,
+    *,
+    _start=threading.Thread.start,
+    _gh=None,
+    _print_prompt=None,
+    _rewrite_fn=None,
+    _reorder_fn=None,
+    _coalesce_state: dict | None = None,
+) -> None:
+    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
+
+    Coalesces concurrent calls: if a reorder thread is already running for
+    *work_dir*, the new trigger is recorded as pending rather than spawning
+    another thread.  When the running thread finishes it checks for a pending
+    run and, if one exists, executes it before exiting — so at most one Opus
+    call is in-flight plus one queued per repo.
+
+    Passes an ``_on_changes`` callback so that any thread tasks dropped or
+    modified during rescoping trigger a notification reply to the original
+    comment.
+
+    If *repo_cfg* and *registry* are provided, also passes an
+    ``_on_inprogress_affected`` callback that aborts the running worker whenever
+    the in-progress task is dropped or modified by the rescope, so the worker
+    loop restarts on the new next task.
+
+    Passes an ``_on_done`` callback that rewrites the PR description after a
+    successful reorder, so the human-facing summary stays in sync with the
+    updated plan.
+    """
+    from kennel.tasks import reorder_tasks as _reorder_tasks
+
+    reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
+    gh = _gh if _gh is not None else get_github()
+    rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
+    state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
+
+    key = str(work_dir)
+    kwargs = _make_reorder_kwargs(
+        work_dir, config, repo_cfg, registry, gh, _print_prompt, rewrite_fn
+    )
+
+    with _reorder_coalesce_lock:
+        entry = state.setdefault(key, {"running": False, "pending": None})
+        if entry["running"]:
+            # Coalesce: latest call wins; the running thread will do one more pass.
+            entry["pending"] = (commit_summary, kwargs)
+            return
+        entry["running"] = True
+        entry["pending"] = None
+
+    def run_loop() -> None:
+        cs = commit_summary
+        kw = kwargs
+        while True:
+            reorder(work_dir, cs, **kw)
+            with _reorder_coalesce_lock:
+                pending = state[key].get("pending")
+                if pending is None:
+                    state[key]["running"] = False
+                    return
+                state[key]["pending"] = None
+                cs, kw = pending
 
     t = threading.Thread(
-        target=reorder_tasks,
-        args=(work_dir, commit_summary),
-        kwargs=kwargs,
+        target=run_loop,
         name=f"reorder-{work_dir.name}",
         daemon=True,
     )
@@ -849,6 +1017,7 @@ def create_task(
     *,
     _get_commit_summary_fn=_get_commit_summary,
     _reorder_background_fn=_reorder_tasks_background,
+    _tasks: Tasks | None = None,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
@@ -867,11 +1036,11 @@ def create_task(
 
     Returns the new task dict.
     """
+    if _tasks is None:
+        _tasks = Tasks(repo_cfg.work_dir)
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
-    new_task = add_task(
-        repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
-    )
+    new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
     launch_sync(config, repo_cfg)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)

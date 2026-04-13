@@ -272,6 +272,53 @@ def rescope_prompt(
     )
 
 
+# ── PR description rewrite ───────────────────────────────────────────────────
+
+
+def rewrite_description_prompt(
+    pr_body: str,
+    task_list: list[dict[str, Any]],
+) -> str:
+    """Build an Opus prompt to rewrite the PR description after rescoping.
+
+    Presents the current PR description section and the updated task list,
+    then asks Opus to rewrite only the descriptive summary while preserving
+    required structural lines like ``Fixes #N``.
+
+    The caller is responsible for substituting the result back into the PR
+    body, keeping the work-queue section intact.
+    """
+    divider = "\n\n---\n\n"
+    if divider in pr_body:
+        description_section = pr_body.split(divider)[0]
+    elif "<!-- WORK_QUEUE_START -->" in pr_body:
+        description_section = pr_body.split("<!-- WORK_QUEUE_START -->")[0].strip()
+    else:
+        description_section = pr_body
+
+    pending = [t for t in task_list if t.get("status") != "completed"]
+
+    def _fmt(t: dict[str, Any]) -> str:
+        title = t.get("title", "")
+        desc = t.get("description", "")
+        return f"- {title}" + (f": {desc}" if desc else "")
+
+    task_block = "\n".join(_fmt(t) for t in pending) if pending else "(none)"
+
+    return (
+        "You are rewriting the description section of a pull request after the plan changed.\n\n"
+        "Current PR description section:\n"
+        f"{description_section.strip()}\n\n"
+        "Updated task list (pending work):\n"
+        f"{task_block}\n\n"
+        "Rewrite the descriptive summary to match the updated plan. Rules:\n"
+        "1. Keep it to 2-3 sentences.\n"
+        "2. Preserve any 'Fixes #N.' lines exactly as they appear — do not add, remove, or modify them.\n"
+        "3. Do not include work queue content, markdown headers, or HTML comments.\n"
+        "4. Output ONLY the replacement description text — no preamble, no explanation."
+    )
+
+
 # ── Prompts DI class ──────────────────────────────────────────────────────────
 
 

@@ -16,7 +16,7 @@ from typing import Any
 from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
-from kennel.state import _resolve_git_dir, load_state
+from kennel.state import JsonFileStore, _resolve_git_dir, load_state
 from kennel.types import TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
@@ -514,6 +514,7 @@ def reorder_tasks(
     _rescope_prompt_fn=_rescope_prompt_default,
     _on_changes=None,
     _on_inprogress_affected=None,
+    _on_done=None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -536,6 +537,9 @@ def reorder_tasks(
     the caller can abort the running worker and restart on the new next task.
     When the in-progress task is modified its status is reset to ``pending`` so
     the worker loop picks it up again with the updated title/description.
+
+    If *_on_done* is provided, it is called after a successful reorder write so
+    callers can trigger follow-up work (e.g. rewriting the PR description).
     """
     task_list = list_tasks(work_dir)
     if not task_list:
@@ -600,6 +604,9 @@ def reorder_tasks(
 
     log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 
+    if _on_done is not None:
+        _on_done()
+
 
 def sync_tasks_background(
     work_dir: Path, gh: GitHub, *, _start=threading.Thread.start
@@ -612,3 +619,62 @@ def sync_tasks_background(
         daemon=True,
     )
     _start(t)
+
+
+class Tasks(JsonFileStore):
+    """Encapsulates task file operations for a single worker directory.
+
+    Abstracts all file access so callers never touch the filesystem directly.
+    Instantiate with the work_dir path and inject wherever tasks are needed.
+
+    Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write of
+    the entire task list.
+    """
+
+    def __init__(self, work_dir: Path) -> None:
+        self._work_dir = work_dir
+
+    @property
+    def _data_path(self) -> Path:
+        return _task_file(self._work_dir)
+
+    def _default(self) -> list:
+        return []
+
+    def list(self) -> list[dict[str, Any]]:
+        """Return all tasks."""
+        return list_tasks(self._work_dir)
+
+    def add(
+        self,
+        title: str,
+        task_type: TaskType,
+        description: str = "",
+        status: TaskStatus = TaskStatus.PENDING,
+        thread: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a task. Returns the new (or existing duplicate) task."""
+        return add_task(
+            self._work_dir,
+            title,
+            task_type,
+            description=description,
+            status=status,
+            thread=thread,
+        )
+
+    def complete_by_id(self, task_id: str) -> dict[str, Any] | None:
+        """Mark a task completed. Returns its thread dict or None."""
+        return complete_by_id(self._work_dir, task_id)
+
+    def has_pending_for_comment(self, comment_id: int | str) -> bool:
+        """Return True if any pending task references *comment_id*."""
+        return has_pending_tasks_for_comment(self._work_dir, comment_id)
+
+    def remove(self, task_id: str) -> bool:
+        """Remove a task. Returns True if found."""
+        return remove_task(self._work_dir, task_id)
+
+    def update(self, task_id: str, status: TaskStatus) -> bool:
+        """Update a task's status. Returns True if found."""
+        return update_task(self._work_dir, task_id, status)
