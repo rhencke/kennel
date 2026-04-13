@@ -2973,3 +2973,15 @@ class TestRewritePrDescription:
             _load_state_fn=lambda _: {"issue": 42},
             _list_tasks=lambda _: [],
         )
+
+    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+        self._setup_state(tmp_path)
+        mock_gh = self._mock_gh()
+        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _load_state_fn=lambda _: {"issue": 42},
+                _list_tasks=lambda _: [],
+            )
+        mock_pp.assert_called_once()
