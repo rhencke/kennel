@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from kennel.tasks import (
+    Tasks,
     _apply_reorder,
     _compute_thread_changes,
     _parse_reorder_response,
@@ -893,3 +894,15 @@ class TestComputeThreadChanges:
         kinds = {c["kind"] for c in changes}
         assert "completed" in kinds
         assert "modified" in kinds
+
+
+class TestTasks:
+    def test_list_delegates_to_list_tasks(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Task A", TaskType.SPEC)
+        result = Tasks(work_dir).list()
+        assert len(result) == 1
+        assert result[0]["title"] == "Task A"

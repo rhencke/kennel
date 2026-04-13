@@ -2789,23 +2789,6 @@ class TestReplyToCommentTerseEnrichment:
 
 
 class TestRewritePrDescription:
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-
-    def _setup_state(self, tmp_path: Path, issue: int = 42) -> None:
-        import json
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True, exist_ok=True)
-        (fido_dir / "state.json").write_text(json.dumps({"issue": issue}))
-
     def _pr_body(self, desc: str = "Does something useful.\n\nFixes #42.") -> str:
         return (
             f"{desc}\n\n---\n\n## Work queue\n\n"
@@ -2820,79 +2803,72 @@ class TestRewritePrDescription:
         gh.get_pr_body.return_value = body if body is not None else self._pr_body()
         return gh
 
-    def test_skips_when_no_state_file(self, tmp_path: Path) -> None:
-        # No .git/fido/state.json created
-        mock_gh = self._mock_gh()
-        _rewrite_pr_description(tmp_path, mock_gh, _print_prompt=MagicMock())
-        mock_gh.edit_pr_body.assert_not_called()
+    def _mock_state(self, issue: int | None = 42) -> MagicMock:
+        state = MagicMock()
+        state.load.return_value = {"issue": issue} if issue else {}
+        return state
+
+    def _mock_tasks(self, task_list: list | None = None) -> MagicMock:
+        tasks = MagicMock()
+        tasks.list.return_value = task_list if task_list is not None else []
+        return tasks
 
     def test_skips_when_no_issue_in_state(self, tmp_path: Path) -> None:
-        import json
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True, exist_ok=True)
-        (fido_dir / "state.lock").touch()
-        (fido_dir / "state.json").write_text(json.dumps({}))
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {},
+            _state=self._mock_state(issue=None),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_on_get_repo_exception(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         mock_gh.get_repo_info.side_effect = RuntimeError("network error")
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {"issue": 42},
+            _state=self._mock_state(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_no_open_pr(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         mock_gh.find_pr.return_value = None
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {"issue": 42},
+            _state=self._mock_state(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_pr_not_open(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         mock_gh.find_pr.return_value = {"number": 99, "state": "MERGED"}
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {"issue": 42},
+            _state=self._mock_state(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_on_get_pr_body_exception(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         mock_gh.get_pr_body.side_effect = RuntimeError("API error")
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_no_divider_in_body(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh(
             body="No divider here. <!-- WORK_QUEUE_START -->x<!-- WORK_QUEUE_END -->"
         )
@@ -2900,46 +2876,43 @@ class TestRewritePrDescription:
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_opus_returns_empty(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(return_value=""),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_updates_pr_body_with_new_description(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(return_value="New description.\n\nFixes #42."),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         mock_gh.edit_pr_body.assert_called_once()
         new_body = mock_gh.edit_pr_body.call_args[0][2]
         assert "New description." in new_body
 
     def test_preserves_work_queue_section(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(return_value="Updated description.\n\nFixes #42."),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         new_body = mock_gh.edit_pr_body.call_args[0][2]
         assert "<!-- WORK_QUEUE_START -->" in new_body
@@ -2947,14 +2920,13 @@ class TestRewritePrDescription:
         assert "<!-- WORK_QUEUE_END -->" in new_body
 
     def test_description_replaces_only_before_divider(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(return_value="Fresh desc.\n\nFixes #42."),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
         new_body = mock_gh.edit_pr_body.call_args[0][2]
         assert "Does something useful." not in new_body
@@ -2962,7 +2934,6 @@ class TestRewritePrDescription:
         assert "## Work queue" in new_body
 
     def test_handles_edit_pr_body_exception(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         mock_gh.edit_pr_body.side_effect = RuntimeError("write failed")
         # Should not propagate the exception
@@ -2970,18 +2941,17 @@ class TestRewritePrDescription:
             tmp_path,
             mock_gh,
             _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
-            _load_state_fn=lambda _: {"issue": 42},
-            _list_tasks=lambda _: [],
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
         )
 
     def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
-        self._setup_state(tmp_path)
         mock_gh = self._mock_gh()
         with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _load_state_fn=lambda _: {"issue": 42},
-                _list_tasks=lambda _: [],
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
             )
         mock_pp.assert_called_once()

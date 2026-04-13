@@ -39,6 +39,31 @@ def clear_state(fido_dir: Path) -> None:
         (fido_dir / "state.json").unlink(missing_ok=True)
 
 
+class State:
+    """Encapsulates fido state.json operations for a single worker directory.
+
+    Abstracts all file access so callers never touch the filesystem directly.
+    Instantiate with the fido_dir path and inject wherever state is needed.
+    """
+
+    def __init__(self, fido_dir: Path) -> None:
+        self._fido_dir = fido_dir
+
+    def load(self) -> dict[str, Any]:
+        """Return state dict, or {} when the directory or state file is absent."""
+        if not self._fido_dir.exists():
+            return {}
+        return load_state(self._fido_dir)
+
+    def save(self, data: dict[str, Any]) -> None:
+        """Write *data* to state.json."""
+        save_state(self._fido_dir, data)
+
+    def clear(self) -> None:
+        """Remove state.json."""
+        clear_state(self._fido_dir)
+
+
 def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
     """Return the absolute .git directory for *work_dir*."""
     result = _run(

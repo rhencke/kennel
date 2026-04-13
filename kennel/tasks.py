@@ -619,3 +619,18 @@ def sync_tasks_background(
         daemon=True,
     )
     _start(t)
+
+
+class Tasks:
+    """Encapsulates task file operations for a single worker directory.
+
+    Abstracts all file access so callers never touch the filesystem directly.
+    Instantiate with the work_dir path and inject wherever tasks are needed.
+    """
+
+    def __init__(self, work_dir: Path) -> None:
+        self._work_dir = work_dir
+
+    def list(self) -> list[dict[str, Any]]:
+        """Return all tasks."""
+        return list_tasks(self._work_dir)

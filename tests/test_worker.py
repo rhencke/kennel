@@ -13,6 +13,7 @@ import pytest
 
 from kennel.config import RepoMembership
 from kennel.state import (
+    State,
     _resolve_git_dir,
     clear_state,
     load_state,
@@ -1615,6 +1616,33 @@ class TestClearState:
         save_state(fido_dir, {"issue": 10})
         clear_state(fido_dir)
         assert load_state(fido_dir) == {}
+
+
+class TestState:
+    def test_load_returns_empty_when_fido_dir_absent(self, tmp_path: Path) -> None:
+        state = State(tmp_path / "nonexistent")
+        assert state.load() == {}
+
+    def test_load_returns_state_when_present(self, tmp_path: Path) -> None:
+        import json
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "state.json").write_text(json.dumps({"issue": 7}))
+        assert State(fido_dir).load() == {"issue": 7}
+
+    def test_save_persists_data(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"issue": 42})
+        assert load_state(fido_dir) == {"issue": 42}
+
+    def test_clear_removes_state_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).clear()
+        assert not (fido_dir / "state.json").exists()
 
 
 class TestBuildPrompt:

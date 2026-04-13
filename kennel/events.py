@@ -648,6 +648,9 @@ def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
     registry: WorkerRegistry,
+    *,
+    _state=None,
+    _tasks=None,
 ) -> None:
     """Abort the current task if the new task has higher priority.
 
@@ -656,18 +659,20 @@ def _maybe_abort_for_new_task(
     pending for later (ABORT_KEEP).  Equal or lower priority does not
     preempt.
     """
-    from kennel.state import load_state
-    from kennel.tasks import list_tasks
+    from kennel.state import State
+    from kennel.tasks import Tasks
 
-    fido_dir = repo_cfg.work_dir / ".git" / "fido"
-    if not (fido_dir / "state.json").exists():
-        return
-    state = load_state(fido_dir)
+    if _state is None:
+        _state = State(repo_cfg.work_dir / ".git" / "fido")
+    if _tasks is None:
+        _tasks = Tasks(repo_cfg.work_dir)
+
+    state = _state.load()
     current_task_id = state.get("current_task_id")
     if not current_task_id:
         return
 
-    task_list = list_tasks(repo_cfg.work_dir)
+    task_list = _tasks.list()
     current_task = next((t for t in task_list if t["id"] == current_task_id), None)
     if current_task is None:
         return
@@ -795,8 +800,8 @@ def _rewrite_pr_description(
     gh: Any,
     *,
     _print_prompt=None,
-    _list_tasks=None,
-    _load_state_fn=None,
+    _state=None,
+    _tasks=None,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
@@ -808,22 +813,17 @@ def _rewrite_pr_description(
     Silently skips when there is no active issue, no open PR, no ``---``
     divider in the body, or when Opus returns an empty response.
     """
-    from kennel.state import load_state as _load_state_default
-    from kennel.tasks import list_tasks as _list_tasks_default
+    from kennel.state import State
+    from kennel.tasks import Tasks
 
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
-    if _list_tasks is None:
-        _list_tasks = _list_tasks_default
-    if _load_state_fn is None:
-        _load_state_fn = _load_state_default
+    if _state is None:
+        _state = State(work_dir / ".git" / "fido")
+    if _tasks is None:
+        _tasks = Tasks(work_dir)
 
-    fido_dir = work_dir / ".git" / "fido"
-    if not (fido_dir / "state.json").exists():
-        log.info("_rewrite_pr_description: no state.json — skipping")
-        return
-
-    state = _load_state_fn(fido_dir)
+    state = _state.load()
     issue = state.get("issue")
     if not issue:
         log.info("_rewrite_pr_description: no active issue in state — skipping")
@@ -842,7 +842,7 @@ def _rewrite_pr_description(
         return
 
     pr_number = pr_data["number"]
-    task_list = _list_tasks(work_dir)
+    task_list = _tasks.list()
 
     try:
         body = gh.get_pr_body(repo, pr_number)
