@@ -44,6 +44,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 @pytest.fixture(autouse=True)
 def _restore_handler_fns():
     saved = {
+        "_fn_get_github": WebhookHandler._fn_get_github,
         "_fn_dispatch": WebhookHandler._fn_dispatch,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
@@ -512,11 +513,144 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
+        WebhookHandler._fn_get_github = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
         time.sleep(0.2)
         # server still alive — no crash
+
+    def test_process_action_error_reacts_on_reply_to(self, server: tuple) -> None:
+        """On exception with a reply_to comment, adds a confused reaction."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 500,
+                "body": "looks bad",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "x.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 20, "title": "T", "body": ""},
+        }
+        mock_gh = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        time.sleep(0.2)
+        mock_gh.add_reaction.assert_called_once_with(
+            "owner/repo", "pulls", 500, "confused"
+        )
+
+    def test_process_action_error_reacts_on_thread(self, server: tuple) -> None:
+        """On exception with a thread comment (issue_comment), adds a confused reaction."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 501,
+                "body": "question?",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/21#issuecomment-501",
+            },
+            "issue": {
+                "number": 21,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_gh = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        _post_webhook(url, cfg, "issue_comment", payload)
+        time.sleep(0.2)
+        mock_gh.add_reaction.assert_called_once_with(
+            "owner/repo", "issues", 501, "confused"
+        )
+
+    def test_process_action_error_no_reaction_without_comment(
+        self, server: tuple
+    ) -> None:
+        """On exception with no comment context (e.g., merged PR), no reaction."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 22, "merged": True},
+        }
+        mock_gh_factory = MagicMock()
+        WebhookHandler._fn_get_github = mock_gh_factory
+        WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
+        _post_webhook(url, cfg, "pull_request", payload)
+        time.sleep(0.2)
+        mock_gh_factory.assert_not_called()
+
+    def test_process_action_error_no_reaction_when_comment_id_missing(
+        self, server: tuple
+    ) -> None:
+        """No reaction when thread has no comment_id (e.g., review submission)."""
+        url, cfg = server
+        # review submission: reply_to=None, thread=None, review_comments set
+        payload = {
+            **self._payload(),
+            "action": "submitted",
+            "review": {
+                "id": 888,
+                "state": "changes_requested",
+                "user": {"login": "owner"},
+            },
+            "pull_request": {"number": 24},
+        }
+        mock_gh_factory = MagicMock()
+        WebhookHandler._fn_get_github = mock_gh_factory
+        WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        _post_webhook(url, cfg, "pull_request_review", payload)
+        time.sleep(0.2)
+        mock_gh_factory.assert_not_called()
+
+    def test_process_action_error_reaction_failure_doesnt_crash(
+        self, server: tuple
+    ) -> None:
+        """add_reaction failure is caught — server stays alive."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 502,
+                "body": "yo",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "x.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 23, "title": "T", "body": ""},
+        }
+        mock_gh = MagicMock()
+        mock_gh.add_reaction.side_effect = RuntimeError("reaction failed")
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=RuntimeError("process boom")
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_gh.add_reaction.assert_called_once()
 
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
         """When dispatch raises, return 500 so GitHub retries the delivery."""

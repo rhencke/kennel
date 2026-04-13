@@ -173,6 +173,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     registry: WorkerRegistry
     # Injectable callables — set as class attributes so HTTP-driven tests can
     # replace them without patching module-level names.
+    _fn_get_github = GitHub
     _fn_dispatch = dispatch
     _fn_reply_to_comment = reply_to_comment
     _fn_reply_to_review = reply_to_review
@@ -332,6 +333,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
             type(self)._fn_launch_worker(repo_cfg, self.registry)
         except Exception:
             log.exception("error processing action")
+            self._signal_action_error(action)
+
+    def _signal_action_error(self, action) -> None:
+        """Post a 'confused' reaction on the triggering comment, if any.
+
+        Called when _process_action raises so the comment author sees something
+        went wrong rather than silence.  Reaction failures are caught — if
+        signalling itself fails we log and move on rather than masking the
+        original error.
+        """
+        thread = action.reply_to or action.thread
+        if not thread:
+            return
+        repo = thread.get("repo")
+        comment_id = thread.get("comment_id")
+        comment_type = thread.get("comment_type", "issues")
+        try:
+            gh = type(self)._fn_get_github()
+            gh.add_reaction(repo, comment_type, comment_id, "confused")
+        except Exception:
+            log.exception("failed to post error reaction on comment %s", comment_id)
 
     def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
         runner_dir = type(self)._fn_runner_dir()
