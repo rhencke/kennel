@@ -233,15 +233,46 @@ class TestRunStreaming:
             list(_run_streaming(["/nonexistent/binary"], stdin_file))
 
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
+        """Idle-timeout kills the subprocess when no output for N seconds.
+
+        Uses a virtual clock and mocked popen/selector so the test runs in
+        microseconds — no real ``sleep`` subprocess, no wall-clock waiting.
+        """
         from kennel.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
-        import pytest
+
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stderr = MagicMock()
+        proc.poll = MagicMock(return_value=None)  # still alive
+        proc.wait = MagicMock(return_value=None)
+        proc.kill = MagicMock()
+        proc.returncode = 0
+
+        # Selector always reports stdout-not-ready → loop falls through to
+        # the idle-timeout check on every iteration.
+        fake_selector = MagicMock(return_value=([], [], []))
+        # Virtual clock: first call seeds ``last_activity`` at 0; subsequent
+        # calls jump past idle_timeout so the check trips on iteration one.
+        times = iter([0.0, 1.0])
+        fake_clock = MagicMock(side_effect=lambda: next(times))
 
         with pytest.raises(ClaudeStreamError) as exc_info:
-            list(_run_streaming(["sleep", "60"], stdin_file, idle_timeout=0.1))
+            list(
+                _run_streaming(
+                    ["anything"],
+                    stdin_file,
+                    idle_timeout=0.1,
+                    popen=MagicMock(return_value=proc),
+                    selector=fake_selector,
+                    clock=fake_clock,
+                )
+            )
         assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
+        proc.kill.assert_called_once()
+        proc.wait.assert_called_once()
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         from kennel.claude import _run_streaming
