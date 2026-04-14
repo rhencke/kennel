@@ -552,6 +552,7 @@ class ClaudeSession:
         self,
         system_file: Path,
         work_dir: Path | str | None = None,
+        model: str = "claude-sonnet-4-6",
         idle_timeout: float = 1800.0,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list, list, list]] = select.select,
@@ -560,6 +561,7 @@ class ClaudeSession:
         self._selector = selector
         self._system_file = system_file
         self._work_dir = work_dir
+        self._model = model
         self._popen_fn = popen
         self._lock = threading.Lock()
         self._cancel = threading.Event()
@@ -571,6 +573,8 @@ class ClaudeSession:
         """Spawn the claude subprocess with bidirectional stream-json I/O."""
         cmd = [
             "claude",
+            "--model",
+            self._model,
             "--input-format",
             "stream-json",
             "--output-format",

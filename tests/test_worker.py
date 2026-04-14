@@ -761,6 +761,22 @@ class TestWorker:
         _, kwargs = claude.ClaudeSession.call_args
         assert kwargs.get("work_dir") == tmp_path
 
+    def test_create_session_passes_model(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session(tmp_path, model="claude-opus-4-6")
+        _, kwargs = claude.ClaudeSession.call_args
+        assert kwargs.get("model") == "claude-opus-4-6"
+
+    def test_create_session_default_model_is_sonnet(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session(tmp_path)
+        _, kwargs = claude.ClaudeSession.call_args
+        assert kwargs.get("model") == "claude-sonnet-4-6"
+
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
         from kennel import claude
 
@@ -870,7 +886,36 @@ class TestWorker:
             patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
-        mock_create.assert_called_once_with(mock_ctx.fido_dir)
+        mock_create.assert_called_once_with(mock_ctx.fido_dir, model="claude-opus-4-6")
+
+    def test_run_switches_to_sonnet_after_setup(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_session = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker._session = mock_session
+            worker.run()
+        mock_session.switch_model.assert_called_once_with("claude-sonnet-4-6")
 
     def test_run_stops_session_on_exit(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)

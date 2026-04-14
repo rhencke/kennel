@@ -726,7 +726,11 @@ class Worker:
         hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
         (fido_dir / "compact.sh").unlink(missing_ok=True)
 
-    def create_session(self, fido_dir: Path) -> None:  # noqa: ARG002
+    def create_session(
+        self,
+        fido_dir: Path,  # noqa: ARG002
+        model: str = "claude-sonnet-4-6",
+    ) -> None:
         """Start a persistent ClaudeSession for this work iteration.
 
         Uses the fido persona as the session system prompt.  Task-specific
@@ -737,7 +741,9 @@ class Worker:
         but is not used at this stage.
         """
         persona_file = _sub_dir() / "persona.md"
-        self._session = claude.ClaudeSession(persona_file, work_dir=self.work_dir)
+        self._session = claude.ClaudeSession(
+            persona_file, work_dir=self.work_dir, model=model
+        )
 
     def stop_session(self) -> None:
         """Stop the ClaudeSession if one is running, then clear it.
@@ -1808,7 +1814,7 @@ class Worker:
             )
 
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
-            self.create_session(ctx.fido_dir)
+            self.create_session(ctx.fido_dir, model="claude-opus-4-6")
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
@@ -1826,6 +1832,8 @@ class Worker:
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+                if self._session is not None:
+                    self._session.switch_model("claude-sonnet-4-6")
                 self._ensure_session_alive(ctx.fido_dir)
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
