@@ -14,20 +14,7 @@ from __future__ import annotations
 import os
 import sys
 
-# ANSI escape sequences
-_RESET = "\033[0m"
-_CODES: dict[str, str] = {
-    "bold": "\033[1m",
-    "dim": "\033[2m",
-    "red": "\033[31m",
-    "red_bold": "\033[1;31m",
-    "cyan": "\033[36m",
-    "magenta": "\033[35m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-}
-
-# Semantic style name constants for import convenience
+# Semantic style names
 BOLD = "bold"
 DIM = "dim"
 RED = "red"
@@ -36,6 +23,19 @@ CYAN = "cyan"
 MAGENTA = "magenta"
 GREEN = "green"
 YELLOW = "yellow"
+
+# ANSI escape sequences
+_RESET = "\033[0m"
+_CODES: dict[str, str] = {
+    BOLD: "\033[1m",
+    DIM: "\033[2m",
+    RED: "\033[31m",
+    RED_BOLD: "\033[1;31m",
+    CYAN: "\033[36m",
+    MAGENTA: "\033[35m",
+    GREEN: "\033[32m",
+    YELLOW: "\033[33m",
+}
 
 
 def _color_enabled() -> bool:
