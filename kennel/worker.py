@@ -473,7 +473,7 @@ def _no_commit_nudge(
     work_dir: Path | str,
     pr_number: int | None,
 ) -> str:
-    """Build an escalating nudge prompt for the no-commit resume loop.
+    r"""Build an escalating nudge prompt for the no-commit resume loop.
 
     Each attempt demands a concrete action — commit, mark complete, or
     post a blocked-status comment on the PR.  "Explain what's blocking
