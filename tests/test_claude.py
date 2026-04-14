@@ -1480,3 +1480,125 @@ class TestClaudeSessionConsumeUntilResult:
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
         assert session.consume_until_result() == "output"
+
+
+class TestClaudeSessionIsAliveAndRestart:
+    def test_is_alive_true_when_process_running(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=None)
+        session = _make_session(tmp_path, proc)
+        assert session.is_alive() is True
+
+    def test_is_alive_false_when_process_exited(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=0)
+        session = _make_session(tmp_path, proc)
+        assert session.is_alive() is False
+
+    def test_restart_spawns_new_process(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()
+        assert session._proc is new_proc
+        assert fake_popen.call_count == 2
+
+    def test_restart_registers_new_proc_in_active_children(
+        self, tmp_path: Path
+    ) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()
+        assert new_proc in _active_children
+        assert old_proc not in _active_children
+        # cleanup
+        session.stop()
+
+    def test_restart_unregisters_old_proc(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()
+        assert old_proc not in _active_children
+        # cleanup
+        session.stop()
+
+    def test_restart_logs_warning(self, tmp_path: Path, caplog) -> None:
+        import logging as _logging
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        with caplog.at_level(_logging.WARNING, logger="kennel.claude"):
+            session.restart()
+        assert any("restart" in r.message.lower() for r in caplog.records)
+        session.stop()
+
+    def test_restart_swallows_oserror_on_kill(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        old_proc.kill = MagicMock(side_effect=OSError("already dead"))
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()  # must not raise
+        session.stop()
+
+    def test_restart_swallows_timeout_on_wait(self, tmp_path: Path) -> None:
+        import subprocess as _subprocess
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        old_proc.wait = MagicMock(side_effect=_subprocess.TimeoutExpired("x", 1))
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()  # must not raise
+        session.stop()
+
+    def test_stop_after_restart_cleans_up_new_proc(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()
+        session.stop()
+        assert new_proc not in _active_children

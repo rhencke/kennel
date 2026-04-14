@@ -737,6 +737,20 @@ class Worker:
             self._session.stop()
             self._session = None
 
+    def _ensure_session_alive(self, fido_dir: Path) -> None:  # noqa: ARG002
+        """Restart the session if the claude process has died unexpectedly.
+
+        Called before each work phase (CI, threads, task execution) so tasks
+        are never lost because the session died between iterations.  No-op
+        when the session is healthy or not yet created.
+
+        *fido_dir* is accepted for future use (e.g. writing per-phase context
+        into the session system file) but is not used at this stage.
+        """
+        if self._session is not None and not self._session.is_alive():
+            log.warning("worker: ClaudeSession died — restarting before next phase")
+            self._session.restart()
+
     # ------------------------------------------------------------------
     # Business logic
     # ------------------------------------------------------------------
@@ -1824,6 +1838,7 @@ class Worker:
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+                self._ensure_session_alive(ctx.fido_dir)
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):

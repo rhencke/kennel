@@ -788,6 +788,70 @@ class TestWorker:
         assert worker._session is None
         worker.stop_session()  # must not raise
 
+    # --- _ensure_session_alive ---
+
+    def test_ensure_session_alive_restarts_dead_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = False
+        worker._session = mock_session
+        worker._ensure_session_alive(tmp_path)
+        mock_session.restart.assert_called_once()
+
+    def test_ensure_session_alive_noop_when_alive(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = True
+        worker._session = mock_session
+        worker._ensure_session_alive(tmp_path)
+        mock_session.restart.assert_not_called()
+
+    def test_ensure_session_alive_noop_when_no_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._session is None
+        worker._ensure_session_alive(tmp_path)  # must not raise
+
+    def test_ensure_session_alive_logs_warning_on_restart(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = False
+        worker._session = mock_session
+        with caplog.at_level(logging.WARNING, logger="kennel.worker"):
+            worker._ensure_session_alive(tmp_path)
+        assert any("restart" in r.message.lower() for r in caplog.records)
+
+    def test_run_ensures_session_alive_before_handlers(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_ensure = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive", mock_ensure),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_ensure.assert_called_once_with(mock_ctx.fido_dir)
+
     def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()

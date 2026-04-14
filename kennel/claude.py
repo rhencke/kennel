@@ -544,6 +544,14 @@ class ClaudeSession:
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
+        self._system_file = system_file
+        self._work_dir = work_dir
+        self._popen_fn = popen
+        self._proc = self._spawn()
+        _register_child(self._proc)
+
+    def _spawn(self) -> subprocess.Popen[str]:
+        """Spawn the claude subprocess with bidirectional stream-json I/O."""
         cmd = [
             "claude",
             "--input-format",
@@ -553,16 +561,37 @@ class ClaudeSession:
             "--verbose",
             "--dangerously-skip-permissions",
             "--system-prompt-file",
-            str(system_file),
+            str(self._system_file),
         ]
-        self._proc = popen(
+        return self._popen_fn(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=work_dir,
+            cwd=self._work_dir,
         )
+
+    def is_alive(self) -> bool:
+        """Return True if the claude subprocess is still running."""
+        return self._proc.poll() is None
+
+    def restart(self) -> None:
+        """Stop the current subprocess and start a fresh one.
+
+        Unregisters the dead process from ``_active_children``, kills it if
+        still running, then spawns a replacement and registers it.  The
+        conversation transcript is lost — callers are responsible for
+        re-sending any context the new process needs.
+        """
+        log.warning("ClaudeSession: restarting after unexpected process death")
+        _unregister_child(self._proc)
+        try:
+            self._proc.kill()
+            self._proc.wait(timeout=1.0)
+        except OSError, ProcessLookupError, subprocess.TimeoutExpired:
+            pass
+        self._proc = self._spawn()
         _register_child(self._proc)
 
     def send(self, content: str) -> None:
