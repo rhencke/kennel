@@ -797,7 +797,12 @@ class ClaudeSession:
         self._system_file = system_file
         self._work_dir = work_dir
         self._popen_fn = popen
-        self._lock = threading.Lock()
+        # Reentrant so :meth:`switch_model` and :meth:`restart` can
+        # reacquire while called from inside a ``with session:`` block
+        # (e.g. ``prompt()`` acquires the lock, then calls switch_model
+        # which also needs to serialize with other sessions' access —
+        # a plain threading.Lock self-deadlocks).
+        self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._repo_name = repo_name
         self._model = model
