@@ -13,8 +13,6 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from kennel.state import PreemptQueue
-
 log = logging.getLogger(__name__)
 
 # How many seconds select.select waits for stdout before checking for
@@ -605,7 +603,6 @@ class ClaudeSession:
         idle_timeout: float = 1800.0,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list, list, list]] = select.select,
-        preempt_queue: PreemptQueue | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -614,7 +611,6 @@ class ClaudeSession:
         self._popen_fn = popen
         self._lock = threading.Lock()
         self._cancel = threading.Event()
-        self._preempt_queue = preempt_queue
         self._owner: str | None = None
         self._proc = self._spawn()
         _register_child(self._proc)
@@ -746,42 +742,6 @@ class ClaudeSession:
             self.consume_until_result()
             self.send(content)
 
-    def preempt(self, content: str) -> None:
-        """Signal the in-flight turn to stop and queue a follow-up user turn.
-
-        Sets the cancel event so :meth:`iter_events` exits on its next poll
-        cycle.  The lock holder's ``with session:`` block then unwinds and
-        releases the lock.  This method acquires the lock (blocking until the
-        holder releases it), appends *content* to the durable FIFO queue, and
-        releases the lock.  Multiple consecutive preempts accumulate — no
-        message is lost even if preempt is called again before the first
-        queued turn is consumed.  The queued content is retrieved one item at
-        a time via :meth:`take_queued_content` by the next caller that holds
-        the lock.
-
-        Only for preempt paths (rescope abort, CI-failure cancel).  Normal
-        turns must go through the context-manager lock.
-        """
-        self._cancel.set()
-        with self._lock:
-            assert self._preempt_queue is not None, (
-                "preempt_queue required for preempt()"
-            )
-            self._preempt_queue.push(content)
-
-    def take_queued_content(self) -> str | None:
-        """Pop and return the oldest queued preempt content, or ``None``.
-
-        Returns ``None`` if the queue is empty.  Call this while holding the
-        session lock (via the context manager) so that reading and removing
-        from the queue is serialized with respect to a concurrent
-        :meth:`preempt` appending to it.
-        """
-        assert self._preempt_queue is not None, (
-            "preempt_queue required for take_queued_content()"
-        )
-        return self._preempt_queue.pop()
-
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.
 
@@ -800,7 +760,7 @@ class ClaudeSession:
         the lock-handoff window (between the previous holder's :meth:`__exit__`
         and this call) is consumed here rather than immediately aborting the
         new turn.  After that, checks the event on each poll cycle so a
-        concurrent :meth:`interrupt` or :meth:`preempt` can abort mid-turn.
+        concurrent :meth:`interrupt` can abort mid-turn.
 
         Reads lines from stdout, parsing each as JSON.  Stops (and returns)
         when a ``type=result`` or ``type=error`` event is yielded, when the

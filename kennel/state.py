@@ -134,36 +134,6 @@ class State(JsonFileStore):
         clear_state(self._fido_dir)
 
 
-class PreemptQueue(JsonFileStore):
-    """Durable FIFO queue for preempt content backed by a JSON file.
-
-    Survives process restarts.  Use :meth:`push` to enqueue a string and
-    :meth:`pop` to dequeue the oldest entry.  Both operations are atomic
-    under an exclusive ``flock`` via the inherited :meth:`~JsonFileStore.modify`
-    context manager.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-
-    @property
-    def _data_path(self) -> Path:
-        return self._path
-
-    def _default(self) -> list:
-        return []
-
-    def push(self, content: str) -> None:
-        """Append *content* to the end of the queue."""
-        with self.modify() as q:
-            q.append(content)
-
-    def pop(self) -> str | None:
-        """Remove and return the oldest entry, or ``None`` if empty."""
-        with self.modify() as q:
-            return q.pop(0) if q else None
-
-
 def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
     """Return the absolute .git directory for *work_dir*."""
     result = _run(

@@ -32,7 +32,6 @@ from kennel.claude import (
     resume_status,
     triage_comment,
 )
-from kennel.state import PreemptQueue
 
 
 def _completed(
@@ -1179,7 +1178,6 @@ def _make_session(
         idle_timeout=idle_timeout,
         popen=fake_popen,
         selector=fake_selector,
-        preempt_queue=PreemptQueue(tmp_path / "preempt.json"),
     )
 
 
@@ -1968,82 +1966,4 @@ class TestClaudeSessionInterrupt:
         t_interrupt.join(timeout=2)
 
         assert proc.stdin.write.call_count > 0
-        session.stop()
-
-
-class TestClaudeSessionPreempt:
-    def test_preempt_queues_content(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session.preempt("handle ci failure")
-        assert session.take_queued_content() == "handle ci failure"
-
-    def test_preempt_does_not_write_to_stdin(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session.preempt("follow up")
-        proc.stdin.write.assert_not_called()
-        session.stop()
-
-    def test_preempt_sets_cancel_event(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        assert not session._cancel.is_set()
-        session.preempt("follow up")
-        assert session._cancel.is_set()
-        session.stop()
-
-    def test_preempt_waits_for_lock_holder_then_queues(self, tmp_path: Path) -> None:
-        import threading as _threading
-
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        acquired = _threading.Event()
-        release = _threading.Event()
-
-        def holder() -> None:
-            session._lock.acquire()
-            acquired.set()
-            release.wait()
-            session._lock.release()
-
-        t_holder = _threading.Thread(target=holder)
-        t_holder.start()
-        acquired.wait()  # holder definitely has the lock
-
-        t_preempt = _threading.Thread(target=lambda: session.preempt("queued"))
-        t_preempt.start()
-
-        # preempt is blocked on lock.acquire(); queue must still be empty
-        assert session.take_queued_content() is None
-
-        release.set()
-        t_holder.join(timeout=2)
-        t_preempt.join(timeout=2)
-
-        assert session.take_queued_content() == "queued"
-        assert session.take_queued_content() is None
-        session.stop()
-
-    def test_preempt_twice_preserves_both_messages(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session.preempt("first")
-        session.preempt("second")
-        assert session.take_queued_content() == "first"
-        assert session.take_queued_content() == "second"
-        assert session.take_queued_content() is None
-        session.stop()
-
-    def test_take_queued_content_returns_none_when_empty(self, tmp_path: Path) -> None:
-        session = _make_session(tmp_path, _make_session_proc([]))
-        assert session.take_queued_content() is None
-        session.stop()
-
-    def test_take_queued_content_clears_after_return(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session.preempt("once")
-        session.take_queued_content()
-        assert session.take_queued_content() is None
         session.stop()

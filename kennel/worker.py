@@ -20,7 +20,6 @@ from kennel.config import RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts, rewrite_description_prompt
 from kennel.state import (
-    PreemptQueue,
     State,
     _resolve_git_dir,
 )
@@ -730,16 +729,12 @@ class Worker:
         hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
         (fido_dir / "compact.sh").unlink(missing_ok=True)
 
-    def create_session(self, fido_dir: Path) -> None:
+    def create_session(self) -> None:
         """Start a persistent ClaudeSession for this work iteration.
 
         Uses the fido persona as the session system prompt.  Task-specific
         instructions are delivered via user messages in later phases.
         Stores the session on ``self._session`` so worker methods can access it.
-
-        The session is given a :class:`~kennel.state.PreemptQueue` backed by
-        ``fido_dir/preempt.json`` so queued preempt content survives process
-        restarts.
 
         Immediately switches to Opus for the planning phase; the caller is
         responsible for switching to Sonnet once planning is complete.
@@ -748,7 +743,6 @@ class Worker:
         self._session = claude.ClaudeSession(
             persona_file,
             work_dir=self.work_dir,
-            preempt_queue=PreemptQueue(fido_dir / "preempt.json"),
         )
         self._session.switch_model("claude-opus-4-6")
 
@@ -1823,7 +1817,7 @@ class Worker:
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
             session_fresh = self._session is None
             if session_fresh:
-                self.create_session(ctx.fido_dir)
+                self.create_session()
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
