@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1328,6 +1328,127 @@ class TestClaudeSessionSend:
         session.send("msg")
         written = proc.stdin.write.call_args.args[0]
         assert written.endswith("\n")
+
+    def test_marks_in_turn_after_send(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.send("hi")
+        assert session._in_turn is True
+
+    def test_drains_stale_turn_before_sending_new(self, tmp_path: Path) -> None:
+        """Send() must drain any unfinished prior turn so the next
+        consume_until_result doesn't read stale events as its own (#499)."""
+        import json as _json
+
+        stale_result = (
+            _json.dumps({"type": "result", "result": "stale", "session_id": "s1"})
+            + "\n"
+        )
+        proc = _make_session_proc([stale_result])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True  # simulate cancelled-prior-turn state
+        session.send("fresh message")
+        assert session._in_turn is True
+        # control_request was written before the new user message
+        writes = [c.args[0] for c in proc.stdin.write.call_args_list]
+        assert any("control_request" in w for w in writes)
+        assert any('"fresh message"' in w for w in writes)
+        # The control_request must come first
+        control_idx = next(i for i, w in enumerate(writes) if "control_request" in w)
+        user_idx = next(i for i, w in enumerate(writes) if '"fresh message"' in w)
+        assert control_idx < user_idx
+
+
+class TestClaudeSessionDrainToBoundary:
+    def test_returns_early_when_proc_dead(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([], poll_returns=0)
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert session._in_turn is False
+        # No control_request sent to a dead process
+        proc.stdin.write.assert_not_called()
+
+    def test_returns_on_control_request_failure(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        proc.stdin.write.side_effect = BrokenPipeError("pipe closed")
+        session._drain_to_boundary()
+        assert session._in_turn is False
+
+    def test_reads_until_type_result(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
+            _json.dumps({"type": "result", "result": "abandoned", "session_id": "s9"})
+            + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert session._in_turn is False
+        assert session._session_id == "s9"
+
+    def test_reads_until_type_error(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "error", "error": "boom"}) + "\n"]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert session._in_turn is False
+
+    def test_skips_blank_and_invalid_json(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            "\n",
+            "not-json-at-all\n",
+            _json.dumps({"type": "result", "result": "ok"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert session._in_turn is False
+
+    def test_breaks_on_eof(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])  # readline returns "" (EOF)
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        session._drain_to_boundary()
+        # EOF path restarts the session at the deadline check, but the
+        # initial readline returning "" just exits the drain loop.
+        # _in_turn gets cleared by the restart fallback path.
+
+    def test_breaks_when_proc_exits_mid_drain(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        # selector reports no pending data; proc.poll() says alive initially
+        # (for the front-door check) then exited once drain loop polls.
+        session._selector = MagicMock(return_value=([], [], []))
+        poll_results = iter([None] + [0] * 10)
+        proc.poll = MagicMock(side_effect=lambda: next(poll_results))
+        session._drain_to_boundary(deadline=1.0)
+        # Loop exits on proc.poll() == 0 (EOF). _in_turn stays True because
+        # we only clear it on type=result/error — restart path would clear
+        # it, but EOF-only exit doesn't.
+
+    def test_restarts_on_deadline(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        # No pending data, process stays alive → loop just times out
+        session._selector = MagicMock(return_value=([], [], []))
+        with patch.object(session, "restart") as mock_restart:
+            session._drain_to_boundary(deadline=0.01)
+        mock_restart.assert_called_once()
+        assert session._in_turn is False
 
 
 class TestClaudeSessionIterEvents:

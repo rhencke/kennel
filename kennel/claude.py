@@ -820,6 +820,17 @@ class ClaudeSession:
         # from "turn was interrupted and should be retried once the lock is
         # free again".
         self._last_turn_cancelled = False
+        # True when a :meth:`send` has been issued whose ``type=result``
+        # boundary has not yet been consumed.  Cleared when
+        # :meth:`iter_events` sees ``type=result``/``type=error``/EOF.  When
+        # still True at the start of the next :meth:`send`, the prior turn
+        # was cancelled without draining — its result (and any tail events)
+        # is still on stdout and would be read by the next caller's
+        # :meth:`consume_until_result` as its own.  That's the stream-leak
+        # root cause in #499: without this flag we can't tell the stream
+        # is dirty.  :meth:`send` drains to the boundary before writing new
+        # content so every turn starts on a clean slate.
+        self._in_turn = False
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -920,6 +931,9 @@ class ClaudeSession:
             # --resume.  Any thread waiting on ``with session:`` blocks on
             # :attr:`_lock` until the new subprocess is listening.
             self._session_id = ""
+            # Fresh subprocess has no in-flight turn, so next send() skips
+            # the drain path.
+            self._in_turn = False
             self._proc = self._spawn()
             _register_child(self._proc)
         log.info("ClaudeSession: restart complete, new pid %d", self._proc.pid)
@@ -983,13 +997,82 @@ class ClaudeSession:
         self._lock.release()
 
     def send(self, content: str) -> None:
-        """Write a user message to the session stdin, flushing immediately."""
+        """Write a user message to the session stdin, flushing immediately.
+
+        If the prior turn was cancelled without draining (:attr:`_in_turn`
+        still True), abort it via ``control_request`` and read events until
+        the turn boundary first — otherwise the next
+        :meth:`consume_until_result` would return that prior turn's
+        ``type=result`` and the caller would receive stale content as its
+        own (the stream-leak in #499).
+        """
+        if self._in_turn:
+            self._drain_to_boundary()
         msg = json.dumps(
             {"type": "user", "message": {"role": "user", "content": content}}
         )
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
+        self._in_turn = True
+
+    def _drain_to_boundary(self, deadline: float = 10.0) -> None:
+        """Abort the in-flight turn and read events until ``type=result`` /
+        ``type=error`` / EOF, discarding them.  Used by :meth:`send` before
+        writing a new user message when a prior turn was cancelled.
+
+        Sends a ``control_request`` interrupt so claude closes the turn
+        quickly rather than running it to completion — typical drain is
+        well under a second.  Falls back to :meth:`restart` if the
+        deadline elapses without a boundary, so a wedged subprocess can't
+        stall the caller indefinitely.
+        """
+        assert self._proc.stdout is not None
+        if self._proc.poll() is not None:
+            self._in_turn = False
+            return
+        try:
+            self._send_control_interrupt()
+        except (BrokenPipeError, OSError) as exc:
+            log.warning(
+                "ClaudeSession._drain_to_boundary: control_request failed: %s", exc
+            )
+            self._in_turn = False
+            return
+        end_time = time.monotonic() + deadline
+        while time.monotonic() < end_time:
+            ready, _, _ = self._selector(
+                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+            )
+            if ready:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break  # EOF
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                sid = obj.get("session_id")
+                if isinstance(sid, str) and sid:
+                    self._session_id = sid
+                if obj.get("type") in ("result", "error"):
+                    log.debug(
+                        "ClaudeSession: drained stale %s event",
+                        obj.get("type"),
+                    )
+                    self._in_turn = False
+                    return
+            elif self._proc.poll() is not None:
+                break
+        log.warning(
+            "ClaudeSession._drain_to_boundary: no boundary after %.1fs — restarting",
+            deadline,
+        )
+        self._in_turn = False
+        self.restart()
 
     def _send_control_interrupt(self) -> None:
         """Write a stream-json ``control_request`` interrupt to subprocess stdin.
@@ -1109,6 +1192,9 @@ class ClaudeSession:
                     )
                     raise
             self._model = model
+            # Fresh subprocess — any in-flight turn on the old one died
+            # with it, so next send() has nothing to drain.
+            self._in_turn = False
             self._proc = self._spawn()
             _register_child(self._proc)
         log.info("switch_model: new pid %d ready (model=%s)", self._proc.pid, model)
@@ -1141,6 +1227,9 @@ class ClaudeSession:
             if self._cancel.is_set():
                 log.debug("ClaudeSession: cancelled — exiting turn early")
                 self._last_turn_cancelled = True
+                # Intentionally leave _in_turn = True: the caller who set
+                # _cancel will have the next send() drain the boundary
+                # we're abandoning here.
                 break
             ready, _, _ = self._selector(
                 [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
@@ -1148,6 +1237,7 @@ class ClaudeSession:
             if ready:
                 line = self._proc.stdout.readline()
                 if not line:
+                    self._in_turn = False
                     break  # EOF
                 line = line.strip()
                 if not line:
@@ -1164,8 +1254,10 @@ class ClaudeSession:
                     self._session_id = sid
                 yield obj
                 if obj.get("type") in ("result", "error"):
+                    self._in_turn = False
                     break
             elif self._proc.poll() is not None:
+                self._in_turn = False
                 break  # process exited
             elif time.monotonic() - last_activity > self._idle_timeout:
                 log.warning(
