@@ -1794,26 +1794,35 @@ class Worker:
                     len(pending),
                 )
                 return 0
-            log.info("PR #%s: work complete — marking ready", pr_number)
+            checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+            required = self.gh.get_required_checks(
+                repo_ctx.repo, repo_ctx.default_branch
+            )
+            if not ci_ready_for_review(checks, required):
+                log.info(
+                    "PR #%s: work complete but CI not yet green — deferring promote",
+                    pr_number,
+                )
+                return 0
+            thread_nodes = self.gh.get_review_threads(
+                repo_ctx.owner, repo_ctx.repo_name, pr_number
+            )
+            if any(not n["isResolved"] for n in thread_nodes):
+                log.info(
+                    "PR #%s: work complete but unresolved review threads remain — deferring promote",
+                    pr_number,
+                )
+                return 0
+            log.info("PR #%s: work complete, CI green — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
             missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
             if missing:
-                checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
-                required = self.gh.get_required_checks(
-                    repo_ctx.repo, repo_ctx.default_branch
+                log.info(
+                    "PR #%s: requesting review from %s",
+                    pr_number,
+                    ", ".join(missing),
                 )
-                if ci_ready_for_review(checks, required):
-                    log.info(
-                        "PR #%s: CI passing — requesting review from %s",
-                        pr_number,
-                        ", ".join(missing),
-                    )
-                    self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
-                else:
-                    log.info(
-                        "PR #%s: CI not yet passing — deferring review request",
-                        pr_number,
-                    )
+                self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
             return 1
 
         missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
