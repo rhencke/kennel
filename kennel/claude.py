@@ -698,18 +698,18 @@ class ClaudeSession:
         try:
             if self._proc.stdin and not self._proc.stdin.closed:
                 self._proc.stdin.close()
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("ClaudeSession.stop: stdin close failed: %s", exc)
         try:
             self._proc.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
             try:
                 self._proc.kill()
                 self._proc.wait(timeout=1.0)
-            except OSError, ProcessLookupError, subprocess.TimeoutExpired:
-                pass
-        except OSError, ProcessLookupError:
-            pass
+            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                log.debug("ClaudeSession.stop: kill/wait failed: %s", exc)
+        except (OSError, ProcessLookupError) as exc:
+            log.debug("ClaudeSession.stop: wait failed: %s", exc)
         _unregister_child(self._proc)
 
 

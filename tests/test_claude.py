@@ -1375,26 +1375,32 @@ class TestClaudeSessionStop:
         session.stop(grace_seconds=0.0)
         proc.kill.assert_called()
 
-    def test_swallows_oserror_on_stdin_close(self, tmp_path: Path) -> None:
+    def test_logs_oserror_on_stdin_close(self, tmp_path: Path, caplog) -> None:
         proc = _make_session_proc([])
         proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
         session = _make_session(tmp_path, proc)
-        session.stop()  # must not raise
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            session.stop()  # must not raise
+        assert any("stdin close failed" in r.message for r in caplog.records)
 
-    def test_swallows_oserror_on_wait(self, tmp_path: Path) -> None:
+    def test_logs_oserror_on_wait(self, tmp_path: Path, caplog) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(side_effect=OSError("already gone"))
         session = _make_session(tmp_path, proc)
-        session.stop()  # must not raise
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            session.stop()  # must not raise
+        assert any("wait failed" in r.message for r in caplog.records)
 
-    def test_swallows_errors_on_kill_after_timeout(self, tmp_path: Path) -> None:
+    def test_logs_errors_on_kill_after_timeout(self, tmp_path: Path, caplog) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(
             side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
         )
         proc.kill = MagicMock(side_effect=ProcessLookupError())
         session = _make_session(tmp_path, proc)
-        session.stop(grace_seconds=0.0)  # must not raise
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            session.stop(grace_seconds=0.0)  # must not raise
+        assert any("kill/wait failed" in r.message for r in caplog.records)
 
     def test_skips_close_when_stdin_already_closed(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
