@@ -676,6 +676,7 @@ class Worker:
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        session: claude.ClaudeSession | None = None,
         _tasks: Tasks | None = None,
     ) -> None:
         self.work_dir = work_dir
@@ -684,8 +685,8 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
+        self._session: claude.ClaudeSession | None = session
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
-        self._session: claude.ClaudeSession | None = None
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -1814,7 +1815,9 @@ class Worker:
             )
 
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
-            self.create_session(ctx.fido_dir, model="claude-opus-4-6")
+            session_fresh = self._session is None
+            if session_fresh:
+                self.create_session(ctx.fido_dir, model="claude-opus-4-6")
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
@@ -1832,7 +1835,7 @@ class Worker:
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                if self._session is not None:
+                if session_fresh and self._session is not None:
                     self._session.switch_model("claude-sonnet-4-6")
                 self._ensure_session_alive(ctx.fido_dir)
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
@@ -1846,7 +1849,6 @@ class Worker:
                     ctx.fido_dir, repo_ctx, pr_number, slug, issue
                 )
             finally:
-                self.stop_session()
                 self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
 
@@ -1885,6 +1887,7 @@ class WorkerThread(threading.Thread):
         self._abort_task = threading.Event()
         self._stop = False
         self.crash_error: str | None = None
+        self._session: claude.ClaudeSession | None = None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -1907,14 +1910,19 @@ class WorkerThread(threading.Thread):
             while not self._stop:
                 if self._registry is not None:
                     self._registry.report_activity(self._repo_name, "idle", busy=False)
-                result = Worker(
+                worker = Worker(
                     self.work_dir,
                     self._gh,
                     self._abort_task,
                     self._repo_name,
                     self._registry,
                     self._membership,
-                ).run()
+                    session=self._session,
+                )
+                try:
+                    result = worker.run()
+                finally:
+                    self._session = worker._session
 
                 if result == 1:
                     # Did work — loop immediately without waiting.
@@ -1927,6 +1935,10 @@ class WorkerThread(threading.Thread):
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
+        finally:
+            if self._session is not None:
+                self._session.stop()
+                self._session = None
 
 
 def run(work_dir: Path, *, _GitHub: type[GitHub] = GitHub) -> int:

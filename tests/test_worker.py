@@ -888,12 +888,18 @@ class TestWorker:
             worker.run()
         mock_create.assert_called_once_with(mock_ctx.fido_dir, model="claude-opus-4-6")
 
-    def test_run_switches_to_sonnet_after_setup(self, tmp_path: Path) -> None:
+    def test_run_switches_to_sonnet_after_setup_for_fresh_session(
+        self, tmp_path: Path
+    ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh)  # no session — fresh
         mock_session = MagicMock()
+
+        def set_session(*args, **kwargs):
+            worker._session = mock_session
+
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -901,8 +907,7 @@ class TestWorker:
             ),
             patch.object(worker, "setup_hooks", return_value=("c", "s")),
             patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session"),
+            patch.object(worker, "create_session", side_effect=set_session),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
@@ -913,15 +918,17 @@ class TestWorker:
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
-            worker._session = mock_session
             worker.run()
         mock_session.switch_model.assert_called_once_with("claude-sonnet-4-6")
 
-    def test_run_stops_session_on_exit(self, tmp_path: Path) -> None:
+    def test_run_does_not_switch_model_for_carry_over_session(
+        self, tmp_path: Path
+    ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
-        mock_stop = MagicMock()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, gh, session=mock_session)  # carry-over
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -929,33 +936,37 @@ class TestWorker:
             ),
             patch.object(worker, "setup_hooks", return_value=("c", "s")),
             patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session", mock_stop),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_session.switch_model.assert_not_called()
+
+    def test_run_does_not_create_session_when_provided(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, gh, session=mock_session)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session") as mock_create,
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
-        mock_stop.assert_called_once()
-
-    def test_run_stops_session_even_on_exception(self, tmp_path: Path) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
-        mock_stop = MagicMock()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session", mock_stop),
-            patch.object(worker, "get_current_issue", side_effect=RuntimeError("boom")),
-        ):
-            with pytest.raises(RuntimeError):
-                worker.run()
-        mock_stop.assert_called_once()
+        mock_create.assert_not_called()
 
     # --- run() ---
 
@@ -8653,11 +8664,13 @@ class TestWorkerThread:
             repo_name="",
             registry=None,
             membership=None,
+            session=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
+            self_w._session = session
 
         def fake_worker_run(self_w):
             wt._stop = True
@@ -8706,3 +8719,80 @@ class TestWorkerThread:
 
         with patch.object(Worker, "run", fake_worker_run):
             self._run_thread(wt)  # must not raise
+
+    # ── session lifecycle ─────────────────────────────────────────────────
+
+    def test_session_carried_to_next_iteration(self, tmp_path: Path) -> None:
+        """Session created by one Worker.run() is passed to the next."""
+        wt = self._make_thread(tmp_path)
+        wt._wake = MagicMock()
+        mock_session = MagicMock()
+        sessions_received: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            sessions_received.append(session)
+
+        call_count = 0
+
+        def fake_worker_run(self_w) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self_w._session = mock_session  # first worker creates a session
+                return 1
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            self._run_thread(wt)
+
+        assert len(sessions_received) == 2
+        assert sessions_received[0] is None  # no carry-over on first iteration
+        assert sessions_received[1] is mock_session  # carried forward
+
+    def test_session_stopped_when_thread_exits(self, tmp_path: Path) -> None:
+        """WorkerThread stops the session when its loop finishes."""
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        wt._session = mock_session
+        wt._stop = True  # exit immediately without running any Worker
+
+        with patch.object(Worker, "run"):
+            wt.run()
+
+        mock_session.stop.assert_called_once()
+        assert wt._session is None
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_session_stopped_when_worker_raises(self, tmp_path: Path) -> None:
+        """WorkerThread stops the session even when Worker.run() raises."""
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+
+        def fake_worker_run(self_w) -> int:
+            self_w._session = mock_session
+            raise RuntimeError("boom")
+
+        with patch.object(Worker, "run", fake_worker_run):
+            wt.start()
+            wt.join(timeout=5.0)
+
+        assert not wt.is_alive()
+        mock_session.stop.assert_called_once()
+        assert wt._session is None
