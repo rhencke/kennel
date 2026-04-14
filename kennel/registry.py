@@ -7,13 +7,18 @@ import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from kennel.config import RepoConfig
 from kennel.github import GitHub
 from kennel.worker import WorkerThread
 
 log = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(tz=timezone.utc)
 
 
 @dataclass
@@ -23,6 +28,7 @@ class WorkerActivity:
     repo_name: str
     what: str
     busy: bool
+    last_progress_at: datetime
 
 
 @dataclass
@@ -82,12 +88,38 @@ class WorkerRegistry:
         if thread:
             thread.abort_task()
 
-    def report_activity(self, repo_name: str, what: str, busy: bool) -> None:
+    def report_activity(
+        self,
+        repo_name: str,
+        what: str,
+        busy: bool,
+        *,
+        _now: Callable[[], datetime] = _utcnow,
+    ) -> None:
         """Record what *repo_name*'s worker is currently doing."""
         with self._activity_lock:
             self._activities[repo_name] = WorkerActivity(
-                repo_name=repo_name, what=what, busy=busy
+                repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
             )
+
+    def is_stale(
+        self,
+        repo_name: str,
+        threshold: float,
+        *,
+        _now: Callable[[], datetime] = _utcnow,
+    ) -> bool:
+        """Return True if *repo_name*'s last progress is older than *threshold* seconds.
+
+        Returns False when no activity has been recorded for the repo (e.g. it
+        has never reported in) — the caller can treat that as a fresh start
+        rather than a stall.
+        """
+        with self._activity_lock:
+            activity = self._activities.get(repo_name)
+        if activity is None:
+            return False
+        return (_now() - activity.last_progress_at).total_seconds() > threshold
 
     def get_all_activities(self) -> list[WorkerActivity]:
         """Return a snapshot of all registered workers' current activities."""

@@ -139,11 +139,18 @@ class TestGetEndpoint:
         assert b"kennel is running" in resp.read()
 
     def test_status_endpoint_returns_activities(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
         from kennel.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(repo_name="owner/repo", what="Working on: #1", busy=True),
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
         ]
         WebhookHandler.registry.get_crash_info.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
@@ -160,13 +167,18 @@ class TestGetEndpoint:
         ]
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         from kennel.registry import WorkerActivity, WorkerCrash
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(repo_name="owner/repo", what="Napping", busy=False),
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Napping",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
         ]
         WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
             death_count=3,
