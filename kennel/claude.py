@@ -811,9 +811,11 @@ class ClaudeSession:
                 self._proc.wait(timeout=1.0)
             except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
                 log.debug("ClaudeSession.stop: kill/wait failed: %s", exc)
+                raise
         except (OSError, ProcessLookupError) as exc:
             log.debug("ClaudeSession.stop: wait failed: %s", exc)
-        _unregister_child(self._proc)
+        finally:
+            _unregister_child(self._proc)
 
 
 def resume_status(

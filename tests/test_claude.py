@@ -1421,7 +1421,9 @@ class TestClaudeSessionStop:
             session.stop()  # must not raise
         assert any("wait failed" in r.message for r in caplog.records)
 
-    def test_logs_errors_on_kill_after_timeout(self, tmp_path: Path, caplog) -> None:
+    def test_raises_and_logs_on_kill_after_timeout(
+        self, tmp_path: Path, caplog
+    ) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(
             side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
@@ -1429,8 +1431,21 @@ class TestClaudeSessionStop:
         proc.kill = MagicMock(side_effect=ProcessLookupError())
         session = _make_session(tmp_path, proc)
         with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            session.stop(grace_seconds=0.0)  # must not raise
+            with pytest.raises(ProcessLookupError):
+                session.stop(grace_seconds=0.0)
         assert any("kill/wait failed" in r.message for r in caplog.records)
+
+    def test_unregisters_even_when_kill_raises(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.wait = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
+        )
+        proc.kill = MagicMock(side_effect=ProcessLookupError())
+        session = _make_session(tmp_path, proc)
+        assert proc in _active_children
+        with pytest.raises(ProcessLookupError):
+            session.stop(grace_seconds=0.0)
+        assert proc not in _active_children
 
     def test_skips_close_when_stdin_already_closed(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
