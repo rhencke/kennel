@@ -283,13 +283,53 @@ def _claude(
     timeout: int = 30,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the claude CLI with the given args, optionally piping prompt to stdin."""
-    return runner(
-        ["claude", *args],
-        input=prompt,
-        capture_output=True,
+    """Run the claude CLI with the given args, optionally piping prompt to stdin.
+
+    Under the free-threaded (3.14t) runtime we observed
+    ``subprocess.run(..., timeout=...)`` failing to fire on long-hung
+    claude children — the worker sat on a futex for minutes past the
+    requested timeout (closes #489).  When the default runner is used,
+    drive the subprocess with explicit ``Popen`` + ``communicate`` so
+    the child is guaranteed to be killed and reaped when the budget
+    elapses.  Test overrides via *runner* still flow through whatever
+    mock the test supplies.  Logs entry and exit so a stalled status
+    call is localisable in the kennel log.
+    """
+    cmd = ["claude", *args]
+    log.debug("_claude: running (timeout=%ds) %s", timeout, cmd[:3])
+    if runner is not subprocess.run:
+        return runner(
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout
+        )
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+    )
+    stdout = ""
+    stderr = ""
+    try:
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "_claude: subprocess exceeded %ds — killing and re-raising", timeout
+        )
+        proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise subprocess.TimeoutExpired(
+            proc.args, timeout, output=stdout, stderr=stderr
+        )
+    log.debug("_claude: returned rc=%d", proc.returncode)
+    return subprocess.CompletedProcess(
+        args=proc.args,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 

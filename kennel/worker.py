@@ -897,9 +897,13 @@ class Worker:
                 activities = [(self.work_dir.name, what, busy)]
 
             # Call 1: generate status text
+            log.info("set_status: requesting status text from claude")
             text, session_id = _generate_status_with_session(
                 prompt=prompts.status_text_prompt(activities),
                 system_prompt=prompts.status_text_system_prompt(),
+            )
+            log.info(
+                "set_status: status text returned (%d chars)", len(text) if text else 0
             )
             if not text:
                 log.warning(
@@ -925,10 +929,12 @@ class Worker:
                 text = text[:80]
 
             # Call 2: generate emoji
+            log.info("set_status: requesting emoji from claude")
             emoji = _generate_status_emoji(
                 prompt=prompts.status_emoji_prompt(text),
                 system_prompt=prompts.status_emoji_system_prompt(),
             )
+            log.info("set_status: emoji returned (%r)", emoji)
             if not emoji:
                 emoji = ":dog:"
 
