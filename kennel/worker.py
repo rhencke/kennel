@@ -1223,7 +1223,7 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
@@ -1347,7 +1347,7 @@ class Worker:
             f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True

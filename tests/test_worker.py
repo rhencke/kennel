@@ -4267,7 +4267,7 @@ class TestHandleCi:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
         """CI failures have no task entry — no complete call needed."""
@@ -4960,7 +4960,7 @@ class TestHandleThreads:
             patch("kennel.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
