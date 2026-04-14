@@ -629,6 +629,19 @@ class ClaudeSession:
                 self._proc.wait()
                 raise ClaudeStreamError(-1)
 
+    def consume_until_result(self) -> str:
+        """Drain events for the current turn and return the result text.
+
+        Exhausts :meth:`iter_events` and returns the ``result`` field from
+        the ``type=result`` event, or an empty string if the turn ends
+        without one (EOF, ``type=error``, or idle-timeout kill).
+        """
+        result_text = ""
+        for event in self.iter_events():
+            if event.get("type") == "result" and isinstance(event.get("result"), str):
+                result_text = event["result"]
+        return result_text
+
     def stop(self, grace_seconds: float = 2.0) -> None:
         """Shut down the session: close stdin, wait for exit, kill if needed.
 

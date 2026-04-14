@@ -1433,3 +1433,50 @@ class TestClaudeSessionSwitchModel:
         proc = _make_session_proc([])  # immediate EOF
         session = _make_session(tmp_path, proc)
         session.switch_model("claude-haiku-4-5-20251001")  # must not raise
+
+
+class TestClaudeSessionConsumeUntilResult:
+    def test_returns_result_text(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "thinking..."}) + "\n",
+            _json.dumps({"type": "result", "result": "all done"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        assert session.consume_until_result() == "all done"
+
+    def test_returns_empty_on_eof_without_result(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert session.consume_until_result() == ""
+
+    def test_returns_empty_on_error_event(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "error", "error": "something broke"}) + "\n"]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        assert session.consume_until_result() == ""
+
+    def test_returns_empty_when_result_field_not_a_string(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "result", "result": None}) + "\n"]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        assert session.consume_until_result() == ""
+
+    def test_drains_all_intermediate_events(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "system", "subtype": "init"}) + "\n",
+            _json.dumps({"type": "assistant", "text": "a"}) + "\n",
+            _json.dumps({"type": "assistant", "text": "b"}) + "\n",
+            _json.dumps({"type": "result", "result": "output"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        assert session.consume_until_result() == "output"
