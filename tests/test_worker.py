@@ -1132,7 +1132,10 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert load_state(fido_dir) == {"issue": 7}
+        state = load_state(fido_dir)
+        assert state["issue"] == 7
+        assert state["issue_title"] == "Fetch!"
+        assert "issue_started_at" in state
 
     def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

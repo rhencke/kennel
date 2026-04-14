@@ -486,3 +486,58 @@ class TestMakeRegistry:
             {"foo/bar": cfg}, _thread_factory=MagicMock(return_value=mock_thread)
         )
         assert reg.is_alive("foo/bar") is True
+
+
+class TestThreadStartedAt:
+    def test_records_on_start(self, tmp_path: Path) -> None:
+        reg = WorkerRegistry(MagicMock())
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        assert reg.thread_started_at("foo/bar") is not None
+
+    def test_returns_none_for_unknown(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        assert reg.thread_started_at("nope/none") is None
+
+
+class TestWebhookActivity:
+    def test_registers_and_unregisters(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        assert reg.get_webhook_activities("foo/bar") == []
+        with reg.webhook_activity("foo/bar", "triaging"):
+            activities = reg.get_webhook_activities("foo/bar")
+            assert len(activities) == 1
+            assert activities[0].description == "triaging"
+        assert reg.get_webhook_activities("foo/bar") == []
+
+    def test_unregisters_on_exception(self) -> None:
+        import pytest as _pytest
+
+        reg = WorkerRegistry(MagicMock())
+        with _pytest.raises(RuntimeError):
+            with reg.webhook_activity("foo/bar", "oops"):
+                raise RuntimeError("boom")
+        assert reg.get_webhook_activities("foo/bar") == []
+
+    def test_multiple_concurrent_activities(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        with reg.webhook_activity("foo/bar", "first"):
+            with reg.webhook_activity("foo/bar", "second"):
+                descs = sorted(
+                    a.description for a in reg.get_webhook_activities("foo/bar")
+                )
+                assert descs == ["first", "second"]
+        assert reg.get_webhook_activities("foo/bar") == []
+
+    def test_activities_isolated_per_repo(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        with reg.webhook_activity("a/b", "work-ab"):
+            with reg.webhook_activity("c/d", "work-cd"):
+                a = reg.get_webhook_activities("a/b")
+                c = reg.get_webhook_activities("c/d")
+                assert [x.description for x in a] == ["work-ab"]
+                assert [x.description for x in c] == ["work-cd"]
+
+    def test_unknown_repo_returns_empty_list(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        assert reg.get_webhook_activities("ghost/repo") == []

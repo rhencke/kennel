@@ -10,6 +10,7 @@ import subprocess
 import threading
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Protocol
 
@@ -619,7 +620,13 @@ class Worker:
                 number = issue["number"]
                 title = issue["title"]
                 log.info("starting issue #%s: %s", number, title)
-                State(fido_dir).save({"issue": number})
+                State(fido_dir).save(
+                    {
+                        "issue": number,
+                        "issue_title": title,
+                        "issue_started_at": datetime.now(tz=timezone.utc).isoformat(),
+                    }
+                )
                 self.set_status(f"Picking up issue #{number}: {title}")
                 return number
 
@@ -687,6 +694,10 @@ class Worker:
         if existing is not None:
             pr_number = existing["number"]
             slug = existing["headRefName"]
+            pr_title = existing.get("title") or request
+            with State(fido_dir).modify() as state:
+                state["pr_number"] = pr_number
+                state["pr_title"] = pr_title
             # Open PR — resume
             log.info("resuming PR #%s on branch %s", pr_number, slug)
             self._git(["fetch", remote])
@@ -774,6 +785,9 @@ class Worker:
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
+        with State(fido_dir).modify() as state:
+            state["pr_number"] = pr_number
+            state["pr_title"] = request
         _write_pr_description(
             self.gh, repo_ctx.repo, pr_number, issue, self._tasks.list()
         )

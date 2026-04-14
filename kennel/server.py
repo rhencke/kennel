@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -394,6 +395,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
             ).start()
 
     def _process_action(self, action, repo_cfg: RepoConfig) -> None:
+        description = self._describe_action(action)
+        with self.registry.webhook_activity(repo_cfg.name, description):
+            self._process_action_inner(action, repo_cfg)
+
+    def _describe_action(self, action) -> str:
+        """Short label for status display — what this webhook handler is doing."""
+        if action.reply_to:
+            cid = action.reply_to.get("comment_id")
+            return f"replying to review comment {cid}" if cid else "replying to review"
+        if action.review_comments:
+            return "replying to review thread"
+        if action.comment_body:
+            return "triaging PR comment"
+        return "handling webhook action"
+
+    def _process_action_inner(self, action, repo_cfg: RepoConfig) -> None:
         try:
             self.registry.report_activity(
                 repo_cfg.name, "handling webhook action", busy=True
@@ -502,9 +519,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/status":
+            now = datetime.now(tz=timezone.utc)
             activities = []
             for a in self.registry.get_all_activities():
                 crash = self.registry.get_crash_info(a.repo_name)
+                started_at = self.registry.thread_started_at(a.repo_name)
+                worker_uptime = (
+                    (now - started_at).total_seconds()
+                    if started_at is not None
+                    else None
+                )
+                webhooks = [
+                    {
+                        "description": w.description,
+                        "elapsed_seconds": (now - w.started_at).total_seconds(),
+                    }
+                    for w in self.registry.get_webhook_activities(a.repo_name)
+                ]
                 activities.append(
                     {
                         "repo_name": a.repo_name,
@@ -515,6 +546,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "is_stuck": self.registry.is_stale(
                             a.repo_name, _STALE_THRESHOLD
                         ),
+                        "worker_uptime_seconds": worker_uptime,
+                        "webhook_activities": webhooks,
                     }
                 )
             body = json.dumps(activities).encode()
