@@ -1650,3 +1650,26 @@ class TestClaudeSessionLock:
         t2.join(timeout=2)
         assert could_not_acquire.is_set()
         session.stop()
+
+
+class TestClaudeSessionInterrupt:
+    def test_interrupt_writes_json_to_stdin(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.interrupt("abort now")
+        written = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(written.strip())
+        assert obj["type"] == "user"
+        assert obj["message"]["content"] == "abort now"
+
+    def test_interrupt_bypasses_held_lock(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._lock.acquire()
+        try:
+            session.interrupt("urgent")  # must not block or raise
+        finally:
+            session._lock.release()
+        session.stop()

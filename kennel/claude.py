@@ -627,6 +627,19 @@ class ClaudeSession:
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
 
+    def interrupt(self, content: str) -> None:
+        """Write a user message to stdin, bypassing the session lock.
+
+        This is the explicit lock-break path for preempt and interrupt use
+        cases (e.g. rescope abort, CI-failure cancel) where the lock is
+        already held by the in-flight turn and waiting for it would defeat
+        the purpose of the interrupt.  Only call from threads that have a
+        legitimate need to preempt the current holder; all normal turns
+        should go through the :meth:`__enter__` / :meth:`__exit__` context
+        manager instead.
+        """
+        self.send(content)
+
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.
 
