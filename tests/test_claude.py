@@ -1947,7 +1947,6 @@ class TestClaudeSessionLock:
         system_file.write_text("persona")
         proc = _make_session_proc(
             [
-                '{"type":"result","result":""}\n',  # drain after interrupt
                 '{"type":"result","result":"hello world"}\n',  # actual turn
             ]
         )

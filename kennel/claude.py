@@ -1045,17 +1045,21 @@ class ClaudeSession:
         2. Acquire ``self`` as a context manager — blocks while the previous
            holder is winding down.  Registers a fresh :class:`ClaudeTalker`
            so status display attributes claude to this thread.
-        3. Send a stream-json ``control_request`` interrupt + drain stale
-           events from the cancelled turn so stdout is clean.
-        4. Switch model if *model* is provided and differs from the session
+        3. Switch model if *model* is provided and differs from the session
            default.
-        5. Send *content* (optionally prefixed with *system_prompt*) and
+        4. Send *content* (optionally prefixed with *system_prompt*) and
            consume until the result boundary, returning the text.
+
+        Does **not** send a ``control_request`` interrupt to the subprocess
+        before the user message.  On a fresh subprocess with no in-flight
+        turn, claude ignores the control_request and never emits a
+        ``type=result``, so ``consume_until_result`` would hang
+        indefinitely.  The :attr:`_cancel` signal + lock hand-off already
+        ensures the previous holder's :meth:`iter_events` has exited, so
+        there is nothing in-flight to interrupt.
         """
         self._cancel.set()
         with self:
-            self._send_control_interrupt()
-            self.consume_until_result()
             if model is not None:
                 self.switch_model(model)
             if system_prompt:
