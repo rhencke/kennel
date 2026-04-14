@@ -678,6 +678,7 @@ class Worker:
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
         session: claude.ClaudeSession | None = None,
+        session_issue: int | None = None,
         _tasks: Tasks | None = None,
     ) -> None:
         self.work_dir = work_dir
@@ -687,6 +688,7 @@ class Worker:
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._session: claude.ClaudeSession | None = session
+        self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
@@ -1829,6 +1831,17 @@ class Worker:
                 if issue is None:
                     return 0
 
+                if not session_fresh and issue != self._session_issue:
+                    log.info(
+                        "worker: new issue #%s — restarting session at issue boundary",
+                        issue,
+                    )
+                    assert self._session is not None
+                    self._session.restart()
+                    self._session.switch_model("claude-opus-4-6")
+                    session_fresh = True
+                self._session_issue = issue
+
                 issue_data = self.gh.view_issue(repo_ctx.repo, issue)
                 issue_title = issue_data["title"]
                 issue_body = issue_data.get("body", "") or ""
@@ -1892,6 +1905,7 @@ class WorkerThread(threading.Thread):
         self._stop = False
         self.crash_error: str | None = None
         self._session: claude.ClaudeSession | None = None
+        self._session_issue: int | None = None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -1922,11 +1936,13 @@ class WorkerThread(threading.Thread):
                     self._registry,
                     self._membership,
                     session=self._session,
+                    session_issue=self._session_issue,
                 )
                 try:
                     result = worker.run()
                 finally:
                     self._session = worker._session
+                    self._session_issue = worker._session_issue
 
                 if result == 1:
                     # Did work — loop immediately without waiting.

@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -921,7 +921,8 @@ class TestWorker:
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         mock_session = MagicMock()
-        worker = Worker(tmp_path, gh, session=mock_session)  # carry-over
+        # same issue as last time — no boundary restart, no model switch
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -941,6 +942,64 @@ class TestWorker:
         ):
             worker.run()
         mock_session.switch_model.assert_not_called()
+
+    def test_run_restarts_session_at_issue_boundary(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        # session was working on issue 5; now issue 7 is picked — boundary
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=5)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_session.restart.assert_called_once()
+        # opus first (boundary restart), then sonnet (session_fresh path)
+        assert mock_session.switch_model.call_args_list == [
+            call("claude-opus-4-6"),
+            call("claude-sonnet-4-6"),
+        ]
+
+    def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        assert worker._session_issue == 7
 
     def test_run_does_not_create_session_when_provided(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -8658,12 +8717,14 @@ class TestWorkerThread:
             registry=None,
             membership=None,
             session=None,
+            session_issue=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
             self_w._session = session
+            self_w._session_issue = session_issue
 
         def fake_worker_run(self_w):
             wt._stop = True
@@ -8697,9 +8758,9 @@ class TestWorkerThread:
 
         assert call_count == 2
         assert mock_registry.report_activity.call_count == 2
-        for call in mock_registry.report_activity.call_args_list:
-            assert call.args[0] == "owner/repo"
-            assert call.kwargs.get("busy") is False or call.args[2] is False
+        for c in mock_registry.report_activity.call_args_list:
+            assert c.args[0] == "owner/repo"
+            assert c.kwargs.get("busy") is False or c.args[2] is False
 
     def test_heartbeat_not_emitted_when_no_registry(self, tmp_path: Path) -> None:
         """WorkerThread without a registry must not crash on the heartbeat path."""
@@ -8731,11 +8792,13 @@ class TestWorkerThread:
             registry=None,
             membership=None,
             session=None,
+            session_issue=None,
         ) -> None:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
             self_w._session = session
+            self_w._session_issue = session_issue
             sessions_received.append(session)
 
         call_count = 0
@@ -8758,6 +8821,51 @@ class TestWorkerThread:
         assert len(sessions_received) == 2
         assert sessions_received[0] is None  # no carry-over on first iteration
         assert sessions_received[1] is mock_session  # carried forward
+
+    def test_session_issue_carried_to_next_iteration(self, tmp_path: Path) -> None:
+        """session_issue set by one Worker.run() is passed to the next."""
+        wt = self._make_thread(tmp_path)
+        wt._wake = MagicMock()
+        issues_received: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+            issues_received.append(session_issue)
+
+        call_count = 0
+
+        def fake_worker_run(self_w) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self_w._session_issue = 42  # first worker picks issue 42
+                return 1
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            self._run_thread(wt)
+
+        assert len(issues_received) == 2
+        assert issues_received[0] is None  # no carry-over on first iteration
+        assert issues_received[1] == 42  # carried forward
 
     def test_session_stopped_when_thread_exits(self, tmp_path: Path) -> None:
         """WorkerThread stops the session when its loop finishes."""
