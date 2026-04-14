@@ -140,6 +140,16 @@ class TestWorkerRegistry:
         reg, _ = self._make_registry()
         assert reg.get_thread_crash_error("unknown/repo") is None
 
+    def test_get_session_owner_returns_none_for_unknown_repo(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_session_owner("unknown/repo") is None
+
+    def test_get_session_owner_delegates_to_thread(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.session_owner = "worker-home"
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_session_owner("foo/bar") == "worker-home"
+
     def test_get_thread_crash_error_returns_thread_crash_error(
         self, tmp_path: Path
     ) -> None:

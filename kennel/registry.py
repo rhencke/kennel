@@ -248,6 +248,16 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread.crash_error if thread is not None else None
 
+    def get_session_owner(self, repo_name: str) -> str | None:
+        """Return the name of the thread currently holding the ClaudeSession lock.
+
+        Delegates to :attr:`~kennel.worker.WorkerThread.session_owner` on the
+        registered thread.  Returns ``None`` when no thread is registered for
+        the repo, no session exists, or the lock is currently free.
+        """
+        thread = self._threads.get(repo_name)
+        return thread.session_owner if thread is not None else None
+
 
 def _make_thread(
     repo_cfg: RepoConfig,

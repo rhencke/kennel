@@ -47,6 +47,7 @@ class RepoStatus:
     task_total: int | None = None
     worker_uptime: int | None = None
     webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
+    session_owner: str | None = None
 
 
 @dataclass
@@ -196,6 +197,7 @@ def _fetch_activities(
                 "is_stuck": item.get("is_stuck", False),
                 "worker_uptime_seconds": item.get("worker_uptime_seconds"),
                 "webhook_activities": item.get("webhook_activities", []),
+                "session_owner": item.get("session_owner"),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -317,6 +319,7 @@ def repo_status(
     worker_stuck: bool = False,
     worker_uptime: int | None = None,
     webhook_activities: list[WebhookActivityInfo] | None = None,
+    session_owner: str | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -343,6 +346,7 @@ def repo_status(
             last_crash_error=last_crash_error,
             worker_stuck=worker_stuck,
             webhook_activities=webhook_activities,
+            session_owner=session_owner,
         )
 
     fido_dir = git_dir / "fido"
@@ -388,6 +392,7 @@ def repo_status(
         last_crash_error=last_crash_error,
         worker_stuck=worker_stuck,
         webhook_activities=webhook_activities,
+        session_owner=session_owner,
     )
 
 
@@ -427,6 +432,7 @@ def collect() -> KennelStatus:
                 worker_stuck=info["is_stuck"] if info else False,
                 worker_uptime=worker_uptime_val,
                 webhook_activities=webhook_list,
+                session_owner=info.get("session_owner") if info else None,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
@@ -497,8 +503,13 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
 
     if repo.claude_pid is not None:
         claude_str = f"  └─ claude pid {repo.claude_pid}"
+        parts: list[str] = []
         if repo.claude_uptime is not None:
-            claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
+            parts.append(f"running {_format_uptime(repo.claude_uptime)}")
+        if repo.session_owner is not None:
+            parts.append(f"held by {repo.session_owner}")
+        if parts:
+            claude_str += f" ({', '.join(parts)})"
         body.append(claude_str)
 
     for w in repo.webhook_activities:

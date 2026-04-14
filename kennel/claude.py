@@ -599,6 +599,7 @@ class ClaudeSession:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._preempt_queue = preempt_queue
+        self._owner: str | None = None
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -648,18 +649,33 @@ class ClaudeSession:
         self._proc = self._spawn()
         _register_child(self._proc)
 
+    @property
+    def owner(self) -> str | None:
+        """Name of the thread currently holding the session lock, or ``None``.
+
+        Set to :func:`threading.current_thread().name <threading.current_thread>`
+        immediately after the lock is acquired in :meth:`__enter__` and
+        cleared before it is released in :meth:`__exit__`.  Read without
+        holding the lock — safe to poll from status-display threads for a
+        best-effort snapshot of who is actively driving the session.
+        """
+        return self._owner
+
     def __enter__(self) -> "ClaudeSession":
         """Acquire the session lock, serializing send/receive across threads.
 
         Also clears the cancel event so a turn that follows a preempt or
-        interrupt starts with a clean slate.
+        interrupt starts with a clean slate.  Records the current thread name
+        in :attr:`owner` so status display can show who holds the session.
         """
         self._lock.acquire()
         self._cancel.clear()
+        self._owner = threading.current_thread().name
         return self
 
     def __exit__(self, *args: object) -> None:
-        """Release the session lock."""
+        """Release the session lock.  Clears :attr:`owner` before releasing."""
+        self._owner = None
         self._lock.release()
 
     def send(self, content: str) -> None:

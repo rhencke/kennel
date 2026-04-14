@@ -1907,6 +1907,17 @@ class WorkerThread(threading.Thread):
         self._session: claude.ClaudeSession | None = None
         self._session_issue: int | None = None
 
+    @property
+    def session_owner(self) -> str | None:
+        """Name of the thread currently holding the ClaudeSession lock, or ``None``.
+
+        Delegates to :attr:`~kennel.claude.ClaudeSession.owner` on the active
+        session.  Returns ``None`` when no session exists or the lock is free.
+        Safe to call from any thread — reads a volatile field for display only.
+        """
+        session = self._session
+        return session.owner if session is not None else None
+
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()

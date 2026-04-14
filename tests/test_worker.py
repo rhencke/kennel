@@ -8897,3 +8897,15 @@ class TestWorkerThread:
         assert not wt.is_alive()
         mock_session.stop.assert_called_once()
         assert wt._session is None
+
+    def test_session_owner_returns_none_when_no_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._session is None
+        assert wt.session_owner is None
+
+    def test_session_owner_delegates_to_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        mock_session.owner = "worker-home"
+        wt._session = mock_session
+        assert wt.session_owner == "worker-home"

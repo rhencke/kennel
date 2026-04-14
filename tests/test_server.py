@@ -156,6 +156,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_stale.return_value = False
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
@@ -169,6 +170,30 @@ class TestGetEndpoint:
         assert entry["is_stuck"] is False
         assert entry["worker_uptime_seconds"] is None
         assert entry["webhook_activities"] == []
+        assert entry["session_owner"] is None
+
+    def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = "worker-home"
+        resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        assert data[0]["session_owner"] == "worker-home"
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -192,6 +217,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_stale.return_value = False
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -228,6 +254,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_stale.return_value = True
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["is_stuck"] is True

@@ -1700,6 +1700,26 @@ class TestClaudeSessionLock:
         session._lock.release()
         session.stop()
 
+    def test_owner_none_when_lock_free(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.owner is None
+        session.stop()
+
+    def test_owner_set_to_thread_name_while_held(self, tmp_path: Path) -> None:
+        import threading as _threading
+
+        session = _make_session(tmp_path, _make_session_proc([]))
+        with session:
+            assert session.owner == _threading.current_thread().name
+        session.stop()
+
+    def test_owner_cleared_after_exit(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        with session:
+            pass
+        assert session.owner is None
+        session.stop()
+
     def test_context_manager_blocks_second_thread(self, tmp_path: Path) -> None:
         import threading as _threading
 
