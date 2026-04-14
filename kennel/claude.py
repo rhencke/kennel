@@ -574,6 +574,17 @@ class ClaudeSession:
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
 
+    def switch_model(self, model: str) -> None:
+        """Switch the active model by sending a /model slash command.
+
+        Sends ``/model <model>`` as a user message and drains any response
+        events so the turn boundary is clean before the next call to
+        :meth:`send` + :meth:`iter_events`.
+        """
+        self.send(f"/model {model}")
+        for _ in self.iter_events():
+            pass
+
     def iter_events(self) -> Iterator[dict]:
         """Yield parsed stream-json events for the current turn.
 

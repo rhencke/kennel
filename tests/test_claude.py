@@ -1403,3 +1403,33 @@ class TestClaudeSessionStop:
         session.stop()
         proc.stdin.close.assert_not_called()
         proc.wait.assert_called()
+
+
+class TestClaudeSessionSwitchModel:
+    def test_sends_model_slash_command(self, tmp_path: Path) -> None:
+        import json as _json
+
+        result_line = _json.dumps({"type": "result", "result": ""}) + "\n"
+        proc = _make_session_proc([result_line])
+        session = _make_session(tmp_path, proc)
+        session.switch_model("claude-opus-4-6")
+        written = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(written.strip())
+        assert obj["message"]["content"] == "/model claude-opus-4-6"
+
+    def test_drains_response_events(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "Switching..."}) + "\n",
+            _json.dumps({"type": "result", "result": ""}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        # Must not raise or leave unread events blocking future reads
+        session.switch_model("claude-sonnet-4-6")
+
+    def test_works_when_command_produces_no_output(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])  # immediate EOF
+        session = _make_session(tmp_path, proc)
+        session.switch_model("claude-haiku-4-5-20251001")  # must not raise
