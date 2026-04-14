@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
@@ -1602,6 +1604,7 @@ class TestCreateTask:
                 thread=new_thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -1738,6 +1741,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # ABORT_KEEP: current task stays in tasks.json
@@ -1767,6 +1771,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_called_once_with("owner/repo")
         # task should still be in tasks.json (ABORT_KEEP)
@@ -1795,6 +1800,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -3035,15 +3041,16 @@ class TestRewritePrDescription:
         )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_skips_on_get_repo_exception(self, tmp_path: Path) -> None:
+    def test_raises_on_get_repo_exception(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
         mock_gh.get_repo_info.side_effect = RuntimeError("network error")
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(),
-            _state=self._mock_state(),
-        )
+        with pytest.raises(RuntimeError, match="network error"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _state=self._mock_state(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_no_open_pr(self, tmp_path: Path) -> None:
@@ -3068,16 +3075,17 @@ class TestRewritePrDescription:
         )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_skips_on_get_pr_body_exception(self, tmp_path: Path) -> None:
+    def test_raises_on_get_pr_body_exception(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
         mock_gh.get_pr_body.side_effect = RuntimeError("API error")
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
+        with pytest.raises(RuntimeError, match="API error"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_skips_when_no_divider_in_body(self, tmp_path: Path) -> None:
@@ -3155,19 +3163,19 @@ class TestRewritePrDescription:
         assert "Fresh desc." in new_body
         assert "## Work queue" in new_body
 
-    def test_handles_edit_pr_body_exception(self, tmp_path: Path) -> None:
+    def test_raises_on_edit_pr_body_exception(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
         mock_gh.edit_pr_body.side_effect = RuntimeError("write failed")
-        # Should not propagate the exception
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New desc.\n\nFixes #42.</body>"
-            ),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
+        with pytest.raises(RuntimeError, match="write failed"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(
+                    return_value="<body>New desc.\n\nFixes #42.</body>"
+                ),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
 
     def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()

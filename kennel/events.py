@@ -826,8 +826,9 @@ def _rewrite_pr_description(
     PR creation and post-rescope rewrites share one code path.
 
     Silently skips when there is no active issue or no open PR for it.
-    Skips (and logs) when the PR body fetch fails or when the shared writer
-    skips (no ``---`` divider, or Opus returned empty).
+    Skips without error when the shared writer returns False (no ``---``
+    divider, or Opus returned empty).  All GitHub fetch and write errors
+    propagate so the caller's thread excepthook can surface them.
 
     Retries up to *_max_retries* times when the task list changes while Opus
     is generating the description, so the written description always reflects
@@ -849,12 +850,8 @@ def _rewrite_pr_description(
         log.info("_rewrite_pr_description: no active issue in state — skipping")
         return
 
-    try:
-        repo = gh.get_repo_info(cwd=work_dir)
-        user = gh.get_user()
-    except Exception:
-        log.exception("_rewrite_pr_description: failed to get repo info")
-        return
+    repo = gh.get_repo_info(cwd=work_dir)
+    user = gh.get_user()
 
     pr_data = gh.find_pr(repo, issue, user)
     if pr_data is None or pr_data.get("state") != "OPEN":
@@ -867,19 +864,10 @@ def _rewrite_pr_description(
         task_list = _tasks.list()
         snapshot_before = _task_snapshot(task_list)
 
-        try:
-            body = gh.get_pr_body(repo, pr_number)
-        except Exception:
-            log.exception("_rewrite_pr_description: failed to get PR body")
-            return
-
-        try:
-            written = _write_pr_description(
-                gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
-            )
-        except Exception:
-            log.exception("_rewrite_pr_description: failed to update PR body")
-            return
+        body = gh.get_pr_body(repo, pr_number)
+        written = _write_pr_description(
+            gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+        )
 
         if not written:
             return
