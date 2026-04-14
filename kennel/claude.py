@@ -152,9 +152,12 @@ def print_prompt(
 ) -> str:
     """Run claude --print with a prompt, return stdout (empty string on failure).
 
-    Uses -p to pass the prompt as a positional argument (no tool access).
-    Retries up to ``_EMPTY_RETRY_COUNT`` times (with a short delay) when
-    Claude exits 0 but produces no output, to handle transient empty responses.
+    Best-effort enrichment: nonzero exit, timeout, and missing CLI all return
+    ``""`` — callers must treat an empty result as "unavailable" rather than
+    as an error.  Uses -p to pass the prompt as a positional argument (no tool
+    access).  Retries up to ``_EMPTY_RETRY_COUNT`` times (with a short delay)
+    when Claude exits 0 but produces no output, to handle transient empty
+    responses.
     """
     args: list[str] = ["--model", model, "--print"]
     if system_prompt is not None:
@@ -193,11 +196,11 @@ def print_prompt_json(
 ) -> str:
     """Run claude --print, parse JSON from output, return the string at *key*.
 
+    Best-effort enrichment: returns ``""`` on any subprocess failure or JSON
+    parse error — callers must treat an empty result as "unavailable".
     Appends a JSON-format instruction to *system_prompt* so Claude outputs
     {"key": "..."}.  Scans the raw response for a JSON object, so preamble
     or trailing text from Opus does not corrupt the result.
-
-    Returns the string value at *key*, or empty string on failure.
     """
     json_instruction = (
         f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
@@ -359,7 +362,8 @@ def triage_comment(
 ) -> str:
     """Ask claude to triage a PR comment. Returns the raw first line of output.
 
-    Returns empty string on timeout or if the CLI is not found.
+    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
+    CLI — callers must treat an empty result as "unable to triage".
     """
     try:
         result = _claude(
@@ -378,7 +382,11 @@ def generate_reply(
     timeout: int = 30,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a short reply. Returns stripped output or empty string."""
+    """Ask claude to generate a short reply. Returns stripped output or empty string.
+
+    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
+    CLI — callers must treat an empty result as "no reply generated".
+    """
     try:
         result = _claude(
             "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
@@ -394,7 +402,11 @@ def generate_branch_name(
     timeout: int = 15,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a git branch name slug. Returns first line of output."""
+    """Ask claude to generate a git branch name slug. Returns first line of output.
+
+    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
+    CLI — callers must treat an empty result as "use a fallback branch name".
+    """
     try:
         result = _claude(
             "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
@@ -413,7 +425,11 @@ def generate_status(
     timeout: int = 15,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a GitHub status (two lines: emoji + text)."""
+    """Ask claude to generate a GitHub status (two lines: emoji + text).
+
+    Best-effort enrichment: returns ``""`` on any failure — callers must treat
+    an empty result as "status unavailable".
+    """
     return print_prompt(
         prompt=prompt,
         model=model,
@@ -432,7 +448,8 @@ def generate_status_emoji(
 ) -> str:
     """Ask claude to choose a single emoji for a GitHub status.
 
-    Returns the stripped response, or an empty string on failure.
+    Best-effort enrichment: returns ``""`` on any failure — callers must treat
+    an empty result as "emoji unavailable".
     """
     return print_prompt(
         prompt=prompt,
@@ -453,9 +470,10 @@ def generate_status_with_session(
 ) -> tuple[str, str]:
     """Generate a GitHub status, returning (status_text, session_id).
 
-    Uses stream-json output format to capture the session_id alongside the
-    response text, enabling follow-up calls (e.g., ``resume_status`` to
-    shorten a long response).  Returns ``("", "")`` on failure.
+    Best-effort enrichment: returns ``("", "")`` on any failure — callers must
+    treat an all-empty tuple as "status unavailable".  Uses stream-json output
+    format to capture the session_id alongside the response text, enabling
+    follow-up calls (e.g., ``resume_status`` to shorten a long response).
     Retries up to ``_EMPTY_RETRY_COUNT`` times when Claude exits 0 but
     produces no output.
     """
@@ -512,9 +530,9 @@ def resume_status(
 ) -> str:
     """Resume an existing claude session to refine a status response.
 
+    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
+    CLI — callers must treat an empty result as "refinement unavailable".
     Passes *prompt* as a positional argument (``-p``), so no file is needed.
-    Returns the response text extracted from stream-json output, or an empty
-    string on failure.
     """
     try:
         result = _claude(
