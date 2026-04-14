@@ -198,7 +198,10 @@ def claude_start(
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
-    Returns the session_id string (empty string on failure).
+    Returns the session_id extracted from stream-json output, or an empty
+    string if the session_id is absent from the output.  Raises
+    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
+    these propagate to the worker's crash handler.
     """
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
@@ -222,7 +225,9 @@ def claude_run(
     *fido_dir/system* and *fido_dir/prompt*.
 
     Returns ``(session_id, raw_output)`` where *raw_output* is the full
-    stream-json text produced by the claude CLI.
+    stream-json text produced by the claude CLI.  Raises
+    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
+    these propagate to the worker's crash handler.
     """
     prompt_file = fido_dir / "prompt"
     if session_id:

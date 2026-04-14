@@ -294,8 +294,12 @@ def print_prompt_from_file(
 ) -> str:
     """Run claude --print reading system prompt and user prompt from files.
 
-    Returns stdout on success, empty string on failure.  Kills the process
-    if no output is produced for *idle_timeout* seconds (default 30 min).
+    Returns the full stdout on success.  Kills the process if no output
+    is produced for *idle_timeout* seconds (default 30 min).
+
+    Raises ``ClaudeStreamError`` on nonzero exit or idle timeout.
+    ``FileNotFoundError`` propagates if the claude CLI is not installed.
+    Both are authoritative failures — callers should not silently ignore them.
     """
     cmd = [
         "claude",
@@ -309,12 +313,7 @@ def print_prompt_from_file(
         str(system_file),
         "--print",
     ]
-    try:
-        return "".join(
-            streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
-        ).strip()
-    except ClaudeStreamError, FileNotFoundError:
-        return ""
+    return "".join(streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
 
 
 def resume_session(
@@ -328,8 +327,12 @@ def resume_session(
 ) -> str:
     """Continue an existing claude session by ID, feeding prompt_file on stdin.
 
-    Returns stdout on success, empty string on failure.  Kills the process
-    if no output is produced for *idle_timeout* seconds (default 30 min).
+    Returns the full stdout on success.  Kills the process if no output
+    is produced for *idle_timeout* seconds (default 30 min).
+
+    Raises ``ClaudeStreamError`` on nonzero exit or idle timeout.
+    ``FileNotFoundError`` propagates if the claude CLI is not installed.
+    Both are authoritative failures — callers should not silently ignore them.
     """
     cmd = [
         "claude",
@@ -343,12 +346,7 @@ def resume_session(
         session_id,
         "--print",
     ]
-    try:
-        return "".join(
-            streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
-        ).strip()
-    except ClaudeStreamError, FileNotFoundError:
-        return ""
+    return "".join(streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
 
 
 # ── Specialised wrappers used by events.py ───────────────────────────────────

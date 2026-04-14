@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from kennel.claude import (
     ClaudeStreamError,
     _claude,
@@ -392,29 +394,29 @@ class TestPrintPromptFromFile:
         )
         assert result == "session output"
 
-    def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
+    def test_raises_on_nonzero(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
-    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=FileNotFoundError)
-        result = print_prompt_from_file(
-            sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(FileNotFoundError):
+            print_prompt_from_file(
+                sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
+            )
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
@@ -452,32 +454,41 @@ class TestResumeSession:
         )
         assert result == "continued"
 
-    def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
+    def test_raises_on_nonzero(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
-    def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(ClaudeStreamError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
         mock_stream = MagicMock(side_effect=FileNotFoundError)
-        result = resume_session(
-            "sess-123", prompt_file, "claude-sonnet-4-6", streaming_runner=mock_stream
-        )
-        assert result == ""
+        with pytest.raises(FileNotFoundError):
+            resume_session(
+                "sess-123",
+                prompt_file,
+                "claude-sonnet-4-6",
+                streaming_runner=mock_stream,
+            )
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
