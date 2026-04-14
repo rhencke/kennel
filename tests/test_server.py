@@ -2314,7 +2314,9 @@ class TestSelfRestart:
         WebhookHandler.registry = mock_registry
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t = threading.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         t.start()
         return srv, f"http://127.0.0.1:{port}", cfg
 
