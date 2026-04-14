@@ -27,6 +27,7 @@ class RepoStatus:
     worker_what: str | None  # activity text from the live registry
     crash_count: int  # number of unexpected worker deaths since kennel started
     last_crash_error: str | None  # error from the most recent crash, if any
+    worker_stuck: bool  # True if the worker is alive but making no progress
 
 
 @dataclass
@@ -164,7 +165,7 @@ def _port_from_pid(pid: int) -> int | None:
 def _fetch_activities(
     port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
 ) -> dict[str, dict[str, Any]]:
-    """Query GET /status, returning {repo_name: {what, crash_count, last_crash_error}}."""
+    """Query GET /status, returning {repo_name: {what, crash_count, last_crash_error, is_stuck}}."""
     try:
         with _urlopen(f"http://localhost:{port}/status", timeout=2) as resp:
             data = json.loads(resp.read())
@@ -173,6 +174,7 @@ def _fetch_activities(
                 "what": item["what"],
                 "crash_count": item["crash_count"],
                 "last_crash_error": item["last_crash_error"],
+                "is_stuck": item.get("is_stuck", False),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -251,6 +253,7 @@ def repo_status(
     worker_what: str | None = None,
     crash_count: int = 0,
     last_crash_error: str | None = None,
+    worker_stuck: bool = False,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     git_dir = _git_dir(repo_config.work_dir)
@@ -267,6 +270,7 @@ def repo_status(
             worker_what=worker_what,
             crash_count=crash_count,
             last_crash_error=last_crash_error,
+            worker_stuck=worker_stuck,
         )
 
     fido_dir = git_dir / "fido"
@@ -298,6 +302,7 @@ def repo_status(
         worker_what=worker_what,
         crash_count=crash_count,
         last_crash_error=last_crash_error,
+        worker_stuck=worker_stuck,
     )
 
 
@@ -322,6 +327,7 @@ def collect() -> KennelStatus:
                 worker_what=info["what"] if info else None,
                 crash_count=info["crash_count"] if info else 0,
                 last_crash_error=info["last_crash_error"] if info else None,
+                worker_stuck=info["is_stuck"] if info else False,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
@@ -371,6 +377,9 @@ def format_status(status: KennelStatus) -> str:
             if repo.claude_uptime is not None:
                 claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
             parts.append(claude_str)
+
+        if repo.worker_stuck:
+            parts.append("STUCK")
 
         if repo.crash_count > 0:
             crash_str = f"crashed {repo.crash_count}x"

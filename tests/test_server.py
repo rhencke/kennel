@@ -153,6 +153,7 @@ class TestGetEndpoint:
             ),
         ]
         WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
@@ -163,6 +164,7 @@ class TestGetEndpoint:
                 "busy": True,
                 "crash_count": 0,
                 "last_crash_error": None,
+                "is_stuck": False,
             }
         ]
 
@@ -185,6 +187,7 @@ class TestGetEndpoint:
             last_error="RuntimeError: boom",
             last_crash_time=datetime(2026, 1, 1),
         )
+        WebhookHandler.registry.is_stale.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -202,6 +205,26 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.headers.get("Content-Type") == "application/json"
+
+    def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = True
+        resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        assert data[0]["is_stuck"] is True
 
 
 class TestEmptyBody:
