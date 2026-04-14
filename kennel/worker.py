@@ -674,6 +674,7 @@ class Worker:
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        self._session: claude.ClaudeSession | None = None
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -713,6 +714,28 @@ class Worker:
         """Remove hooks and the compact script created by setup_hooks."""
         hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
         (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+    def create_session(self, fido_dir: Path) -> None:  # noqa: ARG002
+        """Start a persistent ClaudeSession for this work iteration.
+
+        Uses the fido persona as the session system prompt.  Task-specific
+        instructions are delivered via user messages in later phases.
+        Stores the session on ``self._session`` so worker methods can access it.
+
+        *fido_dir* is accepted for future use (e.g. per-issue session files)
+        but is not used at this stage.
+        """
+        persona_file = _sub_dir() / "persona.md"
+        self._session = claude.ClaudeSession(persona_file, work_dir=self.work_dir)
+
+    def stop_session(self) -> None:
+        """Stop the ClaudeSession if one is running, then clear it.
+
+        Safe to call when no session has been created (no-op).
+        """
+        if self._session is not None:
+            self._session.stop()
+            self._session = None
 
     # ------------------------------------------------------------------
     # Business logic
@@ -1783,6 +1806,7 @@ class Worker:
             )
 
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
+            self.create_session(ctx.fido_dir)
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
@@ -1811,6 +1835,7 @@ class Worker:
                     ctx.fido_dir, repo_ctx, pr_number, slug, issue
                 )
             finally:
+                self.stop_session()
                 self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
 

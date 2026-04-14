@@ -52,6 +52,20 @@ from kennel.worker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_claude_session_spawn(monkeypatch):
+    """Patch ClaudeSession for every test in this module.
+
+    Worker.run() now creates a ClaudeSession on entry.  Without this fixture
+    every test that calls worker.run() would try to spawn a real claude
+    subprocess.  The mock is a MagicMock so all attribute and method accesses
+    (stop, send, iter_events, …) work without raising AttributeError.
+    """
+    from kennel import claude
+
+    monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
+
+
 class TestRepoContextFilter:
     def test_filter_injects_repo_name_from_thread_local(self) -> None:
         _thread_repo.repo_name = "confusio"
@@ -729,6 +743,112 @@ class TestWorker:
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
         return repo_ctx
+
+    # --- create_session / stop_session ---
+
+    def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session(tmp_path)
+        claude.ClaudeSession.assert_called_once()
+
+    def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session(tmp_path)
+        _, kwargs = claude.ClaudeSession.call_args
+        assert kwargs.get("work_dir") == tmp_path
+
+    def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        mock_session = MagicMock()
+        claude.ClaudeSession.return_value = mock_session
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session(tmp_path)
+        assert worker._session is mock_session
+
+    def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, MagicMock())
+        worker._session = mock_session
+        worker.stop_session()
+        mock_session.stop.assert_called_once()
+
+    def test_stop_session_clears_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        worker._session = MagicMock()
+        worker.stop_session()
+        assert worker._session is None
+
+    def test_stop_session_is_noop_when_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._session is None
+        worker.stop_session()  # must not raise
+
+    def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_create = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session", mock_create),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+        mock_create.assert_called_once_with(mock_ctx.fido_dir)
+
+    def test_run_stops_session_on_exit(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_stop = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session", mock_stop),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+        mock_stop.assert_called_once()
+
+    def test_run_stops_session_even_on_exception(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_stop = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session", mock_stop),
+            patch.object(worker, "get_current_issue", side_effect=RuntimeError("boom")),
+        ):
+            with pytest.raises(RuntimeError):
+                worker.run()
+        mock_stop.assert_called_once()
+
+    # --- run() ---
 
     def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
         gh = self._make_gh()
