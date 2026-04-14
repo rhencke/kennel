@@ -128,7 +128,8 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
 - **One entry point** — `kennel` (heading toward all-threads architecture)
-- **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
+- **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
+- **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
 - **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on
   the free-threaded build.  Do **not** rely on the GIL for atomicity.  Every
   shared mutable state (dicts, sets, lists, counters, attribute mutations
@@ -138,11 +139,31 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   attribute reads, and integer increments are **not** safe across threads
   without a lock.  When in doubt, hold the lock.
 
-### Dependency injection pattern
+### OO + constructor-DI architecture
 
-Worker classes accept external collaborators (e.g. `GitHub`) via the
-constructor rather than instantiating them internally.  This keeps methods
-testable without patching module-level names.
+All behavior lives on classes with dependencies injected through the
+constructor.  Module-level code is restricted to:
+
+- **Constants** and pure data (no side effects, no I/O)
+- **Value-only helpers** — pure functions that transform data and take no
+  collaborators (e.g. `parse_event_type(header)`)
+- **Dataclasses, enums, exceptions, Protocols** — type definitions only
+- **Thin `run()` / `main()` composition roots** — these are the *only* places
+  that call constructors with real collaborators and then delegate
+
+A **composition root** is the one place where real objects are assembled.  In
+this repo every module's `run()` (or `main()`) function is a composition root:
+
+```python
+def run(work_dir: Path) -> int:
+    return Worker(work_dir, GitHub()).run()  # assembles, then delegates
+```
+
+Everything else — all logic, all I/O, all state — lives on injected objects.
+
+#### Constructor-DI pattern
+
+Collaborators are accepted via `__init__`, not instantiated internally:
 
 ```python
 class Worker:
@@ -154,15 +175,14 @@ class Worker:
         self.gh.do_thing(...)  # uses injected client
 ```
 
-The module-level `run()` entry point creates real collaborators and delegates:
-
-```python
-def run(work_dir: Path) -> int:
-    return Worker(work_dir, GitHub()).run()
-```
-
 Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
 `kennel.worker.GitHub`.
+
+#### No `@staticmethod` on behavior-bearing code
+
+Static methods can't be patched via `self` and resist the DI pattern.  Move
+behavior-bearing static methods onto the injected object, or onto a new class
+that is itself injected.
 
 ## Lessons learned
 
