@@ -1405,12 +1405,13 @@ class TestClaudeSessionStop:
         session.stop(grace_seconds=0.0)
         proc.kill.assert_called()
 
-    def test_logs_oserror_on_stdin_close(self, tmp_path: Path, caplog) -> None:
+    def test_raises_oserror_on_stdin_close(self, tmp_path: Path, caplog) -> None:
         proc = _make_session_proc([])
         proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
         session = _make_session(tmp_path, proc)
         with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            session.stop()  # must not raise
+            with pytest.raises(OSError):
+                session.stop()
         assert any("stdin close failed" in r.message for r in caplog.records)
 
     def test_logs_oserror_on_wait(self, tmp_path: Path, caplog) -> None:

@@ -804,6 +804,7 @@ class ClaudeSession:
                 self._proc.stdin.close()
         except OSError as exc:
             log.debug("ClaudeSession.stop: stdin close failed: %s", exc)
+            raise
         try:
             self._proc.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
