@@ -41,6 +41,16 @@ class TestGhToken:
         mock_run = MagicMock(return_value=_completed("  tok  \n"))
         assert _gh_token(runner=mock_run, environ={}) == "tok"
 
+    def test_raises_on_nonzero_exit(self) -> None:
+        mock_run = MagicMock(return_value=_completed("", returncode=1))
+        with pytest.raises(RuntimeError, match="gh auth token failed"):
+            _gh_token(runner=mock_run, environ={})
+
+    def test_error_message_includes_exit_code(self) -> None:
+        mock_run = MagicMock(return_value=_completed("", returncode=4))
+        with pytest.raises(RuntimeError, match=r"exit 4"):
+            _gh_token(runner=mock_run, environ={})
+
 
 class TestGetGh:
     def test_creates_instance_lazily(self) -> None:
