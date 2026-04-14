@@ -1798,6 +1798,15 @@ class Worker:
                     pr_number,
                 )
                 return 0
+            thread_nodes = self.gh.get_review_threads(
+                repo_ctx.owner, repo_ctx.repo_name, pr_number
+            )
+            if any(not n["isResolved"] for n in thread_nodes):
+                log.info(
+                    "PR #%s: work complete but unresolved review threads remain — deferring promote",
+                    pr_number,
+                )
+                return 0
             log.info("PR #%s: work complete, CI green — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
             missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
