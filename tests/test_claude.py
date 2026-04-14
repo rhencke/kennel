@@ -1135,6 +1135,53 @@ class TestRunStreamingTracksChildren:
         # the generator runs); after exhaustion it should be unregistered.
         assert proc not in _active_children
 
+    def test_registers_and_unregisters_talker_when_thread_repo_set(
+        self, tmp_path: Path
+    ) -> None:
+        """When thread-local repo_name is set, _run_streaming registers a
+        webhook-kind ClaudeTalker for the duration of the subprocess and
+        unregisters it on exit."""
+        from kennel.claude import (
+            _run_streaming,
+            get_talker,
+            set_thread_repo,
+        )
+
+        stdin_file = tmp_path / "in"
+        stdin_file.write_text("hi")
+        proc = self._make_proc(["one\n"])
+        proc.pid = 77777
+
+        observed: list = []
+
+        def fake_popen(*args, **kwargs):
+            return proc
+
+        def fake_select(rs, ws, xs, t):
+            observed.append(get_talker("owner/repo"))
+            return (rs, [], [])
+
+        set_thread_repo("owner/repo")
+        try:
+            list(
+                _run_streaming(
+                    ["claude"],
+                    stdin_file,
+                    idle_timeout=1.0,
+                    popen=fake_popen,
+                    selector=fake_select,
+                )
+            )
+        finally:
+            set_thread_repo(None)
+        # During the subprocess lifetime the talker was present and described
+        # the one-shot pid.
+        assert observed[0] is not None
+        assert observed[0].kind == "webhook"
+        assert observed[0].claude_pid == 77777
+        # Cleanly unregistered after the generator exhausts.
+        assert get_talker("owner/repo") is None
+
 
 # ── ClaudeSession tests ───────────────────────────────────────────────────────
 
@@ -1150,6 +1197,7 @@ def _make_session_proc(
     value ``poll()`` yields (``None`` = still running; ``0`` = exited).
     """
     proc = MagicMock(spec=subprocess.Popen)
+    proc.pid = 99999
     proc.stdin = MagicMock()
     proc.stdin.closed = False
     proc.stdout = MagicMock()
@@ -1178,6 +1226,7 @@ def _make_session(
         idle_timeout=idle_timeout,
         popen=fake_popen,
         selector=fake_selector,
+        repo_name="owner/repo",
     )
 
 
@@ -1792,6 +1841,59 @@ class TestClaudeSessionLock:
         with session:
             pass
         assert session.owner is None
+        session.stop()
+
+    def test_repo_name_exposed(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.repo_name == "owner/repo"
+        session.stop()
+
+    def test_owner_is_none_without_repo_name(self, tmp_path: Path) -> None:
+        """Session without repo_name never registers a talker → owner None."""
+        from kennel.claude import ClaudeSession
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("you are fido")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=MagicMock(return_value=([proc.stdout], [], [])),
+        )
+        with session:
+            assert session.owner is None
+        session.stop()
+
+    def test_enter_raises_on_concurrent_talker_and_releases_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """__enter__ raises ClaudeLeakError if another talker is registered and
+        releases the session lock so callers don't deadlock."""
+        from datetime import datetime, timezone
+
+        from kennel import claude as claude_module
+        from kennel.claude import ClaudeLeakError, ClaudeTalker, register_talker
+
+        session = _make_session(tmp_path, _make_session_proc([]))
+        register_talker(
+            ClaudeTalker(
+                repo_name="owner/repo",
+                thread_name="intruder",
+                kind="webhook",
+                description="leaked",
+                claude_pid=555,
+                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        with pytest.raises(ClaudeLeakError):
+            session.__enter__()
+        # Session lock must be released so we don't deadlock future callers.
+        assert session._lock.acquire(blocking=False)
+        session._lock.release()
+        with claude_module._talkers_lock:
+            claude_module._talkers.clear()
         session.stop()
 
     def test_context_manager_blocks_second_thread(self, tmp_path: Path) -> None:

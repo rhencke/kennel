@@ -410,6 +410,7 @@ class TestFetchActivities:
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
                 "session_owner": None,
+                "session_alive": False,
             }
         }
 
@@ -444,6 +445,7 @@ class TestFetchActivities:
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
                 "session_owner": None,
+                "session_alive": False,
             },
             "c/d": {
                 "what": "Fixing CI",
@@ -453,6 +455,7 @@ class TestFetchActivities:
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
                 "session_owner": None,
+                "session_alive": False,
             },
         }
 
@@ -925,6 +928,7 @@ class TestCollect:
             worker_uptime=None,
             webhook_activities=[],
             session_owner=None,
+            session_alive=False,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -956,6 +960,7 @@ class TestCollect:
             worker_uptime=None,
             webhook_activities=[],
             session_owner=None,
+            session_alive=False,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -980,6 +985,7 @@ class TestCollect:
             worker_uptime=None,
             webhook_activities=[],
             session_owner=None,
+            session_alive=False,
         )
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
@@ -1007,6 +1013,7 @@ class TestCollect:
             worker_uptime=None,
             webhook_activities=[],
             session_owner=None,
+            session_alive=False,
         )
 
 
@@ -1122,6 +1129,31 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "└─ claude pid 9999 (held by worker-home)" in output
+
+    def test_claude_pid_session_alive_no_owner(self) -> None:
+        """Session subprocess alive but nobody holds the lock → shows 'session idle'."""
+        repo = self._repo(
+            issue=1,
+            claude_pid=9999,
+            claude_uptime=60,
+            session_owner=None,
+            session_alive=True,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "└─ claude pid 9999 (running 1m, session idle)" in output
+
+    def test_session_alive_without_claude_pid(self) -> None:
+        """Session alive but pgrep didn't match → fallback line noting the mismatch."""
+        repo = self._repo(
+            issue=1,
+            claude_pid=None,
+            session_owner=None,
+            session_alive=True,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "└─ session alive (no pgrep match)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.

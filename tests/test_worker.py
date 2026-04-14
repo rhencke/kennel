@@ -8922,3 +8922,33 @@ class TestWorkerThread:
         mock_session.owner = "worker-home"
         wt._session = mock_session
         assert wt.session_owner == "worker-home"
+
+    def test_session_alive_false_when_no_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._session is None
+        assert wt.session_alive is False
+
+    def test_session_alive_delegates_to_session_is_alive(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = True
+        wt._session = mock_session
+        assert wt.session_alive is True
+        mock_session.is_alive.return_value = False
+        assert wt.session_alive is False
+
+    def test_run_halts_on_claude_leak_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ClaudeLeakError in the worker loop calls os._exit(3)."""
+        from kennel import claude
+        from kennel import worker as worker_module
+
+        wt = self._make_thread(tmp_path)
+        exits: list[int] = []
+        monkeypatch.setattr(worker_module.os, "_exit", exits.append)
+        # Force the loop to raise a leak error on the first iteration.
+        wt._registry = MagicMock()
+        wt._registry.report_activity.side_effect = claude.ClaudeLeakError("leak")
+        wt.run()
+        assert exits == [3]

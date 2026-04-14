@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -743,6 +744,7 @@ class Worker:
         self._session = claude.ClaudeSession(
             persona_file,
             work_dir=self.work_dir,
+            repo_name=self._repo_name or None,
         )
         self._session.switch_model("claude-opus-4-6")
 
@@ -1929,6 +1931,18 @@ class WorkerThread(threading.Thread):
         session = self._session
         return session.owner if session is not None else None
 
+    @property
+    def session_alive(self) -> bool:
+        """True if the persistent ClaudeSession subprocess is alive.
+
+        Distinct from :attr:`session_owner` — a session that nobody currently
+        holds still reports alive so status display can distinguish
+        "session exists, idle" from "no session".  Returns ``False`` when no
+        session object exists or its subprocess has exited.
+        """
+        session = self._session
+        return session is not None and session.is_alive()
+
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()
@@ -1946,6 +1960,7 @@ class WorkerThread(threading.Thread):
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
+        claude.set_thread_repo(self._repo_name)
         try:
             while not self._stop:
                 if self._registry is not None:
@@ -1973,11 +1988,21 @@ class WorkerThread(threading.Thread):
                 timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
                 self._wake.wait(timeout=timeout)
                 self._wake.clear()
+        except claude.ClaudeLeakError:
+            # A worker and webhook tried to talk to the same repo's claude
+            # at the same time — halt kennel so the supervisor restarts fresh
+            # rather than let sub-claudes multiply silently.
+            log.exception(
+                "claude leak detected in worker thread for %s — halting",
+                self._repo_name,
+            )
+            os._exit(3)
         except Exception as exc:
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
         finally:
+            claude.set_thread_repo(None)
             # Only stop the session on orderly shutdown — a crashed thread
             # leaves it alive so the registry can hand it to the replacement.
             if self._stop and self._session is not None:

@@ -157,6 +157,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
@@ -191,9 +192,35 @@ class TestGetEndpoint:
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
+        WebhookHandler.registry.get_session_alive.return_value = True
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["session_owner"] == "worker-home"
+
+    def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="idle",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = True
+        resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        assert data[0]["session_alive"] is True
+        assert data[0]["session_owner"] is None
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -218,6 +245,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -255,6 +283,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["is_stuck"] is True
@@ -647,6 +676,70 @@ class TestProcessAction:
         WebhookHandler.registry.report_activity.assert_called_with(
             "owner/repo", "handling webhook action", busy=True
         )
+
+    def test_status_endpoint_includes_claude_talker(self, server: tuple) -> None:
+        """Active ClaudeTalker appears in /status as a structured object."""
+        from datetime import datetime, timezone
+
+        from kennel.claude import ClaudeTalker
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        talker = ClaudeTalker(
+            repo_name="owner/repo",
+            thread_name="worker-repo",
+            kind="worker",
+            description="persistent session turn",
+            claude_pid=12345,
+            started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
+        )
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="running",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = True
+        with patch("kennel.claude.get_talker", return_value=talker):
+            resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        talker_data = data[0]["claude_talker"]
+        assert talker_data["repo_name"] == "owner/repo"
+        assert talker_data["thread_name"] == "worker-repo"
+        assert talker_data["kind"] == "worker"
+        assert talker_data["claude_pid"] == 12345
+
+    def test_claude_leak_halts_process(
+        self,
+        server: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ClaudeLeakError from a webhook handler calls os._exit(3)."""
+        from kennel import claude
+        from kennel import server as server_module
+
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 99, "merged": True},
+        }
+        WebhookHandler.gh = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock(
+            side_effect=claude.ClaudeLeakError("leaked")
+        )
+        exits: list[int] = []
+        monkeypatch.setattr(server_module.os, "_exit", exits.append)
+        _post_webhook(url, cfg, "pull_request", payload)
+        time.sleep(0.2)
+        assert exits == [3]
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server

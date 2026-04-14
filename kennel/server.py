@@ -16,8 +16,10 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
+from kennel import claude
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
@@ -56,6 +58,23 @@ class PreflightError(RuntimeError):
 def _runner_dir() -> Path:
     """Return the runner clone directory — where the running kennel code lives."""
     return Path(__file__).resolve().parents[1]
+
+
+def _serialize_talker(talker: claude.ClaudeTalker | None) -> dict[str, Any] | None:
+    """Convert a :class:`~kennel.claude.ClaudeTalker` to a JSON-friendly dict.
+
+    Returns ``None`` when nobody is talking to claude for the repo.
+    """
+    if talker is None:
+        return None
+    return {
+        "repo_name": talker.repo_name,
+        "thread_name": talker.thread_name,
+        "kind": talker.kind,
+        "description": talker.description,
+        "claude_pid": talker.claude_pid,
+        "started_at": talker.started_at.isoformat(),
+    }
 
 
 def _parse_repo_from_url(url: str) -> str | None:
@@ -393,8 +412,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _process_action(self, action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
-        with self.registry.webhook_activity(repo_cfg.name, description):
-            self._process_action_inner(action, repo_cfg)
+        claude.set_thread_repo(repo_cfg.name)
+        try:
+            with self.registry.webhook_activity(repo_cfg.name, description):
+                self._process_action_inner(action, repo_cfg)
+        except claude.ClaudeLeakError:
+            # A webhook and a worker tried to talk to the same repo's claude
+            # at the same time — the only safe action is to halt the whole
+            # process so the supervisor (start-kennel.sh) restarts us fresh.
+            log.exception(
+                "claude leak detected in webhook handler for %s — halting",
+                repo_cfg.name,
+            )
+            os._exit(3)
+        finally:
+            claude.set_thread_repo(None)
 
     def _describe_action(self, action) -> str:
         """Short label for status display — what this webhook handler is doing."""
@@ -468,6 +500,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             # Non-comment events just trigger kennel worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)
+        except claude.ClaudeLeakError:
+            # Let the outer _process_action handler halt kennel — we must not
+            # swallow a leak into the generic "confused reaction" path below.
+            raise
         except Exception:
             log.exception("error processing action")
             self._signal_action_error(action)
@@ -548,6 +584,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "worker_uptime_seconds": worker_uptime,
                         "webhook_activities": webhooks,
                         "session_owner": self.registry.get_session_owner(a.repo_name),
+                        "session_alive": self.registry.get_session_alive(a.repo_name),
+                        "claude_talker": _serialize_talker(
+                            claude.get_talker(a.repo_name)
+                        ),
                     }
                 )
             body = json.dumps(activities).encode()

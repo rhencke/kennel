@@ -11,7 +11,10 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +69,106 @@ def _register_child(proc: subprocess.Popen) -> None:
 def _unregister_child(proc: subprocess.Popen) -> None:
     with _active_children_lock:
         _active_children.discard(proc)
+
+
+# ── Claude-talker registry ────────────────────────────────────────────────────
+# At most one thread per repo may be "talking to" a claude subprocess at any
+# moment — either via the persistent :class:`ClaudeSession` lock or via a
+# one-shot ``claude --print`` (streaming or batch).  Concurrent registration
+# for the same repo means something is leaking a sub-claude and we halt loud
+# rather than silently proliferate processes.
+
+
+class ClaudeLeakError(RuntimeError):
+    """Raised when a second thread tries to talk to claude for a repo that
+    already has an active talker.  Fatal — kennel halts rather than let
+    sub-claudes multiply silently."""
+
+
+@dataclass(frozen=True)
+class ClaudeTalker:
+    """Snapshot of the thread currently driving a claude subprocess.
+
+    *kind* distinguishes between the persistent session path (``"worker"`` —
+    the worker thread is inside a ``with session:`` block) and one-shot
+    ``claude --print`` invocations from a webhook handler (``"webhook"``).
+    *description* is a short human label for status display.
+    """
+
+    repo_name: str
+    thread_name: str
+    kind: Literal["worker", "webhook"]
+    description: str
+    claude_pid: int
+    started_at: datetime
+
+
+_talkers: dict[str, ClaudeTalker] = {}
+_talkers_lock = threading.Lock()
+
+# Thread-local repo_name so downstream one-shot claude calls know which
+# repo they belong to without plumbing repo_name through every helper in
+# :mod:`kennel.events`.  Set at :func:`kennel.server.WebhookHandler._process_action`
+# entry and at :meth:`kennel.worker.WorkerThread.run` entry, cleared on
+# exit.  Reads fall back to ``None`` in tests and tools that do not set it.
+_thread_local: threading.local = threading.local()
+
+
+def set_thread_repo(repo_name: str | None) -> None:
+    """Set (or clear, with ``None``) the repo_name for this thread."""
+    if repo_name is None:
+        if hasattr(_thread_local, "repo_name"):
+            del _thread_local.repo_name
+    else:
+        _thread_local.repo_name = repo_name
+
+
+def current_repo() -> str | None:
+    """Return the repo_name set by :func:`set_thread_repo` on this thread."""
+    return getattr(_thread_local, "repo_name", None)
+
+
+def register_talker(talker: ClaudeTalker) -> None:
+    """Register *talker* as the active claude driver for its repo.
+
+    Raises :class:`ClaudeLeakError` if a talker for the same repo is already
+    registered — the guarantee is one claude per repo at a time.
+    """
+    with _talkers_lock:
+        existing = _talkers.get(talker.repo_name)
+        if existing is not None:
+            raise ClaudeLeakError(
+                f"claude leak for repo {talker.repo_name}: "
+                f"{existing.thread_name} ({existing.kind}, "
+                f"{existing.description}, pid={existing.claude_pid}) "
+                f"still active when {talker.thread_name} ({talker.kind}, "
+                f"{talker.description}, pid={talker.claude_pid}) tried to start"
+            )
+        _talkers[talker.repo_name] = talker
+
+
+def unregister_talker(repo_name: str, thread_name: str) -> None:
+    """Remove the talker entry for *repo_name* if it belongs to *thread_name*.
+
+    Idempotent — safe to call from cleanup paths that may race the registry.
+    Non-matching thread_name is a no-op (defensive against cross-thread
+    cleanup bugs).
+    """
+    with _talkers_lock:
+        existing = _talkers.get(repo_name)
+        if existing is not None and existing.thread_name == thread_name:
+            del _talkers[repo_name]
+
+
+def get_talker(repo_name: str) -> ClaudeTalker | None:
+    """Return the active talker for *repo_name*, or ``None`` if idle."""
+    with _talkers_lock:
+        return _talkers.get(repo_name)
+
+
+def _talker_now() -> datetime:
+    """Seam for tests — override this module attribute to freeze time."""
+    return datetime.now(tz=timezone.utc)
 
 
 def kill_active_children(grace_seconds: float = 2.0) -> None:
@@ -294,6 +397,21 @@ def _run_streaming(
         cwd=cwd,
     )
     _register_child(proc)
+    repo_name = current_repo()
+    thread_name = threading.current_thread().name
+    talker_registered = False
+    if repo_name is not None:
+        register_talker(
+            ClaudeTalker(
+                repo_name=repo_name,
+                thread_name=thread_name,
+                kind="webhook",
+                description=f"one-shot claude --print (pid {proc.pid})",
+                claude_pid=proc.pid,
+                started_at=_talker_now(),
+            )
+        )
+        talker_registered = True
 
     try:
         last_activity = time.monotonic()
@@ -323,6 +441,8 @@ def _run_streaming(
         if proc.returncode != 0:
             raise ClaudeStreamError(proc.returncode)
     finally:
+        if talker_registered and repo_name is not None:
+            unregister_talker(repo_name, thread_name)
         _unregister_child(proc)
 
 
@@ -603,6 +723,7 @@ class ClaudeSession:
         idle_timeout: float = 1800.0,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list, list, list]] = select.select,
+        repo_name: str | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -611,9 +732,14 @@ class ClaudeSession:
         self._popen_fn = popen
         self._lock = threading.Lock()
         self._cancel = threading.Event()
-        self._owner: str | None = None
+        self._repo_name = repo_name
         self._proc = self._spawn()
         _register_child(self._proc)
+
+    @property
+    def repo_name(self) -> str | None:
+        """Repo this session belongs to, for :class:`ClaudeTalker` registration."""
+        return self._repo_name
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O."""
@@ -665,30 +791,58 @@ class ClaudeSession:
     def owner(self) -> str | None:
         """Name of the thread currently holding the session lock, or ``None``.
 
-        Set to :func:`threading.current_thread().name <threading.current_thread>`
-        immediately after the lock is acquired in :meth:`__enter__` and
-        cleared before it is released in :meth:`__exit__`.  Read without
-        holding the lock — safe to poll from status-display threads for a
-        best-effort snapshot of who is actively driving the session.
+        Derived from the global :class:`ClaudeTalker` registry so reads are
+        always serialized through ``_talkers_lock`` — correct under the
+        free-threaded (3.14t) runtime without relying on the GIL.  Returns
+        ``None`` for sessions without a ``repo_name`` (unit-test fixtures)
+        and when the active talker is a webhook rather than the worker.
         """
-        return self._owner
+        if self._repo_name is None:
+            return None
+        talker = get_talker(self._repo_name)
+        if talker is None or talker.kind != "worker":
+            return None
+        return talker.thread_name
 
     def __enter__(self) -> "ClaudeSession":
         """Acquire the session lock, serializing send/receive across threads.
 
-        Records the current thread name in :attr:`owner` so status display can
-        show who holds the session.  Does *not* clear the cancel event — that
-        is deferred to :meth:`iter_events` so a signal that lands between one
-        holder's :meth:`__exit__` and the next holder's :meth:`iter_events` is
-        not silently dropped.
+        Registers a ``worker``-kind :class:`ClaudeTalker` so status surfaces
+        this thread as the one driving claude.  Does *not* clear the cancel
+        event — that is deferred to :meth:`iter_events` so a signal that
+        lands between one holder's :meth:`__exit__` and the next holder's
+        :meth:`iter_events` is not silently dropped.
+
+        Raises :class:`ClaudeLeakError` if another thread is already
+        registered as the talker for this repo — indicates a sub-claude is
+        leaking.  On leak, the session lock is released before raising so the
+        holder we would have taken over from does not deadlock.
         """
         self._lock.acquire()
-        self._owner = threading.current_thread().name
+        if self._repo_name is not None:
+            try:
+                register_talker(
+                    ClaudeTalker(
+                        repo_name=self._repo_name,
+                        thread_name=threading.current_thread().name,
+                        kind="worker",
+                        description="persistent session turn",
+                        claude_pid=self._proc.pid,
+                        started_at=_talker_now(),
+                    )
+                )
+            except ClaudeLeakError:
+                self._lock.release()
+                raise
         return self
 
     def __exit__(self, *args: object) -> None:
-        """Release the session lock.  Clears :attr:`owner` before releasing."""
-        self._owner = None
+        """Release the session lock.  Unregisters the :class:`ClaudeTalker`
+        before releasing the lock so no other thread can race in and see our
+        stale talker entry.
+        """
+        if self._repo_name is not None:
+            unregister_talker(self._repo_name, threading.current_thread().name)
         self._lock.release()
 
     def send(self, content: str) -> None:
