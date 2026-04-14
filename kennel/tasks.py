@@ -526,7 +526,7 @@ def reorder_tasks(
 
     original_ids = frozenset(t["id"] for t in task_list)
     prompt = _rescope_prompt_fn(task_list, commit_summary)
-    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    raw = _print_prompt(prompt, "claude-opus-4-6")
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return

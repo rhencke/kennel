@@ -243,7 +243,7 @@ def maybe_react(
         _print_prompt = claude.print_prompt
     prompts = Prompts(_load_persona(config))
     reaction = (
-        _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15)
+        _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6")
         .lower()
         .split("\n")[0]
         .strip()
@@ -476,7 +476,7 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = _print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
+    answer = _print_prompt(prompt, "claude-haiku-4-5").upper()
     return answer.startswith("YES")
 
 
@@ -496,7 +496,7 @@ def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
-    result = _print_prompt(prompt, "claude-opus-4-6", timeout=15).strip()
+    result = _print_prompt(prompt, "claude-opus-4-6").strip()
     for _ in range(3):
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
@@ -525,7 +525,7 @@ def _triage(
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
-    text = _print_prompt(prompt, "claude-opus-4-6", timeout=15)
+    text = _print_prompt(prompt, "claude-opus-4-6")
     category: str | None = None
     titles: list[str] = []
     for line in text.splitlines() if text else []:

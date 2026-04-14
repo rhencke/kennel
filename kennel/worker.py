@@ -686,7 +686,7 @@ def _write_pr_description(
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
     prompt = rewrite_description_prompt(existing_body, task_list)
-    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    raw = _print_prompt(prompt, "claude-opus-4-6")
     new_desc = _extract_body(raw)
     if not new_desc:
         raise ValueError(
