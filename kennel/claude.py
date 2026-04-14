@@ -676,11 +676,8 @@ class ClaudeSession:
         where the in-flight turn must be cancelled and a follow-up sent.
         """
         self._cancel.set()
-        self._lock.acquire()
-        try:
+        with self._lock:
             self.send(content)
-        finally:
-            self._lock.release()
 
     def preempt(self, content: str) -> None:
         """Signal the in-flight turn to stop and queue a follow-up user turn.
@@ -699,14 +696,11 @@ class ClaudeSession:
         turns must go through the context-manager lock.
         """
         self._cancel.set()
-        self._lock.acquire()
-        try:
+        with self._lock:
             assert self._preempt_queue is not None, (
                 "preempt_queue required for preempt()"
             )
             self._preempt_queue.push(content)
-        finally:
-            self._lock.release()
 
     def take_queued_content(self) -> str | None:
         """Pop and return the oldest queued preempt content, or ``None``.
