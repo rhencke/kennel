@@ -2014,6 +2014,25 @@ class WorkerThread(threading.Thread):
         self._stop = True
         self._wake.set()
 
+    def _create_session(self) -> claude.ClaudeSession:
+        """Spawn the per-worker persistent :class:`~kennel.claude.ClaudeSession`.
+
+        Used from :meth:`run` so the thread's ``_session`` attribute is
+        populated before the inner :class:`Worker` begins — that way the
+        registry's resolver (and therefore :func:`claude.print_prompt`)
+        can find the session from any other thread (status updates, webhook
+        handlers) the moment the worker thread starts up, not only after
+        its first full iteration has completed.
+        """
+        persona_file = _sub_dir() / "persona.md"
+        session = claude.ClaudeSession(
+            persona_file,
+            work_dir=self.work_dir,
+            repo_name=self._repo_name or None,
+        )
+        session.switch_model("claude-opus-4-6")
+        return session
+
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
@@ -2022,6 +2041,19 @@ class WorkerThread(threading.Thread):
             while not self._stop:
                 if self._registry is not None:
                     self._registry.report_activity(self._repo_name, "idle", busy=False)
+                # Create the persistent ClaudeSession eagerly — before the
+                # Worker runs — so it's always reachable via
+                # registry.get_session() for :func:`claude.print_prompt`
+                # callers (e.g. cosmetic set_status on repos with no
+                # eligible issues).  Writing here, on ``self._session``,
+                # rather than inside Worker.create_session, means the
+                # registry's resolver sees the session even while the
+                # Worker is mid-iteration.  Spawning unconditionally is
+                # fine: sessions persist across Worker crashes and idle
+                # between iterations; we'd create one on the first
+                # iteration anyway.
+                if self._session is None:
+                    self._session = self._create_session()
                 worker = Worker(
                     self.work_dir,
                     self._gh,

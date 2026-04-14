@@ -8800,10 +8800,11 @@ class TestWorkerThread:
     # ── session lifecycle ─────────────────────────────────────────────────
 
     def test_session_carried_to_next_iteration(self, tmp_path: Path) -> None:
-        """Session created by one Worker.run() is passed to the next."""
+        """Session pre-created by WorkerThread on first iteration is carried forward."""
         wt = self._make_thread(tmp_path)
         wt._wake = MagicMock()
-        mock_session = MagicMock()
+        pre_session = MagicMock()
+        wt._create_session = MagicMock(return_value=pre_session)
         sessions_received: list = []
 
         def fake_worker_init(
@@ -8830,7 +8831,6 @@ class TestWorkerThread:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                self_w._session = mock_session  # first worker creates a session
                 return 1
             wt._stop = True
             return 0
@@ -8842,8 +8842,12 @@ class TestWorkerThread:
             self._run_thread(wt)
 
         assert len(sessions_received) == 2
-        assert sessions_received[0] is None  # no carry-over on first iteration
-        assert sessions_received[1] is mock_session  # carried forward
+        # WorkerThread pre-creates the session before the first Worker runs,
+        # so the first Worker already inherits it, and subsequent Workers
+        # continue to inherit it (no carry-over / re-create on iteration 2).
+        assert sessions_received[0] is pre_session
+        assert sessions_received[1] is pre_session
+        wt._create_session.assert_called_once()
 
     def test_session_issue_carried_to_next_iteration(self, tmp_path: Path) -> None:
         """session_issue set by one Worker.run() is passed to the next."""
