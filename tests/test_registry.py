@@ -211,6 +211,17 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_pid("foo/bar") == 77777
 
+    def test_get_session_returns_none_for_unknown_repo(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_session("unknown/repo") is None
+
+    def test_get_session_delegates_to_thread(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        fake_session = MagicMock()
+        factory.return_value._session = fake_session
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_session("foo/bar") is fake_session
+
     def test_get_thread_crash_error_returns_thread_crash_error(
         self, tmp_path: Path
     ) -> None:

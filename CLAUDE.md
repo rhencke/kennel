@@ -120,7 +120,13 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
 - **100% test coverage** — CI enforced, no exceptions
 - **ruff** — lint + format on all Python
 - **PRs required** — branch protection on main
-- **Pre-commit hook** — blocks commits that fail format/lint/tests
+- **Pre-commit hook** — blocks commits that fail format/lint/tests.  Before
+  running a test suite or build step "as a good-citizen check", compare the
+  repo pre-commit hook against the GHA jobs marked as required for a PR to
+  `main` (branch ruleset).  If they're reasonably similar, skip the standalone
+  invocation and lean on the pre-commit hook: just attempt the commit (without
+  `--no-verify`).  That's more reliable than guessing at the build/test steps
+  and avoids running the suite twice (once manually, once via the hook).
 - **One entry point** — `kennel` (heading toward all-threads architecture)
 - **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
 - **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on

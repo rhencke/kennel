@@ -177,6 +177,61 @@ def _talker_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+_session_resolver: Callable[[str], "ClaudeSession | None"] | None = None
+"""Callback the event/webhook layer uses to find its repo's persistent
+:class:`ClaudeSession` — installed once by :mod:`kennel.server` at startup.
+
+Every in-process prompt call goes through the persistent session, so
+this is a required piece of wiring.  Callers (:func:`print_prompt`) fail
+loud if it's missing — the only time that should happen is a forgotten
+resolver install, not a real production path."""
+
+
+def set_session_resolver(
+    resolver: Callable[[str], "ClaudeSession | None"] | None,
+) -> None:
+    """Install (or clear) the session resolver callback."""
+    global _session_resolver
+    _session_resolver = resolver
+
+
+def _session_for_current_repo() -> "ClaudeSession":
+    """Return the live :class:`ClaudeSession` driving the current thread's repo.
+
+    Production always has both a thread-local ``repo_name`` (set by
+    :func:`set_thread_repo` in the worker thread and webhook handler
+    entrypoints) and an installed :func:`set_session_resolver` callback,
+    and every worker reaches this code after :meth:`Worker.create_session`
+    has populated the session.  So this raises rather than falling back —
+    a missing session is a wiring bug, not a condition callers should
+    paper over.
+    """
+    repo = current_repo()
+    if repo is None:
+        raise RuntimeError(
+            "claude.print_prompt called without a thread-local repo_name — "
+            "server.WebhookHandler._process_action and WorkerThread.run both "
+            "set it; this caller is missing the install."
+        )
+    if _session_resolver is None:
+        raise RuntimeError(
+            "claude.print_prompt called before set_session_resolver — "
+            "server._run() installs it at startup; nothing should run before."
+        )
+    session = _session_resolver(repo)
+    if session is None:
+        raise RuntimeError(
+            f"no ClaudeSession registered for repo {repo} — worker thread "
+            "has not yet created its session"
+        )
+    if not session.is_alive():
+        raise RuntimeError(
+            f"ClaudeSession for repo {repo} is not alive — watchdog should "
+            "have restarted the worker thread"
+        )
+    return session
+
+
 def _thread_name_for_id(thread_id: int) -> str | None:
     """Return the human-readable name of the live thread with *thread_id*,
     or ``None`` if that thread has exited.
@@ -309,46 +364,16 @@ def print_prompt(
     prompt: str,
     model: str,
     system_prompt: str | None = None,
-    timeout: int = 30,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    _sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Run claude --print with a prompt, return stdout (empty string on failure).
+    """Run a prompt turn on this thread's persistent :class:`ClaudeSession`,
+    returning the result text.
 
-    Best-effort enrichment: nonzero exit, timeout, and missing CLI all return
-    ``""`` — callers must treat an empty result as "unavailable" rather than
-    as an error.  Uses -p to pass the prompt as a positional argument (no tool
-    access).  Retries up to ``_EMPTY_RETRY_COUNT`` times (with a short delay)
-    when Claude exits 0 but produces no output, to handle transient empty
-    responses.
+    Always routes through the session resolved via :func:`set_session_resolver`
+    — production has one claude subprocess per repo, and every prompt call
+    shares it.  Errors propagate (we fail open, not silently masked).
     """
-    args: list[str] = ["--model", model, "--print"]
-    if system_prompt is not None:
-        args += ["--system-prompt", system_prompt]
-    args += ["-p", prompt]
-    for attempt in range(_EMPTY_RETRY_COUNT + 1):
-        try:
-            result = _claude(*args, timeout=timeout, runner=runner)
-            if result.returncode != 0:
-                log.warning("print_prompt: claude exited %d", result.returncode)
-                return ""
-            text = result.stdout.strip()
-            if text:
-                return text
-            if result.stderr:
-                log.warning("print_prompt: stderr=%r", _Trunc(result.stderr))
-            log.debug("print_prompt: stdout=%r", _Trunc(result.stdout))
-            if attempt < _EMPTY_RETRY_COUNT:
-                log.warning(
-                    "print_prompt: empty output on attempt %d — retrying",
-                    attempt + 1,
-                )
-                _sleep(_EMPTY_RETRY_DELAY)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            log.warning("print_prompt: %s", exc)
-            return ""
-    log.warning("print_prompt: empty output after %d attempts", _EMPTY_RETRY_COUNT + 1)
-    return ""
+    session = _session_for_current_repo()
+    return session.prompt(prompt, model=model, system_prompt=system_prompt)
 
 
 def print_prompt_json(
@@ -356,16 +381,14 @@ def print_prompt_json(
     key: str,
     model: str,
     system_prompt: str | None = None,
-    timeout: int = 30,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Run claude --print, parse JSON from output, return the string at *key*.
+    """Run a prompt turn and parse JSON from the response at *key*.
 
-    Best-effort enrichment: returns ``""`` on any subprocess failure or JSON
-    parse error — callers must treat an empty result as "unavailable".
     Appends a JSON-format instruction to *system_prompt* so Claude outputs
-    {"key": "..."}.  Scans the raw response for a JSON object, so preamble
-    or trailing text from Opus does not corrupt the result.
+    ``{"key": "..."}``.  Scans the raw response for a JSON object so
+    preamble or trailing text from Opus does not corrupt the result.
+    Returns ``""`` if the JSON parse fails (but claude errors propagate
+    from :func:`print_prompt` — we fail open on infrastructure failure).
     """
     json_instruction = (
         f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
@@ -374,9 +397,7 @@ def print_prompt_json(
     full_system = (
         f"{system_prompt}\n\n{json_instruction}" if system_prompt else json_instruction
     )
-    raw = print_prompt(
-        prompt, model, system_prompt=full_system, timeout=timeout, runner=runner
-    )
+    raw = print_prompt(prompt, model, system_prompt=full_system)
     if not raw:
         return ""
     # Try parsing whole output, then scan for JSON objects (handles preamble).
@@ -603,20 +624,12 @@ def generate_status(
     prompt: str,
     system_prompt: str,
     model: str = "claude-opus-4-6",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to generate a GitHub status (two lines: emoji + text).
-
-    Best-effort enrichment: returns ``""`` on any failure — callers must treat
-    an empty result as "status unavailable".
-    """
+    """Ask claude to generate a GitHub status (two lines: emoji + text)."""
     return print_prompt(
         prompt=prompt,
         model=model,
         system_prompt=system_prompt,
-        timeout=timeout,
-        runner=runner,
     )
 
 
@@ -624,20 +637,12 @@ def generate_status_emoji(
     prompt: str,
     system_prompt: str,
     model: str = "claude-opus-4-6",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
-    """Ask claude to choose a single emoji for a GitHub status.
-
-    Best-effort enrichment: returns ``""`` on any failure — callers must treat
-    an empty result as "emoji unavailable".
-    """
+    """Ask claude to choose a single emoji for a GitHub status."""
     return print_prompt(
         prompt=prompt,
         model=model,
         system_prompt=system_prompt,
-        timeout=timeout,
-        runner=runner,
     )
 
 
@@ -753,6 +758,13 @@ class ClaudeSession:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._repo_name = repo_name
+        # True when the most recent :meth:`iter_events` call exited early
+        # because :attr:`_cancel` was set (i.e. another thread preempted the
+        # turn via :meth:`prompt`).  Cleared at the start of each turn.
+        # Callers use this to distinguish "turn completed with empty result"
+        # from "turn was interrupted and should be retried once the lock is
+        # free again".
+        self._last_turn_cancelled = False
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -760,6 +772,19 @@ class ClaudeSession:
     def repo_name(self) -> str | None:
         """Repo this session belongs to, for :class:`ClaudeTalker` registration."""
         return self._repo_name
+
+    @property
+    def last_turn_cancelled(self) -> bool:
+        """``True`` when the most recent :meth:`iter_events` call exited
+        early because another thread set the cancel event (preempted the
+        turn via :meth:`prompt` or :meth:`interrupt`).
+
+        Callers that want resumption semantics can check this after a turn
+        and re-send the same content once the session lock is free again —
+        effectively 'hand the session back to the worker and ask it to
+        resume what it was doing'.
+        """
+        return self._last_turn_cancelled
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O."""
@@ -927,6 +952,44 @@ class ClaudeSession:
             self.consume_until_result()
             self.send(content)
 
+    def prompt(
+        self,
+        content: str,
+        model: str | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Steal the session, send *content* as a user message, return the result.
+
+        Intended as the session-aware replacement for one-shot
+        :func:`print_prompt` / :func:`print_prompt_json` calls on webhook-
+        handler threads.  Runs one full turn on the persistent session:
+
+        1. Signal cancel to wake any current holder out of
+           :meth:`iter_events`.  They exit their turn early, their context
+           manager releases the lock and unregisters their talker.
+        2. Acquire ``self`` as a context manager — blocks while the previous
+           holder is winding down.  Registers a fresh :class:`ClaudeTalker`
+           so status display attributes claude to this thread.
+        3. Send a stream-json ``control_request`` interrupt + drain stale
+           events from the cancelled turn so stdout is clean.
+        4. Switch model if *model* is provided and differs from the session
+           default.
+        5. Send *content* (optionally prefixed with *system_prompt*) and
+           consume until the result boundary, returning the text.
+        """
+        self._cancel.set()
+        with self:
+            self._send_control_interrupt()
+            self.consume_until_result()
+            if model is not None:
+                self.switch_model(model)
+            if system_prompt:
+                body = f"{system_prompt}\n\n---\n\n{content}"
+            else:
+                body = content
+            self.send(body)
+            return self.consume_until_result()
+
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.
 
@@ -959,11 +1022,13 @@ class ClaudeSession:
         """
         assert self._proc.stdout is not None
         self._cancel.clear()
+        self._last_turn_cancelled = False
         last_activity = time.monotonic()
 
         while True:
             if self._cancel.is_set():
                 log.debug("ClaudeSession: cancelled — exiting turn early")
+                self._last_turn_cancelled = True
                 break
             ready, _, _ = self._selector(
                 [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL

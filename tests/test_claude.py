@@ -86,213 +86,131 @@ class TestClaudeHelper:
         assert mock_run.call_args.kwargs["input"] is None
 
 
+@pytest.fixture
+def session_resolver():
+    """Install a session resolver that returns a MagicMock session for any
+    repo, and wire the thread-local repo so ``print_prompt`` can find it.
+    Yields the fake session so tests can assert on ``session.prompt.*``.
+    """
+    from kennel import claude as claude_module
+
+    fake = MagicMock()
+    fake.is_alive.return_value = True
+    claude_module.set_session_resolver(lambda repo: fake)
+    claude_module.set_thread_repo("owner/repo")
+    try:
+        yield fake
+    finally:
+        claude_module.set_session_resolver(None)
+        claude_module.set_thread_repo(None)
+
+
 class TestPrintPrompt:
-    def test_returns_stripped_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed("  hello world  \n"))
-        assert print_prompt("hi", "claude-opus-4-6", runner=mock_run) == "hello world"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed("err", returncode=1))
-        mock_sleep = MagicMock()
-        assert (
-            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
+    def test_delegates_to_session_prompt(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "hello"
+        assert print_prompt("hi", "claude-opus-4-6") == "hello"
+        session_resolver.prompt.assert_called_once_with(
+            "hi", model="claude-opus-4-6", system_prompt=None
         )
-        mock_run.assert_called_once()
-        mock_sleep.assert_not_called()
 
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        mock_sleep = MagicMock()
-        assert (
-            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
-        mock_run.assert_called_once()
-        mock_sleep.assert_not_called()
+    def test_passes_system_prompt(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "ok"
+        print_prompt("q", "claude-opus-4-6", system_prompt="be fido")
+        assert session_resolver.prompt.call_args.kwargs["system_prompt"] == "be fido"
 
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        mock_sleep = MagicMock()
-        assert (
-            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
-        mock_run.assert_called_once()
-        mock_sleep.assert_not_called()
+    def test_raises_without_repo_set(self) -> None:
+        """No thread_repo → wiring bug, raise loud."""
+        with pytest.raises(RuntimeError, match="without a thread-local repo_name"):
+            print_prompt("q", "claude-opus-4-6")
 
-    def test_retries_on_empty_output_then_succeeds(self) -> None:
-        mock_run = MagicMock(
-            side_effect=[_completed(""), _completed(""), _completed("hello")]
-        )
-        mock_sleep = MagicMock()
-        assert (
-            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == "hello"
-        )
-        assert mock_run.call_count == 3
-        assert mock_sleep.call_count == 2
+    def test_raises_without_resolver_installed(self) -> None:
+        from kennel import claude as claude_module
 
-    def test_returns_empty_after_all_retries_exhausted(self) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        mock_sleep = MagicMock()
-        assert (
-            print_prompt("hi", "claude-opus-4-6", runner=mock_run, _sleep=mock_sleep)
-            == ""
-        )
-        assert mock_run.call_count == 3
-        assert mock_sleep.call_count == 2
+        claude_module.set_thread_repo("owner/repo")
+        try:
+            with pytest.raises(RuntimeError, match="before set_session_resolver"):
+                print_prompt("q", "claude-opus-4-6")
+        finally:
+            claude_module.set_thread_repo(None)
 
-    def test_includes_system_prompt(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        print_prompt(
-            "question", "claude-opus-4-6", system_prompt="be helpful", runner=mock_run
-        )
-        cmd = mock_run.call_args.args[0]
-        assert "--system-prompt" in cmd
-        assert "be helpful" in cmd
+    def test_raises_when_session_missing(self) -> None:
+        from kennel import claude as claude_module
 
-    def test_no_system_prompt_arg_when_none(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        print_prompt("q", "claude-opus-4-6", system_prompt=None, runner=mock_run)
-        cmd = mock_run.call_args.args[0]
-        assert "--system-prompt" not in cmd
+        claude_module.set_session_resolver(lambda repo: None)
+        claude_module.set_thread_repo("owner/repo")
+        try:
+            with pytest.raises(RuntimeError, match="no ClaudeSession registered"):
+                print_prompt("q", "claude-opus-4-6")
+        finally:
+            claude_module.set_session_resolver(None)
+            claude_module.set_thread_repo(None)
 
-    def test_passes_model(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        print_prompt("q", "claude-haiku-4-5-20251001", runner=mock_run)
-        cmd = mock_run.call_args.args[0]
-        assert "--model" in cmd
-        assert "claude-haiku-4-5-20251001" in cmd
+    def test_raises_when_session_not_alive(self) -> None:
+        from kennel import claude as claude_module
 
-    def test_passes_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        print_prompt("q", "claude-opus-4-6", timeout=7, runner=mock_run)
-        assert mock_run.call_args.kwargs["timeout"] == 7
+        dead = MagicMock()
+        dead.is_alive.return_value = False
+        claude_module.set_session_resolver(lambda repo: dead)
+        claude_module.set_thread_repo("owner/repo")
+        try:
+            with pytest.raises(RuntimeError, match="is not alive"):
+                print_prompt("q", "claude-opus-4-6")
+        finally:
+            claude_module.set_session_resolver(None)
+            claude_module.set_thread_repo(None)
 
-    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
-        mock_run = MagicMock(return_value=_completed("", stderr="Rate limit exceeded"))
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
-        assert "Rate limit exceeded" in caplog.text
-
-    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
-        mock_run = MagicMock(return_value=_completed("   \n  "))
-        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
-        assert "stdout=" in caplog.text
-
-    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
-        assert "stderr=" not in caplog.text
+    def test_session_errors_propagate(self, session_resolver) -> None:
+        """Session errors must not be masked — fail open, not silently."""
+        session_resolver.prompt.side_effect = ClaudeStreamError(1)
+        with pytest.raises(ClaudeStreamError):
+            print_prompt("q", "claude-opus-4-6")
 
 
 class TestPrintPromptJson:
-    def test_extracts_key_from_clean_json(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"description": "Fixes bug."}'))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == "Fixes bug."
-        )
+    def test_extracts_key_from_clean_json(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = '{"description": "Fixes bug."}'
+        assert print_prompt_json("q", "description", "claude-opus-4-6") == "Fixes bug."
 
-    def test_extracts_key_when_preamble_present(self) -> None:
-        mock_run = MagicMock(
-            return_value=_completed(
-                'Sure! Here you go: {"description": "Adds feature."} Done.'
-            )
+    def test_extracts_key_when_preamble_present(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = (
+            'Sure! Here: {"description": "Adds feature."} Done.'
         )
         assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == "Adds feature."
+            print_prompt_json("q", "description", "claude-opus-4-6") == "Adds feature."
         )
 
-    def test_returns_empty_when_key_missing(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"other": "value"}'))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
+    def test_returns_empty_when_key_missing(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = '{"other": "value"}'
+        assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
 
-    def test_returns_empty_on_no_json(self) -> None:
-        mock_run = MagicMock(return_value=_completed("just plain text"))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
+    def test_returns_empty_on_no_json(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "just plain text"
+        assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
 
-    def test_returns_empty_on_empty_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
+    def test_returns_empty_on_empty_output(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = ""
+        assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
 
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(
-            return_value=_completed('{"description": "x"}', returncode=1)
-        )
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
+    def test_non_string_value_is_ignored(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = '{"description": 42}'
+        assert print_prompt_json("q", "description", "claude-opus-4-6") == ""
 
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
-
-    def test_appends_json_instruction_to_system_prompt(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"description": "x"}'))
+    def test_appends_json_instruction_to_system_prompt(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = '{"description": "x"}'
         print_prompt_json(
-            "q",
-            "description",
-            "claude-opus-4-6",
-            system_prompt="be helpful",
-            runner=mock_run,
+            "q", "description", "claude-opus-4-6", system_prompt="be helpful"
         )
-        cmd = mock_run.call_args.args[0]
-        assert "--system-prompt" in cmd
-        idx = cmd.index("--system-prompt")
-        combined = cmd[idx + 1]
-        assert "be helpful" in combined
-        assert "description" in combined
+        sent_system = session_resolver.prompt.call_args.kwargs["system_prompt"]
+        assert "be helpful" in sent_system
+        assert "description" in sent_system
 
-    def test_uses_json_instruction_as_only_system_prompt_when_none_given(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"description": "x"}'))
-        print_prompt_json(
-            "q", "description", "claude-opus-4-6", system_prompt=None, runner=mock_run
-        )
-        cmd = mock_run.call_args.args[0]
-        assert "--system-prompt" in cmd
-        idx = cmd.index("--system-prompt")
-        assert "description" in cmd[idx + 1]
-
-    def test_non_string_value_is_ignored(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"description": 42}'))
-        assert (
-            print_prompt_json("q", "description", "claude-opus-4-6", runner=mock_run)
-            == ""
-        )
-
-    def test_passes_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed('{"k": "v"}'))
-        print_prompt_json(
-            "q", "k", "claude-haiku-4-5-20251001", timeout=7, runner=mock_run
-        )
-        cmd = mock_run.call_args.args[0]
-        assert "claude-haiku-4-5-20251001" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 7
+    def test_uses_json_instruction_as_only_system_prompt_when_none_given(
+        self, session_resolver
+    ) -> None:
+        session_resolver.prompt.return_value = '{"description": "x"}'
+        print_prompt_json("q", "description", "claude-opus-4-6", system_prompt=None)
+        sent_system = session_resolver.prompt.call_args.kwargs["system_prompt"]
+        assert "description" in sent_system
 
 
 class TestRunStreaming:
@@ -652,43 +570,22 @@ class TestGenerateBranchName:
 
 
 class TestGenerateStatus:
-    def test_returns_two_lines(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🐶\ncoding up a storm"))
-        result = generate_status("working on #42", "be fido", runner=mock_run)
-        assert result == "🐶\ncoding up a storm"
-
-    def test_returns_empty_on_failure(self) -> None:
-        mock_run = MagicMock(return_value=_completed("", returncode=1))
-        result = generate_status("working", "sys", runner=mock_run)
-        assert result == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        result = generate_status("working", "sys", runner=mock_run)
-        assert result == ""
-
-    def test_passes_system_prompt(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🚀\nworking"))
-        generate_status("doing stuff", system_prompt="be a dog", runner=mock_run)
-        cmd = mock_run.call_args.args[0]
-        assert "--system-prompt" in cmd
-        assert "be a dog" in cmd
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🐶\nwoof"))
-        generate_status("working", "sys", runner=mock_run)
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_custom_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🐶\nwoof"))
-        generate_status(
-            "working", "sys", model="claude-sonnet-4-6", timeout=5, runner=mock_run
+    def test_delegates_to_session_prompt(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "🐶\ncoding up a storm"
+        assert generate_status("working on #42", "be fido") == "🐶\ncoding up a storm"
+        session_resolver.prompt.assert_called_once_with(
+            "working on #42", model="claude-opus-4-6", system_prompt="be fido"
         )
-        cmd = mock_run.call_args.args[0]
-        assert "claude-sonnet-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 5
+
+    def test_default_model(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "🐶\nwoof"
+        generate_status("working", "sys")
+        assert session_resolver.prompt.call_args.kwargs["model"] == "claude-opus-4-6"
+
+    def test_custom_model(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "🐶\nwoof"
+        generate_status("working", "sys", model="claude-sonnet-4-6")
+        assert session_resolver.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
 
 class TestExtractSessionId:
@@ -942,29 +839,17 @@ class TestGenerateStatusWithSession:
 
 
 class TestGenerateStatusEmoji:
-    def test_returns_emoji(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🐕"))
-        result = generate_status_emoji("pick emoji", "be fido", runner=mock_run)
-        assert result == "🐕"
-
-    def test_returns_empty_on_failure(self) -> None:
-        mock_run = MagicMock(return_value=_completed("", returncode=1))
-        result = generate_status_emoji("pick emoji", "sys", runner=mock_run)
-        assert result == ""
-
-    def test_passes_correct_flags(self) -> None:
-        mock_run = MagicMock(return_value=_completed("🐕"))
-        generate_status_emoji(
-            "pick emoji",
-            "be fido",
-            model="claude-sonnet-4-6",
-            timeout=10,
-            runner=mock_run,
+    def test_delegates_to_session_prompt(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "🐕"
+        assert generate_status_emoji("pick emoji", "be fido") == "🐕"
+        session_resolver.prompt.assert_called_once_with(
+            "pick emoji", model="claude-opus-4-6", system_prompt="be fido"
         )
-        cmd = mock_run.call_args.args[0]
-        assert "claude-sonnet-4-6" in cmd
-        assert "be fido" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 10
+
+    def test_custom_model(self, session_resolver) -> None:
+        session_resolver.prompt.return_value = "🐕"
+        generate_status_emoji("pick emoji", "be fido", model="claude-sonnet-4-6")
+        assert session_resolver.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
 
 class TestResumeStatus:
@@ -1134,6 +1019,24 @@ class TestRunStreamingTracksChildren:
         # Was registered (popen sees it not yet in set, but it is by the time
         # the generator runs); after exhaustion it should be unregistered.
         assert proc not in _active_children
+
+    def test_session_for_current_repo_returns_live_session(self) -> None:
+        from kennel import claude as claude_module
+        from kennel.claude import (
+            _session_for_current_repo,
+            set_session_resolver,
+            set_thread_repo,
+        )
+
+        live = MagicMock()
+        live.is_alive.return_value = True
+        set_session_resolver(lambda repo: live if repo == "owner/repo" else None)
+        set_thread_repo("owner/repo")
+        try:
+            assert _session_for_current_repo() is live
+        finally:
+            set_thread_repo(None)
+            claude_module.set_session_resolver(None)
 
     def test_thread_name_for_id_returns_none_when_not_found(self) -> None:
         from kennel.claude import _thread_name_for_id
@@ -1848,6 +1751,73 @@ class TestClaudeSessionLock:
             pass
         assert session.owner is None
         session.stop()
+
+    def test_last_turn_cancelled_false_initially(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.last_turn_cancelled is False
+        session.stop()
+
+    def test_prompt_routes_through_session(self, tmp_path: Path) -> None:
+        """ClaudeSession.prompt cancels, takes the lock, sends, and returns result."""
+        from kennel.claude import ClaudeSession
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        proc = _make_session_proc(
+            [
+                '{"type":"result","result":""}\n',  # drain after interrupt
+                '{"type":"result","result":""}\n',  # /model ack
+                '{"type":"result","result":"hello world"}\n',  # actual turn
+            ]
+        )
+        proc.pid = 11111
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            repo_name="owner/repo",
+        )
+        try:
+            result = session.prompt("hi there", model="claude-opus-4-6")
+            assert result == "hello world"
+            # send() was called: /model line + main content.
+            sent = [call.args[0] for call in proc.stdin.write.call_args_list]
+            combined = "".join(sent)
+            assert "/model claude-opus-4-6" in combined
+            assert "hi there" in combined
+        finally:
+            session.stop()
+
+    def test_prompt_prepends_system_prompt_to_body(self, tmp_path: Path) -> None:
+        from kennel.claude import ClaudeSession
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        proc = _make_session_proc(
+            [
+                '{"type":"result","result":""}\n',
+                '{"type":"result","result":"ok"}\n',
+            ]
+        )
+        proc.pid = 22222
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            repo_name="owner/repo",
+        )
+        try:
+            session.prompt("the question", system_prompt="extra instructions")
+            sent = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+            assert "extra instructions\\n\\n---\\n\\nthe question" in sent
+        finally:
+            session.stop()
 
     def test_pid_property_returns_popen_pid(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])

@@ -2477,19 +2477,43 @@ class TestClaudeStart:
 
     def test_session_path_returns_empty_string(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        result = claude_start(fido_dir, session=session)
+        assert result == ""
+
+    def test_session_path_retries_on_preempt(self, tmp_path: Path) -> None:
+        """_run_session_turn re-enters the session when last_turn_cancelled
+        is True, so a webhook steal → worker re-sends same content."""
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        # First turn: cancelled mid-flight (webhook stole).  Second turn:
+        # completes cleanly.
+        consume_calls = {"n": 0}
+
+        def consume_side_effect() -> str:
+            consume_calls["n"] += 1
+            if consume_calls["n"] == 1:
+                session.last_turn_cancelled = True
+            else:
+                session.last_turn_cancelled = False
+            return ""
+
+        session.consume_until_result.side_effect = consume_side_effect
+        claude_start(fido_dir, session=session)
+        assert session.send.call_count == 2
+
+    def _mock_session(self) -> MagicMock:
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=None)
-        result = claude_start(fido_dir, session=session)
-        assert result == ""
+        session.last_turn_cancelled = False
+        return session
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         (fido_dir / "skill").write_text("setup instructions")
         (fido_dir / "prompt").write_text("the task prompt")
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_start(fido_dir, session=session)
         session.send.assert_called_once_with(
             "setup instructions\n\n---\n\nthe task prompt"
@@ -2497,26 +2521,20 @@ class TestClaudeStart:
 
     def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_start(fido_dir, session=session)
         session.consume_until_result.assert_called_once()
 
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
             claude_start(fido_dir, session=session)
         mock_ppf.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_start(fido_dir, session=session)
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()
@@ -2610,19 +2628,22 @@ class TestClaudeRun:
 
     def test_session_path_returns_empty_tuple(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        result = claude_run(fido_dir, session=session)
+        assert result == ("", "")
+
+    def _mock_session(self) -> MagicMock:
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=None)
-        result = claude_run(fido_dir, session=session)
-        assert result == ("", "")
+        session.last_turn_cancelled = False
+        return session
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         (fido_dir / "skill").write_text("task instructions")
         (fido_dir / "prompt").write_text("run this task")
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_run(fido_dir, session=session)
         session.send.assert_called_once_with(
             "task instructions\n\n---\n\nrun this task"
@@ -2630,26 +2651,20 @@ class TestClaudeRun:
 
     def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_run(fido_dir, session=session)
         session.consume_until_result.assert_called_once()
 
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
             claude_run(fido_dir, session=session)
         mock_ppf.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=None)
+        session = self._mock_session()
         claude_run(fido_dir, session=session)
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()

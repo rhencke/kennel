@@ -223,9 +223,7 @@ def claude_start(
     worker's crash handler.
     """
     if session is not None:
-        with session:
-            session.send(_session_turn_prompt(fido_dir))
-            session.consume_until_result()
+        _run_session_turn(session, _session_turn_prompt(fido_dir))
         return ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
@@ -233,6 +231,31 @@ def claude_start(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
     return claude.extract_session_id(output)
+
+
+def _run_session_turn(session: claude.ClaudeSession, content: str) -> str:
+    """Send *content* through *session* and return the result text.
+
+    Retries indefinitely when a webhook handler preempts the turn mid-flight
+    (detected via :attr:`~kennel.claude.ClaudeSession.last_turn_cancelled`).
+    No bound on the retry count — replying to a burst of PR review comments
+    is higher priority than worker development, so the worker yields as
+    many times as there are pending webhooks and picks up its turn once
+    the backlog has drained.  Each webhook is itself one-shot on the
+    webhook side; the loop is here, not on the webhook.
+    """
+    attempt = 0
+    while True:
+        with session:
+            session.send(content)
+            result = session.consume_until_result()
+            # ``is True`` rather than truthiness so a MagicMock session in
+            # tests (where the attribute default is a MagicMock, which is
+            # itself truthy) doesn't spin the loop forever.
+            if session.last_turn_cancelled is not True:
+                return result
+        attempt += 1
+        log.info("session turn preempted mid-flight — retry %d", attempt)
 
 
 def _session_turn_prompt(fido_dir: Path) -> str:
@@ -271,9 +294,7 @@ def claude_run(
     worker's crash handler.
     """
     if session is not None:
-        with session:
-            session.send(_session_turn_prompt(fido_dir))
-            session.consume_until_result()
+        _run_session_turn(session, _session_turn_prompt(fido_dir))
         return "", ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"

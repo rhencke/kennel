@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from kennel.claude import ClaudeSession
 from kennel.config import RepoConfig
 from kennel.github import GitHub
 from kennel.worker import WorkerThread
@@ -301,6 +302,18 @@ class WorkerRegistry:
         """
         thread = self._threads.get(repo_name)
         return thread.session_pid if thread is not None else None
+
+    def get_session(self, repo_name: str) -> ClaudeSession | None:
+        """Return the live :class:`~kennel.claude.ClaudeSession` for *repo_name*.
+
+        Used by :func:`kennel.claude.set_session_resolver` so webhook-handler
+        prompt calls can route through the per-repo persistent session
+        instead of spawning extra one-shot subprocesses.  Returns ``None``
+        when no worker thread is registered for the repo or the thread has
+        not yet created its session.
+        """
+        thread = self._threads.get(repo_name)
+        return thread._session if thread is not None else None
 
 
 def _make_thread(
