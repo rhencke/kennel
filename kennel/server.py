@@ -48,6 +48,12 @@ def _runner_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _parse_repo_from_url(url: str) -> str | None:
+    """Extract 'owner/repo' from an SSH or HTTPS git remote URL, or return None."""
+    m = re.search(r"[:/]([^:/]+/[^/]+?)(?:\.git)?$", url)
+    return m.group(1) if m else None
+
+
 def _get_self_repo(
     runner_dir: Path,
     *,
@@ -70,11 +76,51 @@ def _get_self_repo(
         log.error("self-restart: failed to read origin remote: %s", e)
         return None
     url = result.stdout.strip()
-    m = re.search(r"[:/]([^:/]+/[^/]+?)(?:\.git)?$", url)
-    if not m:
+    parsed = _parse_repo_from_url(url)
+    if not parsed:
         log.error("self-restart: could not parse owner/repo from remote url: %r", url)
         return None
-    return m.group(1)
+    return parsed
+
+
+def preflight_repo_identity(
+    repos: dict[str, RepoConfig],
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Verify each configured work_dir is a git repo whose origin matches its name.
+
+    Raises :exc:`SystemExit` if any repo's origin remote can't be read, can't
+    be parsed, or doesn't match the configured ``owner/repo`` name.  This runs
+    once at startup so misconfigured repo mappings fail immediately rather than
+    surfacing as silent divergence deep inside webhook or worker paths.
+    """
+    for name, repo_cfg in repos.items():
+        try:
+            result = _run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(
+                f"preflight: {name}: git remote get-url failed: {e}"
+            ) from e
+        except FileNotFoundError as e:
+            raise SystemExit(f"preflight: {name}: git not found: {e}") from e
+        url = result.stdout.strip()
+        actual = _parse_repo_from_url(url)
+        if actual is None:
+            raise SystemExit(
+                f"preflight: {name}: could not parse owner/repo from origin remote: {url!r}"
+            )
+        if actual != name:
+            raise SystemExit(
+                f"preflight: {name}: origin remote is {actual!r} — expected {name!r}"
+            )
+        log.info("preflight: %s: work_dir identity confirmed", name)
 
 
 def _get_head(
@@ -488,6 +534,7 @@ def run(
     _kill_active_children=kill_active_children,
     _startup_pull=_startup_pull,
     _Watchdog=Watchdog,
+    _preflight_repo_identity=preflight_repo_identity,
 ) -> None:
     config = _from_args()
 
@@ -534,6 +581,7 @@ def run(
     threading.excepthook = _log_thread_exception
 
     _startup_pull()
+    _preflight_repo_identity(config.repos)
 
     _populate_memberships(config)
 
