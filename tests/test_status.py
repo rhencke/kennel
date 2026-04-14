@@ -973,20 +973,20 @@ class TestFormatStatus:
         output = format_status(status)
         assert "claude pid 9999 (running 1m) — crashed 2x: OSError: disk full" in output
 
-    def test_worker_stuck_false_not_shown(self) -> None:
+    def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK" not in output
+        assert "BUSY" not in output
 
-    def test_worker_stuck_true_shown(self) -> None:
+    def test_worker_busy_true_shown(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK" in output
+        assert "BUSY" in output
 
-    def test_stuck_appears_before_crash_info(self) -> None:
+    def test_busy_appears_before_crash_info(self) -> None:
         repo = self._repo(worker_stuck=True, crash_count=1, last_crash_error="err")
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK — crashed 1x: err" in output
+        assert "BUSY — crashed 1x: err" in output

@@ -379,7 +379,7 @@ def format_status(status: KennelStatus) -> str:
             parts.append(claude_str)
 
         if repo.worker_stuck:
-            parts.append("STUCK")
+            parts.append("BUSY")
 
         if repo.crash_count > 0:
             crash_str = f"crashed {repo.crash_count}x"
