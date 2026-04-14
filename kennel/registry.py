@@ -103,11 +103,11 @@ class WorkerRegistry:
         if (
             old_thread is not None
             and not old_thread.is_alive()
-            and not old_thread._stop
+            and not old_thread._stop  # pyright: ignore[reportPrivateUsage]
         ):
             # Crashed thread — rescue the live session before replacing it
-            session, old_thread._session = old_thread._session, None
-            session_issue, old_thread._session_issue = old_thread._session_issue, None
+            session, old_thread._session = old_thread._session, None  # pyright: ignore[reportPrivateUsage]
+            session_issue, old_thread._session_issue = old_thread._session_issue, None  # pyright: ignore[reportPrivateUsage]
         thread = self._factory(repo_cfg, session=session, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         with self._started_at_lock:
@@ -313,7 +313,7 @@ class WorkerRegistry:
         not yet created its session.
         """
         thread = self._threads.get(repo_name)
-        return thread._session if thread is not None else None
+        return thread._session if thread is not None else None  # pyright: ignore[reportPrivateUsage]
 
 
 def _make_thread(
@@ -321,9 +321,9 @@ def _make_thread(
     registry: WorkerRegistry,
     *,
     gh: GitHub,
-    session=None,
-    session_issue=None,
-    _WorkerThread=WorkerThread,
+    session: ClaudeSession | None = None,
+    session_issue: int | None = None,
+    _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client."""
     return _WorkerThread(
@@ -341,7 +341,7 @@ def make_registry(
     repos: dict[str, RepoConfig],
     gh: GitHub,
     *,
-    _thread_factory=_make_thread,
+    _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
@@ -350,7 +350,12 @@ def make_registry(
     (with a mock factory) in tests instead of calling this.
     """
 
-    def factory(cfg: RepoConfig, *, session=None, session_issue=None) -> WorkerThread:
+    def factory(
+        cfg: RepoConfig,
+        *,
+        session: ClaudeSession | None = None,
+        session_issue: int | None = None,
+    ) -> WorkerThread:
         return _thread_factory(
             cfg, registry, gh=gh, session=session, session_issue=session_issue
         )

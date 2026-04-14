@@ -266,7 +266,7 @@ def _git_dir(
         return None
 
 
-def _read_state(fido_dir: Path) -> dict[str, Any]:
+def _read_state(fido_dir: Path) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]  # used by tests
     """Read state.json from fido_dir, returning {} if absent or unreadable."""
     path = fido_dir / "state.json"
     lock_path = fido_dir / "state.lock"
@@ -320,7 +320,9 @@ def _task_position(task_list: list[dict[str, Any]]) -> tuple[int | None, int | N
     return (1, len(non_completed))
 
 
-def _elapsed_since_iso(iso: str | None, *, _now=None) -> int | None:
+def _elapsed_since_iso(
+    iso: str | None, *, _now: Callable[[], datetime] | None = None
+) -> int | None:
     """Return integer seconds since *iso* (an ISO-8601 timestamp), or None."""
     if not iso:
         return None

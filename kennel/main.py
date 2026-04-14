@@ -8,7 +8,7 @@ import sys
 def main(
     argv: list[str] | None = None,
     *,
-    _GitHub=None,
+    _GitHub: type | None = None,
 ) -> None:
     args = sys.argv[1:] if argv is None else argv
 

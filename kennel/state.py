@@ -6,6 +6,7 @@ import fcntl
 import json
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, Generator
@@ -134,7 +135,11 @@ class State(JsonFileStore):
         clear_state(self._fido_dir)
 
 
-def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
+def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker
+    work_dir: Path,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Path:
     """Return the absolute .git directory for *work_dir*."""
     result = _run(
         ["git", "rev-parse", "--absolute-git-dir"],

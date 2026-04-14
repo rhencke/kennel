@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 
 def _settings_path(work_dir: Path) -> Path:
@@ -28,7 +29,7 @@ def ensure_gitexcluded(work_dir: Path) -> None:
         f.write(entry + "\n")
 
 
-def _load(path: Path) -> dict:
+def _load(path: Path) -> dict[str, Any]:
     if path.exists():
         try:
             return json.loads(path.read_text())
@@ -37,12 +38,12 @@ def _load(path: Path) -> dict:
     return {}
 
 
-def _save(path: Path, cfg: dict) -> None:
+def _save(path: Path, cfg: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2))
 
 
-def _hook_entry(command: str, matcher: str = "") -> dict:
+def _hook_entry(command: str, matcher: str = "") -> dict[str, Any]:
     return {"matcher": matcher, "hooks": [{"type": "command", "command": command}]}
 
 

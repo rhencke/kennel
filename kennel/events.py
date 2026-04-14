@@ -5,6 +5,7 @@ import logging
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,13 @@ from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
 
+# Type alias for the claude.print_prompt DI callback.
+# Uses Callable[..., str] because some callsites pass system_prompt= as a kwarg.
+_PrintPrompt = Callable[..., str]
+
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
-_reorder_coalesce: dict[str, dict] = {}
+_reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
 
 
@@ -233,7 +238,7 @@ def maybe_react(
     config: Config,
     gh: GitHub,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
@@ -267,7 +272,7 @@ def reply_to_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
@@ -396,7 +401,7 @@ def reply_to_review(
     gh: GitHub,
     already_replied: set[int] | None = None,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> None:
     """Fetch inline comments from a review and reply to each."""
     if _print_prompt is None:
@@ -455,7 +460,9 @@ def reply_to_review(
             already_replied.add(cid)
 
 
-def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
+def needs_more_context(
+    comment_body: str, *, _print_prompt: _PrintPrompt | None = None
+) -> bool:
     """Ask Haiku whether this comment needs sibling thread context to act on.
 
     Returns True if Haiku thinks the comment is too vague or cross-referential
@@ -479,7 +486,9 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
 _MAX_TITLE_LEN = 80
 
 
-def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
+def _summarize_as_action_item(
+    comment_body: str, *, _print_prompt: _PrintPrompt | None = None
+) -> str:
     """Ask Opus to convert a comment into a short imperative action-item title.
 
     If the result is too long, asks Claude to shorten it up to 3 times before
@@ -511,7 +520,7 @@ def _triage(
     is_bot: bool,
     context: dict[str, Any] | None = None,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> tuple[str, list[str]]:
     """Ask Opus to triage a comment. Returns (category, titles).
 
@@ -551,7 +560,7 @@ def reply_to_issue_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event).
 
@@ -645,8 +654,8 @@ def _maybe_abort_for_new_task(
     new_task: dict[str, Any],
     registry: WorkerRegistry,
     *,
-    _state=None,
-    _tasks=None,
+    _state: Any = None,
+    _tasks: Any = None,
 ) -> None:
     """Abort the current task if the new task has higher priority.
 
@@ -714,7 +723,7 @@ def _notify_thread_change(
     config: Config,
     gh: GitHub,
     *,
-    _print_prompt=None,
+    _print_prompt: _PrintPrompt | None = None,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
 
@@ -787,7 +796,7 @@ def _notify_thread_change(
         log.exception("failed to notify thread %s", comment_id)
 
 
-def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple]:
+def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
     """Summarise task_list as an ordered list of (id, status, title) tuples.
 
     Used by :func:`_rewrite_pr_description` to detect whether the task list
@@ -800,9 +809,9 @@ def _rewrite_pr_description(
     work_dir: Path,
     gh: Any,
     *,
-    _print_prompt=None,
-    _state=None,
-    _tasks=None,
+    _print_prompt: _PrintPrompt | None = None,
+    _state: Any = None,
+    _tasks: Any = None,
     _max_retries: int = 3,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
@@ -821,7 +830,9 @@ def _rewrite_pr_description(
     """
     from kennel.state import State
     from kennel.tasks import Tasks
-    from kennel.worker import _write_pr_description
+    from kennel.worker import (
+        _write_pr_description,  # pyright: ignore[reportPrivateUsage]
+    )
 
     if _state is None:
         _state = State(work_dir / ".git" / "fido")
@@ -911,11 +922,11 @@ def _reorder_tasks_background(
     repo_cfg: RepoConfig | None = None,
     registry: WorkerRegistry | None = None,
     *,
-    _start=threading.Thread.start,
-    _print_prompt=None,
-    _rewrite_fn=None,
-    _reorder_fn=None,
-    _coalesce_state: dict | None = None,
+    _start: Callable[[threading.Thread], None] = threading.Thread.start,
+    _print_prompt: _PrintPrompt | None = None,
+    _rewrite_fn: Callable[..., None] | None = None,
+    _reorder_fn: Callable[..., None] | None = None,
+    _coalesce_state: dict[str, Any] | None = None,
 ) -> None:
     """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
 
@@ -987,8 +998,8 @@ def create_task(
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
     *,
-    _get_commit_summary_fn=_get_commit_summary,
-    _reorder_background_fn=_reorder_tasks_background,
+    _get_commit_summary_fn: Callable[[Path], str] = _get_commit_summary,
+    _reorder_background_fn: Callable[..., None] = _reorder_tasks_background,
     _tasks: Tasks | None = None,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.

@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 log = logging.getLogger(__name__)
 
@@ -57,16 +57,16 @@ class _Trunc:
 # can clean them up on shutdown.  Short-lived ``subprocess.run`` calls cap
 # at 30s and aren't tracked.  Use ``kill_active_children`` from a signal
 # handler to terminate everything before exiting.
-_active_children: set[subprocess.Popen] = set()
+_active_children: set[subprocess.Popen[str]] = set()
 _active_children_lock = threading.Lock()
 
 
-def _register_child(proc: subprocess.Popen) -> None:
+def _register_child(proc: subprocess.Popen[str]) -> None:
     with _active_children_lock:
         _active_children.add(proc)
 
 
-def _unregister_child(proc: subprocess.Popen) -> None:
+def _unregister_child(proc: subprocess.Popen[str]) -> None:
     with _active_children_lock:
         _active_children.discard(proc)
 
@@ -458,7 +458,7 @@ def _run_streaming(
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
     popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
-    selector: Callable[..., tuple[list, list, list]] = select.select,
+    selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
     clock: Callable[[], float] = time.monotonic,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
@@ -789,7 +789,7 @@ class ClaudeSession:
         work_dir: Path | str | None = None,
         idle_timeout: float = 1800.0,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
-        selector: Callable[..., tuple[list, list, list]] = select.select,
+        selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
         repo_name: str | None = None,
         model: str = "claude-opus-4-6",
     ) -> None:
@@ -1113,7 +1113,7 @@ class ClaudeSession:
             _register_child(self._proc)
         log.info("switch_model: new pid %d ready (model=%s)", self._proc.pid, model)
 
-    def iter_events(self) -> Iterator[dict]:
+    def iter_events(self) -> Iterator[dict[str, Any]]:
         """Yield parsed stream-json events for the current turn.
 
         Clears the cancel event at the start so any signal that arrived during

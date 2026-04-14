@@ -22,7 +22,7 @@ from kennel.github import GitHub
 from kennel.prompts import Prompts, rewrite_description_prompt
 from kennel.state import (
     State,
-    _resolve_git_dir,
+    _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
 from kennel.tasks import Tasks
 from kennel.types import TaskStatus, TaskType
@@ -642,7 +642,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    _print_prompt=None,
+    _print_prompt: Callable[..., str] | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -734,11 +734,15 @@ class Worker:
         self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
 
-    def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
+    def resolve_git_dir(
+        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+    ) -> Path:
         """Return the absolute .git directory for self.work_dir."""
         return _resolve_git_dir(self.work_dir, _run=_run)
 
-    def create_context(self, *, _run=subprocess.run) -> WorkerContext:
+    def create_context(
+        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+    ) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
 
         Raises LockHeld if the lock is already held.
@@ -860,10 +864,12 @@ class Worker:
         what: str,
         busy: bool = True,
         *,
-        _generate_status_with_session=claude.generate_status_with_session,
-        _generate_status_emoji=claude.generate_status_emoji,
-        _resume_status=claude.resume_status,
-        _sub_dir_fn=_sub_dir,
+        _generate_status_with_session: Callable[
+            ..., tuple[str, str]
+        ] = claude.generate_status_with_session,
+        _generate_status_emoji: Callable[..., str] = claude.generate_status_emoji,
+        _resume_status: Callable[..., str] = claude.resume_status,
+        _sub_dir_fn: Callable[..., Path] = _sub_dir,
     ) -> None:
         """Set the authenticated user's GitHub status using Claude-generated text.
 
@@ -995,7 +1001,11 @@ class Worker:
         return choice.number
 
     def _git(
-        self, args: list[str], check: bool = True, *, _run=subprocess.run
+        self,
+        args: list[str],
+        check: bool = True,
+        *,
+        _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> subprocess.CompletedProcess[str]:
         """Run a git command in self.work_dir."""
         return _run(
@@ -1527,7 +1537,7 @@ class Worker:
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
-        session_id, output = claude_run(
+        session_id, _output = claude_run(
             fido_dir,
             cwd=self.work_dir,
             session=self._session,
@@ -1563,7 +1573,7 @@ class Worker:
                 "task produced no commits — nudging session (attempt %d)",
                 attempt,
             )
-            session_id, output = claude_run(
+            session_id, _output = claude_run(
                 fido_dir,
                 cwd=self.work_dir,
                 session=self._session,
@@ -2082,8 +2092,8 @@ class WorkerThread(threading.Thread):
                 try:
                     result = worker.run()
                 finally:
-                    self._session = worker._session
-                    self._session_issue = worker._session_issue
+                    self._session = worker._session  # pyright: ignore[reportPrivateUsage]
+                    self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
 
                 if result == 1:
                     # Did work — loop immediately without waiting.

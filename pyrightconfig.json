@@ -1,5 +1,9 @@
 {
   "pythonVersion": "3.14",
   "include": ["kennel"],
-  "typeCheckingMode": "standard"
+  "typeCheckingMode": "strict",
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownParameterType": false
 }

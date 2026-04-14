@@ -866,6 +866,23 @@ class TestProcessAction:
         time.sleep(0.2)
         mock_gh.add_reaction.assert_not_called()
 
+    def test_process_action_error_no_reaction_when_thread_lacks_comment_id(
+        self, server: tuple
+    ) -> None:
+        """No reaction when thread dict exists but has no comment_id key."""
+        from kennel.events import Action
+
+        url, cfg = server
+        handler = WebhookHandler.__new__(WebhookHandler)
+        mock_gh = MagicMock()
+        handler.gh = mock_gh
+        action = Action(
+            prompt="test",
+            thread={"repo": "owner/repo", "pr": 1},
+        )
+        handler._signal_action_error(action)
+        mock_gh.add_reaction.assert_not_called()
+
     def test_process_action_error_reaction_failure_doesnt_crash(
         self, server: tuple
     ) -> None:

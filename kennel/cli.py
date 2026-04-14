@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from kennel.github import GitHub
 from kennel.tasks import Tasks
@@ -20,7 +21,7 @@ class Cmd:
     def __init__(self, *, github: GitHub) -> None:
         self._github = github
 
-    def _resolve_thread_if_ours(self, thread: dict) -> None:
+    def _resolve_thread_if_ours(self, thread: dict[str, Any]) -> None:
         """Resolve the review thread if the last reply came from us."""
         repo = thread.get("repo", "")
         pr = thread.get("pr")
@@ -70,8 +71,8 @@ class Cmd:
         comment_id: int | None = None,
         repo: str | None = None,
         pr: int | None = None,
-    ) -> dict:
-        thread: dict | None = None
+    ) -> dict[str, Any]:
+        thread: dict[str, Any] | None = None
         if comment_id is not None:
             thread = {"comment_id": comment_id}
             if repo:
@@ -131,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None, *, _GitHub=GitHub) -> None:
+def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     cmd = Cmd(github=_GitHub())
