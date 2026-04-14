@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from kennel.config import RepoConfig
+from kennel.state import State
 
 
 @dataclass
@@ -184,8 +185,20 @@ def _fetch_activities(
 
 
 def _claude_pid(fido_dir: Path) -> int | None:
-    """Return the PID of the claude process using fido_dir/system, or None."""
+    """Return the PID of the claude process for this fido_dir, or None.
+
+    Matches both initial sessions (command line includes the system-prompt
+    file under fido_dir/system) and resumed sessions (command line includes
+    ``--resume <session_id>`` from state.json, which doesn't mention the
+    system file).
+    """
     pids = _pgrep(str(fido_dir / "system"))
+    if pids:
+        return pids[0]
+    session_id = State(fido_dir).load().get("setup_session_id")
+    if not session_id:
+        return None
+    pids = _pgrep(session_id)
     return pids[0] if pids else None
 
 

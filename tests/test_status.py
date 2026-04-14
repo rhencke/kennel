@@ -378,17 +378,66 @@ class TestClaudePid:
             result = _claude_pid(fido_dir)
         assert result == 999
 
-    def test_returns_none_when_no_match(self, tmp_path: Path) -> None:
+    def test_returns_none_when_no_match_and_no_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
         with patch("kennel.status._pgrep", return_value=[]):
             result = _claude_pid(fido_dir)
         assert result is None
 
-    def test_searches_for_system_file(self, tmp_path: Path) -> None:
+    def test_searches_for_system_file_first(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
         with patch("kennel.status._pgrep", return_value=[]) as mock:
             _claude_pid(fido_dir)
-        mock.assert_called_once_with(str(fido_dir / "system"))
+        mock.assert_any_call(str(fido_dir / "system"))
+
+    def test_falls_back_to_resumed_session_id(self, tmp_path: Path) -> None:
+        """Resumed sessions run with --resume <id> and don't reference the
+        system file — fall back to matching the session id from state.json."""
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"setup_session_id": "abc-123", "issue": 7})
+
+        def fake_pgrep(pattern: str) -> list[int]:
+            return [42] if pattern == "abc-123" else []
+
+        with patch("kennel.status._pgrep", side_effect=fake_pgrep):
+            result = _claude_pid(fido_dir)
+        assert result == 42
+
+    def test_resumed_fallback_returns_none_when_no_process(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"setup_session_id": "abc-123"})
+        with patch("kennel.status._pgrep", return_value=[]):
+            result = _claude_pid(fido_dir)
+        assert result is None
+
+    def test_resumed_fallback_skipped_when_no_session_id(self, tmp_path: Path) -> None:
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"issue": 7})
+        with patch("kennel.status._pgrep", return_value=[]) as mock:
+            result = _claude_pid(fido_dir)
+        assert result is None
+        # Only the system-file pgrep fires when there's no session id.
+        assert mock.call_count == 1
+
+    def test_resumed_fallback_skipped_when_state_absent(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        with patch("kennel.status._pgrep", return_value=[]):
+            result = _claude_pid(fido_dir)
+        assert result is None
 
 
 class TestGitDir:
