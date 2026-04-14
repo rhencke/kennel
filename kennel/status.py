@@ -48,6 +48,7 @@ class RepoStatus:
     worker_uptime: int | None = None
     webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
     session_owner: str | None = None
+    session_alive: bool = False
 
 
 @dataclass
@@ -198,6 +199,7 @@ def _fetch_activities(
                 "worker_uptime_seconds": item.get("worker_uptime_seconds"),
                 "webhook_activities": item.get("webhook_activities", []),
                 "session_owner": item.get("session_owner"),
+                "session_alive": item.get("session_alive", False),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -320,6 +322,7 @@ def repo_status(
     worker_uptime: int | None = None,
     webhook_activities: list[WebhookActivityInfo] | None = None,
     session_owner: str | None = None,
+    session_alive: bool = False,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -347,6 +350,7 @@ def repo_status(
             worker_stuck=worker_stuck,
             webhook_activities=webhook_activities,
             session_owner=session_owner,
+            session_alive=session_alive,
         )
 
     fido_dir = git_dir / "fido"
@@ -393,6 +397,7 @@ def repo_status(
         worker_stuck=worker_stuck,
         webhook_activities=webhook_activities,
         session_owner=session_owner,
+        session_alive=session_alive,
     )
 
 
@@ -433,6 +438,7 @@ def collect() -> KennelStatus:
                 worker_uptime=worker_uptime_val,
                 webhook_activities=webhook_list,
                 session_owner=info.get("session_owner") if info else None,
+                session_alive=bool(info.get("session_alive")) if info else False,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
@@ -508,9 +514,13 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             parts.append(f"running {_format_uptime(repo.claude_uptime)}")
         if repo.session_owner is not None:
             parts.append(f"held by {repo.session_owner}")
+        elif repo.session_alive:
+            parts.append("session idle")
         if parts:
             claude_str += f" ({', '.join(parts)})"
         body.append(claude_str)
+    elif repo.session_alive:
+        body.append("  └─ session alive (no pgrep match)")
 
     for w in repo.webhook_activities:
         body.append(

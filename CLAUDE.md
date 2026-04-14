@@ -123,6 +123,14 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
 - **Pre-commit hook** — blocks commits that fail format/lint/tests
 - **One entry point** — `kennel` (heading toward all-threads architecture)
 - **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
+- **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on
+  the free-threaded build.  Do **not** rely on the GIL for atomicity.  Every
+  shared mutable state (dicts, sets, lists, counters, attribute mutations
+  observed from other threads) must be guarded by an explicit lock, or use a
+  primitive that documents its own thread-safe contract (`threading.Event`,
+  `queue.Queue`, `threading.local`).  In particular: `dict.setdefault`,
+  attribute reads, and integer increments are **not** safe across threads
+  without a lock.  When in doubt, hold the lock.
 
 ### Dependency injection pattern
 

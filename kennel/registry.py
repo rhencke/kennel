@@ -274,6 +274,16 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread.session_owner if thread is not None else None
 
+    def get_session_alive(self, repo_name: str) -> bool:
+        """Return True if the persistent ClaudeSession subprocess is alive.
+
+        Distinct from :meth:`get_session_owner` — an idle session that nobody
+        currently holds still reports ``session_alive=True`` so status display
+        can distinguish "session exists, idle" from "no session".
+        """
+        thread = self._threads.get(repo_name)
+        return thread.session_alive if thread is not None else False
+
 
 def _make_thread(
     repo_cfg: RepoConfig,
