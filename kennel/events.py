@@ -351,7 +351,6 @@ def reply_to_comment(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
     )
 
     if not body:
@@ -504,7 +503,6 @@ def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             "claude-opus-4-6",
-            timeout=15,
         ).strip()
     return result[:_MAX_TITLE_LEN] if result else comment_body[:_MAX_TITLE_LEN]
 
@@ -614,7 +612,6 @@ def reply_to_issue_comment(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
     )
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
@@ -781,7 +778,6 @@ def _notify_thread_change(
         prompts.persona_wrap(instruction),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=15,
     )
     if not body:
         body = fallback

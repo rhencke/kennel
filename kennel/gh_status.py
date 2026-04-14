@@ -35,7 +35,6 @@ def generate_persona_status(
         prompt=f"Rewrite this status in Fido's voice: {message}",
         model="claude-opus-4-6",
         system_prompt=system,
-        timeout=15,
     )
     return result if result else message[:80]
 
@@ -52,7 +51,6 @@ def generate_persona_emoji(
         key="emoji",
         model="claude-opus-4-6",
         system_prompt=system,
-        timeout=15,
     )
     return result if result else ":dog:"
 
