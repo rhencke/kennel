@@ -6,7 +6,6 @@ import hmac
 import json
 import logging
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -16,6 +15,7 @@ import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
@@ -51,8 +51,18 @@ def _runner_dir() -> Path:
 
 def _parse_repo_from_url(url: str) -> str | None:
     """Extract 'owner/repo' from an SSH or HTTPS git remote URL, or return None."""
-    m = re.search(r"[:/]([^:/]+/[^/]+?)(?:\.git)?$", url)
-    return m.group(1) if m else None
+    parsed = urlparse(url)
+    if parsed.scheme:
+        # Standard URL (https, ssh, git, etc.): path is /owner/repo[.git]
+        path = parsed.path
+    elif ":" in url:
+        # SCP-style SSH: git@github.com:owner/repo[.git]
+        _, path = url.split(":", 1)
+    else:
+        return None
+    path = path.lstrip("/").removesuffix(".git")
+    parts = path.split("/")
+    return path if len(parts) == 2 and all(parts) else None
 
 
 def _get_self_repo(
