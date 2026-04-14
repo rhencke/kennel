@@ -18,9 +18,6 @@ class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
     def __init__(self, *, github: GitHub | None = None) -> None:
-        if github is None:
-            github = GitHub()
-
         self._github = github
 
     def _resolve_thread_if_ours(self, thread: dict) -> None:
@@ -31,9 +28,10 @@ class Cmd:
         if not (repo and pr and comment_id):
             return
 
+        github = self._github if self._github is not None else GitHub()
         try:
-            us = self._github.get_user()
-            comments = self._github.get_pull_comments(repo, pr)
+            us = github.get_user()
+            comments = github.get_pull_comments(repo, pr)
             thread_comments = sorted(
                 [
                     c
@@ -51,13 +49,13 @@ class Cmd:
                 return
 
             owner, repo_name = repo.split("/", 1)
-            threads = self._github.get_review_threads(owner, repo_name, pr)
+            threads = github.get_review_threads(owner, repo_name, pr)
             for t in threads:
                 if t["isResolved"]:
                     continue
                 nodes = t["comments"]["nodes"]
                 if nodes and nodes[0].get("databaseId") == comment_id:
-                    self._github.resolve_thread(t["id"])
+                    github.resolve_thread(t["id"])
                     log.info("thread resolved: %s", t["id"])
                     return
         except Exception as exc:  # noqa: BLE001
