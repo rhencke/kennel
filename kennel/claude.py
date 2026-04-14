@@ -419,6 +419,7 @@ def _run_streaming(
     cwd: Path | str | None = None,
     popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
     selector: Callable[..., tuple[list, list, list]] = select.select,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -455,7 +456,7 @@ def _run_streaming(
         talker_registered = True
 
     try:
-        last_activity = time.monotonic()
+        last_activity = clock()
 
         while True:
             ready, _, _ = selector([proc.stdout], [], [], _SELECT_POLL_INTERVAL)
@@ -465,10 +466,10 @@ def _run_streaming(
                     break  # EOF
                 yield line
                 log.debug(line.rstrip())
-                last_activity = time.monotonic()
+                last_activity = clock()
             elif proc.poll() is not None:
                 break  # process exited
-            elif time.monotonic() - last_activity > idle_timeout:
+            elif clock() - last_activity > idle_timeout:
                 log.warning("claude idle for %.0fs — killing", idle_timeout)
                 proc.kill()
                 proc.wait()
