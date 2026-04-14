@@ -903,6 +903,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -925,6 +926,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
         )
@@ -952,6 +954,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
         )
@@ -979,6 +982,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=mock_kill,
         )
@@ -1016,6 +1020,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -1043,6 +1048,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -1068,6 +1074,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -1105,6 +1112,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -1155,6 +1163,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
         )
 
         repo_handler = next(
@@ -1186,6 +1195,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
             _Watchdog=mock_watchdog_cls,
         )
 
@@ -1216,6 +1226,7 @@ class TestRun:
                 _populate_memberships=MagicMock(),
                 _startup_pull=MagicMock(),
                 _preflight_repo_identity=MagicMock(),
+                _preflight_tools=MagicMock(),
                 _Watchdog=MagicMock(),
             )
             assert _sys.excepthook is not saved_sys
@@ -1410,6 +1421,68 @@ class TestPreflightRepoIdentity:
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos)
+
+    def test_run_calls_preflight_tools(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=mock_preflight,
+        )
+
+        mock_preflight.assert_called_once_with()
+
+
+class TestPreflightTools:
+    def test_succeeds_when_all_tools_found(self) -> None:
+        from kennel.server import preflight_tools
+
+        preflight_tools(_which=lambda _: "/usr/bin/git")  # no exception
+
+    def test_raises_when_git_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "git"
+        with pytest.raises(SystemExit, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_raises_when_gh_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "gh"
+        with pytest.raises(SystemExit, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_raises_when_claude_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "claude"
+        with pytest.raises(SystemExit, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_required_tools_constant(self) -> None:
+        from kennel.server import _REQUIRED_TOOLS
+
+        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude"}
 
 
 class TestGetSelfRepo:

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -121,6 +122,25 @@ def preflight_repo_identity(
                 f"preflight: {name}: origin remote is {actual!r} — expected {name!r}"
             )
         log.info("preflight: %s: work_dir identity confirmed", name)
+
+
+_REQUIRED_TOOLS = ("git", "gh", "claude")
+
+
+def preflight_tools(
+    *,
+    _which: Callable[[str], str | None] = shutil.which,
+) -> None:
+    """Verify that all required CLI tools are on PATH.
+
+    Raises :exc:`SystemExit` naming the first missing tool.  Runs once at
+    startup so a missing binary is caught immediately rather than discovered
+    inside a worker or webhook handler hours later.
+    """
+    for tool in _REQUIRED_TOOLS:
+        if _which(tool) is None:
+            raise SystemExit(f"preflight: required tool not found on PATH: {tool!r}")
+    log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
 def _get_head(
@@ -535,6 +555,7 @@ def run(
     _startup_pull=_startup_pull,
     _Watchdog=Watchdog,
     _preflight_repo_identity=preflight_repo_identity,
+    _preflight_tools=preflight_tools,
 ) -> None:
     config = _from_args()
 
@@ -581,6 +602,7 @@ def run(
     threading.excepthook = _log_thread_exception
 
     _startup_pull()
+    _preflight_tools()
     _preflight_repo_identity(config.repos)
 
     _populate_memberships(config)
