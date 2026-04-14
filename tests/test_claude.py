@@ -8,7 +8,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.claude import (
+    ClaudeSession,
     ClaudeStreamError,
+    _active_children,
     _claude,
     _register_child,
     _unregister_child,
@@ -1113,3 +1115,291 @@ class TestRunStreamingTracksChildren:
         # Was registered (popen sees it not yet in set, but it is by the time
         # the generator runs); after exhaustion it should be unregistered.
         assert proc not in _active_children
+
+
+# ── ClaudeSession tests ───────────────────────────────────────────────────────
+
+
+def _make_session_proc(
+    stdout_lines: list[str],
+    poll_returns: int | None = None,
+) -> MagicMock:
+    """Build a mock Popen object for ClaudeSession tests.
+
+    *stdout_lines* are returned by successive ``readline()`` calls; an empty
+    string is appended automatically to signal EOF.  *poll_returns* is the
+    value ``poll()`` yields (``None`` = still running; ``0`` = exited).
+    """
+    proc = MagicMock(spec=subprocess.Popen)
+    proc.stdin = MagicMock()
+    proc.stdin.closed = False
+    proc.stdout = MagicMock()
+    proc.stdout.readline = MagicMock(side_effect=stdout_lines + [""])
+    proc.stderr = MagicMock()
+    proc.poll = MagicMock(return_value=poll_returns)
+    proc.wait = MagicMock(return_value=0)
+    proc.returncode = 0
+    return proc
+
+
+def _make_session(
+    tmp_path: Path,
+    proc: MagicMock,
+    *,
+    idle_timeout: float = 1800.0,
+) -> ClaudeSession:
+    """Construct a ClaudeSession injecting *proc* as the subprocess."""
+    system_file = tmp_path / "system.md"
+    system_file.write_text("you are fido")
+    fake_popen = MagicMock(return_value=proc)
+    fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+    return ClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        idle_timeout=idle_timeout,
+        popen=fake_popen,
+        selector=fake_selector,
+    )
+
+
+class TestClaudeSessionInit:
+    def test_spawns_with_stream_json_flags(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        cmd = fake_popen.call_args.args[0]
+        assert cmd[0] == "claude"
+        assert "--input-format" in cmd
+        assert "stream-json" in cmd[cmd.index("--input-format") + 1]
+        assert "--output-format" in cmd
+        assert "stream-json" in cmd[cmd.index("--output-format") + 1]
+        assert "--verbose" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--system-prompt-file" in cmd
+        assert str(system_file) in cmd
+
+    def test_opens_stdin_stdout_pipes(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        kwargs = fake_popen.call_args.kwargs
+        assert kwargs["stdin"] == subprocess.PIPE
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["text"] is True
+
+    def test_passes_cwd(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        assert fake_popen.call_args.kwargs["cwd"] == tmp_path
+
+    def test_registers_in_active_children(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        assert proc in _active_children
+        # cleanup
+        session.stop()
+
+
+class TestClaudeSessionSend:
+    def test_writes_json_user_message_to_stdin(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.send("hello fido")
+        written = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(written.strip())
+        assert obj["type"] == "user"
+        assert obj["message"]["role"] == "user"
+        assert obj["message"]["content"] == "hello fido"
+
+    def test_flushes_after_write(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.send("ping")
+        proc.stdin.flush.assert_called()
+
+    def test_appends_newline(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.send("msg")
+        written = proc.stdin.write.call_args.args[0]
+        assert written.endswith("\n")
+
+
+class TestClaudeSessionIterEvents:
+    def test_yields_parsed_json_events(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
+            _json.dumps({"type": "result", "result": "done", "session_id": "s1"})
+            + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        events = list(session.iter_events())
+        assert events[0]["type"] == "assistant"
+        assert events[1]["type"] == "result"
+
+    def test_stops_after_result_event(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "result", "result": "done"}) + "\n",
+            _json.dumps({"type": "assistant", "text": "extra"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        events = list(session.iter_events())
+        # Only the result event should be yielded; extra line is not consumed
+        assert len(events) == 1
+        assert events[0]["type"] == "result"
+
+    def test_stops_after_error_event(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "error", "error": "oops"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        events = list(session.iter_events())
+        assert len(events) == 1
+        assert events[0]["type"] == "error"
+
+    def test_stops_on_eof(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])  # immediately EOF
+        session = _make_session(tmp_path, proc)
+        events = list(session.iter_events())
+        assert events == []
+
+    def test_stops_when_process_exits(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([], poll_returns=0)
+        fake_popen = MagicMock(return_value=proc)
+        # selector never returns ready — forces poll() branch
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        events = list(session.iter_events())
+        assert events == []
+
+    def test_skips_blank_lines(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            "\n",
+            "   \n",
+            _json.dumps({"type": "result", "result": "ok"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        events = list(session.iter_events())
+        assert len(events) == 1
+        assert events[0]["type"] == "result"
+
+    def test_skips_unparseable_lines(self, tmp_path: Path, caplog) -> None:
+        import json as _json
+
+        lines = [
+            "not json at all\n",
+            _json.dumps({"type": "result", "result": "ok"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            events = list(session.iter_events())
+        assert any("unparseable" in r.message for r in caplog.records)
+        assert len(events) == 1
+
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=None)  # never exits
+        fake_popen = MagicMock(return_value=proc)
+        # selector never ready, process never exits → triggers idle timeout
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file,
+            idle_timeout=0.0,
+            popen=fake_popen,
+            selector=fake_selector,
+        )
+        with pytest.raises(ClaudeStreamError) as exc_info:
+            list(session.iter_events())
+        assert exc_info.value.returncode == -1
+        proc.kill.assert_called()
+
+
+class TestClaudeSessionStop:
+    def test_closes_stdin_and_waits(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.stop()
+        proc.stdin.close.assert_called()
+        proc.wait.assert_called()
+
+    def test_unregisters_from_active_children(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert proc in _active_children
+        session.stop()
+        assert proc not in _active_children
+
+    def test_kills_if_wait_times_out(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.wait = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="claude", timeout=2), None]
+        )
+        session = _make_session(tmp_path, proc)
+        session.stop(grace_seconds=0.0)
+        proc.kill.assert_called()
+
+    def test_swallows_oserror_on_stdin_close(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
+        session = _make_session(tmp_path, proc)
+        session.stop()  # must not raise
+
+    def test_swallows_oserror_on_wait(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.wait = MagicMock(side_effect=OSError("already gone"))
+        session = _make_session(tmp_path, proc)
+        session.stop()  # must not raise
+
+    def test_swallows_errors_on_kill_after_timeout(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.wait = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=2), None]
+        )
+        proc.kill = MagicMock(side_effect=ProcessLookupError())
+        session = _make_session(tmp_path, proc)
+        session.stop(grace_seconds=0.0)  # must not raise
+
+    def test_skips_close_when_stdin_already_closed(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.stdin.closed = True
+        session = _make_session(tmp_path, proc)
+        session.stop()
+        proc.stdin.close.assert_not_called()
+        proc.wait.assert_called()

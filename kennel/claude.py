@@ -519,6 +519,129 @@ def generate_status_with_session(
     return "", ""
 
 
+# ── Persistent bidirectional session ─────────────────────────────────────────
+
+
+class ClaudeSession:
+    """A long-lived claude process driven via bidirectional stream-json.
+
+    Spawns ``claude --input-format stream-json --output-format stream-json``
+    and keeps it running across multiple turns.  Each :meth:`send` writes one
+    JSON user message to stdin; :meth:`iter_events` reads structured events
+    from stdout until the turn completes (``type=result`` or ``type=error``).
+
+    Pass *popen* and *selector* to override subprocess creation and
+    ``select.select`` in tests; these default to the real implementations.
+    """
+
+    def __init__(
+        self,
+        system_file: Path,
+        work_dir: Path | str | None = None,
+        idle_timeout: float = 1800.0,
+        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        selector: Callable[..., tuple[list, list, list]] = select.select,
+    ) -> None:
+        self._idle_timeout = idle_timeout
+        self._selector = selector
+        cmd = [
+            "claude",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--system-prompt-file",
+            str(system_file),
+        ]
+        self._proc = popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=work_dir,
+        )
+        _register_child(self._proc)
+
+    def send(self, content: str) -> None:
+        """Write a user message to the session stdin, flushing immediately."""
+        msg = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": content}}
+        )
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+
+    def iter_events(self) -> Iterator[dict]:
+        """Yield parsed stream-json events for the current turn.
+
+        Reads lines from stdout, parsing each as JSON.  Stops (and returns)
+        when a ``type=result`` or ``type=error`` event is yielded, when the
+        process exits (EOF), or when no output arrives for *idle_timeout*
+        seconds (raises :class:`ClaudeStreamError` ``(-1)`` in that case).
+
+        Unparseable lines are logged at WARNING and skipped.
+        """
+        assert self._proc.stdout is not None
+        last_activity = time.monotonic()
+
+        while True:
+            ready, _, _ = self._selector([self._proc.stdout], [], [], 10.0)
+            if ready:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break  # EOF
+                line = line.strip()
+                if not line:
+                    last_activity = time.monotonic()
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    log.warning("ClaudeSession: unparseable line: %r", line[:200])
+                    last_activity = time.monotonic()
+                    continue
+                log.debug("ClaudeSession event: %s", line[:200])
+                last_activity = time.monotonic()
+                yield obj
+                if obj.get("type") in ("result", "error"):
+                    break
+            elif self._proc.poll() is not None:
+                break  # process exited
+            elif time.monotonic() - last_activity > self._idle_timeout:
+                log.warning(
+                    "ClaudeSession: idle for %.0fs — killing", self._idle_timeout
+                )
+                self._proc.kill()
+                self._proc.wait()
+                raise ClaudeStreamError(-1)
+
+    def stop(self, grace_seconds: float = 2.0) -> None:
+        """Shut down the session: close stdin, wait for exit, kill if needed.
+
+        Always unregisters the process from ``_active_children``, even if the
+        process has already exited before :meth:`stop` is called.
+        """
+        try:
+            if self._proc.stdin and not self._proc.stdin.closed:
+                self._proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self._proc.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=1.0)
+            except OSError, ProcessLookupError, subprocess.TimeoutExpired:
+                pass
+        except OSError, ProcessLookupError:
+            pass
+        _unregister_child(self._proc)
+
+
 def resume_status(
     session_id: str,
     prompt: str,
