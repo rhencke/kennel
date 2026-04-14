@@ -547,6 +547,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         ),
                         "worker_uptime_seconds": worker_uptime,
                         "webhook_activities": webhooks,
+                        "session_owner": self.registry.get_session_owner(a.repo_name),
                     }
                 )
             body = json.dumps(activities).encode()

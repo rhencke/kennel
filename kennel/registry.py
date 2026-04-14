@@ -69,7 +69,7 @@ class WorkerRegistry:
         registry.stop_all()          # clean shutdown
     """
 
-    def __init__(self, thread_factory: Callable[[RepoConfig], WorkerThread]) -> None:
+    def __init__(self, thread_factory: Callable[..., WorkerThread]) -> None:
         self._threads: dict[str, WorkerThread] = {}
         self._factory = thread_factory
         self._activities: dict[str, WorkerActivity] = {}
@@ -83,8 +83,24 @@ class WorkerRegistry:
         self._webhook_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
-        """Create and start a WorkerThread for *repo_cfg*."""
-        thread = self._factory(repo_cfg)
+        """Create and start a WorkerThread for *repo_cfg*.
+
+        If a previous thread for this repo crashed (dead but not stopped
+        orderly), its live session is rescued and handed to the replacement so
+        the persistent :class:`~kennel.claude.ClaudeSession` survives the crash.
+        """
+        session = None
+        session_issue = None
+        old_thread = self._threads.get(repo_cfg.name)
+        if (
+            old_thread is not None
+            and not old_thread.is_alive()
+            and not old_thread._stop
+        ):
+            # Crashed thread — rescue the live session before replacing it
+            session, old_thread._session = old_thread._session, None
+            session_issue, old_thread._session_issue = old_thread._session_issue, None
+        thread = self._factory(repo_cfg, session=session, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         with self._started_at_lock:
             self._started_at[repo_cfg.name] = _utcnow()
@@ -248,12 +264,24 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread.crash_error if thread is not None else None
 
+    def get_session_owner(self, repo_name: str) -> str | None:
+        """Return the name of the thread currently holding the ClaudeSession lock.
+
+        Delegates to :attr:`~kennel.worker.WorkerThread.session_owner` on the
+        registered thread.  Returns ``None`` when no thread is registered for
+        the repo, no session exists, or the lock is currently free.
+        """
+        thread = self._threads.get(repo_name)
+        return thread.session_owner if thread is not None else None
+
 
 def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
     *,
     gh: GitHub,
+    session=None,
+    session_issue=None,
     _WorkerThread=WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client."""
@@ -263,6 +291,8 @@ def _make_thread(
         gh,
         registry,
         repo_cfg.membership,
+        session=session,
+        session_issue=session_issue,
     )
 
 
@@ -279,8 +309,10 @@ def make_registry(
     (with a mock factory) in tests instead of calling this.
     """
 
-    def factory(cfg: RepoConfig) -> WorkerThread:
-        return _thread_factory(cfg, registry, gh=gh)
+    def factory(cfg: RepoConfig, *, session=None, session_issue=None) -> WorkerThread:
+        return _thread_factory(
+            cfg, registry, gh=gh, session=session, session_issue=session_issue
+        )
 
     registry = WorkerRegistry(factory)
     for repo_cfg in repos.values():

@@ -197,14 +197,27 @@ def claude_start(
     model: str = "claude-opus-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
+    session: claude.ClaudeSession | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
-    Returns the session_id extracted from stream-json output, or an empty
-    string if the session_id is absent from the output.  Raises
-    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
-    these propagate to the worker's crash handler.
+    When *session* is provided the setup prompt is sent through the
+    persistent session (via :meth:`~claude.ClaudeSession.send` +
+    :meth:`~claude.ClaudeSession.consume_until_result`) and an empty string
+    is returned — there is no subprocess session_id to track.
+
+    When *session* is ``None`` a fresh subprocess is spawned via
+    ``claude.print_prompt_from_file`` and the session_id extracted from its
+    stream-json output is returned.  Raises ``ClaudeStreamError`` or
+    ``FileNotFoundError`` on subprocess failure — these propagate to the
+    worker's crash handler.
     """
+    if session is not None:
+        prompt = (fido_dir / "prompt").read_text()
+        with session:
+            session.send(prompt)
+            session.consume_until_result()
+        return ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = claude.print_prompt_from_file(
@@ -215,27 +228,32 @@ def claude_start(
 
 def claude_run(
     fido_dir: Path,
-    session_id: str = "",
     model: str = "claude-sonnet-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
+    session: claude.ClaudeSession | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
-    If *session_id* is non-empty the existing session is resumed via
-    ``claude --resume``.  Otherwise a new session is started from
-    *fido_dir/system* and *fido_dir/prompt*.
+    When *session* is provided the prompt is sent through the persistent
+    session (via :meth:`~claude.ClaudeSession.send` +
+    :meth:`~claude.ClaudeSession.consume_until_result`) and ``("", "")``
+    is returned.
 
-    Returns ``(session_id, raw_output)`` where *raw_output* is the full
-    stream-json text produced by the claude CLI.  Raises
-    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
-    these propagate to the worker's crash handler.
+    When *session* is ``None`` a new session is started from *fido_dir/system*
+    and *fido_dir/prompt*.  Returns ``(session_id, raw_output)`` where
+    *raw_output* is the full stream-json text.  Raises ``ClaudeStreamError``
+    or ``FileNotFoundError`` on subprocess failure — these propagate to the
+    worker's crash handler.
     """
-    prompt_file = fido_dir / "prompt"
-    if session_id:
-        output = claude.resume_session(session_id, prompt_file, model, timeout, cwd=cwd)
-        return session_id, output
+    if session is not None:
+        prompt = (fido_dir / "prompt").read_text()
+        with session:
+            session.send(prompt)
+            session.consume_until_result()
+        return "", ""
     system_file = fido_dir / "system"
+    prompt_file = fido_dir / "prompt"
     output = claude.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
@@ -458,13 +476,6 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 
-# Number of session-resume attempts with escalating nudges before we
-# abandon the stale session and start a fresh one.  Resuming the same
-# session forever can get stuck in a rut where claude keeps replying
-# with the same "nothing to do" no matter how hard we nudge; rebuilding
-# the context from scratch usually unsticks it.  See #452.
-_NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION: int = 5
-
 
 def _no_commit_nudge(
     attempt: int,
@@ -665,6 +676,8 @@ class Worker:
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        session: claude.ClaudeSession | None = None,
+        session_issue: int | None = None,
         _tasks: Tasks | None = None,
     ) -> None:
         self.work_dir = work_dir
@@ -673,6 +686,8 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
+        self._session: claude.ClaudeSession | None = session
+        self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
 
     def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
@@ -713,6 +728,46 @@ class Worker:
         """Remove hooks and the compact script created by setup_hooks."""
         hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
         (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+    def create_session(self) -> None:
+        """Start a persistent ClaudeSession for this work iteration.
+
+        Uses the fido persona as the session system prompt.  Task-specific
+        instructions are delivered via user messages in later phases.
+        Stores the session on ``self._session`` so worker methods can access it.
+
+        Immediately switches to Opus for the planning phase; the caller is
+        responsible for switching to Sonnet once planning is complete.
+        """
+        persona_file = _sub_dir() / "persona.md"
+        self._session = claude.ClaudeSession(
+            persona_file,
+            work_dir=self.work_dir,
+        )
+        self._session.switch_model("claude-opus-4-6")
+
+    def stop_session(self) -> None:
+        """Stop the ClaudeSession if one is running, then clear it.
+
+        Safe to call when no session has been created (no-op).
+        """
+        if self._session is not None:
+            self._session.stop()
+            self._session = None
+
+    def _ensure_session_alive(self, fido_dir: Path) -> None:  # noqa: ARG002
+        """Restart the session if the claude process has died unexpectedly.
+
+        Called before each work phase (CI, threads, task execution) so tasks
+        are never lost because the session died between iterations.  No-op
+        when the session is healthy or not yet created.
+
+        *fido_dir* is accepted for future use (e.g. writing per-phase context
+        into the session system file) but is not used at this stage.
+        """
+        if self._session is not None and not self._session.is_alive():
+            log.warning("worker: ClaudeSession died — restarting before next phase")
+            self._session.restart()
 
     # ------------------------------------------------------------------
     # Business logic
@@ -972,10 +1027,7 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                session_id = claude_start(fido_dir, cwd=self.work_dir)
-                log.info("setup session: %s", session_id)
-                with State(fido_dir).modify() as state:
-                    state["setup_session_id"] = session_id
+                claude_start(fido_dir, cwd=self.work_dir, session=self._session)
                 if not self._tasks.list():
                     raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
             log.info(
@@ -1017,10 +1069,7 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        session_id = claude_start(fido_dir, cwd=self.work_dir)
-        log.info("setup session: %s", session_id)
-        with State(fido_dir).modify() as state:
-            state["setup_session_id"] = session_id
+        claude_start(fido_dir, cwd=self.work_dir, session=self._session)
 
         if not self._tasks.list():
             raise RuntimeError("setup produced no tasks")
@@ -1161,7 +1210,7 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
@@ -1285,7 +1334,7 @@ class Worker:
             f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir)
+        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
@@ -1426,10 +1475,11 @@ class Worker:
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         with State(fido_dir).modify() as state:
-            setup_session_id = state.get("setup_session_id", "")
             state["current_task_id"] = task["id"]
         session_id, output = claude_run(
-            fido_dir, session_id=setup_session_id, cwd=self.work_dir
+            fido_dir,
+            cwd=self.work_dir,
+            session=self._session,
         )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1454,43 +1504,25 @@ class Worker:
                 )
                 break
             attempt += 1
-            # After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges fail, drop
-            # the stale session and start a fresh one.  Do not give up on
-            # the task — just reset context and keep going.
-            if session_id and attempt > _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION:
-                log.warning(
-                    "task produced no commits after %d nudges — starting fresh session",
-                    _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION,
-                )
-                session_id = ""
             nudge = _no_commit_nudge(
                 attempt, task_title, task["id"], self.work_dir, pr_number
             )
             (fido_dir / "prompt").write_text(nudge)
-            if session_id:
-                log.info(
-                    "task produced no commits — nudging session (attempt %d)",
-                    attempt,
-                )
-                session_id, output = claude_run(
-                    fido_dir, session_id=session_id, cwd=self.work_dir
-                )
-            else:
-                log.info(
-                    "task produced no commits — fresh session with nudge (attempt %d)",
-                    attempt,
-                )
-                session_id, output = claude_run(fido_dir, cwd=self.work_dir)
+            log.info(
+                "task produced no commits — nudging session (attempt %d)",
+                attempt,
+            )
+            session_id, output = claude_run(
+                fido_dir,
+                cwd=self.work_dir,
+                session=self._session,
+            )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
-
-        if session_id:
-            with State(fido_dir).modify() as state:
-                state["setup_session_id"] = session_id
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
@@ -1783,12 +1815,26 @@ class Worker:
             )
 
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
+            session_fresh = self._session is None
+            if session_fresh:
+                self.create_session()
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
                     issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
                 if issue is None:
                     return 0
+
+                if not session_fresh and issue != self._session_issue:
+                    log.info(
+                        "worker: new issue #%s — restarting session at issue boundary",
+                        issue,
+                    )
+                    assert self._session is not None
+                    self._session.restart()
+                    self._session.switch_model("claude-opus-4-6")
+                    session_fresh = True
+                self._session_issue = issue
 
                 issue_data = self.gh.view_issue(repo_ctx.repo, issue)
                 issue_title = issue_data["title"]
@@ -1800,6 +1846,9 @@ class Worker:
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+                if session_fresh and self._session is not None:
+                    self._session.switch_model("claude-sonnet-4-6")
+                self._ensure_session_alive(ctx.fido_dir)
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
@@ -1829,6 +1878,21 @@ class WorkerThread(threading.Thread):
 
     Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
     Call :meth:`stop` to request a clean shutdown.
+
+    **Session persistence**
+
+    ``_session`` and ``_session_issue`` survive individual :class:`Worker`
+    crashes: each new ``Worker`` receives the existing session via the
+    constructor and hands it back after ``run()`` returns (even on exception).
+    When this thread itself crashes, :class:`~kennel.registry.WorkerRegistry`
+    rescues the live session from the dead thread and passes it to the
+    replacement thread via the *session* constructor parameter, so the session
+    persists across both Worker-level and WorkerThread-level crashes.
+
+    Neither ``_session`` nor ``_session_issue`` survive a kennel/home restart
+    — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
+    with both fields set to ``None`` and creates a fresh session on its first
+    iteration.
     """
 
     def __init__(
@@ -1838,6 +1902,8 @@ class WorkerThread(threading.Thread):
         gh: GitHub,
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        session: claude.ClaudeSession | None = None,
+        session_issue: int | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -1849,6 +1915,19 @@ class WorkerThread(threading.Thread):
         self._abort_task = threading.Event()
         self._stop = False
         self.crash_error: str | None = None
+        self._session: claude.ClaudeSession | None = session
+        self._session_issue: int | None = session_issue
+
+    @property
+    def session_owner(self) -> str | None:
+        """Name of the thread currently holding the ClaudeSession lock, or ``None``.
+
+        Delegates to :attr:`~kennel.claude.ClaudeSession.owner` on the active
+        session.  Returns ``None`` when no session exists or the lock is free.
+        Safe to call from any thread — reads a volatile field for display only.
+        """
+        session = self._session
+        return session.owner if session is not None else None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -1871,14 +1950,21 @@ class WorkerThread(threading.Thread):
             while not self._stop:
                 if self._registry is not None:
                     self._registry.report_activity(self._repo_name, "idle", busy=False)
-                result = Worker(
+                worker = Worker(
                     self.work_dir,
                     self._gh,
                     self._abort_task,
                     self._repo_name,
                     self._registry,
                     self._membership,
-                ).run()
+                    session=self._session,
+                    session_issue=self._session_issue,
+                )
+                try:
+                    result = worker.run()
+                finally:
+                    self._session = worker._session
+                    self._session_issue = worker._session_issue
 
                 if result == 1:
                     # Did work — loop immediately without waiting.
@@ -1891,6 +1977,12 @@ class WorkerThread(threading.Thread):
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
+        finally:
+            # Only stop the session on orderly shutdown — a crashed thread
+            # leaves it alive so the registry can hand it to the replacement.
+            if self._stop and self._session is not None:
+                self._session.stop()
+                self._session = None
 
 
 def run(work_dir: Path, *, _GitHub: type[GitHub] = GitHub) -> int:

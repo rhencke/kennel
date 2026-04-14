@@ -409,6 +409,7 @@ class TestFetchActivities:
                 "is_stuck": False,
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
+                "session_owner": None,
             }
         }
 
@@ -442,6 +443,7 @@ class TestFetchActivities:
                 "is_stuck": False,
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
+                "session_owner": None,
             },
             "c/d": {
                 "what": "Fixing CI",
@@ -450,6 +452,7 @@ class TestFetchActivities:
                 "is_stuck": True,
                 "worker_uptime_seconds": None,
                 "webhook_activities": [],
+                "session_owner": None,
             },
         }
 
@@ -856,6 +859,7 @@ class TestCollect:
         is_stuck: bool = False,
         worker_uptime_seconds: int | None = None,
         webhook_activities: list | None = None,
+        session_owner: str | None = None,
     ) -> dict:
         return {
             "what": what,
@@ -864,6 +868,7 @@ class TestCollect:
             "is_stuck": is_stuck,
             "worker_uptime_seconds": worker_uptime_seconds,
             "webhook_activities": webhook_activities or [],
+            "session_owner": session_owner,
         }
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
@@ -919,6 +924,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            session_owner=None,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -949,6 +955,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            session_owner=None,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -972,6 +979,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            session_owner=None,
         )
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
@@ -998,6 +1006,7 @@ class TestCollect:
             worker_stuck=True,
             worker_uptime=None,
             webhook_activities=[],
+            session_owner=None,
         )
 
 
@@ -1097,6 +1106,22 @@ class TestFormatStatus:
         output = format_status(status)
         assert "└─ claude pid 9999" in output
         assert "running" not in output
+
+    def test_claude_pid_with_session_owner(self) -> None:
+        repo = self._repo(
+            issue=1, claude_pid=9999, claude_uptime=60, session_owner="worker-home"
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "└─ claude pid 9999 (running 1m, held by worker-home)" in output
+
+    def test_claude_pid_session_owner_no_uptime(self) -> None:
+        repo = self._repo(
+            issue=1, claude_pid=9999, claude_uptime=None, session_owner="worker-home"
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "└─ claude pid 9999 (held by worker-home)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.

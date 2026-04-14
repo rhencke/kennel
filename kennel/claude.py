@@ -9,10 +9,45 @@ import select
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# How many seconds select.select waits for stdout before checking for
+# process exit or idle-timeout.  Short enough to react quickly, long enough
+# not to busy-loop.
+_SELECT_POLL_INTERVAL = 10.0
+
+# Maximum number of characters included when logging a raw line from the
+# claude subprocess, to keep log records readable.
+_LOG_LINE_TRUNCATE = 200
+
+
+class _Trunc:
+    """Lazy-truncating wrapper for log arguments.
+
+    Pass an instance as a ``%s`` or ``%r`` log argument instead of slicing
+    inline.  The truncation is deferred to format time, so it is free when
+    the log level is disabled.
+
+    Usage::
+
+        log.debug("event: %s", _Trunc(line))
+        log.warning("stderr=%r", _Trunc(result.stderr))
+    """
+
+    __slots__ = ("_s",)
+
+    def __init__(self, s: str) -> None:
+        self._s = s
+
+    def __str__(self) -> str:
+        return self._s[:_LOG_LINE_TRUNCATE]
+
+    def __repr__(self) -> str:
+        return repr(self._s[:_LOG_LINE_TRUNCATE])
 
 
 # Tracked long-running claude subprocesses (the streaming ones), so kennel
@@ -78,6 +113,11 @@ def _claude(
         text=True,
         timeout=timeout,
     )
+
+
+_RETURNCODE_IDLE_TIMEOUT = -1
+"""Sentinel returncode used in :class:`ClaudeStreamError` when the process is
+killed due to an idle timeout rather than exiting with a real non-zero code."""
 
 
 class ClaudeStreamError(Exception):
@@ -167,20 +207,22 @@ def print_prompt(
         try:
             result = _claude(*args, timeout=timeout, runner=runner)
             if result.returncode != 0:
+                log.warning("print_prompt: claude exited %d", result.returncode)
                 return ""
             text = result.stdout.strip()
             if text:
                 return text
             if result.stderr:
-                log.warning("print_prompt: stderr=%r", result.stderr[:200])
-            log.debug("print_prompt: stdout=%r", result.stdout[:200])
+                log.warning("print_prompt: stderr=%r", _Trunc(result.stderr))
+            log.debug("print_prompt: stdout=%r", _Trunc(result.stdout))
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "print_prompt: empty output on attempt %d — retrying",
                     attempt + 1,
                 )
                 _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warning("print_prompt: %s", exc)
             return ""
     log.warning("print_prompt: empty output after %d attempts", _EMPTY_RETRY_COUNT + 1)
     return ""
@@ -237,8 +279,9 @@ def _run_streaming(
     """Run a command, streaming stdout with idle-timeout detection.
 
     Yields each line of stdout as it arrives.  If no new output arrives for
-    *idle_timeout* seconds, the process is killed and ``ClaudeStreamError(-1)``
-    is raised.  If the process exits with a non-zero code,
+    *idle_timeout* seconds, the process is killed and
+    ``ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)`` is raised.  If the process
+    exits with a non-zero code,
     ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
     propagates naturally if the command is not found.
     """
@@ -256,7 +299,7 @@ def _run_streaming(
         last_activity = time.monotonic()
 
         while True:
-            ready, _, _ = selector([proc.stdout], [], [], 10.0)
+            ready, _, _ = selector([proc.stdout], [], [], _SELECT_POLL_INTERVAL)
             if ready:
                 line = proc.stdout.readline()
                 if not line:
@@ -270,7 +313,7 @@ def _run_streaming(
                 log.warning("claude idle for %.0fs — killing", idle_timeout)
                 proc.kill()
                 proc.wait()
-                raise ClaudeStreamError(-1)
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
         proc.wait()
         # Drain any remaining output
@@ -493,6 +536,9 @@ def generate_status_with_session(
                 runner=runner,
             )
             if result.returncode != 0:
+                log.warning(
+                    "generate_status_with_session: claude exited %d", result.returncode
+                )
                 return "", ""
             raw = result.stdout.strip()
             text = extract_result_text(raw)
@@ -501,22 +547,306 @@ def generate_status_with_session(
                 return text, sid
             if result.stderr:
                 log.warning(
-                    "generate_status_with_session: stderr=%r", result.stderr[:200]
+                    "generate_status_with_session: stderr=%r", _Trunc(result.stderr)
                 )
-            log.debug("generate_status_with_session: stdout=%r", result.stdout[:200])
+            log.debug("generate_status_with_session: stdout=%r", _Trunc(result.stdout))
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "generate_status_with_session: empty output on attempt %d — retrying",
                     attempt + 1,
                 )
                 _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warning("generate_status_with_session: %s", exc)
             return "", ""
     log.warning(
         "generate_status_with_session: empty output after %d attempts",
         _EMPTY_RETRY_COUNT + 1,
     )
     return "", ""
+
+
+# ── Persistent bidirectional session ─────────────────────────────────────────
+
+
+class ClaudeSession:
+    """A long-lived claude process driven via bidirectional stream-json.
+
+    Spawns ``claude --input-format stream-json --output-format stream-json``
+    and keeps it running across multiple turns.  Each :meth:`send` writes one
+    JSON user message to stdin; :meth:`iter_events` reads structured events
+    from stdout until the turn completes (``type=result`` or ``type=error``).
+
+    **Lifetime / persistence model**
+
+    The session outlives individual :class:`~kennel.worker.Worker` crashes:
+    :class:`~kennel.worker.WorkerThread` holds the session in
+    ``_session`` across iterations and passes it into each new ``Worker``
+    instance, so an unexpected exception in ``Worker.run()`` does not tear the
+    session down.  The watchdog restarts the thread and the next Worker
+    inherits the same session.
+
+    The session does *not* survive a kennel/home restart.  When kennel
+    replaces itself via ``os.execvp`` (e.g. after a self-update), all
+    in-memory state is lost, including the ``WorkerThread`` and its session.
+    The new process starts with ``_session = None`` and creates a fresh session
+    on the first iteration.
+
+    Pass *popen* and *selector* to override subprocess creation and
+    ``select.select`` in tests; these default to the real implementations.
+    """
+
+    def __init__(
+        self,
+        system_file: Path,
+        work_dir: Path | str | None = None,
+        idle_timeout: float = 1800.0,
+        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        selector: Callable[..., tuple[list, list, list]] = select.select,
+    ) -> None:
+        self._idle_timeout = idle_timeout
+        self._selector = selector
+        self._system_file = system_file
+        self._work_dir = work_dir
+        self._popen_fn = popen
+        self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._owner: str | None = None
+        self._proc = self._spawn()
+        _register_child(self._proc)
+
+    def _spawn(self) -> subprocess.Popen[str]:
+        """Spawn the claude subprocess with bidirectional stream-json I/O."""
+        cmd = [
+            "claude",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--system-prompt-file",
+            str(self._system_file),
+        ]
+        return self._popen_fn(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=self._work_dir,
+        )
+
+    def is_alive(self) -> bool:
+        """Return True if the claude subprocess is still running."""
+        return self._proc.poll() is None
+
+    def restart(self) -> None:
+        """Stop the current subprocess and start a fresh one.
+
+        Unregisters the dead process from ``_active_children``, kills it if
+        still running, then spawns a replacement and registers it.  The
+        conversation transcript is lost — callers are responsible for
+        re-sending any context the new process needs.
+        """
+        log.warning("ClaudeSession: restarting after unexpected process death")
+        _unregister_child(self._proc)
+        if self._proc.poll() is None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=1.0)
+            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
+                raise
+        self._proc = self._spawn()
+        _register_child(self._proc)
+
+    @property
+    def owner(self) -> str | None:
+        """Name of the thread currently holding the session lock, or ``None``.
+
+        Set to :func:`threading.current_thread().name <threading.current_thread>`
+        immediately after the lock is acquired in :meth:`__enter__` and
+        cleared before it is released in :meth:`__exit__`.  Read without
+        holding the lock — safe to poll from status-display threads for a
+        best-effort snapshot of who is actively driving the session.
+        """
+        return self._owner
+
+    def __enter__(self) -> "ClaudeSession":
+        """Acquire the session lock, serializing send/receive across threads.
+
+        Records the current thread name in :attr:`owner` so status display can
+        show who holds the session.  Does *not* clear the cancel event — that
+        is deferred to :meth:`iter_events` so a signal that lands between one
+        holder's :meth:`__exit__` and the next holder's :meth:`iter_events` is
+        not silently dropped.
+        """
+        self._lock.acquire()
+        self._owner = threading.current_thread().name
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        """Release the session lock.  Clears :attr:`owner` before releasing."""
+        self._owner = None
+        self._lock.release()
+
+    def send(self, content: str) -> None:
+        """Write a user message to the session stdin, flushing immediately."""
+        msg = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": content}}
+        )
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+
+    def _send_control_interrupt(self) -> None:
+        """Write a stream-json ``control_request`` interrupt to subprocess stdin.
+
+        Tells the Claude subprocess to abort the current turn at the protocol
+        level.  The subprocess responds with a ``control_response`` on stdout
+        and then emits a ``type=result`` to close the turn.  Call this while
+        holding the session lock so it does not race with other stdin writes.
+        """
+        msg = json.dumps(
+            {
+                "type": "control_request",
+                "request_id": str(uuid.uuid4()),
+                "request": {"subtype": "interrupt"},
+            }
+        )
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+
+    def interrupt(self, content: str) -> None:
+        """Interrupt the in-flight turn at the protocol level, then send *content*.
+
+        One owner-controlled sequence while holding the lock:
+
+        1. Sets the cancel event so any concurrent :meth:`iter_events` caller
+           exits on its next poll cycle and releases the lock.
+        2. Acquires the lock (blocks until the holder exits).
+        3. Sends a stream-json ``control_request`` interrupt so the Claude
+           subprocess aborts the current turn (not just our local reading of it).
+        4. Drains events until the turn boundary (``type=result`` /
+           ``type=error`` / EOF) so the stream is clean for the next caller.
+        5. Sends *content* as the follow-up user message.
+
+        This guarantees no unread old-turn output is left on stdout for the
+        next :meth:`iter_events` caller to inherit.
+        """
+        self._cancel.set()
+        with self._lock:
+            self._send_control_interrupt()
+            self.consume_until_result()
+            self.send(content)
+
+    def switch_model(self, model: str) -> None:
+        """Switch the active model by sending a /model slash command.
+
+        Sends ``/model <model>`` as a user message and drains any response
+        events so the turn boundary is clean before the next call to
+        :meth:`send` + :meth:`iter_events`.
+        """
+        self.send(f"/model {model}")
+        for _ in self.iter_events():
+            pass
+
+    def iter_events(self) -> Iterator[dict]:
+        """Yield parsed stream-json events for the current turn.
+
+        Clears the cancel event at the start so any signal that arrived during
+        the lock-handoff window (between the previous holder's :meth:`__exit__`
+        and this call) is consumed here rather than immediately aborting the
+        new turn.  After that, checks the event on each poll cycle so a
+        concurrent :meth:`interrupt` can abort mid-turn.
+
+        Reads lines from stdout, parsing each as JSON.  Stops (and returns)
+        when a ``type=result`` or ``type=error`` event is yielded, when the
+        process exits (EOF), or when no output arrives for *idle_timeout*
+        seconds (raises :class:`ClaudeStreamError` with
+        :data:`_RETURNCODE_IDLE_TIMEOUT` in that case).
+
+        Raises ``json.JSONDecodeError`` if a non-empty stdout line cannot be
+        parsed — this is a protocol violation from the claude subprocess and
+        should not be silently swallowed.
+        """
+        assert self._proc.stdout is not None
+        self._cancel.clear()
+        last_activity = time.monotonic()
+
+        while True:
+            if self._cancel.is_set():
+                log.debug("ClaudeSession: cancelled — exiting turn early")
+                break
+            ready, _, _ = self._selector(
+                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+            )
+            if ready:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break  # EOF
+                line = line.strip()
+                if not line:
+                    last_activity = time.monotonic()
+                    continue
+                obj = json.loads(line)
+                log.debug("ClaudeSession event: %s", _Trunc(line))
+                last_activity = time.monotonic()
+                yield obj
+                if obj.get("type") in ("result", "error"):
+                    break
+            elif self._proc.poll() is not None:
+                break  # process exited
+            elif time.monotonic() - last_activity > self._idle_timeout:
+                log.warning(
+                    "ClaudeSession: idle for %.0fs — killing", self._idle_timeout
+                )
+                self._proc.kill()
+                self._proc.wait()
+                self.restart()
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
+
+    def consume_until_result(self) -> str:
+        """Drain events for the current turn and return the result text.
+
+        Exhausts :meth:`iter_events` and returns the ``result`` field from
+        the ``type=result`` event, or an empty string if the turn ends
+        without one (EOF, ``type=error``, or idle-timeout kill).
+        """
+        result_text = ""
+        for event in self.iter_events():
+            if event.get("type") == "result" and isinstance(event.get("result"), str):
+                result_text = event["result"]
+        return result_text
+
+    def stop(self, grace_seconds: float = 2.0) -> None:
+        """Shut down the session: close stdin, wait for exit, kill if needed.
+
+        Always unregisters the process from ``_active_children``, even if the
+        process has already exited before :meth:`stop` is called.
+        """
+        try:
+            try:
+                if self._proc.stdin and not self._proc.stdin.closed:
+                    self._proc.stdin.close()
+            except OSError as exc:
+                log.debug("ClaudeSession.stop: stdin close failed: %s", exc)
+                raise
+            try:
+                self._proc.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1.0)
+                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                    log.debug("ClaudeSession.stop: kill/wait failed: %s", exc)
+                    raise
+            except (OSError, ProcessLookupError) as exc:
+                log.debug("ClaudeSession.stop: wait failed: %s", exc)
+        finally:
+            _unregister_child(self._proc)
 
 
 def resume_status(

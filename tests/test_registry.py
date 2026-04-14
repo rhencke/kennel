@@ -29,7 +29,48 @@ class TestWorkerRegistry:
         reg, factory = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
-        factory.assert_called_once_with(cfg)
+        factory.assert_called_once_with(cfg, session=None, session_issue=None)
+
+    def test_start_rescues_session_from_crashed_thread(self, tmp_path: Path) -> None:
+        """Session rescued from a crashed (dead, not _stop) thread and passed to replacement."""
+        mock_session = MagicMock()
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = _repo("foo/bar", tmp_path)
+        # First start — no prior thread
+        reg.start(cfg)
+        # Simulate crash: thread died, _stop is False, session is alive
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = False
+        threads[0]._session = mock_session
+        threads[0]._session_issue = 42
+        # Second start — should rescue session from crashed thread
+        reg.start(cfg)
+        _, kwargs = factory.call_args_list[1]
+        assert kwargs["session"] is mock_session
+        assert kwargs["session_issue"] == 42
+        # Old thread's session must be cleared to prevent double-stop
+        assert threads[0]._session is None
+
+    def test_start_does_not_rescue_session_from_orderly_shutdown_thread(
+        self, tmp_path: Path
+    ) -> None:
+        """No session rescue when the old thread exited via orderly stop()."""
+        mock_session = MagicMock()
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        # Simulate orderly shutdown: _stop is True (session was already stopped)
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = True
+        threads[0]._session = mock_session  # shouldn't happen, but test the guard
+        reg.start(cfg)
+        _, kwargs = factory.call_args_list[1]
+        assert kwargs["session"] is None
+        assert kwargs["session_issue"] is None
 
     def test_start_starts_thread(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
@@ -139,6 +180,16 @@ class TestWorkerRegistry:
     def test_get_thread_crash_error_returns_none_for_unknown_repo(self) -> None:
         reg, _ = self._make_registry()
         assert reg.get_thread_crash_error("unknown/repo") is None
+
+    def test_get_session_owner_returns_none_for_unknown_repo(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_session_owner("unknown/repo") is None
+
+    def test_get_session_owner_delegates_to_thread(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.session_owner = "worker-home"
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_session_owner("foo/bar") == "worker-home"
 
     def test_get_thread_crash_error_returns_thread_crash_error(
         self, tmp_path: Path
@@ -441,6 +492,8 @@ class TestMakeThread:
             mock_gh,
             mock_registry,
             RepoMembership(),
+            session=None,
+            session_issue=None,
         )
         assert result is mock_wt_cls.return_value
 

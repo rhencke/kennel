@@ -16,6 +16,8 @@ Multi-repo: one kennel process handles multiple repos. Each repo has its own tas
 
 **Concurrency model**: one fido per repo, one issue per fido, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two fidos max, running in parallel, each on their own issue.
 
+**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. It does *not* survive a kennel/home restart: `os.execvp` replaces the process entirely, so the new kennel starts with `_session = None` and creates a fresh session on its first iteration.
+
 ## Runner vs workspace clones
 
 Kennel runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.

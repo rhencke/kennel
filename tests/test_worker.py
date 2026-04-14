@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -50,6 +50,20 @@ from kennel.worker import (
     run,
     should_rerequest_review,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_claude_session_spawn(monkeypatch):
+    """Patch ClaudeSession for every test in this module.
+
+    Worker.run() now creates a ClaudeSession on entry.  Without this fixture
+    every test that calls worker.run() would try to spawn a real claude
+    subprocess.  The mock is a MagicMock so all attribute and method accesses
+    (stop, send, iter_events, …) work without raising AttributeError.
+    """
+    from kennel import claude
+
+    monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
 
 
 class TestRepoContextFilter:
@@ -729,6 +743,284 @@ class TestWorker:
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
         return repo_ctx
+
+    # --- create_session / stop_session ---
+
+    def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session()
+        claude.ClaudeSession.assert_called_once()
+
+    def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session()
+        _, kwargs = claude.ClaudeSession.call_args
+        assert kwargs.get("work_dir") == tmp_path
+
+    def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        mock_session = MagicMock()
+        claude.ClaudeSession.return_value = mock_session
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session()
+        mock_session.switch_model.assert_called_once_with("claude-opus-4-6")
+
+    def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
+        from kennel import claude
+
+        mock_session = MagicMock()
+        claude.ClaudeSession.return_value = mock_session
+        worker = Worker(tmp_path, MagicMock())
+        worker.create_session()
+        assert worker._session is mock_session
+
+    def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, MagicMock())
+        worker._session = mock_session
+        worker.stop_session()
+        mock_session.stop.assert_called_once()
+
+    def test_stop_session_clears_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        worker._session = MagicMock()
+        worker.stop_session()
+        assert worker._session is None
+
+    def test_stop_session_is_noop_when_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._session is None
+        worker.stop_session()  # must not raise
+
+    # --- _ensure_session_alive ---
+
+    def test_ensure_session_alive_restarts_dead_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = False
+        worker._session = mock_session
+        worker._ensure_session_alive(tmp_path)
+        mock_session.restart.assert_called_once()
+
+    def test_ensure_session_alive_noop_when_alive(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = True
+        worker._session = mock_session
+        worker._ensure_session_alive(tmp_path)
+        mock_session.restart.assert_not_called()
+
+    def test_ensure_session_alive_noop_when_no_session(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._session is None
+        worker._ensure_session_alive(tmp_path)  # must not raise
+
+    def test_ensure_session_alive_logs_warning_on_restart(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker = Worker(tmp_path, MagicMock())
+        mock_session = MagicMock()
+        mock_session.is_alive.return_value = False
+        worker._session = mock_session
+        with caplog.at_level(logging.WARNING, logger="kennel.worker"):
+            worker._ensure_session_alive(tmp_path)
+        assert any("restart" in r.message.lower() for r in caplog.records)
+
+    def test_run_ensures_session_alive_before_handlers(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_ensure = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive", mock_ensure),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_ensure.assert_called_once_with(mock_ctx.fido_dir)
+
+    def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_create = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session", mock_create),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+        mock_create.assert_called_once_with()
+
+    def test_run_switches_to_sonnet_after_setup_for_fresh_session(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)  # no session — fresh
+        mock_session = MagicMock()
+
+        def set_session(*args, **kwargs):
+            worker._session = mock_session
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session", side_effect=set_session),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_session.switch_model.assert_called_once_with("claude-sonnet-4-6")
+
+    def test_run_does_not_switch_model_for_carry_over_session(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        # same issue as last time — no boundary restart, no model switch
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_session.switch_model.assert_not_called()
+
+    def test_run_restarts_session_at_issue_boundary(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        # session was working on issue 5; now issue 7 is picked — boundary
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=5)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_session.restart.assert_called_once()
+        # opus first (boundary restart), then sonnet (session_fresh path)
+        assert mock_session.switch_model.call_args_list == [
+            call("claude-opus-4-6"),
+            call("claude-sonnet-4-6"),
+        ]
+
+    def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        assert worker._session_issue == 7
+
+    def test_run_does_not_create_session_when_provided(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        mock_session = MagicMock()
+        worker = Worker(tmp_path, gh, session=mock_session)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session") as mock_create,
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+        mock_create.assert_not_called()
+
+    # --- run() ---
 
     def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
         gh = self._make_gh()
@@ -2180,6 +2472,51 @@ class TestClaudeStart:
             claude_start(fido_dir)
         mock_ext.assert_called_once_with(raw)
 
+    # ── Session path ──────────────────────────────────────────────────────
+
+    def test_session_path_returns_empty_string(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        result = claude_start(fido_dir, session=session)
+        assert result == ""
+
+    def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("the task prompt")
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.send.assert_called_once_with("the task prompt")
+
+    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.consume_until_result.assert_called_once()
+
+    def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
+            claude_start(fido_dir, session=session)
+        mock_ppf.assert_not_called()
+
+    def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.__enter__.assert_called_once()
+        session.__exit__.assert_called_once()
+
 
 class TestClaudeRun:
     """Tests for claude_run."""
@@ -2190,44 +2527,6 @@ class TestClaudeRun:
         (fido_dir / "system").write_text("system")
         (fido_dir / "prompt").write_text("prompt")
         return fido_dir
-
-    # ── Resume path ────────────────────────────────────────────────────────
-
-    def test_resume_returns_existing_session_id(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="output text"):
-            session_id, _ = claude_run(fido_dir, session_id="existing-id")
-        assert session_id == "existing-id"
-
-    def test_resume_returns_output(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="stream output"):
-            _, output = claude_run(fido_dir, session_id="sid")
-        assert output == "stream output"
-
-    def test_resume_calls_resume_session_with_correct_args(
-        self, tmp_path: Path
-    ) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(
-                fido_dir,
-                session_id="my-session",
-                model="claude-opus-4-6",
-                timeout=120,
-            )
-        mock_rs.assert_called_once_with(
-            "my-session", fido_dir / "prompt", "claude-opus-4-6", 120, cwd=None
-        )
-
-    def test_resume_does_not_call_print_prompt_from_file(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_session", return_value=""),
-            patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
-        ):
-            claude_run(fido_dir, session_id="sid")
-        mock_ppf.assert_not_called()
 
     # ── Start path ─────────────────────────────────────────────────────────
 
@@ -2271,16 +2570,6 @@ class TestClaudeRun:
             cwd=None,
         )
 
-    def test_start_does_not_call_resume_session(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.claude.extract_session_id", return_value=""),
-            patch("kennel.worker.claude.resume_session") as mock_rs,
-        ):
-            claude_run(fido_dir)
-        mock_rs.assert_not_called()
-
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
@@ -2312,17 +2601,50 @@ class TestClaudeRun:
             claude_run(fido_dir)
         assert mock_ppf.call_args[0][3] == 300
 
-    def test_passes_custom_model_to_resume(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(fido_dir, session_id="sid", model="claude-haiku-4-5-20251001")
-        assert mock_rs.call_args[0][2] == "claude-haiku-4-5-20251001"
+    # ── Session path ──────────────────────────────────────────────────────
 
-    def test_passes_custom_timeout_to_resume(self, tmp_path: Path) -> None:
+    def test_session_path_returns_empty_tuple(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(fido_dir, session_id="sid", timeout=90)
-        assert mock_rs.call_args[0][3] == 90
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        result = claude_run(fido_dir, session=session)
+        assert result == ("", "")
+
+    def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("run this task")
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.send.assert_called_once_with("run this task")
+
+    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.consume_until_result.assert_called_once()
+
+    def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
+            claude_run(fido_dir, session=session)
+        mock_ppf.assert_not_called()
+
+    def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.__enter__.assert_called_once()
+        session.__exit__.assert_called_once()
 
 
 class TestSanitizeSlug:
@@ -2837,7 +3159,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2888,10 +3210,9 @@ class TestFindOrCreatePr:
             patch("kennel.worker.tasks.list_tasks", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-open"),
+            patch("kennel.worker.claude_start", return_value=""),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-open"
 
     def test_open_pr_seeds_from_pr_body_before_setup(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3059,7 +3380,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3204,52 +3525,6 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         gh.create_pr.assert_not_called()
-
-    def test_no_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
-        """New-PR path: setup session_id is saved to state.json."""
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
-        with (
-            patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch("kennel.worker._write_pr_description"),
-            patch(
-                "kennel.worker.tasks.list_tasks",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
-        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-new"
-
-    def test_no_pr_setup_persists_session_id_preserves_issue(
-        self, tmp_path: Path
-    ) -> None:
-        """New-PR path: persisting session_id does not clobber the issue key."""
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
-        with (
-            patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch("kennel.worker._write_pr_description"),
-            patch(
-                "kennel.worker.tasks.list_tasks",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
-        state = load_state(fido_dir)
-        assert state.get("issue") == 5
-        assert state.get("setup_session_id") == "setup-sess-new"
 
     def test_no_pr_logs_pr_number(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -3989,7 +4264,7 @@ class TestHandleCi:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
         """CI failures have no task entry — no complete call needed."""
@@ -4682,7 +4957,7 @@ class TestHandleThreads:
             patch("kennel.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -5444,7 +5719,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
+        mock_run.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5666,9 +5941,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        # First call: fresh start. Second call: resume with session_id.
         assert mock_run.call_count == 2
-        assert mock_run.call_args_list[1][1]["session_id"] == "sess-1"
 
     def test_starts_fresh_when_no_session_id(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5740,47 +6013,6 @@ class TestExecuteTask:
         assert mock_run.call_count == 4
         mock_complete.assert_called_once()
 
-    def test_drops_stale_session_after_nudge_limit(self, tmp_path: Path) -> None:
-        """After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges, the next retry
-        drops the session id so claude starts from scratch.  We don't give
-        up on the task — just reset context."""
-        from kennel.worker import _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
-
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        task = self._pending_task("Stubborn task")
-
-        n = _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
-        # head_before=aaa, then n+1 resumes return aaa (no commits), then
-        # the fresh session lands commits at bbb so loop exits.  Every
-        # iteration rev-parses HEAD once.
-        head_seq = ["aaa"] * (1 + (n + 1)) + ["bbb"]
-        head_iter = iter(head_seq)
-
-        def git_side(args, **kw):
-            if args == ["rev-parse", "HEAD"]:
-                return MagicMock(returncode=0, stdout=next(head_iter, "bbb"), stderr="")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        # Initial + n nudged resumes on sess-1, then the fresh start returns sess-2.
-        runs = [("sess-1", "o")] * (n + 1) + [("sess-2", "fresh")]
-
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=runs) as mock_run,
-            patch.object(worker, "_git", side_effect=git_side),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
-
-        # Call index (n+1) is the fresh start — session_id kwarg missing/empty.
-        fresh_call = mock_run.call_args_list[n + 1]
-        assert fresh_call.kwargs.get("session_id", "") == ""
-
     def test_breaks_retry_loop_when_task_externally_completed(
         self, tmp_path: Path
     ) -> None:
@@ -5820,106 +6052,6 @@ class TestExecuteTask:
         mock_run.assert_called_once()
         # complete_by_id still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(tmp_path, task["id"])
-
-    def test_resumes_setup_session_when_present_in_state(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1, "setup_session_id": "setup-sess-42"})
-        task = self._pending_task("Do the thing")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch(
-                "kennel.worker.claude_run", return_value=("setup-sess-42", "")
-            ) as mock_run,
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(
-            fido_dir, session_id="setup-sess-42", cwd=tmp_path
-        )
-
-    def test_uses_empty_session_id_when_not_in_state(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("Do something")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch(
-                "kennel.worker.claude_run", return_value=("new-sess", "")
-            ) as mock_run,
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
-
-    def test_updates_state_with_returned_session_id(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("Update state")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("returned-sess", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert load_state(fido_dir).get("setup_session_id") == "returned-sess"
-
-    def test_does_not_update_state_when_session_id_empty(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("No session")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert "setup_session_id" not in load_state(fido_dir)
-
-    def test_preserves_existing_state_keys_when_updating_session_id(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 99, "setup_session_id": "old-sess"})
-        task = self._pending_task("Preserve keys")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("new-sess", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        state = load_state(fido_dir)
-        assert state.get("setup_session_id") == "new-sess"
-        assert state.get("issue") == 99
 
     def test_saves_current_task_id_to_state_before_claude_run(
         self, tmp_path: Path
@@ -5970,7 +6102,7 @@ class TestExecuteTask:
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5, "setup_session_id": "old-sess"})
+        save_state(fido_dir, {"issue": 5})
         task = {"id": "t-111", "title": "Preserve", "status": "pending"}
         captured: dict = {}
 
@@ -5990,7 +6122,6 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
         assert captured.get("issue") == 5
-        assert captured.get("setup_session_id") == "old-sess"
         assert captured.get("current_task_id") == "t-111"
 
     def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:
@@ -8585,11 +8716,15 @@ class TestWorkerThread:
             repo_name="",
             registry=None,
             membership=None,
+            session=None,
+            session_issue=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
 
         def fake_worker_run(self_w):
             wt._stop = True
@@ -8623,9 +8758,9 @@ class TestWorkerThread:
 
         assert call_count == 2
         assert mock_registry.report_activity.call_count == 2
-        for call in mock_registry.report_activity.call_args_list:
-            assert call.args[0] == "owner/repo"
-            assert call.kwargs.get("busy") is False or call.args[2] is False
+        for c in mock_registry.report_activity.call_args_list:
+            assert c.args[0] == "owner/repo"
+            assert c.kwargs.get("busy") is False or c.args[2] is False
 
     def test_heartbeat_not_emitted_when_no_registry(self, tmp_path: Path) -> None:
         """WorkerThread without a registry must not crash on the heartbeat path."""
@@ -8638,3 +8773,152 @@ class TestWorkerThread:
 
         with patch.object(Worker, "run", fake_worker_run):
             self._run_thread(wt)  # must not raise
+
+    # ── session lifecycle ─────────────────────────────────────────────────
+
+    def test_session_carried_to_next_iteration(self, tmp_path: Path) -> None:
+        """Session created by one Worker.run() is passed to the next."""
+        wt = self._make_thread(tmp_path)
+        wt._wake = MagicMock()
+        mock_session = MagicMock()
+        sessions_received: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+            sessions_received.append(session)
+
+        call_count = 0
+
+        def fake_worker_run(self_w) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self_w._session = mock_session  # first worker creates a session
+                return 1
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            self._run_thread(wt)
+
+        assert len(sessions_received) == 2
+        assert sessions_received[0] is None  # no carry-over on first iteration
+        assert sessions_received[1] is mock_session  # carried forward
+
+    def test_session_issue_carried_to_next_iteration(self, tmp_path: Path) -> None:
+        """session_issue set by one Worker.run() is passed to the next."""
+        wt = self._make_thread(tmp_path)
+        wt._wake = MagicMock()
+        issues_received: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+            issues_received.append(session_issue)
+
+        call_count = 0
+
+        def fake_worker_run(self_w) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self_w._session_issue = 42  # first worker picks issue 42
+                return 1
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            self._run_thread(wt)
+
+        assert len(issues_received) == 2
+        assert issues_received[0] is None  # no carry-over on first iteration
+        assert issues_received[1] == 42  # carried forward
+
+    def test_session_stopped_when_thread_exits(self, tmp_path: Path) -> None:
+        """WorkerThread stops the session when its loop finishes."""
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        wt._session = mock_session
+        wt._stop = True  # exit immediately without running any Worker
+
+        with patch.object(Worker, "run"):
+            wt.run()
+
+        mock_session.stop.assert_called_once()
+        assert wt._session is None
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_session_preserved_when_worker_raises(self, tmp_path: Path) -> None:
+        """WorkerThread leaves the session alive when Worker.run() raises.
+
+        The registry rescues the live session and passes it to the replacement
+        thread so the persistent ClaudeSession survives the crash.
+        """
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+
+        def fake_worker_run(self_w) -> int:
+            self_w._session = mock_session
+            raise RuntimeError("boom")
+
+        with patch.object(Worker, "run", fake_worker_run):
+            wt.start()
+            wt.join(timeout=5.0)
+
+        assert not wt.is_alive()
+        mock_session.stop.assert_not_called()  # session must NOT be stopped
+        assert wt._session is mock_session  # still reachable for registry to rescue
+
+    def test_session_accepted_via_constructor(self, tmp_path: Path) -> None:
+        """Session passed to WorkerThread constructor is used as the initial session."""
+        mock_session = MagicMock()
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), session=mock_session, session_issue=7
+        )
+        assert wt._session is mock_session
+        assert wt._session_issue == 7
+
+    def test_session_owner_returns_none_when_no_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._session is None
+        assert wt.session_owner is None
+
+    def test_session_owner_delegates_to_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        mock_session.owner = "worker-home"
+        wt._session = mock_session
+        assert wt.session_owner == "worker-home"
