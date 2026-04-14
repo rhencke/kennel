@@ -25,6 +25,32 @@ _SELECT_POLL_INTERVAL = 10.0
 # claude subprocess, to keep log records readable.
 _LOG_LINE_TRUNCATE = 200
 
+
+class _Trunc:
+    """Lazy-truncating wrapper for log arguments.
+
+    Pass an instance as a ``%s`` or ``%r`` log argument instead of slicing
+    inline.  The truncation is deferred to format time, so it is free when
+    the log level is disabled.
+
+    Usage::
+
+        log.debug("event: %s", _Trunc(line))
+        log.warning("stderr=%r", _Trunc(result.stderr))
+    """
+
+    __slots__ = ("_s",)
+
+    def __init__(self, s: str) -> None:
+        self._s = s
+
+    def __str__(self) -> str:
+        return self._s[:_LOG_LINE_TRUNCATE]
+
+    def __repr__(self) -> str:
+        return repr(self._s[:_LOG_LINE_TRUNCATE])
+
+
 # Tracked long-running claude subprocesses (the streaming ones), so kennel
 # can clean them up on shutdown.  Short-lived ``subprocess.run`` calls cap
 # at 30s and aren't tracked.  Use ``kill_active_children`` from a signal
@@ -187,10 +213,8 @@ def print_prompt(
             if text:
                 return text
             if result.stderr:
-                log.warning(
-                    "print_prompt: stderr=%r", result.stderr[:_LOG_LINE_TRUNCATE]
-                )
-            log.debug("print_prompt: stdout=%r", result.stdout[:_LOG_LINE_TRUNCATE])
+                log.warning("print_prompt: stderr=%r", _Trunc(result.stderr))
+            log.debug("print_prompt: stdout=%r", _Trunc(result.stdout))
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "print_prompt: empty output on attempt %d — retrying",
@@ -519,13 +543,9 @@ def generate_status_with_session(
                 return text, sid
             if result.stderr:
                 log.warning(
-                    "generate_status_with_session: stderr=%r",
-                    result.stderr[:_LOG_LINE_TRUNCATE],
+                    "generate_status_with_session: stderr=%r", _Trunc(result.stderr)
                 )
-            log.debug(
-                "generate_status_with_session: stdout=%r",
-                result.stdout[:_LOG_LINE_TRUNCATE],
-            )
+            log.debug("generate_status_with_session: stdout=%r", _Trunc(result.stdout))
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "generate_status_with_session: empty output on attempt %d — retrying",
@@ -744,7 +764,7 @@ class ClaudeSession:
                     last_activity = time.monotonic()
                     continue
                 obj = json.loads(line)
-                log.debug("ClaudeSession event: %s", line[:_LOG_LINE_TRUNCATE])
+                log.debug("ClaudeSession event: %s", _Trunc(line))
                 last_activity = time.monotonic()
                 yield obj
                 if obj.get("type") in ("result", "error"):

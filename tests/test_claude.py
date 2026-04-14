@@ -8,12 +8,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.claude import (
+    _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
     ClaudeSession,
     ClaudeStreamError,
     _active_children,
     _claude,
     _register_child,
+    _Trunc,
     _unregister_child,
     extract_result_text,
     extract_session_id,
@@ -39,6 +41,22 @@ def _completed(
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+class TestTrunc:
+    def test_str_truncates_long_string(self) -> None:
+        t = _Trunc("x" * (_LOG_LINE_TRUNCATE + 50))
+        assert str(t) == "x" * _LOG_LINE_TRUNCATE
+
+    def test_str_passes_short_string_unchanged(self) -> None:
+        assert str(_Trunc("hi")) == "hi"
+
+    def test_repr_truncates_and_quotes(self) -> None:
+        t = _Trunc("x" * (_LOG_LINE_TRUNCATE + 50))
+        assert repr(t) == repr("x" * _LOG_LINE_TRUNCATE)
+
+    def test_repr_passes_short_string_unchanged(self) -> None:
+        assert repr(_Trunc("hi")) == repr("hi")
 
 
 class TestClaudeHelper:
