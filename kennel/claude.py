@@ -790,6 +790,7 @@ class ClaudeSession:
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list, list, list]] = select.select,
         repo_name: str | None = None,
+        model: str = "claude-opus-4-6",
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -799,6 +800,13 @@ class ClaudeSession:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._repo_name = repo_name
+        self._model = model
+        # Latest session_id seen in a stream-json event.  Updated inside
+        # :meth:`iter_events` so a subsequent :meth:`switch_model` can
+        # restart with ``--resume <sid>`` and keep conversation context
+        # across the model swap.  Empty until the first claude event with
+        # a session_id arrives.
+        self._session_id = ""
         # True when the most recent :meth:`iter_events` call exited early
         # because :attr:`_cancel` was set (i.e. another thread preempted the
         # turn via :meth:`prompt`).  Cleared at the start of each turn.
@@ -828,7 +836,15 @@ class ClaudeSession:
         return self._last_turn_cancelled
 
     def _spawn(self) -> subprocess.Popen[str]:
-        """Spawn the claude subprocess with bidirectional stream-json I/O."""
+        """Spawn the claude subprocess with bidirectional stream-json I/O.
+
+        Model is set via ``--model`` at spawn time — the runtime ``/model``
+        slash command isn't honored in stream-json mode (claude echoes
+        "Unknown command: /model" and hangs without producing a turn
+        boundary).  When :attr:`_session_id` is non-empty the new process
+        resumes the prior conversation via ``--resume`` so context
+        survives a model swap.
+        """
         cmd = [
             "claude",
             "--input-format",
@@ -837,9 +853,13 @@ class ClaudeSession:
             "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
+            "--model",
+            self._model,
             "--system-prompt-file",
             str(self._system_file),
         ]
+        if self._session_id:
+            cmd += ["--resume", self._session_id]
         return self._popen_fn(
             cmd,
             stdin=subprocess.PIPE,
@@ -865,24 +885,38 @@ class ClaudeSession:
         return self._proc.pid
 
     def restart(self) -> None:
-        """Stop the current subprocess and start a fresh one.
+        """Stop the current subprocess and start a fresh one with a **fresh
+        conversation** — the tracked ``session_id`` is cleared so ``_spawn``
+        does not pass ``--resume``.
 
-        Unregisters the dead process from ``_active_children``, kills it if
-        still running, then spawns a replacement and registers it.  The
-        conversation transcript is lost — callers are responsible for
-        re-sending any context the new process needs.
+        Used by :class:`~kennel.worker.Worker` on issue boundaries to bound
+        context growth (one issue's conversation should not bleed into the
+        next).  Contrast with :meth:`switch_model`, which deliberately
+        preserves ``session_id`` across the subprocess swap so the new
+        model picks up where the old one left off.
+
+        Callers are responsible for re-sending any context the new
+        process needs (e.g. the sub-skill prompt for the current phase).
         """
-        log.warning("ClaudeSession: restarting after unexpected process death")
-        _unregister_child(self._proc)
-        if self._proc.poll() is None:
-            try:
-                self._proc.kill()
-                self._proc.wait(timeout=1.0)
-            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-                log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
-                raise
-        self._proc = self._spawn()
-        _register_child(self._proc)
+        log.info(
+            "ClaudeSession: restarting (clear conversation, model=%s)", self._model
+        )
+        with self._lock:
+            _unregister_child(self._proc)
+            if self._proc.poll() is None:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1.0)
+                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                    log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
+                    raise
+            # Fresh conversation — drop the tracked session_id so _spawn omits
+            # --resume.  Any thread waiting on ``with session:`` blocks on
+            # :attr:`_lock` until the new subprocess is listening.
+            self._session_id = ""
+            self._proc = self._spawn()
+            _register_child(self._proc)
+        log.info("ClaudeSession: restart complete, new pid %d", self._proc.pid)
 
     @property
     def owner(self) -> str | None:
@@ -1032,15 +1066,42 @@ class ClaudeSession:
             return self.consume_until_result()
 
     def switch_model(self, model: str) -> None:
-        """Switch the active model by sending a /model slash command.
+        """Switch the active model.  Restart-based — stream-json does not
+        accept ``/model`` or any slash command (claude echoes "Unknown
+        command" and never emits a turn boundary, hanging the reader).
 
-        Sends ``/model <model>`` as a user message and drains any response
-        events so the turn boundary is clean before the next call to
-        :meth:`send` + :meth:`iter_events`.
+        Holds :attr:`_lock` for the full swap so callers waiting on
+        :meth:`__enter__` block gracefully until the new subprocess is
+        listening.  When a prior ``session_id`` is known we pass
+        ``--resume`` to the new subprocess so the conversation transcript
+        carries over across the swap — no context loss when phase
+        transitions flip opus → sonnet or vice versa.
+
+        No-op when *model* equals the current model.
         """
-        self.send(f"/model {model}")
-        for _ in self.iter_events():
-            pass
+        if model == self._model:
+            return
+        log.info(
+            "switch_model: %s → %s (restart-based, resume=%s)",
+            self._model,
+            model,
+            self._session_id or "—",
+        )
+        with self._lock:
+            _unregister_child(self._proc)
+            if self._proc.poll() is None:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1.0)
+                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                    log.warning(
+                        "switch_model: kill/wait of old subprocess failed: %s", exc
+                    )
+                    raise
+            self._model = model
+            self._proc = self._spawn()
+            _register_child(self._proc)
+        log.info("switch_model: new pid %d ready (model=%s)", self._proc.pid, model)
 
     def iter_events(self) -> Iterator[dict]:
         """Yield parsed stream-json events for the current turn.
@@ -1085,6 +1146,12 @@ class ClaudeSession:
                 obj = json.loads(line)
                 log.debug("ClaudeSession event: %s", _Trunc(line))
                 last_activity = time.monotonic()
+                # Track the latest session_id so :meth:`switch_model` can
+                # restart with ``--resume <sid>`` and keep conversation
+                # context across the swap.
+                sid = obj.get("session_id")
+                if isinstance(sid, str) and sid:
+                    self._session_id = sid
                 yield obj
                 if obj.get("type") in ("result", "error"):
                     break

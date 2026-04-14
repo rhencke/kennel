@@ -1559,33 +1559,86 @@ class TestClaudeSessionStop:
 
 
 class TestClaudeSessionSwitchModel:
-    def test_sends_model_slash_command(self, tmp_path: Path) -> None:
-        import json as _json
-
-        result_line = _json.dumps({"type": "result", "result": ""}) + "\n"
-        proc = _make_session_proc([result_line])
-        session = _make_session(tmp_path, proc)
+    def test_same_model_is_noop(self, tmp_path: Path) -> None:
+        """When the target matches the current model, nothing happens."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)  # default model claude-opus-4-6
+        current_proc = session._proc
         session.switch_model("claude-opus-4-6")
-        written = proc.stdin.write.call_args.args[0]
-        obj = _json.loads(written.strip())
-        assert obj["message"]["content"] == "/model claude-opus-4-6"
+        assert session._proc is current_proc
+        # stdin.write should NOT have been called for a /model slash command.
+        assert proc.stdin.write.call_count == 0
 
-    def test_drains_response_events(self, tmp_path: Path) -> None:
-        import json as _json
-
-        lines = [
-            _json.dumps({"type": "assistant", "text": "Switching..."}) + "\n",
-            _json.dumps({"type": "result", "result": ""}) + "\n",
-        ]
-        proc = _make_session_proc(lines)
-        session = _make_session(tmp_path, proc)
-        # Must not raise or leave unread events blocking future reads
+    def test_different_model_respawns_with_new_flag(self, tmp_path: Path) -> None:
+        """Switching model kills the old proc and spawns a new one with
+        --model <new>, passing --resume when session_id is known."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        old_proc.pid = 1001
+        new_proc = _make_session_proc([])
+        new_proc.pid = 1002
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=MagicMock(return_value=([], [], [])),
+            model="claude-opus-4-6",
+            repo_name="owner/repo",
+        )
+        # Prior turn established a session_id — switch_model must preserve
+        # conversation by passing --resume to the new subprocess.
+        session._session_id = "sid-123"
         session.switch_model("claude-sonnet-4-6")
+        old_proc.kill.assert_called_once()
+        assert session._proc is new_proc
+        assert session._model == "claude-sonnet-4-6"
+        # Second spawn call had --model claude-sonnet-4-6 and --resume sid-123.
+        second_cmd = fake_popen.call_args_list[1].args[0]
+        assert "--model" in second_cmd
+        assert second_cmd[second_cmd.index("--model") + 1] == "claude-sonnet-4-6"
+        assert "--resume" in second_cmd
+        assert second_cmd[second_cmd.index("--resume") + 1] == "sid-123"
 
-    def test_works_when_command_produces_no_output(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])  # immediate EOF
-        session = _make_session(tmp_path, proc)
-        session.switch_model("claude-haiku-4-5-20251001")  # must not raise
+    def test_switch_raises_when_kill_fails(self, tmp_path: Path) -> None:
+        """kill/wait failure during switch_model re-raises so the caller
+        can decide how to recover."""
+        import subprocess
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([], poll_returns=None)
+        old_proc.kill = MagicMock()
+        old_proc.wait = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 1.0))
+        fake_popen = MagicMock(side_effect=[old_proc, _make_session_proc([])])
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=MagicMock(return_value=([], [], [])),
+            model="claude-opus-4-6",
+        )
+        with pytest.raises(subprocess.TimeoutExpired):
+            session.switch_model("claude-sonnet-4-6")
+
+    def test_switch_with_no_prior_session_id_omits_resume(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=MagicMock(return_value=([], [], [])),
+            model="claude-opus-4-6",
+        )
+        # No prior session_id (fresh session) — no --resume flag.
+        session.switch_model("claude-sonnet-4-6")
+        second_cmd = fake_popen.call_args_list[1].args[0]
+        assert "--resume" not in second_cmd
 
 
 class TestClaudeSessionConsumeUntilResult:
@@ -1695,7 +1748,7 @@ class TestClaudeSessionIsAliveAndRestart:
         # cleanup
         session.stop()
 
-    def test_restart_logs_warning(self, tmp_path: Path, caplog) -> None:
+    def test_restart_logs_info(self, tmp_path: Path, caplog) -> None:
         import logging as _logging
 
         system_file = tmp_path / "system.md"
@@ -1707,10 +1760,31 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        with caplog.at_level(_logging.WARNING, logger="kennel.claude"):
+        with caplog.at_level(_logging.INFO, logger="kennel.claude"):
             session.restart()
         assert any("restart" in r.message.lower() for r in caplog.records)
         session.stop()
+
+    def test_restart_clears_session_id(self, tmp_path: Path) -> None:
+        """restart drops session_id so the new spawn starts a fresh
+        conversation (opposite of switch_model which preserves it)."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([])
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=MagicMock(return_value=([], [], [])),
+        )
+        session._session_id = "sid-123"
+        session.restart()
+        assert session._session_id == ""
+        # Second spawn call had no --resume.
+        second_cmd = fake_popen.call_args_list[1].args[0]
+        assert "--resume" not in second_cmd
 
     def test_restart_skips_kill_when_process_already_dead(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
@@ -1874,7 +1948,6 @@ class TestClaudeSessionLock:
         proc = _make_session_proc(
             [
                 '{"type":"result","result":""}\n',  # drain after interrupt
-                '{"type":"result","result":""}\n',  # /model ack
                 '{"type":"result","result":"hello world"}\n',  # actual turn
             ]
         )
@@ -1887,15 +1960,16 @@ class TestClaudeSessionLock:
             popen=fake_popen,
             selector=fake_selector,
             repo_name="owner/repo",
+            model="claude-opus-4-6",
         )
         try:
             result = session.prompt("hi there", model="claude-opus-4-6")
             assert result == "hello world"
-            # send() was called: /model line + main content.
-            sent = [call.args[0] for call in proc.stdin.write.call_args_list]
-            combined = "".join(sent)
-            assert "/model claude-opus-4-6" in combined
-            assert "hi there" in combined
+            # model param matches current → switch_model is a no-op;
+            # stdin only carries the user message body.
+            sent = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+            assert "hi there" in sent
+            assert "/model" not in sent
         finally:
             session.stop()
 
