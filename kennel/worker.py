@@ -214,9 +214,8 @@ def claude_start(
     worker's crash handler.
     """
     if session is not None:
-        prompt = (fido_dir / "prompt").read_text()
         with session:
-            session.send(prompt)
+            session.send(_session_turn_prompt(fido_dir))
             session.consume_until_result()
         return ""
     system_file = fido_dir / "system"
@@ -225,6 +224,21 @@ def claude_start(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
     return claude.extract_session_id(output)
+
+
+def _session_turn_prompt(fido_dir: Path) -> str:
+    """Build the user-message body for a persistent :class:`ClaudeSession` turn.
+
+    The persistent session is constructed with only ``sub/persona.md`` as
+    its system prompt.  Each turn (setup, task, ci, threads, resume,
+    comments) has its own sub-skill instructions in ``fido_dir/system``
+    which must be delivered as part of the user message — otherwise claude
+    sees only the bare context and doesn't know what to do, producing
+    empty output (observed as ``setup produced no tasks``).
+    """
+    system = (fido_dir / "system").read_text()
+    prompt = (fido_dir / "prompt").read_text()
+    return f"{system}\n\n---\n\n{prompt}"
 
 
 def claude_run(
@@ -248,9 +262,8 @@ def claude_run(
     worker's crash handler.
     """
     if session is not None:
-        prompt = (fido_dir / "prompt").read_text()
         with session:
-            session.send(prompt)
+            session.send(_session_turn_prompt(fido_dir))
             session.consume_until_result()
         return "", ""
     system_file = fido_dir / "system"
