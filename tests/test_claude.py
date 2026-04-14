@@ -1451,6 +1451,40 @@ class TestClaudeSessionDrainToBoundary:
         assert session._in_turn is False
 
 
+class TestClaudeSessionWaitForPendingPreempt:
+    def test_returns_false_when_not_pending(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        # _preempt_pending starts cleared
+        assert session.wait_for_pending_preempt(timeout=0.01) is False
+
+    def test_returns_true_when_pending_clears(self, tmp_path: Path) -> None:
+        import threading as _t
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._preempt_pending.set()
+
+        # Clear the event from another thread after a brief delay.
+        def _clearer() -> None:
+            import time as _time
+
+            _time.sleep(0.02)
+            session._preempt_pending.clear()
+
+        t = _t.Thread(target=_clearer)
+        t.start()
+        assert session.wait_for_pending_preempt(timeout=1.0) is True
+        t.join()
+
+    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._preempt_pending.set()
+        # Never cleared → waits out the deadline.
+        assert session.wait_for_pending_preempt(timeout=0.05) is False
+
+
 class TestClaudeSessionIterEvents:
     def test_yields_parsed_json_events(self, tmp_path: Path) -> None:
         import json as _json

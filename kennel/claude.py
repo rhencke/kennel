@@ -831,8 +831,58 @@ class ClaudeSession:
         # is dirty.  :meth:`send` drains to the boundary before writing new
         # content so every turn starts on a clean slate.
         self._in_turn = False
+        # Set by :meth:`prompt` right after :attr:`_cancel` and before it
+        # blocks on :attr:`_lock`.  Cleared inside :meth:`__enter__` once the
+        # preempter actually acquires the lock.  Workers check this in their
+        # retry loop to yield fairly: without it, a freshly-released worker
+        # thread can re-acquire :attr:`_lock` before the waiting webhook
+        # gets scheduled, and the next :meth:`iter_events` clears
+        # :attr:`_cancel` — starving the preempter for a full worker turn.
+        # See yield-starvation discussion in #499 comments.
+        self._preempt_pending = threading.Event()
         self._proc = self._spawn()
         _register_child(self._proc)
+
+    def wait_for_pending_preempt(self, timeout: float = 2.0) -> bool:
+        """Block for up to *timeout* seconds while a preempter holds the
+        lock queue.  Returns ``True`` if the preemption completed within the
+        window, ``False`` on timeout (no preempter pending in the first place
+        returns immediately with ``False``).
+
+        Workers call this after their cancelled-turn exit to let the
+        preempter actually acquire :attr:`_lock` before the worker retries —
+        Python's :class:`threading.RLock` isn't FIFO-fair under contention
+        so the worker can otherwise race ahead and starve the preempter for
+        a full turn.
+        """
+        if not self._preempt_pending.is_set():
+            return False
+        # Wait for the preempter's __enter__ to clear the event, meaning they
+        # hold the lock now.  If they don't manage within the deadline, bail.
+        # is_set() -> wait for clear: threading.Event has no "wait-for-clear",
+        # so poll with short sleeps.
+        import time as _time
+
+        started = _time.monotonic()
+        deadline = started + timeout
+        log.info(
+            "session: worker ceding lock to pending preempter (tid=%d)",
+            threading.get_ident(),
+        )
+        while self._preempt_pending.is_set():
+            if _time.monotonic() >= deadline:
+                log.warning(
+                    "session: preempter still pending after %.2fs — worker "
+                    "proceeding anyway",
+                    timeout,
+                )
+                return False
+            _time.sleep(0.01)
+        log.info(
+            "session: preempter acquired lock after %.3fs yield",
+            _time.monotonic() - started,
+        )
+        return True
 
     @property
     def repo_name(self) -> str | None:
@@ -970,6 +1020,9 @@ class ClaudeSession:
         holder we would have taken over from does not deadlock.
         """
         self._lock.acquire()
+        # We hold the lock now; any preempter waiting on this
+        # (wait_for_pending_preempt) can wake.
+        self._preempt_pending.clear()
         if self._repo_name is not None:
             try:
                 register_talker(
@@ -1148,15 +1201,30 @@ class ClaudeSession:
         there is nothing in-flight to interrupt.
         """
         self._cancel.set()
-        with self:
-            if model is not None:
-                self.switch_model(model)
-            if system_prompt:
-                body = f"{system_prompt}\n\n---\n\n{content}"
-            else:
-                body = content
-            self.send(body)
-            return self.consume_until_result()
+        # Mark that a preempter is queued so the current lock holder (a
+        # worker) can wait_for_pending_preempt and cede the lock fairly
+        # instead of racing to re-acquire after it yields.
+        self._preempt_pending.set()
+        log.info(
+            "session.prompt: preempt requested (tid=%d, model=%s)",
+            threading.get_ident(),
+            model or self._model,
+        )
+        try:
+            with self:
+                if model is not None:
+                    self.switch_model(model)
+                if system_prompt:
+                    body = f"{system_prompt}\n\n---\n\n{content}"
+                else:
+                    body = content
+                self.send(body)
+                return self.consume_until_result()
+        finally:
+            # If an exception blew us out of `with self:` before __enter__
+            # could clear the event, do it here so a stuck event doesn't
+            # trap the worker forever.
+            self._preempt_pending.clear()
 
     def switch_model(self, model: str) -> None:
         """Switch the active model.  Restart-based — stream-json does not

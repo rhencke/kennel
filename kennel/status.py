@@ -509,11 +509,15 @@ def _claude_stats_suffix(repo: RepoStatus) -> str:
     if repo.session_alive and repo.claude_talker is None:
         parts.append(color(DIM, "session idle"))
     pid_str = (
-        f"claude pid {repo.claude_pid}" if repo.claude_pid is not None else "claude"
+        color(DIM, f"claude pid {repo.claude_pid}")
+        if repo.claude_pid is not None
+        else color(DIM, "claude")
     )
+    arrow = color(DIM, "→")
     if parts:
-        return f" → {pid_str} ({', '.join(parts)})"
-    return f" → {pid_str}"
+        joined = ", ".join(parts)
+        return f" {arrow} {pid_str} {color(DIM, '(')}{joined}{color(DIM, ')')}"
+    return f" {arrow} {pid_str}"
 
 
 def _format_repo_header(repo: RepoStatus) -> str:
@@ -526,19 +530,21 @@ def _format_repo_header(repo: RepoStatus) -> str:
     claude pid/uptime suffix appears on this line; when a worker or webhook
     IS talking, the suffix attaches to that line instead.
     """
-    state = "fido running" if repo.fido_running else "fido idle"
+    state_word = "running" if repo.fido_running else "idle"
+    state_style = GREEN if repo.fido_running else DIM
     stats: list[str] = []
     if repo.crash_count > 0:
         stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
     if repo.worker_uptime is not None:
-        stats.append(f"up {_format_uptime(repo.worker_uptime)}")
+        stats.append(color(DIM, f"up {_format_uptime(repo.worker_uptime)}"))
     if repo.worker_stuck:
         stats.append(color(RED, "BUSY"))
     if repo.crash_count > 0 and repo.last_crash_error:
         stats.append(color(RED_BOLD, f"last crash: {repo.last_crash_error}"))
 
-    header_style = BOLD if repo.fido_running else DIM
-    header = color(header_style, f"{repo.name}: {state}")
+    name_styled = color(BOLD, f"{repo.name}:")
+    state_styled = color(state_style, f"fido {state_word}")
+    header = f"{name_styled} {state_styled}"
     if stats:
         header += " — " + ", ".join(stats)
     # Claude stats ride the worker summary only when nobody is talking.
@@ -565,9 +571,9 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
         body.append("  no assigned issues")
         return body
 
-    issue_line = f"  Issue:  {color(CYAN, f'#{repo.issue}')}"
+    issue_line = f"  {color(BOLD, 'Issue:')}  {color(CYAN, f'#{repo.issue}')}"
     if repo.issue_title:
-        issue_line += f" — {repo.issue_title}"
+        issue_line += f" {color(DIM, '—')} {repo.issue_title}"
     if repo.issue_elapsed_seconds is not None:
         issue_line += (
             f"  {color(DIM, f'(elapsed {_format_uptime(repo.issue_elapsed_seconds)})')}"
@@ -575,9 +581,9 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
     body.append(issue_line)
 
     if repo.pr_number is not None:
-        pr_line = f"  PR:     {color(MAGENTA, f'#{repo.pr_number}')}"
+        pr_line = f"  {color(BOLD, 'PR:')}     {color(MAGENTA, f'#{repo.pr_number}')}"
         if repo.pr_title:
-            pr_line += f" — {repo.pr_title}"
+            pr_line += f" {color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
     body.append(_format_worker_thread_line(repo))
@@ -594,7 +600,7 @@ def _format_worker_thread_line(repo: RepoStatus) -> str:
     state = _worker_thread_state(repo)
     talker = repo.claude_talker
     is_talker = talker is not None and talker.kind == "worker"
-    label = color(GREEN, "Worker:") if is_talker else "Worker:"
+    label = color(GREEN, "Worker:") if is_talker else color(BOLD, "Worker:")
     line = f"  {label} {state}"
     if is_talker:
         line += _claude_stats_suffix(repo)
@@ -638,16 +644,18 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     overflow = len(webhooks) - len(shown)
     lines: list[str] = []
     for i, w in enumerate(shown):
-        branch = "└─" if overflow == 0 and i == len(shown) - 1 else "├─"
+        branch = color(DIM, "└─" if overflow == 0 and i == len(shown) - 1 else "├─")
         is_talker = talker_tid is not None and w.thread_id == talker_tid
-        wh_label = color(YELLOW, "webhook:") if is_talker else "webhook:"
+        wh_label = color(YELLOW, "webhook:") if is_talker else color(BOLD, "webhook:")
         elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
         line = f"  {branch} {wh_label} {w.description} {elapsed}"
         if is_talker:
             line += _claude_stats_suffix(repo)
         lines.append(line)
     if overflow > 0:
-        lines.append(f"  └─ +{overflow} more webhook{'s' if overflow != 1 else ''}")
+        lines.append(
+            color(DIM, f"  └─ +{overflow} more webhook{'s' if overflow != 1 else ''}")
+        )
     return lines
 
 
@@ -661,9 +669,12 @@ def format_status(status: KennelStatus) -> str:
             if status.kennel_uptime is not None
             else ""
         )
-        lines.append(color(BOLD, f"kennel: UP (pid {status.kennel_pid}{uptime_str})"))
+        lines.append(
+            f"{color(BOLD, 'kennel:')} {color(GREEN, 'UP')} "
+            f"{color(DIM, f'(pid {status.kennel_pid}{uptime_str})')}"
+        )
     else:
-        lines.append(color(BOLD, "kennel: DOWN"))
+        lines.append(f"{color(BOLD, 'kennel:')} {color(RED_BOLD, 'DOWN')}")
 
     for repo in status.repos:
         lines.append(_format_repo_header(repo))

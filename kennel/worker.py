@@ -275,6 +275,13 @@ def _run_session_turn(session: claude.ClaudeSession, content: str) -> str:
             # itself truthy) doesn't spin the loop forever.
             if session.last_turn_cancelled is not True:
                 return result
+        # Before racing back into `with session:`, cede to any pending
+        # preempter so they acquire the lock first.  RLock is not FIFO-fair
+        # under contention, so without this hand-off the worker can grab
+        # the lock before the preempter wakes and then iter_events clears
+        # :attr:`_cancel` — starving the preempter for a full worker turn
+        # (observed in #499 comments).
+        session.wait_for_pending_preempt()
         attempt += 1
         log.info("session turn preempted mid-flight — retry %d", attempt)
 
