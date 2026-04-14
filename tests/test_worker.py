@@ -761,21 +761,14 @@ class TestWorker:
         _, kwargs = claude.ClaudeSession.call_args
         assert kwargs.get("work_dir") == tmp_path
 
-    def test_create_session_passes_model(self, tmp_path: Path) -> None:
+    def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
         from kennel import claude
 
-        worker = Worker(tmp_path, MagicMock())
-        worker.create_session(tmp_path, model="claude-opus-4-6")
-        _, kwargs = claude.ClaudeSession.call_args
-        assert kwargs.get("model") == "claude-opus-4-6"
-
-    def test_create_session_default_model_is_sonnet(self, tmp_path: Path) -> None:
-        from kennel import claude
-
+        mock_session = MagicMock()
+        claude.ClaudeSession.return_value = mock_session
         worker = Worker(tmp_path, MagicMock())
         worker.create_session(tmp_path)
-        _, kwargs = claude.ClaudeSession.call_args
-        assert kwargs.get("model") == "claude-sonnet-4-6"
+        mock_session.switch_model.assert_called_once_with("claude-opus-4-6")
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
         from kennel import claude
@@ -886,7 +879,7 @@ class TestWorker:
             patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
-        mock_create.assert_called_once_with(mock_ctx.fido_dir, model="claude-opus-4-6")
+        mock_create.assert_called_once_with(mock_ctx.fido_dir)
 
     def test_run_switches_to_sonnet_after_setup_for_fresh_session(
         self, tmp_path: Path

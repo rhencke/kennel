@@ -728,11 +728,7 @@ class Worker:
         hooks.remove_hooks(self.work_dir, compact_cmd, sync_cmd)
         (fido_dir / "compact.sh").unlink(missing_ok=True)
 
-    def create_session(
-        self,
-        fido_dir: Path,
-        model: str = "claude-sonnet-4-6",
-    ) -> None:
+    def create_session(self, fido_dir: Path) -> None:
         """Start a persistent ClaudeSession for this work iteration.
 
         Uses the fido persona as the session system prompt.  Task-specific
@@ -742,14 +738,17 @@ class Worker:
         The session is given a :class:`~kennel.state.PreemptQueue` backed by
         ``fido_dir/preempt.json`` so queued preempt content survives process
         restarts.
+
+        Immediately switches to Opus for the planning phase; the caller is
+        responsible for switching to Sonnet once planning is complete.
         """
         persona_file = _sub_dir() / "persona.md"
         self._session = claude.ClaudeSession(
             persona_file,
             work_dir=self.work_dir,
-            model=model,
             preempt_queue=PreemptQueue(fido_dir / "preempt.json"),
         )
+        self._session.switch_model("claude-opus-4-6")
 
     def stop_session(self) -> None:
         """Stop the ClaudeSession if one is running, then clear it.
@@ -1822,7 +1821,7 @@ class Worker:
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
             session_fresh = self._session is None
             if session_fresh:
-                self.create_session(ctx.fido_dir, model="claude-opus-4-6")
+                self.create_session(ctx.fido_dir)
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:

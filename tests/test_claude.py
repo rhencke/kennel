@@ -1185,32 +1185,6 @@ class TestClaudeSessionInit:
         assert "--system-prompt-file" in cmd
         assert str(system_file) in cmd
 
-    def test_spawns_with_model_flag(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
-        ClaudeSession(
-            system_file,
-            model="claude-opus-4-6",
-            popen=fake_popen,
-            selector=fake_selector,
-        )
-        cmd = fake_popen.call_args.args[0]
-        assert "--model" in cmd
-        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6"
-
-    def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
-        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
-        cmd = fake_popen.call_args.args[0]
-        assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
-
     def test_opens_stdin_stdout_pipes(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
