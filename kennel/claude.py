@@ -841,22 +841,23 @@ class ClaudeSession:
         process has already exited before :meth:`stop` is called.
         """
         try:
-            if self._proc.stdin and not self._proc.stdin.closed:
-                self._proc.stdin.close()
-        except OSError as exc:
-            log.debug("ClaudeSession.stop: stdin close failed: %s", exc)
-            raise
-        try:
-            self._proc.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
             try:
-                self._proc.kill()
-                self._proc.wait(timeout=1.0)
-            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-                log.debug("ClaudeSession.stop: kill/wait failed: %s", exc)
+                if self._proc.stdin and not self._proc.stdin.closed:
+                    self._proc.stdin.close()
+            except OSError as exc:
+                log.debug("ClaudeSession.stop: stdin close failed: %s", exc)
                 raise
-        except (OSError, ProcessLookupError) as exc:
-            log.debug("ClaudeSession.stop: wait failed: %s", exc)
+            try:
+                self._proc.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1.0)
+                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                    log.debug("ClaudeSession.stop: kill/wait failed: %s", exc)
+                    raise
+            except (OSError, ProcessLookupError) as exc:
+                log.debug("ClaudeSession.stop: wait failed: %s", exc)
         finally:
             _unregister_child(self._proc)
 

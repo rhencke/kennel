@@ -1442,6 +1442,15 @@ class TestClaudeSessionStop:
                 session.stop()
         assert any("stdin close failed" in r.message for r in caplog.records)
 
+    def test_unregisters_even_when_stdin_close_raises(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
+        session = _make_session(tmp_path, proc)
+        assert proc in _active_children
+        with pytest.raises(OSError):
+            session.stop()
+        assert proc not in _active_children  # outer finally must still unregister
+
     def test_logs_oserror_on_wait(self, tmp_path: Path, caplog) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(side_effect=OSError("already gone"))
