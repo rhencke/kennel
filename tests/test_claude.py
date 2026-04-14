@@ -1345,6 +1345,20 @@ class TestClaudeSessionIterEvents:
         assert exc_info.value.returncode == -1
         proc.kill.assert_called()
 
+    def test_stops_immediately_when_cancel_set(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=None)  # never exits
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        session._cancel.set()
+        events = list(session.iter_events())
+        assert events == []
+        fake_selector.assert_not_called()  # cancel check fires before select
+        session.stop()
+
 
 class TestClaudeSessionStop:
     def test_closes_stdin_and_waits(self, tmp_path: Path) -> None:
@@ -1612,6 +1626,14 @@ class TestClaudeSessionLock:
         session._lock.release()
         session.stop()
 
+    def test_enter_clears_cancel_event(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        session._cancel.set()
+        session.__enter__()
+        assert not session._cancel.is_set()
+        session._lock.release()
+        session.stop()
+
     def test_exit_releases_lock(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path, _make_session_proc([]))
         session.__enter__()
@@ -1674,6 +1696,14 @@ class TestClaudeSessionInterrupt:
             session._lock.release()
         session.stop()
 
+    def test_interrupt_sets_cancel_event(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert not session._cancel.is_set()
+        session.interrupt("stop")
+        assert session._cancel.is_set()
+        session.stop()
+
 
 class TestClaudeSessionPreempt:
     def test_preempt_writes_control_request_to_stdin(self, tmp_path: Path) -> None:
@@ -1714,4 +1744,12 @@ class TestClaudeSessionPreempt:
         session.preempt("once")
         session.take_queued_content()
         assert session.take_queued_content() is None
+        session.stop()
+
+    def test_preempt_sets_cancel_event(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert not session._cancel.is_set()
+        session.preempt("follow up")
+        assert session._cancel.is_set()
         session.stop()

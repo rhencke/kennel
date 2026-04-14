@@ -562,6 +562,7 @@ class ClaudeSession:
         self._work_dir = work_dir
         self._popen_fn = popen
         self._lock = threading.Lock()
+        self._cancel = threading.Event()
         self._queued_content: str | None = None
         self._proc = self._spawn()
         _register_child(self._proc)
@@ -611,8 +612,13 @@ class ClaudeSession:
         _register_child(self._proc)
 
     def __enter__(self) -> "ClaudeSession":
-        """Acquire the session lock, serializing send/receive across threads."""
+        """Acquire the session lock, serializing send/receive across threads.
+
+        Also clears the cancel event so a turn that follows a preempt or
+        interrupt starts with a clean slate.
+        """
         self._lock.acquire()
+        self._cancel.clear()
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -629,7 +635,12 @@ class ClaudeSession:
         self._proc.stdin.flush()
 
     def interrupt(self, content: str) -> None:
-        """Write a user message to stdin, bypassing the session lock.
+        """Signal the in-flight turn to stop, then send a follow-up message.
+
+        Sets the cancel event so :meth:`iter_events` exits on its next poll
+        cycle, causing the lock holder to finish its ``with session:`` block
+        and release the lock.  Also writes *content* to stdin as a user
+        message (bypassing the lock) so it is queued as the next turn.
 
         This is the explicit lock-break path for preempt and interrupt use
         cases (e.g. rescope abort, CI-failure cancel) where the lock is
@@ -639,6 +650,7 @@ class ClaudeSession:
         should go through the :meth:`__enter__` / :meth:`__exit__` context
         manager instead.
         """
+        self._cancel.set()
         self.send(content)
 
     def preempt(self, content: str) -> None:
@@ -653,6 +665,7 @@ class ClaudeSession:
         Only for preempt paths (rescope abort, CI-failure cancel).  Normal
         turns must go through the context-manager lock.
         """
+        self._cancel.set()
         msg = json.dumps({"type": "control_request", "request": {"type": "interrupt"}})
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
@@ -698,6 +711,9 @@ class ClaudeSession:
         last_activity = time.monotonic()
 
         while True:
+            if self._cancel.is_set():
+                log.debug("ClaudeSession: cancelled — exiting turn early")
+                break
             ready, _, _ = self._selector(
                 [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
             )
