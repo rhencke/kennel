@@ -18,7 +18,7 @@ uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> complete 
 ```
 
 Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only `kennel task`.
-Do NOT edit the PR body directly. `sync-tasks.sh` owns the PR body work queue.
+Do NOT edit the PR body directly. The kennel server owns PR body sync.
 
 ## Done when
 Fix committed and pushed, task marked complete.

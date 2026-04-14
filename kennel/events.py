@@ -281,7 +281,7 @@ def reply_to_comment(
     posted is True only when the reply was successfully sent to GitHub.
     task_titles is a list: one entry for non-task categories (used as reply
     context), or one or more entries for ACT/DO (each becomes a task).
-    Uses a per-comment lockfile to prevent races with work.sh.
+    Uses a per-comment lockfile to prevent concurrent replies.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -289,7 +289,7 @@ def reply_to_comment(
     if not info or not action.comment_body:
         return (False, "ACT", [action.comment_body or action.prompt])
 
-    # Per-comment lock — prevents kennel and work.sh from both replying
+    # Per-comment lock — prevents concurrent replies
     cid = info.get("comment_id")
     if cid:
         lock_path = _comment_lock(repo_cfg.work_dir, cid)
@@ -391,7 +391,7 @@ def reply_to_comment(
     if category == "DUMP" and info.get("comment_id"):
         _try_resolve_thread(info, config)
 
-    # Release comment lock (keep file so work.sh sees it was claimed)
+    # Release comment lock (keep file so concurrent callers see it was claimed)
     if lock_fd:
         lock_fd.close()
 
@@ -400,7 +400,7 @@ def reply_to_comment(
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
     """Best-effort resolve a review thread via GraphQL."""
-    # We'd need the thread node_id — skip for now, work.sh will handle it
+    # Thread node_id not available in webhook payload — skip
     pass
 
 

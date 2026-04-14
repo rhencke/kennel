@@ -297,7 +297,7 @@ def sync_tasks(
 ) -> None:
     """Sync tasks.json → PR body work queue.
 
-    Python replacement for sync-tasks.sh.  Protected by a flock so concurrent
+    Protected by a flock so concurrent
     calls silently skip rather than race.  Re-runs if tasks.json changes while
     the body is being updated.
     """

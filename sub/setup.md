@@ -21,7 +21,7 @@ The `spec` argument is the task type — always use `spec` for planned tasks. Ot
 **CRITICAL**: Always use the `kennel task add` CLI command to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
 
 Do NOT use TaskCreate or TodoWrite — only `kennel task`.
-Do NOT create a PR. Do NOT edit any PR body. Do NOT run sync-tasks.
+Do NOT create a PR. Do NOT edit any PR body. The kennel server handles PR body sync.
 
 ## Done when
 All tasks written to the task file via `kennel task`.
@@ -35,6 +35,6 @@ All tasks written to the task file via `kennel task`.
 - **Never** mark the PR as ready for review (`gh pr ready`).
 - **Never** rebase, amend, or force-push.
 - **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `kennel task`.
-- **Never** edit any PR body or call sync-tasks. The caller handles that.
+- **Never** edit any PR body. The kennel server handles that.
 - **Never** write to tasks.json directly. Always use `kennel task add`.
 - **You are a planner, not an implementer.** Read the code to understand it, then create tasks. Do not change it.

@@ -51,13 +51,8 @@ For each thread in the JSON that does not already have a task:
 - **ANSWER** — a question, not a code change request:
   Post a direct answer. Do NOT resolve. Do NOT create a task.
 
-## Finally: trigger sync
-```bash
-bash /home/rhencke/workspace/kennel/sync-tasks.sh <work_dir>
-```
-
 Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only `kennel task`.
-Do NOT edit the PR body directly. `sync-tasks.sh` owns the PR body work queue.
+Do NOT edit the PR body directly. The kennel server syncs it automatically after task changes.
 
 ## Done when
 Every thread in the JSON has been responded to or has an open task.
