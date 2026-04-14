@@ -23,16 +23,11 @@ class TestGeneratePersonaStatus:
         )
         assert result == "sniffing out a bug *tail wag*"
 
-    def test_empty_response_falls_back_to_raw(self) -> None:
-        result = generate_persona_status(
-            "at the vet", "persona", _print_prompt=lambda **kw: ""
-        )
-        assert result == "at the vet"
-
-    def test_long_message_truncated_on_fallback(self) -> None:
-        long_msg = "x" * 100
-        result = generate_persona_status(long_msg, "", _print_prompt=lambda **kw: "")
-        assert len(result) == 80
+    def test_empty_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="humanify_status"):
+            generate_persona_status(
+                "at the vet", "persona", _print_prompt=lambda **kw: ""
+            )
 
     def test_empty_persona(self) -> None:
         result = generate_persona_status("test", "", _print_prompt=lambda **kw: "woof")
@@ -48,11 +43,11 @@ class TestGeneratePersonaEmoji:
         )
         assert result == ":wrench:"
 
-    def test_empty_response_falls_back_to_dog(self) -> None:
-        result = generate_persona_emoji(
-            "test", "persona", _print_prompt_json=lambda **kw: ""
-        )
-        assert result == ":dog:"
+    def test_empty_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="generate_persona_emoji"):
+            generate_persona_emoji(
+                "test", "persona", _print_prompt_json=lambda **kw: ""
+            )
 
     def test_empty_persona(self) -> None:
         result = generate_persona_emoji(

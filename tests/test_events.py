@@ -374,16 +374,10 @@ class TestSummarizeAsActionItem:
         )
         assert result == "add logging to streamed sub-Claude output"
 
-    def test_falls_back_to_comment_body_when_empty(self) -> None:
+    def test_empty_result_raises(self) -> None:
         pp = MagicMock(return_value="")
-        result = _summarize_as_action_item("short comment", _print_prompt=pp)
-        assert result == "short comment"
-
-    def test_truncates_long_comment_in_fallback(self) -> None:
-        long_comment = "x" * 200
-        pp = MagicMock(return_value="")
-        result = _summarize_as_action_item(long_comment, _print_prompt=pp)
-        assert result == long_comment[:80]
+        with pytest.raises(ValueError, match="_summarize_as_action_item"):
+            _summarize_as_action_item("short comment", _print_prompt=pp)
 
     def test_strips_whitespace_from_result(self) -> None:
         pp = MagicMock(return_value="  add tests  ")
@@ -866,7 +860,7 @@ class TestReplyToComment:
             )
         mock_gh.reply_to_review_comment.assert_not_called()
 
-    def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
+    def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -880,41 +874,16 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: do it"
-            return ""  # empty reply triggers fallback
+            return ""
 
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            _print_prompt=fake_pp,
-        )
-        assert cat == "ACT"  # still succeeds with fallback body
-
-    def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 16},
-            comment_body="do something",
-            is_bot=False,
-        )
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return ""  # simulates timeout — print_prompt returns "" on failure
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            _print_prompt=fake_pp,
-        )
-        assert cat == "ACT"
+        with pytest.raises(ValueError, match="review-comment reply"):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                MagicMock(),
+                _print_prompt=fake_pp,
+            )
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
         """Second call with same comment_id is blocked by lock."""
@@ -1224,39 +1193,22 @@ class TestReplyToIssueComment:
             )
         mock_gh.comment_issue.assert_not_called()
 
-    def test_empty_body_fallback(self, tmp_path: Path) -> None:
+    def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
             if "Triage" in prompt:
                 return "ACT: do it"
-            return ""  # empty reply triggers fallback
+            return ""
 
-        cat, titles = reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            _print_prompt=fake_pp,
-        )
-        assert cat == "ACT"
-
-    def test_timeout_fallback(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return ""  # simulates timeout — print_prompt returns "" on failure
-
-        cat, titles = reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            _print_prompt=fake_pp,
-        )
-        assert cat == "ACT"
+        with pytest.raises(ValueError, match="issue-comment reply"):
+            reply_to_issue_comment(
+                self._action(),
+                cfg,
+                self._repo_cfg(tmp_path),
+                MagicMock(),
+                _print_prompt=fake_pp,
+            )
 
     def test_post_exception_propagates(self, tmp_path: Path) -> None:
         """comment_issue failure propagates so callers fail closed."""
@@ -2501,18 +2453,16 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, _print_prompt=MagicMock())
         mock_gh.comment_issue.assert_not_called()
 
-    def test_empty_opus_uses_fallback_for_completed(self, tmp_path: Path) -> None:
+    def test_empty_opus_raises_for_completed(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
-        )
-        body = mock_gh.comment_issue.call_args[0][2]
-        assert "Fix the thing" in body
-        assert "@" not in body
+        with pytest.raises(ValueError, match="_notify_thread_change"):
+            _notify_thread_change(
+                change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
+            )
 
-    def test_empty_opus_uses_fallback_for_modified(self, tmp_path: Path) -> None:
+    def test_empty_opus_raises_for_modified(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {
@@ -2521,12 +2471,10 @@ class TestNotifyThreadChange:
             "new_title": "New title",
             "new_description": "",
         }
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
-        )
-        body = mock_gh.comment_issue.call_args[0][2]
-        assert "New title" in body
-        assert "@" not in body
+        with pytest.raises(ValueError, match="_notify_thread_change"):
+            _notify_thread_change(
+                change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
+            )
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
