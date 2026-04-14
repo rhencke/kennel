@@ -555,7 +555,10 @@ def reply_to_issue_comment(
     _print_prompt=None,
     _gh=None,
 ) -> tuple[str, list[str]]:
-    """Triage and reply to a top-level PR comment (issue_comment event)."""
+    """Triage and reply to a top-level PR comment (issue_comment event).
+
+    Raises on reply-post failure so callers fail closed.
+    """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     comment = action.comment_body or ""
@@ -617,11 +620,8 @@ def reply_to_issue_comment(
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
-    try:
-        gh.comment_issue(repo_full, number, body)
-        log.info("reply posted")
-    except Exception:
-        log.exception("failed to post issue comment reply")
+    gh.comment_issue(repo_full, number, body)
+    log.info("reply posted")
 
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")

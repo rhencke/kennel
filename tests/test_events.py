@@ -1250,15 +1250,14 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
 
-    def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
-        """comment_issue failure is caught and does not propagate."""
+    def test_post_exception_propagates(self, tmp_path: Path) -> None:
+        """comment_issue failure propagates so callers fail closed."""
         cfg = self._cfg(tmp_path)
-        # Use action without comment_id so react block is skipped
         action = Action(
             prompt="PR top-level comment on #7 by owner:\n\nplease fix",
             comment_body="please fix",
             is_bot=False,
-            context={"pr_title": "My PR"},  # no comment_id → react block skipped
+            context={"pr_title": "My PR"},
         )
 
         def fake_pp(prompt, model, **kwargs):
@@ -1268,14 +1267,14 @@ class TestReplyToIssueComment:
 
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        cat, titles = reply_to_issue_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert cat == "ACT"
+        with pytest.raises(Exception, match="gh fail"):
+            reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
