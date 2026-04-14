@@ -2246,23 +2246,16 @@ class TestWritePrDescription:
         self._call(gh)
         gh.edit_pr_body.assert_called_once()
 
-    def test_returns_true_when_written(self) -> None:
+    def test_raises_when_opus_returns_empty(self) -> None:
         gh = MagicMock()
-        result, _ = self._call(gh)
-        assert result is True
+        with pytest.raises(ValueError, match="no <body> content"):
+            self._call(gh, print_return="", issue=7)
+        gh.edit_pr_body.assert_not_called()
 
-    def test_uses_plain_text_fallback_when_opus_empty(self) -> None:
+    def test_raises_when_no_divider_in_existing_body(self) -> None:
         gh = MagicMock()
-        result, _ = self._call(gh, print_return="", issue=7)
-        assert result is True
-        gh.edit_pr_body.assert_called_once()
-        body = gh.edit_pr_body.call_args[0][2]
-        assert "Working on #7." in body
-
-    def test_returns_false_when_no_divider_in_existing_body(self) -> None:
-        gh = MagicMock()
-        result, _ = self._call(gh, existing_body="no divider here")
-        assert result is False
+        with pytest.raises(ValueError, match="no --- divider"):
+            self._call(gh, existing_body="no divider here")
         gh.edit_pr_body.assert_not_called()
 
     def test_initial_write_contains_work_queue_start_marker(self) -> None:
@@ -2368,13 +2361,12 @@ class TestWritePrDescription:
         assert "The current body is short" not in body
         assert "Want me to update it directly" not in body
 
-    def test_falls_back_when_no_body_tags(self) -> None:
-        """No body tags = treat as garbage, use plain-text fallback."""
+    def test_raises_when_opus_returns_no_body_tags(self) -> None:
+        """No body tags = garbage output; raise instead of silently falling back."""
         gh = MagicMock()
-        self._call(gh, print_return="Bare text with no body tags.", issue=42)
-        body = gh.edit_pr_body.call_args[0][2]
-        assert "Working on #42." in body
-        assert "Bare text with no body tags" not in body
+        with pytest.raises(ValueError, match="no <body> content"):
+            self._call(gh, print_return="Bare text with no body tags.", issue=42)
+        gh.edit_pr_body.assert_not_called()
 
     def test_body_tag_match_is_case_insensitive(self) -> None:
         gh = MagicMock()
@@ -2395,15 +2387,18 @@ class TestWritePrDescription:
         assert "<!-- WORK_QUEUE_START -->" in body
         assert "Old description." not in body
 
-    def test_rewrite_skips_when_no_divider(self) -> None:
+    def test_rewrite_raises_when_no_divider(self) -> None:
         gh = MagicMock()
-        result, _ = self._call(gh, existing_body="no divider here")
-        assert result is False
+        with pytest.raises(ValueError, match="no --- divider"):
+            self._call(gh, existing_body="no divider here")
         gh.edit_pr_body.assert_not_called()
 
     def test_defaults_to_claude_print_prompt(self) -> None:
         gh = MagicMock()
-        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+        with patch(
+            "kennel.claude.print_prompt",
+            return_value="<body>Desc.\n\nFixes #1.</body>",
+        ) as mock_pp:
             _write_pr_description(gh, "owner/repo", 1, 1, [])
         mock_pp.assert_called_once()
 

@@ -348,7 +348,7 @@ def _write_pr_description(
     existing_body: str = "",
     *,
     _print_prompt=None,
-) -> bool:
+) -> None:
     """Write or rewrite the PR description.
 
     Handles both initial PR creation (``existing_body=""``; builds work-queue
@@ -357,9 +357,9 @@ def _write_pr_description(
     divider).
 
     Generates the description via Opus and writes it back via
-    ``gh.edit_pr_body``.  Returns ``True`` if the body was written,
-    ``False`` when skipped (no divider in an existing body).  When Opus
-    returns empty, falls back to a plain-text ``"Working on #N."`` line.
+    ``gh.edit_pr_body``.  Raises ``ValueError`` when the existing body has no
+    ``---`` divider (rewrite precondition) or when Opus returns no
+    ``<body>``-tagged content.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -370,10 +370,9 @@ def _write_pr_description(
     # where the description section ends.  For initial write (empty body)
     # skip this guard and build the rest section fresh.
     if existing_body and divider not in existing_body:
-        log.info(
-            "_write_pr_description: no --- divider in PR #%s body — skipping", pr_number
+        raise ValueError(
+            f"_write_pr_description: no --- divider in PR #{pr_number} body"
         )
-        return False
 
     # Preserve the existing rest section or build the work-queue from scratch.
     if divider in existing_body:
@@ -395,11 +394,10 @@ def _write_pr_description(
     raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
     new_desc = _extract_body(raw)
     if not new_desc:
-        log.warning(
-            "_write_pr_description: Opus returned no <body> content — using plain-text fallback (raw=%r)",
-            (raw or "")[:200],
+        raise ValueError(
+            f"_write_pr_description: Opus returned no <body> content for PR #{pr_number}"
+            f" (raw={str(raw or '')[:200]!r})"
         )
-        new_desc = f"Working on #{issue}."
 
     # Ensure "Fixes #N" is always present (Opus preserves it for rewrites via
     # prompt rules; for initial writes we append it here).
@@ -409,7 +407,6 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
-    return True
 
 
 class Worker:

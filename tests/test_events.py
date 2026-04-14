@@ -3088,33 +3088,31 @@ class TestRewritePrDescription:
             )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_skips_when_no_divider_in_body(self, tmp_path: Path) -> None:
+    def test_raises_when_no_divider_in_body(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh(
             body="No divider here. <!-- WORK_QUEUE_START -->x<!-- WORK_QUEUE_END -->"
         )
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
+        with pytest.raises(ValueError, match="no --- divider"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_uses_plain_text_fallback_when_opus_returns_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_raises_when_opus_returns_empty(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(return_value=""),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
-        mock_gh.edit_pr_body.assert_called_once()
-        body = mock_gh.edit_pr_body.call_args[0][2]
-        assert "Working on #42." in body
+        with pytest.raises(ValueError, match="no <body> content"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(return_value=""),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
+        mock_gh.edit_pr_body.assert_not_called()
 
     def test_updates_pr_body_with_new_description(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
@@ -3179,7 +3177,10 @@ class TestRewritePrDescription:
 
     def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+        with patch(
+            "kennel.claude.print_prompt",
+            return_value="<body>Desc.\n\nFixes #42.</body>",
+        ) as mock_pp:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
@@ -3210,7 +3211,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3232,7 +3235,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3253,32 +3258,29 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
             _max_retries=3,
         )
         assert mock_gh.edit_pr_body.call_count == 3
 
-    def test_no_retry_when_write_skipped(self, tmp_path: Path) -> None:
-        """When _write_pr_description returns False (e.g. no divider), no retry."""
-        task_before = {"id": "t1", "status": "pending", "title": "Before"}
-        task_after = {"id": "t2", "status": "pending", "title": "After"}
-        tasks = MagicMock()
-        tasks.list.side_effect = [
-            [task_before],  # snapshot before
-            [task_after],  # snapshot after (would differ — but write was skipped)
-        ]
+    def test_no_divider_raises_before_retry(self, tmp_path: Path) -> None:
+        """When the PR body has no --- divider, ValueError propagates immediately."""
         mock_gh = self._mock_gh(body="No divider here. Nothing.")
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
-            _state=self._mock_state(),
-            _tasks=tasks,
-        )
+        with pytest.raises(ValueError, match="no --- divider"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(
+                    return_value="<body>New desc.\n\nFixes #42.</body>"
+                ),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
-        assert tasks.list.call_count == 1  # no after-snapshot read
 
     def test_refetches_pr_body_on_retry(self, tmp_path: Path) -> None:
         """PR body is re-fetched on each attempt so work-queue stays current."""
@@ -3295,7 +3297,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )

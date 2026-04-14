@@ -826,9 +826,8 @@ def _rewrite_pr_description(
     PR creation and post-rescope rewrites share one code path.
 
     Silently skips when there is no active issue or no open PR for it.
-    Skips without error when the shared writer returns False (no ``---``
-    divider, or Opus returned empty).  All GitHub fetch and write errors
-    propagate so the caller's thread excepthook can surface them.
+    All other errors (missing ``---`` divider, empty Opus output, GitHub API
+    failures) propagate so the caller's thread excepthook can surface them.
 
     Retries up to *_max_retries* times when the task list changes while Opus
     is generating the description, so the written description always reflects
@@ -865,12 +864,9 @@ def _rewrite_pr_description(
         snapshot_before = _task_snapshot(task_list)
 
         body = gh.get_pr_body(repo, pr_number)
-        written = _write_pr_description(
+        _write_pr_description(
             gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
         )
-
-        if not written:
-            return
 
         snapshot_after = _task_snapshot(_tasks.list())
         if snapshot_after == snapshot_before:
