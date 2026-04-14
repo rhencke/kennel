@@ -5762,9 +5762,7 @@ class TestExecuteTask:
 
         def git_side(args, **kw):
             if args == ["rev-parse", "HEAD"]:
-                return MagicMock(
-                    returncode=0, stdout=next(head_iter, "bbb"), stderr=""
-                )
+                return MagicMock(returncode=0, stdout=next(head_iter, "bbb"), stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         # Initial + n nudged resumes on sess-1, then the fresh start returns sess-2.
