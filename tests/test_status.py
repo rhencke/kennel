@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from kennel.config import RepoConfig
 from kennel.status import (
+    ClaudeTalkerInfo,
     KennelStatus,
     RepoStatus,
     WebhookActivityInfo,
@@ -411,6 +412,8 @@ class TestFetchActivities:
                 "webhook_activities": [],
                 "session_owner": None,
                 "session_alive": False,
+                "session_pid": None,
+                "claude_talker": None,
             }
         }
 
@@ -446,6 +449,8 @@ class TestFetchActivities:
                 "webhook_activities": [],
                 "session_owner": None,
                 "session_alive": False,
+                "session_pid": None,
+                "claude_talker": None,
             },
             "c/d": {
                 "what": "Fixing CI",
@@ -456,6 +461,8 @@ class TestFetchActivities:
                 "webhook_activities": [],
                 "session_owner": None,
                 "session_alive": False,
+                "session_pid": None,
+                "claude_talker": None,
             },
         }
 
@@ -929,6 +936,8 @@ class TestCollect:
             webhook_activities=[],
             session_owner=None,
             session_alive=False,
+            session_pid=None,
+            claude_talker=None,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -961,6 +970,8 @@ class TestCollect:
             webhook_activities=[],
             session_owner=None,
             session_alive=False,
+            session_pid=None,
+            claude_talker=None,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -986,7 +997,54 @@ class TestCollect:
             webhook_activities=[],
             session_owner=None,
             session_alive=False,
+            session_pid=None,
+            claude_talker=None,
         )
+
+    def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
+        """An active ClaudeTalker in /status → ClaudeTalkerInfo on RepoStatus."""
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        activity_info = {
+            "what": "running",
+            "crash_count": 0,
+            "last_crash_error": None,
+            "is_stuck": False,
+            "worker_uptime_seconds": None,
+            "webhook_activities": [],
+            "session_owner": None,
+            "session_alive": True,
+            "session_pid": 42,
+            "claude_talker": {
+                "repo_name": "owner/repo",
+                "thread_id": 1234,
+                "kind": "worker",
+                "description": "persistent session turn",
+                "claude_pid": 42,
+                "started_at": "2026-04-14T18:00:00+00:00",
+            },
+        }
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": activity_info},
+            ),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        kwargs = mock_rs.call_args.kwargs
+        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+            thread_id=1234,
+            kind="worker",
+            description="persistent session turn",
+            claude_pid=42,
+        )
+        assert kwargs["session_pid"] == 42
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1014,6 +1072,8 @@ class TestCollect:
             webhook_activities=[],
             session_owner=None,
             session_alive=False,
+            session_pid=None,
+            claude_talker=None,
         )
 
 
@@ -1085,75 +1145,92 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue:  #42 — Add widget" in output
-        assert "Task:   3/3 — Do the thing" in output
+        assert "Worker: task 3/3 — Do the thing" in output
 
     def test_repo_issue_without_title(self) -> None:
         repo = self._repo(issue=5, pending=2, completed=0, task_number=1, task_total=2)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue:  #5" in output
-        assert "Task:   1/2" in output
+        assert "Worker: task 1/2" in output
 
     def test_repo_issue_no_tasks(self) -> None:
         repo = self._repo(issue=3)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue:  #3" in output
-        assert "Task:" not in output
+        # No task → Worker line shows idle
+        assert "Worker: idle" in output
 
-    def test_claude_pid_with_uptime(self) -> None:
+    def test_claude_pid_on_worker_summary_when_no_talker(self) -> None:
+        """Claude stats ride the worker summary line when nobody is currently
+        talking to claude for this repo."""
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "└─ claude pid 9999 (running 3m)" in output
+        assert "→ claude pid 9999 (running 3m)" in output
+        # Header (worker summary) line carries the suffix.
+        assert any(
+            line.startswith("owner/repo:") and "→ claude pid 9999" in line
+            for line in output.splitlines()
+        )
 
-    def test_claude_pid_no_uptime(self) -> None:
+    def test_claude_pid_no_uptime_on_worker_summary(self) -> None:
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "└─ claude pid 9999" in output
+        assert "→ claude pid 9999" in output
         assert "running" not in output
 
-    def test_claude_pid_with_session_owner(self) -> None:
-        repo = self._repo(
-            issue=1, claude_pid=9999, claude_uptime=60, session_owner="worker-home"
-        )
-        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
-        output = format_status(status)
-        assert "└─ claude pid 9999 (running 1m, held by worker-home)" in output
-
-    def test_claude_pid_session_owner_no_uptime(self) -> None:
-        repo = self._repo(
-            issue=1, claude_pid=9999, claude_uptime=None, session_owner="worker-home"
-        )
-        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
-        output = format_status(status)
-        assert "└─ claude pid 9999 (held by worker-home)" in output
-
-    def test_claude_pid_session_alive_no_owner(self) -> None:
-        """Session subprocess alive but nobody holds the lock → shows 'session idle'."""
+    def test_claude_pid_attaches_to_worker_line_when_worker_talker(self) -> None:
+        """Worker-kind talker → claude stats on the Worker thread line."""
         repo = self._repo(
             issue=1,
             claude_pid=9999,
             claude_uptime=60,
-            session_owner=None,
             session_alive=True,
+            claude_talker=ClaudeTalkerInfo(
+                thread_id=111,
+                kind="worker",
+                description="persistent session turn",
+                claude_pid=9999,
+            ),
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "└─ claude pid 9999 (running 1m, session idle)" in output
+        # Worker line has the claude suffix.
+        worker_lines = [
+            line for line in output.splitlines() if line.startswith("  Worker:")
+        ]
+        assert any("→ claude pid 9999 (running 1m)" in line for line in worker_lines)
+        # Header does not duplicate it.
+        header = next(line for line in output.splitlines() if line.startswith("owner"))
+        assert "→ claude pid" not in header
+
+    def test_claude_pid_session_alive_no_talker(self) -> None:
+        """Session subprocess alive but nobody holds the lock → 'session idle'."""
+        repo = self._repo(
+            issue=1,
+            claude_pid=9999,
+            claude_uptime=60,
+            session_alive=True,
+            claude_talker=None,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        # Suffix appears on worker summary and mentions session idle.
+        assert "→ claude pid 9999 (running 1m, session idle)" in output
 
     def test_session_alive_without_claude_pid(self) -> None:
-        """Session alive but pgrep didn't match → fallback line noting the mismatch."""
+        """Session_alive with no pid still signals claude presence via 'session idle'."""
         repo = self._repo(
             issue=1,
             claude_pid=None,
-            session_owner=None,
             session_alive=True,
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "└─ session alive (no pgrep match)" in output
+        assert "→ claude (session idle)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.
@@ -1247,23 +1324,97 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Task:   Freeform task" in output
+        # Worker line shows the free-form task title.
+        assert "Worker: task: Freeform task" in output
+
+    def test_webhook_talker_sorts_to_top_with_claude_stats(self) -> None:
+        """When a webhook is the ClaudeTalker, its line sorts to the top of
+        the webhook section and carries the claude pid suffix."""
+        repo = self._repo(
+            issue=1,
+            claude_pid=8888,
+            claude_uptime=45,
+            session_alive=True,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description="triaging comment", elapsed_seconds=30, thread_id=1
+                ),
+                WebhookActivityInfo(
+                    description="replying to review", elapsed_seconds=2, thread_id=2
+                ),
+            ],
+            claude_talker=ClaudeTalkerInfo(
+                thread_id=2,
+                kind="webhook",
+                description="one-shot claude --print",
+                claude_pid=8888,
+            ),
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        webhook_lines = [
+            line for line in format_status(status).splitlines() if "webhook:" in line
+        ]
+        assert "replying to review" in webhook_lines[0]
+        assert "→ claude pid 8888" in webhook_lines[0]
+        assert "triaging comment" in webhook_lines[1]
+        assert "→ claude pid" not in webhook_lines[1]
+
+    def test_webhook_overflow_summary_when_more_than_five(self) -> None:
+        """More than 5 webhook activities → first 5 shown + '+N more' line."""
+        repo = self._repo(
+            issue=1,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description=f"wh{i}", elapsed_seconds=i, thread_id=i
+                )
+                for i in range(9)
+            ],
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        lines = [
+            line
+            for line in format_status(status).splitlines()
+            if "webhook" in line or "more" in line
+        ]
+        # 5 shown + 1 overflow summary.
+        assert len(lines) == 6
+        assert "+4 more webhooks" in lines[-1]
+
+    def test_webhook_overflow_singular_for_one_extra(self) -> None:
+        """Overflow of exactly 1 uses singular 'webhook'."""
+        repo = self._repo(
+            issue=1,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description=f"wh{i}", elapsed_seconds=i, thread_id=i
+                )
+                for i in range(6)
+            ],
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        assert "+1 more webhook" in format_status(status)
+        assert "+1 more webhooks" not in format_status(status)
 
     def test_webhook_activities_rendered_as_sub_bullets(self) -> None:
         repo = self._repo(
             issue=1,
             webhook_activities=[
                 WebhookActivityInfo(
-                    description="triaging comment on PR #9", elapsed_seconds=12
+                    description="triaging comment on PR #9",
+                    elapsed_seconds=12,
+                    thread_id=1,
                 ),
                 WebhookActivityInfo(
-                    description="replying to review", elapsed_seconds=3
+                    description="replying to review",
+                    elapsed_seconds=3,
+                    thread_id=2,
                 ),
             ],
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "└─ webhook: triaging comment on PR #9 (12s)" in output
+        # First webhook uses ├─ (not last), second uses └─ (last).
+        assert "├─ webhook: triaging comment on PR #9 (12s)" in output
         assert "└─ webhook: replying to review (3s)" in output
 
     def test_worker_busy_false_not_shown(self) -> None:

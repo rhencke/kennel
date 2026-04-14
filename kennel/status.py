@@ -18,10 +18,26 @@ from kennel.state import State
 
 @dataclass
 class WebhookActivityInfo:
-    """Lightweight in-flight webhook handler, used purely for display."""
+    """Lightweight in-flight webhook handler, used purely for display.
+
+    *thread_id* matches the ``thread_id`` stored on
+    :class:`~kennel.claude.ClaudeTalker` so display can identify which
+    webhook (if any) is currently driving claude.
+    """
 
     description: str
     elapsed_seconds: int
+    thread_id: int = 0
+
+
+@dataclass
+class ClaudeTalkerInfo:
+    """Who is currently driving this repo's claude subprocess."""
+
+    thread_id: int
+    kind: str  # "worker" | "webhook"
+    description: str
+    claude_pid: int
 
 
 @dataclass
@@ -49,6 +65,7 @@ class RepoStatus:
     webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
     session_owner: str | None = None
     session_alive: bool = False
+    claude_talker: ClaudeTalkerInfo | None = None
 
 
 @dataclass
@@ -200,6 +217,8 @@ def _fetch_activities(
                 "webhook_activities": item.get("webhook_activities", []),
                 "session_owner": item.get("session_owner"),
                 "session_alive": item.get("session_alive", False),
+                "session_pid": item.get("session_pid"),
+                "claude_talker": item.get("claude_talker"),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -323,6 +342,8 @@ def repo_status(
     webhook_activities: list[WebhookActivityInfo] | None = None,
     session_owner: str | None = None,
     session_alive: bool = False,
+    session_pid: int | None = None,
+    claude_talker: ClaudeTalkerInfo | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -351,6 +372,7 @@ def repo_status(
             webhook_activities=webhook_activities,
             session_owner=session_owner,
             session_alive=session_alive,
+            claude_talker=claude_talker,
         )
 
     fido_dir = git_dir / "fido"
@@ -370,7 +392,10 @@ def repo_status(
     current = _current_task(task_list)
     task_number, task_total = _task_position(task_list)
 
-    claude_pid = _claude_pid(fido_dir)
+    # Prefer the kennel-tracked session pid (authoritative, known from the
+    # ClaudeSession subprocess) over a pgrep heuristic that can't find the
+    # persistent session (its system file is outside fido_dir).
+    claude_pid = session_pid if session_pid is not None else _claude_pid(fido_dir)
     claude_uptime = (
         _process_uptime_seconds(claude_pid) if claude_pid is not None else None
     )
@@ -398,6 +423,7 @@ def repo_status(
         webhook_activities=webhook_activities,
         session_owner=session_owner,
         session_alive=session_alive,
+        claude_talker=claude_talker,
     )
 
 
@@ -418,16 +444,29 @@ def collect() -> KennelStatus:
         info = activities.get(rc.name)
         webhook_list = []
         worker_uptime_val: int | None = None
+        talker_info: ClaudeTalkerInfo | None = None
+        session_pid_val: int | None = None
         if info:
             for w in info.get("webhook_activities") or []:
                 webhook_list.append(
                     WebhookActivityInfo(
                         description=w["description"],
                         elapsed_seconds=int(w["elapsed_seconds"]),
+                        thread_id=int(w.get("thread_id", 0)),
                     )
                 )
             wu = info.get("worker_uptime_seconds")
             worker_uptime_val = int(wu) if wu is not None else None
+            talker_raw = info.get("claude_talker")
+            if talker_raw is not None:
+                talker_info = ClaudeTalkerInfo(
+                    thread_id=int(talker_raw["thread_id"]),
+                    kind=talker_raw["kind"],
+                    description=talker_raw["description"],
+                    claude_pid=int(talker_raw["claude_pid"]),
+                )
+            sp = info.get("session_pid")
+            session_pid_val = int(sp) if sp is not None else None
         repos.append(
             repo_status(
                 rc,
@@ -439,6 +478,8 @@ def collect() -> KennelStatus:
                 webhook_activities=webhook_list,
                 session_owner=info.get("session_owner") if info else None,
                 session_alive=bool(info.get("session_alive")) if info else False,
+                session_pid=session_pid_val,
+                claude_talker=talker_info,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
@@ -447,13 +488,40 @@ def collect() -> KennelStatus:
 _SILENT_DISPLAY_THRESHOLD: int = 300  # seconds of claude silence before we note it
 
 
-def _format_repo_header(repo: RepoStatus) -> str:
-    """Top line: `<name>: fido <state> — <compact stats>`.
+_WEBHOOK_DISPLAY_CAP: int = 5
+"""Max webhook lines to print per repo; overflow rolled into a +N-more line."""
 
-    Stats are comma-separated and only shown when they matter right now:
-    `crashes N` (skipped when 0), `up X` (worker thread uptime, always
-    shown when known), `BUSY Xm` (no activity for ≥5m; since #444 this is
-    informational only, not a restart signal).
+
+def _claude_stats_suffix(repo: RepoStatus) -> str:
+    """`" → claude pid 123 (running 1m, session idle)"` or ``""``.
+
+    Used both as the inline trailer on whatever line is "talking to" claude
+    and, when nobody is talking, appended to the worker summary line.
+    """
+    if repo.claude_pid is None and not repo.session_alive:
+        return ""
+    parts: list[str] = []
+    if repo.claude_uptime is not None:
+        parts.append(f"running {_format_uptime(repo.claude_uptime)}")
+    if repo.session_alive and repo.claude_talker is None:
+        parts.append("session idle")
+    pid_str = (
+        f"claude pid {repo.claude_pid}" if repo.claude_pid is not None else "claude"
+    )
+    if parts:
+        return f" → {pid_str} ({', '.join(parts)})"
+    return f" → {pid_str}"
+
+
+def _format_repo_header(repo: RepoStatus) -> str:
+    """Top line per repo: ``<name>: fido <state> — <stats>[ → <claude>]``.
+
+    Stats list is comma-separated and only shows what matters right now:
+    ``crashes N`` (skipped when 0), ``up X`` (worker thread uptime), ``BUSY``
+    (no activity for ≥5m, informational since #444), optional ``last crash``
+    line when crash_count > 0.  If nobody is currently talking to claude the
+    claude pid/uptime suffix appears on this line; when a worker or webhook
+    IS talking, the suffix attaches to that line instead.
     """
     state = "fido running" if repo.fido_running else "fido idle"
     stats: list[str] = []
@@ -462,8 +530,6 @@ def _format_repo_header(repo: RepoStatus) -> str:
     if repo.worker_uptime is not None:
         stats.append(f"up {_format_uptime(repo.worker_uptime)}")
     if repo.worker_stuck:
-        # worker_uptime includes time on the current task; there isn't a
-        # separate "silent" counter yet, so we just flag BUSY.
         stats.append("BUSY")
     if repo.crash_count > 0 and repo.last_crash_error:
         stats.append(f"last crash: {repo.last_crash_error}")
@@ -471,11 +537,24 @@ def _format_repo_header(repo: RepoStatus) -> str:
     header = f"{repo.name}: {state}"
     if stats:
         header += " — " + ", ".join(stats)
+    # Claude stats ride the worker summary only when nobody is talking.
+    if repo.claude_talker is None:
+        header += _claude_stats_suffix(repo)
     return header
 
 
 def _format_repo_body(repo: RepoStatus) -> list[str]:
-    """Indented sub-lines: Issue / PR / Task / claude / webhooks."""
+    """Per-repo body lines in fixed order:
+
+    1. ``Issue:  #N — title  (elapsed Xm)``
+    2. ``PR:     #N — title``
+    3. ``Worker: <state>`` (idle / task N/M — title / waiting on …), with
+       claude stats suffix when the worker thread is talking to claude
+    4. Webhook threads (indented ``├─`` / ``└─``), up to
+       :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to claude
+       sorts to the top and gets the claude stats suffix; overflow rolled
+       into ``+N more webhook(s)``.
+    """
     body: list[str] = []
 
     if repo.issue is None:
@@ -495,39 +574,72 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             pr_line += f" — {repo.pr_title}"
         body.append(pr_line)
 
-    if repo.task_number is not None and repo.task_total is not None:
-        task_line = f"  Task:   {repo.task_number}/{repo.task_total}"
-        if repo.current_task:
-            task_line += f" — {repo.current_task}"
-        body.append(task_line)
-    elif repo.current_task:
-        body.append(f"  Task:   {repo.current_task}")
+    body.append(_format_worker_thread_line(repo))
 
-    if repo.worker_what and not (repo.current_task or repo.pr_number):
-        # Only show the live activity when nothing more specific fits.
-        body.append(f"  Doing:  {repo.worker_what}")
-
-    if repo.claude_pid is not None:
-        claude_str = f"  └─ claude pid {repo.claude_pid}"
-        parts: list[str] = []
-        if repo.claude_uptime is not None:
-            parts.append(f"running {_format_uptime(repo.claude_uptime)}")
-        if repo.session_owner is not None:
-            parts.append(f"held by {repo.session_owner}")
-        elif repo.session_alive:
-            parts.append("session idle")
-        if parts:
-            claude_str += f" ({', '.join(parts)})"
-        body.append(claude_str)
-    elif repo.session_alive:
-        body.append("  └─ session alive (no pgrep match)")
-
-    for w in repo.webhook_activities:
-        body.append(
-            f"  └─ webhook: {w.description} ({_format_uptime(w.elapsed_seconds)})"
-        )
+    body.extend(_format_webhook_lines(repo))
 
     return body
+
+
+def _format_worker_thread_line(repo: RepoStatus) -> str:
+    """Worker-thread state line.  Attach claude stats when this thread is
+    the one talking to claude.
+    """
+    state = _worker_thread_state(repo)
+    line = f"  Worker: {state}"
+    talker = repo.claude_talker
+    if talker is not None and talker.kind == "worker":
+        line += _claude_stats_suffix(repo)
+    return line
+
+
+def _worker_thread_state(repo: RepoStatus) -> str:
+    """Compact string describing what the worker thread itself is doing.
+
+    Prefers the richest descriptor available: current task (with position
+    and title) > PR-but-no-task > the live ``worker_what`` field > ``idle``.
+    Never shows webhook-thread activity — that's surfaced separately.
+    """
+    if repo.task_number is not None and repo.task_total is not None:
+        suffix = f" — {repo.current_task}" if repo.current_task else ""
+        return f"task {repo.task_number}/{repo.task_total}{suffix}"
+    if repo.current_task is not None:
+        return f"task: {repo.current_task}"
+    what = (repo.worker_what or "").strip()
+    if what and what.lower() != "idle":
+        return what
+    return "idle"
+
+
+def _format_webhook_lines(repo: RepoStatus) -> list[str]:
+    """Render up to :data:`_WEBHOOK_DISPLAY_CAP` webhook lines with the
+    talker sorted to the top.  Returns ``[]`` when there are no webhooks.
+    """
+    webhooks = list(repo.webhook_activities)
+    if not webhooks:
+        return []
+    talker = repo.claude_talker
+    talker_tid = (
+        talker.thread_id if talker is not None and talker.kind == "webhook" else None
+    )
+    # Stable sort: webhooks driving claude first, then everything else in
+    # original order.
+    webhooks.sort(key=lambda w: 0 if w.thread_id == talker_tid else 1)
+
+    shown = webhooks[:_WEBHOOK_DISPLAY_CAP]
+    overflow = len(webhooks) - len(shown)
+    lines: list[str] = []
+    for i, w in enumerate(shown):
+        branch = "└─" if overflow == 0 and i == len(shown) - 1 else "├─"
+        line = (
+            f"  {branch} webhook: {w.description} ({_format_uptime(w.elapsed_seconds)})"
+        )
+        if talker_tid is not None and w.thread_id == talker_tid:
+            line += _claude_stats_suffix(repo)
+        lines.append(line)
+    if overflow > 0:
+        lines.append(f"  └─ +{overflow} more webhook{'s' if overflow != 1 else ''}")
+    return lines
 
 
 def format_status(status: KennelStatus) -> str:

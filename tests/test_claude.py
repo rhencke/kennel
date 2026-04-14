@@ -1135,6 +1135,12 @@ class TestRunStreamingTracksChildren:
         # the generator runs); after exhaustion it should be unregistered.
         assert proc not in _active_children
 
+    def test_thread_name_for_id_returns_none_when_not_found(self) -> None:
+        from kennel.claude import _thread_name_for_id
+
+        # Pick a thread_id that's very unlikely to match any live thread.
+        assert _thread_name_for_id(0xDEADBEEF) is None
+
     def test_registers_and_unregisters_talker_when_thread_repo_set(
         self, tmp_path: Path
     ) -> None:
@@ -1843,6 +1849,13 @@ class TestClaudeSessionLock:
         assert session.owner is None
         session.stop()
 
+    def test_pid_property_returns_popen_pid(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        proc.pid = 424242
+        session = _make_session(tmp_path, proc)
+        assert session.pid == 424242
+        session.stop()
+
     def test_repo_name_exposed(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path, _make_session_proc([]))
         assert session.repo_name == "owner/repo"
@@ -1880,7 +1893,7 @@ class TestClaudeSessionLock:
         register_talker(
             ClaudeTalker(
                 repo_name="owner/repo",
-                thread_name="intruder",
+                thread_id=999,
                 kind="webhook",
                 description="leaked",
                 claude_pid=555,

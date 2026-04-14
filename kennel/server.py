@@ -69,7 +69,7 @@ def _serialize_talker(talker: claude.ClaudeTalker | None) -> dict[str, Any] | No
         return None
     return {
         "repo_name": talker.repo_name,
-        "thread_name": talker.thread_name,
+        "thread_id": talker.thread_id,
         "kind": talker.kind,
         "description": talker.description,
         "claude_pid": talker.claude_pid,
@@ -440,10 +440,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         return "handling webhook action"
 
     def _process_action_inner(self, action, repo_cfg: RepoConfig) -> None:
+        # The worker thread's own ``worker_what`` is not touched here — this
+        # handler runs on a separate webhook thread and its activity is
+        # surfaced in the repo's :class:`~kennel.registry.WebhookActivity`
+        # list (via :meth:`~kennel.registry.WorkerRegistry.webhook_activity`).
+        # Writing here would clobber the worker thread's own state, which is
+        # what caused the old ``Doing: handling webhook action`` display bug.
         try:
-            self.registry.report_activity(
-                repo_cfg.name, "handling webhook action", busy=True
-            )
             gh = self.gh
             handled = False
 
@@ -568,6 +571,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     {
                         "description": w.description,
                         "elapsed_seconds": (now - w.started_at).total_seconds(),
+                        "thread_id": w.thread_id,
                     }
                     for w in self.registry.get_webhook_activities(a.repo_name)
                 ]
@@ -585,6 +589,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "webhook_activities": webhooks,
                         "session_owner": self.registry.get_session_owner(a.repo_name),
                         "session_alive": self.registry.get_session_alive(a.repo_name),
+                        "session_pid": self.registry.get_session_pid(a.repo_name),
                         "claude_talker": _serialize_talker(
                             claude.get_talker(a.repo_name)
                         ),

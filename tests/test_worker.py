@@ -8936,6 +8936,18 @@ class TestWorkerThread:
         assert wt._session is None
         assert wt.session_alive is False
 
+    def test_session_pid_none_when_no_session(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._session is None
+        assert wt.session_pid is None
+
+    def test_session_pid_delegates_to_session_pid(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        mock_session = MagicMock()
+        mock_session.pid = 54321
+        wt._session = mock_session
+        assert wt.session_pid == 54321
+
     def test_session_alive_delegates_to_session_is_alive(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()

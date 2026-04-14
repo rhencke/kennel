@@ -89,6 +89,12 @@ class ClaudeLeakError(RuntimeError):
 class ClaudeTalker:
     """Snapshot of the thread currently driving a claude subprocess.
 
+    *thread_id* is :func:`threading.get_ident` — a globally-unique integer
+    identifier for the live thread, used to match this talker entry to a
+    specific thread (e.g. a webhook handler's :class:`WebhookActivity`) when
+    rendering status.  The human-readable thread name is looked up at
+    display time rather than cached here.
+
     *kind* distinguishes between the persistent session path (``"worker"`` —
     the worker thread is inside a ``with session:`` block) and one-shot
     ``claude --print`` invocations from a webhook handler (``"webhook"``).
@@ -96,7 +102,7 @@ class ClaudeTalker:
     """
 
     repo_name: str
-    thread_name: str
+    thread_id: int
     kind: Literal["worker", "webhook"]
     description: str
     claude_pid: int
@@ -139,24 +145,24 @@ def register_talker(talker: ClaudeTalker) -> None:
         if existing is not None:
             raise ClaudeLeakError(
                 f"claude leak for repo {talker.repo_name}: "
-                f"{existing.thread_name} ({existing.kind}, "
+                f"tid={existing.thread_id} ({existing.kind}, "
                 f"{existing.description}, pid={existing.claude_pid}) "
-                f"still active when {talker.thread_name} ({talker.kind}, "
+                f"still active when tid={talker.thread_id} ({talker.kind}, "
                 f"{talker.description}, pid={talker.claude_pid}) tried to start"
             )
         _talkers[talker.repo_name] = talker
 
 
-def unregister_talker(repo_name: str, thread_name: str) -> None:
-    """Remove the talker entry for *repo_name* if it belongs to *thread_name*.
+def unregister_talker(repo_name: str, thread_id: int) -> None:
+    """Remove the talker entry for *repo_name* if it belongs to *thread_id*.
 
     Idempotent — safe to call from cleanup paths that may race the registry.
-    Non-matching thread_name is a no-op (defensive against cross-thread
+    Non-matching ``thread_id`` is a no-op (defensive against cross-thread
     cleanup bugs).
     """
     with _talkers_lock:
         existing = _talkers.get(repo_name)
-        if existing is not None and existing.thread_name == thread_name:
+        if existing is not None and existing.thread_id == thread_id:
             del _talkers[repo_name]
 
 
@@ -169,6 +175,20 @@ def get_talker(repo_name: str) -> ClaudeTalker | None:
 def _talker_now() -> datetime:
     """Seam for tests — override this module attribute to freeze time."""
     return datetime.now(tz=timezone.utc)
+
+
+def _thread_name_for_id(thread_id: int) -> str | None:
+    """Return the human-readable name of the live thread with *thread_id*,
+    or ``None`` if that thread has exited.
+
+    Used by status display to render a :class:`ClaudeTalker`'s thread
+    without caching the name in the registry — a dead thread's entry is
+    already being cleaned up and the name would be stale.
+    """
+    for t in threading.enumerate():
+        if t.ident == thread_id:
+            return t.name
+    return None
 
 
 def kill_active_children(grace_seconds: float = 2.0) -> None:
@@ -398,13 +418,13 @@ def _run_streaming(
     )
     _register_child(proc)
     repo_name = current_repo()
-    thread_name = threading.current_thread().name
+    thread_id = threading.get_ident()
     talker_registered = False
     if repo_name is not None:
         register_talker(
             ClaudeTalker(
                 repo_name=repo_name,
-                thread_name=thread_name,
+                thread_id=thread_id,
                 kind="webhook",
                 description=f"one-shot claude --print (pid {proc.pid})",
                 claude_pid=proc.pid,
@@ -442,7 +462,7 @@ def _run_streaming(
             raise ClaudeStreamError(proc.returncode)
     finally:
         if talker_registered and repo_name is not None:
-            unregister_talker(repo_name, thread_name)
+            unregister_talker(repo_name, thread_id)
         _unregister_child(proc)
 
 
@@ -767,6 +787,17 @@ class ClaudeSession:
         """Return True if the claude subprocess is still running."""
         return self._proc.poll() is None
 
+    @property
+    def pid(self) -> int:
+        """PID of the live claude subprocess.
+
+        Read directly off the tracked ``Popen`` — callers should use this
+        rather than pgrep, since :class:`ClaudeSession` uses
+        ``sub/persona.md`` (outside any ``fido_dir``) as its system prompt
+        and the pgrep-based heuristic in :mod:`kennel.status` can't find it.
+        """
+        return self._proc.pid
+
     def restart(self) -> None:
         """Stop the current subprocess and start a fresh one.
 
@@ -802,7 +833,7 @@ class ClaudeSession:
         talker = get_talker(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
-        return talker.thread_name
+        return _thread_name_for_id(talker.thread_id)
 
     def __enter__(self) -> "ClaudeSession":
         """Acquire the session lock, serializing send/receive across threads.
@@ -824,7 +855,7 @@ class ClaudeSession:
                 register_talker(
                     ClaudeTalker(
                         repo_name=self._repo_name,
-                        thread_name=threading.current_thread().name,
+                        thread_id=threading.get_ident(),
                         kind="worker",
                         description="persistent session turn",
                         claude_pid=self._proc.pid,
@@ -842,7 +873,7 @@ class ClaudeSession:
         stale talker entry.
         """
         if self._repo_name is not None:
-            unregister_talker(self._repo_name, threading.current_thread().name)
+            unregister_talker(self._repo_name, threading.get_ident())
         self._lock.release()
 
     def send(self, content: str) -> None:

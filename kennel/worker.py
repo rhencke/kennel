@@ -1965,6 +1965,20 @@ class WorkerThread(threading.Thread):
         session = self._session
         return session is not None and session.is_alive()
 
+    @property
+    def session_pid(self) -> int | None:
+        """PID of the persistent ClaudeSession subprocess, or ``None``.
+
+        Reads directly from the tracked session rather than relying on
+        pgrep — the :class:`~kennel.claude.ClaudeSession` uses
+        ``sub/persona.md`` (outside ``fido_dir``) as its system prompt, which
+        the pgrep-based :func:`kennel.status._claude_pid` heuristic can't find.
+        """
+        session = self._session
+        if session is None:
+            return None
+        return session.pid
+
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()

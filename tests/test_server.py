@@ -158,6 +158,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
@@ -193,6 +194,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
         WebhookHandler.registry.get_session_alive.return_value = True
+        WebhookHandler.registry.get_session_pid.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["session_owner"] == "worker-home"
@@ -217,6 +219,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True
+        WebhookHandler.registry.get_session_pid.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["session_alive"] is True
@@ -246,6 +249,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -284,6 +288,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["is_stuck"] is True
@@ -661,8 +666,12 @@ class TestProcessAction:
         time.sleep(0.2)
         mock_task.assert_not_called()
 
-    def test_process_action_emits_heartbeat(self, server: tuple) -> None:
-        """_process_action calls registry.report_activity at the start."""
+    def test_process_action_does_not_overwrite_worker_what(self, server: tuple) -> None:
+        """_process_action must not call report_activity — the webhook runs on
+        a separate thread and writing the worker's own worker_what field
+        from here clobbers the worker thread's state.  Webhook activity is
+        tracked via registry.webhook_activity instead.
+        """
         url, cfg = server
         payload = {
             **self._payload(),
@@ -673,9 +682,9 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
         time.sleep(0.2)
-        WebhookHandler.registry.report_activity.assert_called_with(
-            "owner/repo", "handling webhook action", busy=True
-        )
+        for call in WebhookHandler.registry.report_activity.call_args_list:
+            args = call.args
+            assert "handling webhook action" not in args
 
     def test_status_endpoint_includes_claude_talker(self, server: tuple) -> None:
         """Active ClaudeTalker appears in /status as a structured object."""
@@ -687,7 +696,7 @@ class TestProcessAction:
         url, _ = server
         talker = ClaudeTalker(
             repo_name="owner/repo",
-            thread_name="worker-repo",
+            thread_id=12321,
             kind="worker",
             description="persistent session turn",
             claude_pid=12345,
@@ -707,12 +716,13 @@ class TestProcessAction:
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True
+        WebhookHandler.registry.get_session_pid.return_value = None
         with patch("kennel.claude.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         talker_data = data[0]["claude_talker"]
         assert talker_data["repo_name"] == "owner/repo"
-        assert talker_data["thread_name"] == "worker-repo"
+        assert talker_data["thread_id"] == 12321
         assert talker_data["kind"] == "worker"
         assert talker_data["claude_pid"] == 12345
 

@@ -48,11 +48,18 @@ class WebhookActivity:
     when that handler returns (success or failure).  Surfaced in ``kennel
     status`` as a sub-bullet under the repo so we can see what's being
     handled beyond the worker's own task.
+
+    *thread_id* is :func:`threading.get_ident` captured at context entry so
+    status display can match this webhook to the active
+    :class:`~kennel.claude.ClaudeTalker` (whose ``thread_id`` field is from
+    the same call) — letting the CLI attach claude stats to the specific
+    webhook line that's driving claude.
     """
 
     handle_id: int
     description: str
     started_at: datetime
+    thread_id: int
 
 
 class WorkerRegistry:
@@ -209,6 +216,7 @@ class WorkerRegistry:
             handle_id=id(object()),  # cheap unique id per call
             description=description,
             started_at=_now(),
+            thread_id=threading.get_ident(),
         )
         with self._webhook_lock:
             self._webhook_activities.setdefault(repo_name, []).append(activity)
@@ -283,6 +291,16 @@ class WorkerRegistry:
         """
         thread = self._threads.get(repo_name)
         return thread.session_alive if thread is not None else False
+
+    def get_session_pid(self, repo_name: str) -> int | None:
+        """Return the PID of the persistent ClaudeSession subprocess, or None.
+
+        Read authoritatively from the kennel-tracked session rather than
+        pgrep — the system prompt file path changed in #456 so the pgrep
+        heuristic in :mod:`kennel.status` can no longer locate it.
+        """
+        thread = self._threads.get(repo_name)
+        return thread.session_pid if thread is not None else None
 
 
 def _make_thread(
