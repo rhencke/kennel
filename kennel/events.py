@@ -307,12 +307,22 @@ def reply_to_comment(
 
     context: dict[str, Any] = dict(action.context) if action.context else {}
 
-    # Always fetch the full thread for this comment
+    # Always fetch the full thread for this comment.
+    # Normalize to list so root_body extraction below is type-safe.
+    thread_comments: list[dict[str, Any]] = []
     if info.get("repo") and info.get("pr") and info.get("comment_id"):
-        thread = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
-        if thread:
-            context["comment_thread"] = thread
-            log.info("fetched %d comment(s) in thread for context", len(thread))
+        fetched = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
+        if fetched:
+            thread_comments = list(fetched)
+            context["comment_thread"] = thread_comments
+            log.info(
+                "fetched %d comment(s) in thread for context", len(thread_comments)
+            )
+
+    # Root comment body — used for task title generation.
+    # When the webhook fires on a reply (e.g. "Yes" or "Woof, you're right!"),
+    # the task title should describe the reviewer's original feedback, not the reply.
+    root_body = thread_comments[0].get("body", comment) if thread_comments else comment
 
     # Enrich context with sibling threads when the comment needs more context
     if (
@@ -328,11 +338,20 @@ def reply_to_comment(
                 len(siblings),
             )
 
-    # Step 1: Haiku triage
+    # Step 1: Haiku triage (on the triggering comment to determine category)
     category, titles = _triage(
         comment, action.is_bot, context, _print_prompt=_print_prompt
     )
     log.info("triage: %s — %s", category, titles)
+
+    # Step 1b: Re-derive task titles from the root comment body when the
+    # triggering comment is a reply.  Triage ran on the reply body which may be
+    # a one-word acknowledgment; the root comment holds the actual requirement.
+    if category in ("ACT", "DO") and root_body != comment:
+        log.info(
+            "re-deriving task titles from root comment (triggering comment is a reply)"
+        )
+        titles = [_summarize_as_action_item(root_body, _print_prompt=_print_prompt)]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
