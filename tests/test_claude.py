@@ -1317,19 +1317,14 @@ class TestClaudeSessionIterEvents:
         assert len(events) == 1
         assert events[0]["type"] == "result"
 
-    def test_skips_unparseable_lines(self, tmp_path: Path, caplog) -> None:
+    def test_raises_on_unparseable_line(self, tmp_path: Path) -> None:
         import json as _json
 
-        lines = [
-            "not json at all\n",
-            _json.dumps({"type": "result", "result": "ok"}) + "\n",
-        ]
+        lines = ["not json at all\n"]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            events = list(session.iter_events())
-        assert any("unparseable" in r.message for r in caplog.records)
-        assert len(events) == 1
+        with pytest.raises(_json.JSONDecodeError):
+            list(session.iter_events())
 
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"

@@ -636,7 +636,9 @@ class ClaudeSession:
         process exits (EOF), or when no output arrives for *idle_timeout*
         seconds (raises :class:`ClaudeStreamError` ``(-1)`` in that case).
 
-        Unparseable lines are logged at WARNING and skipped.
+        Raises ``json.JSONDecodeError`` if a non-empty stdout line cannot be
+        parsed — this is a protocol violation from the claude subprocess and
+        should not be silently swallowed.
         """
         assert self._proc.stdout is not None
         last_activity = time.monotonic()
@@ -653,14 +655,7 @@ class ClaudeSession:
                 if not line:
                     last_activity = time.monotonic()
                     continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    log.warning(
-                        "ClaudeSession: unparseable line: %r", line[:_LOG_LINE_TRUNCATE]
-                    )
-                    last_activity = time.monotonic()
-                    continue
+                obj = json.loads(line)
                 log.debug("ClaudeSession event: %s", line[:_LOG_LINE_TRUNCATE])
                 last_activity = time.monotonic()
                 yield obj
