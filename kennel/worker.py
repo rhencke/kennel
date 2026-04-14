@@ -232,18 +232,28 @@ def claude_run(
     model: str = "claude-sonnet-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
+    session: claude.ClaudeSession | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
-    If *session_id* is non-empty the existing session is resumed via
-    ``claude --resume``.  Otherwise a new session is started from
-    *fido_dir/system* and *fido_dir/prompt*.
+    When *session* is provided the prompt is sent through the persistent
+    session (via :meth:`~claude.ClaudeSession.send` +
+    :meth:`~claude.ClaudeSession.consume_until_result`) and ``("", "")``
+    is returned — there is no subprocess session_id to track.
 
-    Returns ``(session_id, raw_output)`` where *raw_output* is the full
-    stream-json text produced by the claude CLI.  Raises
-    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
-    these propagate to the worker's crash handler.
+    When *session* is ``None``: if *session_id* is non-empty the existing
+    session is resumed via ``claude --resume``; otherwise a new session is
+    started from *fido_dir/system* and *fido_dir/prompt*.  Returns
+    ``(session_id, raw_output)`` where *raw_output* is the full stream-json
+    text.  Raises ``ClaudeStreamError`` or ``FileNotFoundError`` on
+    subprocess failure — these propagate to the worker's crash handler.
     """
+    if session is not None:
+        prompt = (fido_dir / "prompt").read_text()
+        with session:
+            session.send(prompt)
+            session.consume_until_result()
+        return "", ""
     prompt_file = fido_dir / "prompt"
     if session_id:
         output = claude.resume_session(session_id, prompt_file, model, timeout, cwd=cwd)
@@ -1481,7 +1491,10 @@ class Worker:
             setup_session_id = state.get("setup_session_id", "")
             state["current_task_id"] = task["id"]
         session_id, output = claude_run(
-            fido_dir, session_id=setup_session_id, cwd=self.work_dir
+            fido_dir,
+            session_id=setup_session_id,
+            cwd=self.work_dir,
+            session=self._session,
         )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1525,14 +1538,19 @@ class Worker:
                     attempt,
                 )
                 session_id, output = claude_run(
-                    fido_dir, session_id=session_id, cwd=self.work_dir
+                    fido_dir,
+                    session_id=session_id,
+                    cwd=self.work_dir,
+                    session=self._session,
                 )
             else:
                 log.info(
                     "task produced no commits — fresh session with nudge (attempt %d)",
                     attempt,
                 )
-                session_id, output = claude_run(fido_dir, cwd=self.work_dir)
+                session_id, output = claude_run(
+                    fido_dir, cwd=self.work_dir, session=self._session
+                )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 

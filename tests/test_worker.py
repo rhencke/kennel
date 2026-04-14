@@ -2553,6 +2553,55 @@ class TestClaudeRun:
             claude_run(fido_dir, session_id="sid", timeout=90)
         assert mock_rs.call_args[0][3] == 90
 
+    # ── Session path ──────────────────────────────────────────────────────
+
+    def test_session_path_returns_empty_tuple(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        result = claude_run(fido_dir, session=session)
+        assert result == ("", "")
+
+    def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("run this task")
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.send.assert_called_once_with("run this task")
+
+    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.consume_until_result.assert_called_once()
+
+    def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        with (
+            patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
+            patch("kennel.worker.claude.resume_session") as mock_rs,
+        ):
+            claude_run(fido_dir, session=session)
+        mock_ppf.assert_not_called()
+        mock_rs.assert_not_called()
+
+    def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_run(fido_dir, session=session)
+        session.__enter__.assert_called_once()
+        session.__exit__.assert_called_once()
+
 
 class TestSanitizeSlug:
     """Tests for _sanitize_slug."""
@@ -5673,7 +5722,9 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
+        mock_run.assert_called_once_with(
+            fido_dir, session_id="", cwd=tmp_path, session=None
+        )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -6069,7 +6120,7 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(
-            fido_dir, session_id="setup-sess-42", cwd=tmp_path
+            fido_dir, session_id="setup-sess-42", cwd=tmp_path, session=None
         )
 
     def test_uses_empty_session_id_when_not_in_state(self, tmp_path: Path) -> None:
@@ -6090,7 +6141,9 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, session_id="", cwd=tmp_path)
+        mock_run.assert_called_once_with(
+            fido_dir, session_id="", cwd=tmp_path, session=None
+        )
 
     def test_updates_state_with_returned_session_id(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
