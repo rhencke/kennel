@@ -650,8 +650,7 @@ class TestReplyToComment:
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
-        assert not posted
+        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_no_comment_body_returns_act(self, tmp_path: Path) -> None:
@@ -660,8 +659,7 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
-        assert not posted
+        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_full_flow_act(self, tmp_path: Path) -> None:
@@ -686,14 +684,13 @@ class TestReplyToComment:
                 return "ACT: add logging"
             return "I will add logging."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
 
@@ -713,14 +710,13 @@ class TestReplyToComment:
                 return "ASK: need more info"
             return "What specifically?"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ASK"
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
@@ -739,14 +735,13 @@ class TestReplyToComment:
                 return "ANSWER: explain choice"
             return "I did this because..."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ANSWER"
 
     def test_full_flow_do(self, tmp_path: Path) -> None:
@@ -766,14 +761,13 @@ class TestReplyToComment:
             return "On it!"
 
         mock_gh = MagicMock()
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=mock_gh,
         )
-        assert posted
         assert cat == "DO"
         assert titles == ["add result caching"]
         mock_gh.create_issue.assert_not_called()
@@ -796,14 +790,13 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=mock_gh,
         )
-        assert posted
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
             "owner/repo",
@@ -827,18 +820,19 @@ class TestReplyToComment:
                 return "DUMP: not applicable"
             return "Not applicable here."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "DUMP"
 
-    def test_full_flow_defer_issue_creation_failure(self, tmp_path: Path) -> None:
-        """DEFER still posts a reply even when create_issue raises."""
+    def test_full_flow_defer_issue_creation_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """DEFER issue creation failure propagates — no reply posted with missing issue."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -856,15 +850,15 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        posted, cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert posted
-        assert cat == "DEFER"
+        with pytest.raises(RuntimeError, match="network fail"):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -882,14 +876,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
     def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
@@ -908,14 +901,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
@@ -935,10 +927,7 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            posted, cat, titles = reply_to_comment(
-                action, cfg, self._repo_cfg(tmp_path)
-            )
-            assert not posted  # locked — no reply sent
+            cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
             assert cat == "ACT"  # returns without posting
         finally:
             lock_fd.close()
@@ -960,14 +949,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return "ok"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
 
     def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
@@ -987,14 +975,13 @@ class TestReplyToComment:
                 return "ACT: add unit tests\nACT: update documentation"
             return "On it!"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
 
@@ -1205,8 +1192,10 @@ class TestReplyToIssueComment:
             "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
         )
 
-    def test_defer_reply_issue_creation_failure(self, tmp_path: Path) -> None:
-        """DEFER still posts a reply even when create_issue raises."""
+    def test_defer_reply_issue_creation_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """DEFER issue creation failure propagates — no reply posted with missing issue."""
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
@@ -1217,14 +1206,15 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        cat, titles = reply_to_issue_comment(
-            self._action("big refactor"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert cat == "DEFER"
+        with pytest.raises(RuntimeError, match="network fail"):
+            reply_to_issue_comment(
+                self._action("big refactor"),
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
+        mock_gh.comment_issue.assert_not_called()
 
     def test_empty_body_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1260,15 +1250,14 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
 
-    def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
-        """comment_issue failure is caught and does not propagate."""
+    def test_post_exception_propagates(self, tmp_path: Path) -> None:
+        """comment_issue failure propagates so callers fail closed."""
         cfg = self._cfg(tmp_path)
-        # Use action without comment_id so react block is skipped
         action = Action(
             prompt="PR top-level comment on #7 by owner:\n\nplease fix",
             comment_body="please fix",
             is_bot=False,
-            context={"pr_title": "My PR"},  # no comment_id → react block skipped
+            context={"pr_title": "My PR"},
         )
 
         def fake_pp(prompt, model, **kwargs):
@@ -1278,14 +1267,14 @@ class TestReplyToIssueComment:
 
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        cat, titles = reply_to_issue_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert cat == "ACT"
+        with pytest.raises(Exception, match="gh fail"):
+            reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2740,18 +2729,17 @@ class TestReplyToCommentElseBranch:
             patch("kennel.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
             patch("kennel.events.needs_more_context", return_value=False),
         ):
-            posted, cat, titles = reply_to_comment(
+            cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 _print_prompt=MagicMock(return_value="I'll look into this."),
                 _gh=MagicMock(),
             )
-        assert posted
         assert cat == "UNKNOWN_CAT"
 
-    def test_gh_post_exception_caught(self, tmp_path: Path) -> None:
-        """Exception in reply_to_review_comment is caught."""
+    def test_gh_post_exception_propagates(self, tmp_path: Path) -> None:
+        """Exception in reply_to_review_comment propagates so callers fail closed."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2769,15 +2757,14 @@ class TestReplyToCommentElseBranch:
 
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        posted, cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )  # must not raise
-        assert not posted  # post failed
-        assert cat == "ACT"
+        with pytest.raises(RuntimeError, match="network down"):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
 
 class TestReplyToReviewAlreadyRepliedTracking:
@@ -2825,7 +2812,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
     def test_does_not_add_to_already_replied_on_post_failure(
         self, tmp_path: Path
     ) -> None:
-        """Dedup set is NOT updated when the GitHub post fails."""
+        """Failed comment is not added to already_replied; loop continues for others."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="review",
@@ -2841,8 +2828,15 @@ class TestReplyToReviewAlreadyRepliedTracking:
             return "Will fix."
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [(501, "please fix")]
-        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
+        mock_gh.get_review_comments.return_value = [
+            (501, "please fix"),
+            (502, "also fix this"),
+        ]
+        # First comment fails, second succeeds
+        mock_gh.reply_to_review_comment.side_effect = [
+            RuntimeError("network down"),
+            None,
+        ]
         reply_to_review(
             action,
             cfg,
@@ -2852,6 +2846,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
             _gh=mock_gh,
         )
         assert 501 not in already  # post failed — should not be marked as replied
+        assert 502 in already  # second comment still processed
 
 
 class TestReplyToCommentTerseEnrichment:
@@ -2957,7 +2952,7 @@ class TestReplyToCommentTerseEnrichment:
             return "On it."
 
         with patch("kennel.events.needs_more_context", return_value=True):
-            posted, cat, titles = reply_to_comment(
+            cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
@@ -2965,7 +2960,6 @@ class TestReplyToCommentTerseEnrichment:
                 _gh=mock_gh,
             )
 
-        assert posted
         assert cat == "ACT"
 
     def test_terse_no_siblings_leaves_context_clean(self, tmp_path: Path) -> None:
@@ -3088,33 +3082,31 @@ class TestRewritePrDescription:
             )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_skips_when_no_divider_in_body(self, tmp_path: Path) -> None:
+    def test_raises_when_no_divider_in_body(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh(
             body="No divider here. <!-- WORK_QUEUE_START -->x<!-- WORK_QUEUE_END -->"
         )
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
+        with pytest.raises(ValueError, match="no --- divider"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_uses_plain_text_fallback_when_opus_returns_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_raises_when_opus_returns_empty(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(return_value=""),
-            _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
-        )
-        mock_gh.edit_pr_body.assert_called_once()
-        body = mock_gh.edit_pr_body.call_args[0][2]
-        assert "Working on #42." in body
+        with pytest.raises(ValueError, match="no <body> content"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(return_value=""),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
+        mock_gh.edit_pr_body.assert_not_called()
 
     def test_updates_pr_body_with_new_description(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
@@ -3179,7 +3171,10 @@ class TestRewritePrDescription:
 
     def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with patch("kennel.claude.print_prompt", return_value="") as mock_pp:
+        with patch(
+            "kennel.claude.print_prompt",
+            return_value="<body>Desc.\n\nFixes #42.</body>",
+        ) as mock_pp:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
@@ -3210,7 +3205,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3232,7 +3229,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3253,32 +3252,29 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
             _max_retries=3,
         )
         assert mock_gh.edit_pr_body.call_count == 3
 
-    def test_no_retry_when_write_skipped(self, tmp_path: Path) -> None:
-        """When _write_pr_description returns False (e.g. no divider), no retry."""
-        task_before = {"id": "t1", "status": "pending", "title": "Before"}
-        task_after = {"id": "t2", "status": "pending", "title": "After"}
-        tasks = MagicMock()
-        tasks.list.side_effect = [
-            [task_before],  # snapshot before
-            [task_after],  # snapshot after (would differ — but write was skipped)
-        ]
+    def test_no_divider_raises_before_retry(self, tmp_path: Path) -> None:
+        """When the PR body has no --- divider, ValueError propagates immediately."""
         mock_gh = self._mock_gh(body="No divider here. Nothing.")
-        _rewrite_pr_description(
-            tmp_path,
-            mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
-            _state=self._mock_state(),
-            _tasks=tasks,
-        )
+        with pytest.raises(ValueError, match="no --- divider"):
+            _rewrite_pr_description(
+                tmp_path,
+                mock_gh,
+                _print_prompt=MagicMock(
+                    return_value="<body>New desc.\n\nFixes #42.</body>"
+                ),
+                _state=self._mock_state(),
+                _tasks=self._mock_tasks(),
+            )
         mock_gh.edit_pr_body.assert_not_called()
-        assert tasks.list.call_count == 1  # no after-snapshot read
 
     def test_refetches_pr_body_on_retry(self, tmp_path: Path) -> None:
         """PR body is re-fetched on each attempt so work-queue stays current."""
@@ -3295,7 +3291,9 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _print_prompt=MagicMock(
+                return_value="<body>New desc.\n\nFixes #42.</body>"
+            ),
             _state=self._mock_state(),
             _tasks=tasks,
         )

@@ -206,21 +206,16 @@ def _load_persona(config: Config) -> str:
         return ""
 
 
-def _open_defer_issue(
-    gh: Any, repo: str, pr_url: str, title: str, comment: str
-) -> str | None:
+def _open_defer_issue(gh: Any, repo: str, pr_url: str, title: str, comment: str) -> str:
     """Create a tracking issue for a DEFER triage result.
 
-    Returns the new issue URL, or None if creation failed.
+    Returns the new issue URL.  Raises on any creation failure so the caller
+    fails closed rather than crafting a reply that references a missing issue.
     """
     issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-    try:
-        url = gh.create_issue(repo, title, issue_body)
-        log.info("opened tracking issue for DEFER: %s", url)
-        return url
-    except Exception:
-        log.exception("failed to open tracking issue for DEFER")
-        return None
+    url = gh.create_issue(repo, title, issue_body)
+    log.info("opened tracking issue for DEFER: %s", url)
+    return url
 
 
 def _comment_lock(work_dir: Path, comment_id: int) -> Path:
@@ -274,20 +269,20 @@ def reply_to_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[bool, str, list[str]]:
+) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (posted, triage_category, task_titles).
-    posted is True only when the reply was successfully sent to GitHub.
+    Returns (triage_category, task_titles).
     task_titles is a list: one entry for non-task categories (used as reply
     context), or one or more entries for ACT/DO (each becomes a task).
     Uses a per-comment lockfile to prevent concurrent replies.
+    Raises on reply-post failure so callers fail closed.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     info = action.reply_to
     if not info or not action.comment_body:
-        return (False, "ACT", [action.comment_body or action.prompt])
+        return ("ACT", [action.comment_body or action.prompt])
 
     # Per-comment lock — prevents concurrent replies
     cid = info.get("comment_id")
@@ -299,7 +294,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return (False, "ACT", [action.comment_body[:80]])
+            return ("ACT", [action.comment_body[:80]])
     else:
         lock_fd = None
 
@@ -336,7 +331,8 @@ def reply_to_comment(
     )
     log.info("triage: %s — %s", category, titles)
 
-    # Step 2: For DEFER, open a tracking issue before crafting the reply
+    # Step 2: For DEFER, open a tracking issue before crafting the reply.
+    # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
@@ -368,13 +364,8 @@ def reply_to_comment(
         )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    posted = False
-    try:
-        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
-        posted = True
-        log.info("reply posted")
-    except Exception:
-        log.exception("failed to post reply")
+    gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
+    log.info("reply posted")
 
     # Maybe react
     maybe_react(
@@ -395,7 +386,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (posted, category, titles)
+    return (category, titles)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -448,22 +439,26 @@ def reply_to_review(
         return
     log.info("replying to %d review comments", len(todo))
     for cid, body in todo:
-        posted, *_ = reply_to_comment(
-            Action(
-                prompt=action.prompt,
-                reply_to={
-                    "repo": info["repo"],
-                    "pr": info["pr"],
-                    "comment_id": cid,
-                },
-                comment_body=body,
-            ),
-            config,
-            repo_cfg,
-            _print_prompt=_print_prompt,
-            _gh=gh,
-        )
-        if posted and already_replied is not None:
+        try:
+            reply_to_comment(
+                Action(
+                    prompt=action.prompt,
+                    reply_to={
+                        "repo": info["repo"],
+                        "pr": info["pr"],
+                        "comment_id": cid,
+                    },
+                    comment_body=body,
+                ),
+                config,
+                repo_cfg,
+                _print_prompt=_print_prompt,
+                _gh=gh,
+            )
+        except Exception:
+            log.exception("failed to reply to review comment %s — skipping", cid)
+            continue
+        if already_replied is not None:
             already_replied.add(cid)
 
 
@@ -564,7 +559,10 @@ def reply_to_issue_comment(
     _print_prompt=None,
     _gh=None,
 ) -> tuple[str, list[str]]:
-    """Triage and reply to a top-level PR comment (issue_comment event)."""
+    """Triage and reply to a top-level PR comment (issue_comment event).
+
+    Raises on reply-post failure so callers fail closed.
+    """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     comment = action.comment_body or ""
@@ -604,7 +602,8 @@ def reply_to_issue_comment(
     )
     log.info("issue comment triage: %s — %s", category, titles)
 
-    # For DEFER, open a tracking issue before crafting the reply
+    # For DEFER, open a tracking issue before crafting the reply.
+    # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
@@ -625,11 +624,8 @@ def reply_to_issue_comment(
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
-    try:
-        gh.comment_issue(repo_full, number, body)
-        log.info("reply posted")
-    except Exception:
-        log.exception("failed to post issue comment reply")
+    gh.comment_issue(repo_full, number, body)
+    log.info("reply posted")
 
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
@@ -826,9 +822,8 @@ def _rewrite_pr_description(
     PR creation and post-rescope rewrites share one code path.
 
     Silently skips when there is no active issue or no open PR for it.
-    Skips without error when the shared writer returns False (no ``---``
-    divider, or Opus returned empty).  All GitHub fetch and write errors
-    propagate so the caller's thread excepthook can surface them.
+    All other errors (missing ``---`` divider, empty Opus output, GitHub API
+    failures) propagate so the caller's thread excepthook can surface them.
 
     Retries up to *_max_retries* times when the task list changes while Opus
     is generating the description, so the written description always reflects
@@ -865,12 +860,9 @@ def _rewrite_pr_description(
         snapshot_before = _task_snapshot(task_list)
 
         body = gh.get_pr_body(repo, pr_number)
-        written = _write_pr_description(
+        _write_pr_description(
             gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
         )
-
-        if not written:
-            return
 
         snapshot_after = _task_snapshot(_tasks.list())
         if snapshot_after == snapshot_before:
