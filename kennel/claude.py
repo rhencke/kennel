@@ -90,6 +90,11 @@ def _claude(
     )
 
 
+_RETURNCODE_IDLE_TIMEOUT = -1
+"""Sentinel returncode used in :class:`ClaudeStreamError` when the process is
+killed due to an idle timeout rather than exiting with a real non-zero code."""
+
+
 class ClaudeStreamError(Exception):
     """Raised by _run_streaming when the subprocess exits with a non-zero code or times out."""
 
@@ -249,8 +254,9 @@ def _run_streaming(
     """Run a command, streaming stdout with idle-timeout detection.
 
     Yields each line of stdout as it arrives.  If no new output arrives for
-    *idle_timeout* seconds, the process is killed and ``ClaudeStreamError(-1)``
-    is raised.  If the process exits with a non-zero code,
+    *idle_timeout* seconds, the process is killed and
+    ``ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)`` is raised.  If the process
+    exits with a non-zero code,
     ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
     propagates naturally if the command is not found.
     """
@@ -282,7 +288,7 @@ def _run_streaming(
                 log.warning("claude idle for %.0fs — killing", idle_timeout)
                 proc.kill()
                 proc.wait()
-                raise ClaudeStreamError(-1)
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
         proc.wait()
         # Drain any remaining output
@@ -712,7 +718,8 @@ class ClaudeSession:
         Reads lines from stdout, parsing each as JSON.  Stops (and returns)
         when a ``type=result`` or ``type=error`` event is yielded, when the
         process exits (EOF), or when no output arrives for *idle_timeout*
-        seconds (raises :class:`ClaudeStreamError` ``(-1)`` in that case).
+        seconds (raises :class:`ClaudeStreamError` with
+        :data:`_RETURNCODE_IDLE_TIMEOUT` in that case).
 
         Raises ``json.JSONDecodeError`` if a non-empty stdout line cannot be
         parsed — this is a protocol violation from the claude subprocess and
@@ -750,7 +757,7 @@ class ClaudeSession:
                 )
                 self._proc.kill()
                 self._proc.wait()
-                raise ClaudeStreamError(-1)
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
     def consume_until_result(self) -> str:
         """Drain events for the current turn and return the result text.

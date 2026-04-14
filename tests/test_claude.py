@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.claude import (
+    _RETURNCODE_IDLE_TIMEOUT,
     ClaudeSession,
     ClaudeStreamError,
     _active_children,
@@ -305,7 +306,7 @@ class TestRunStreaming:
 
         with pytest.raises(ClaudeStreamError) as exc_info:
             list(_run_streaming(["sleep", "60"], stdin_file, idle_timeout=0.1))
-        assert exc_info.value.returncode == -1
+        assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         from kennel.claude import _run_streaming
@@ -407,7 +408,7 @@ class TestPrintPromptFromFile:
 
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT))
         with pytest.raises(ClaudeStreamError):
             print_prompt_from_file(
                 sys, prompt, "claude-sonnet-4-6", streaming_runner=mock_stream
@@ -472,7 +473,7 @@ class TestResumeSession:
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        mock_stream = MagicMock(side_effect=ClaudeStreamError(-1))
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT))
         with pytest.raises(ClaudeStreamError):
             resume_session(
                 "sess-123",
@@ -1344,7 +1345,7 @@ class TestClaudeSessionIterEvents:
         )
         with pytest.raises(ClaudeStreamError) as exc_info:
             list(session.iter_events())
-        assert exc_info.value.returncode == -1
+        assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
         proc.kill.assert_called()
 
     def test_stops_immediately_when_cancel_set(self, tmp_path: Path) -> None:
