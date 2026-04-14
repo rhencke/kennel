@@ -904,6 +904,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -928,6 +929,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
@@ -957,6 +959,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
@@ -986,6 +989,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=mock_kill,
@@ -1025,6 +1029,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1054,6 +1059,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1081,6 +1087,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1120,6 +1127,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1172,6 +1180,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1205,6 +1214,7 @@ class TestRun:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _Watchdog=mock_watchdog_cls,
         )
@@ -1237,6 +1247,7 @@ class TestRun:
                 _startup_pull=MagicMock(),
                 _preflight_repo_identity=MagicMock(),
                 _preflight_tools=MagicMock(),
+                _preflight_sub_dir=MagicMock(),
                 _preflight_gh_auth=MagicMock(),
                 _Watchdog=MagicMock(),
             )
@@ -1429,6 +1440,9 @@ class TestPreflightRepoIdentity:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=mock_preflight,
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos)
@@ -1458,6 +1472,7 @@ class TestPreflightRepoIdentity:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=mock_preflight,
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
         )
 
@@ -1488,10 +1503,42 @@ class TestPreflightRepoIdentity:
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=mock_preflight,
         )
 
         mock_preflight.assert_called_once_with()
+
+    def test_run_calls_preflight_sub_dir(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=mock_preflight,
+            _preflight_gh_auth=MagicMock(),
+        )
+
+        mock_preflight.assert_called_once_with(fake_cfg)
 
 
 class TestPreflightTools:
@@ -1525,6 +1572,50 @@ class TestPreflightTools:
         from kennel.server import _REQUIRED_TOOLS
 
         assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude"}
+
+
+class TestPreflightSubDir:
+    def test_succeeds_when_sub_dir_exists(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=tmp_path / "sub",
+        )
+        preflight_sub_dir(cfg, _is_dir=lambda _: True)  # no exception
+
+    def test_raises_when_sub_dir_missing(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=tmp_path / "sub",
+        )
+        with pytest.raises(SystemExit, match="skill-files directory not found"):
+            preflight_sub_dir(cfg, _is_dir=lambda _: False)
+
+    def test_error_message_includes_path(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        sub = tmp_path / "my-sub"
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=sub,
+        )
+        with pytest.raises(SystemExit, match=str(sub)):
+            preflight_sub_dir(cfg, _is_dir=lambda _: False)
 
 
 class TestPreflightGhAuth:

@@ -143,6 +143,25 @@ def preflight_tools(
     log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
+def preflight_sub_dir(
+    config: Config,
+    *,
+    _is_dir: Callable[[Path], bool] = Path.is_dir,
+) -> None:
+    """Verify that the skill-files directory exists.
+
+    Raises :exc:`SystemExit` if ``config.sub_dir`` is not an existing directory.
+    Workers read ``persona.md`` and sub-skill files from here on every task
+    run — a missing directory causes every worker invocation to fail with an
+    obscure I/O error rather than a clear startup message.
+    """
+    if not _is_dir(config.sub_dir):
+        raise SystemExit(
+            f"preflight: skill-files directory not found: {config.sub_dir}"
+        )
+    log.info("preflight: skill-files directory confirmed: %s", config.sub_dir)
+
+
 def preflight_gh_auth(
     *,
     _gh_factory: Callable[[], GitHub] = GitHub,
@@ -574,6 +593,7 @@ def run(
     _Watchdog=Watchdog,
     _preflight_repo_identity=preflight_repo_identity,
     _preflight_tools=preflight_tools,
+    _preflight_sub_dir=preflight_sub_dir,
     _preflight_gh_auth=preflight_gh_auth,
 ) -> None:
     config = _from_args()
@@ -622,6 +642,7 @@ def run(
 
     _startup_pull()
     _preflight_tools()
+    _preflight_sub_dir(config)
     _preflight_gh_auth()
     _preflight_repo_identity(config.repos)
 
