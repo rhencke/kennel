@@ -779,6 +779,7 @@ class ClaudeSession:
                 )
                 self._proc.kill()
                 self._proc.wait()
+                self.restart()
                 raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
     def consume_until_result(self) -> str:

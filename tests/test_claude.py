@@ -1365,6 +1365,8 @@ class TestClaudeSessionIterEvents:
             list(session.iter_events())
         assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
         proc.kill.assert_called()
+        # restart() must spawn a replacement process after killing
+        assert fake_popen.call_count == 2
 
     def test_stops_immediately_when_cancel_set(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
