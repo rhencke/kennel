@@ -12,7 +12,6 @@ from kennel.github import (
     GraphQLError,
     _gh_token,
     _TimeoutSession,  # noqa: PLC2701
-    get_github,
 )
 
 
@@ -20,12 +19,6 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr=""
     )
-
-
-@pytest.fixture(autouse=True)
-def _reset_gh_cache() -> None:
-    """Reset cache before each test for isolation."""
-    get_github.cache_clear()
 
 
 class TestGhToken:
@@ -49,17 +42,6 @@ class TestGhToken:
         mock_run = MagicMock(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
             _gh_token(runner=mock_run, environ={})
-
-
-class TestGetGithub:
-    def test_creates_instance_lazily(self) -> None:
-        result = get_github(token="tok")
-        assert isinstance(result, GitHub)
-
-    def test_returns_cached_instance(self) -> None:
-        first = get_github(token="tok")
-        second = get_github(token="tok")
-        assert first is second
 
 
 class TestTimeoutSession:

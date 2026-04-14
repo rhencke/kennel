@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import logging
 import os
 import re
@@ -643,9 +642,3 @@ class GitHub:
             resp.raise_for_status()
             parts.append(resp.text)
         return "".join(parts)
-
-
-@functools.cache
-def get_github(token: str | None = None) -> GitHub:
-    """Return the shared GitHub instance, creating it on first call."""
-    return GitHub(token)

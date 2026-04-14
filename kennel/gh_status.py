@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kennel import claude
-from kennel.github import GitHub, get_github
+from kennel.github import GitHub
 
 _SUB_DIR = Path(__file__).resolve().parent.parent / "sub"
 _PERSONA_PATH = _SUB_DIR / "persona.md"
@@ -63,7 +63,7 @@ def set_gh_status(
     persona_path: Path = _PERSONA_PATH,
     _generate_persona_status: Callable[..., str] = generate_persona_status,
     _generate_persona_emoji: Callable[..., str] = generate_persona_emoji,
-    _get_github: Callable[..., GitHub] = get_github,
+    _get_github: Callable[..., GitHub] = GitHub,
 ) -> None:
     try:
         persona = persona_path.read_text()

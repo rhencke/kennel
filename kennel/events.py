@@ -11,7 +11,7 @@ from typing import Any
 
 from kennel import claude
 from kennel.config import Config, RepoConfig
-from kennel.github import get_github
+from kennel.github import GitHub
 from kennel.prompts import (
     Prompts,
     issue_reply_instruction,
@@ -254,7 +254,7 @@ def maybe_react(
         log.debug("fido chose not to react (got: %s)", reaction)
         return
 
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     log.info("fido reacts with %s to comment %s", reaction, comment_id)
     try:
         gh.add_reaction(repo, comment_type, comment_id, reaction)
@@ -298,7 +298,7 @@ def reply_to_comment(
     else:
         lock_fd = None
 
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     prompts = Prompts(_load_persona(config))
     comment = action.comment_body
 
@@ -411,7 +411,7 @@ def reply_to_review(
     if not info:
         return
 
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     log.info(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
@@ -571,7 +571,7 @@ def reply_to_issue_comment(
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
 
     # Fetch full conversation history for context
@@ -734,7 +734,7 @@ def _notify_thread_change(
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
 
     task = change["task"]
     thread = task.get("thread") or {}
@@ -955,7 +955,7 @@ def _reorder_tasks_background(
     from kennel.tasks import reorder_tasks as _reorder_tasks
 
     reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
 
@@ -1042,7 +1042,7 @@ def launch_sync(config: Config, repo_cfg: RepoConfig, *, _gh=None) -> None:
     """Sync tasks.json → PR body in a background thread."""
     from kennel.tasks import sync_tasks_background
 
-    gh = _gh if _gh is not None else get_github()
+    gh = _gh if _gh is not None else GitHub()
     sync_tasks_background(repo_cfg.work_dir, gh)
     log.info("sync-tasks launched")
 

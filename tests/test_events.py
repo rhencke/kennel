@@ -2533,11 +2533,11 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, _print_prompt=fake_pp, _gh=MagicMock())
         assert "alice" in captured_prompt[0]
 
-    def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
+    def test_gh_none_uses_github_constructor(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        with patch("kennel.events.get_github", return_value=mock_gh):
+        with patch("kennel.events.GitHub", return_value=mock_gh):
             _notify_thread_change(
                 change, cfg, _print_prompt=MagicMock(return_value="ok")
             )
