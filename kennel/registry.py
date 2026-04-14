@@ -40,6 +40,21 @@ class WorkerCrash:
     last_crash_time: datetime
 
 
+@dataclass
+class WebhookActivity:
+    """One in-flight webhook handler running alongside the worker.
+
+    Created when ``_process_action`` starts handling a webhook action; removed
+    when that handler returns (success or failure).  Surfaced in ``kennel
+    status`` as a sub-bullet under the repo so we can see what's being
+    handled beyond the worker's own task.
+    """
+
+    handle_id: int
+    description: str
+    started_at: datetime
+
+
 class WorkerRegistry:
     """Owns and manages one :class:`~kennel.worker.WorkerThread` per repo.
 
@@ -62,13 +77,24 @@ class WorkerRegistry:
         self._status_lock = threading.Lock()
         self._crashes: dict[str, WorkerCrash] = {}
         self._crash_lock = threading.Lock()
+        self._started_at: dict[str, datetime] = {}
+        self._started_at_lock = threading.Lock()
+        self._webhook_activities: dict[str, list[WebhookActivity]] = {}
+        self._webhook_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*."""
         thread = self._factory(repo_cfg)
         self._threads[repo_cfg.name] = thread
+        with self._started_at_lock:
+            self._started_at[repo_cfg.name] = _utcnow()
         thread.start()
         log.info("started WorkerThread for %s", repo_cfg.name)
+
+    def thread_started_at(self, repo_name: str) -> datetime | None:
+        """Return when the worker thread for *repo_name* was started, or None."""
+        with self._started_at_lock:
+            return self._started_at.get(repo_name)
 
     def wake(self, repo_name: str) -> None:
         """Wake the thread for *repo_name* so it checks for work immediately.
@@ -144,6 +170,46 @@ class WorkerRegistry:
         """Return crash history for *repo_name*, or None if it has never crashed."""
         with self._crash_lock:
             return self._crashes.get(repo_name)
+
+    @contextmanager
+    def webhook_activity(
+        self,
+        repo_name: str,
+        description: str,
+        *,
+        _now: Callable[[], datetime] = _utcnow,
+    ) -> Generator[None, None, None]:
+        """Register an in-flight webhook handler for the duration of the block.
+
+        Usage::
+
+            with registry.webhook_activity("owner/repo", "triaging comment"):
+                ...do the work...
+
+        Appears in ``kennel status`` as a sub-bullet under the repo.  Entries
+        self-unregister on block exit (both success and exception paths).
+        """
+        activity = WebhookActivity(
+            handle_id=id(object()),  # cheap unique id per call
+            description=description,
+            started_at=_now(),
+        )
+        with self._webhook_lock:
+            self._webhook_activities.setdefault(repo_name, []).append(activity)
+        try:
+            yield
+        finally:
+            with self._webhook_lock:
+                items = self._webhook_activities.get(repo_name)
+                if items is not None:
+                    self._webhook_activities[repo_name] = [
+                        a for a in items if a.handle_id != activity.handle_id
+                    ]
+
+    def get_webhook_activities(self, repo_name: str) -> list[WebhookActivity]:
+        """Return a snapshot of in-flight webhook activities for *repo_name*."""
+        with self._webhook_lock:
+            return list(self._webhook_activities.get(repo_name, []))
 
     @contextmanager
     def status_update(self) -> Generator[None, None, None]:

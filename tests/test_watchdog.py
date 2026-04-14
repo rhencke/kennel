@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 from kennel.config import RepoConfig
 from kennel.watchdog import (
-    _MAX_STALE_COUNT,  # noqa: PLC2701
     _STALE_THRESHOLD,  # noqa: PLC2701
     Watchdog,
     run,
@@ -23,7 +22,6 @@ def _make(repos: dict[str, RepoConfig] | None = None) -> tuple[Watchdog, MagicMo
     if repos is None:
         repos = {"owner/repo": _repo()}
     registry = MagicMock()
-    registry.is_stale.return_value = False
     return Watchdog(registry, repos), registry
 
 
@@ -37,10 +35,13 @@ class TestWatchdogRun:
         assert w.run() == 0
 
     def test_does_nothing_when_thread_alive(self) -> None:
+        """A live thread is never restarted, even if it looks stale.  Stale
+        threads are claude's problem — claude has its own idle timeout."""
         w, registry = _make()
         registry.is_alive.return_value = True
         w.run()
         registry.start.assert_not_called()
+        registry.stop_and_join.assert_not_called()
 
     def test_restarts_dead_thread(self) -> None:
         repo_cfg = _repo()
@@ -120,201 +121,37 @@ class TestWatchdogRun:
         registry.is_alive.assert_not_called()
         registry.start.assert_not_called()
 
-
-# ── Watchdog stale detection ───────────────────────────────────────────────────
-
-
-class TestWatchdogStale:
-    def _stale_make(self, max_stale: int = 2) -> tuple[Watchdog, MagicMock]:
-        repo_cfg = _repo()
-        registry = MagicMock()
+    def test_is_stale_never_called_for_restart(self) -> None:
+        """Stale detection is not a restart trigger.  is_stale may be called
+        elsewhere (e.g. /status endpoint) but never by the watchdog itself."""
+        w, registry = _make()
         registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=max_stale,
-        )
-        return w, registry
-
-    def test_warns_on_first_stale_detection(self) -> None:
-        w, _ = self._stale_make()
-        from unittest.mock import patch
-
-        with patch("kennel.watchdog.log") as mock_log:
-            w.run()
-        mock_log.warning.assert_called_once()
-        args = mock_log.warning.call_args.args
-        assert "owner/repo" in args[1]
-
-    def test_does_not_restart_on_first_stale_detection(self) -> None:
-        w, registry = self._stale_make(max_stale=2)
-        w.run()
-        registry.start.assert_not_called()
-        registry.stop_and_join.assert_not_called()
-
-    def test_increments_stale_count_each_detection(self) -> None:
-        w, _ = self._stale_make(max_stale=5)
-        w.run()
-        assert w._stale_counts["owner/repo"] == 1
-        w.run()
-        assert w._stale_counts["owner/repo"] == 2
-
-    def test_forces_restart_at_max_stale_count(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=2,
-        )
-        w.run()  # count → 1, no restart
-        registry.start.assert_not_called()
-        w.run()  # count → 2 == max, restart
-        registry.stop_and_join.assert_called_once_with("owner/repo")
-        registry.start.assert_called_once_with(repo_cfg)
-
-    def test_stop_and_join_called_before_start_on_stale_restart(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        call_order: list[str] = []
-        registry.stop_and_join.side_effect = lambda *_: call_order.append(
-            "stop_and_join"
-        )
-        registry.start.side_effect = lambda *_: call_order.append("start")
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=1,
-        )
-        w.run()
-        assert call_order == ["stop_and_join", "start"]
-
-    def test_records_crash_before_stale_restart(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        call_order: list[str] = []
-        registry.record_crash.side_effect = lambda *_: call_order.append("record_crash")
-        registry.stop_and_join.side_effect = lambda *_: call_order.append(
-            "stop_and_join"
-        )
-        registry.start.side_effect = lambda *_: call_order.append("start")
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=1,
-        )
-        w.run()
-        assert call_order == ["record_crash", "stop_and_join", "start"]
-
-    def test_stale_restart_records_crash_with_stuck_message(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=1,
-        )
-        w.run()
-        registry.record_crash.assert_called_once()
-        _, error = registry.record_crash.call_args.args
-        assert "stuck" in error
-
-    def test_stale_count_resets_after_forced_restart(self) -> None:
-        w, _ = self._stale_make(max_stale=1)
-        w.run()  # triggers restart, resets count
-        assert "owner/repo" not in w._stale_counts
-
-    def test_stale_count_resets_on_healthy_check(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = True
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=5,
-        )
-        registry.is_stale.return_value = True
-        w.run()
-        w.run()
-        assert w._stale_counts.get("owner/repo", 0) == 2
-        registry.is_stale.return_value = False
-        w.run()  # healthy — resets
-        assert "owner/repo" not in w._stale_counts
-
-    def test_stale_count_resets_on_dead_thread_restart(self) -> None:
-        repo_cfg = _repo()
-        registry = MagicMock()
-        w = Watchdog(
-            registry,
-            {"owner/repo": repo_cfg},
-            _stale_threshold=300.0,
-            _max_stale_count=5,
-        )
-        # Build up a stale count
-        registry.is_alive.return_value = True
-        registry.is_stale.return_value = True
-        w.run()
-        assert w._stale_counts.get("owner/repo", 0) == 1
-        # Thread dies next iteration
-        registry.is_alive.return_value = False
-        registry.get_thread_crash_error.return_value = None
-        w.run()
-        assert "owner/repo" not in w._stale_counts
-
-    def test_default_stale_threshold_constant(self) -> None:
-        assert _STALE_THRESHOLD == 600.0
-
-    def test_default_max_stale_count_constant(self) -> None:
-        assert _MAX_STALE_COUNT == 2
-
-    def test_watchdog_accepts_stale_threshold_kwarg(self) -> None:
-        w = Watchdog(MagicMock(), {}, _stale_threshold=120.0)
-        assert w._stale_threshold == 120.0
-
-    def test_watchdog_accepts_max_stale_count_kwarg(self) -> None:
-        w = Watchdog(MagicMock(), {}, _max_stale_count=3)
-        assert w._max_stale_count == 3
-
-    def test_is_stale_called_with_threshold(self) -> None:
-        w, registry = self._stale_make()
-        registry.is_stale.return_value = False
-        w.run()
-        registry.is_stale.assert_called_once_with("owner/repo", 300.0)
-
-    def test_stale_check_skipped_when_thread_dead(self) -> None:
-        """is_stale must not be called for a dead thread."""
-        repo_cfg = _repo()
-        registry = MagicMock()
-        registry.is_alive.return_value = False
-        registry.get_thread_crash_error.return_value = None
-        w = Watchdog(registry, {"owner/repo": repo_cfg})
         w.run()
         registry.is_stale.assert_not_called()
 
+    def test_does_not_stop_and_join_alive_thread(self) -> None:
+        w, registry = _make()
+        registry.is_alive.return_value = True
+        w.run()
+        registry.stop_and_join.assert_not_called()
 
-# ── module-level run() ─────────────────────────────────────────────────────────
+
+# ── display-only constants ────────────────────────────────────────────────────
 
 
-def _registry(*, alive: bool = True, stale: bool = False) -> MagicMock:
-    """Return a mock registry with is_alive and is_stale pre-configured."""
+class TestConstants:
+    def test_stale_threshold_is_display_only(self) -> None:
+        """_STALE_THRESHOLD exists for /status endpoint display.  It is not
+        consumed by the Watchdog class itself — documented via this test."""
+        assert _STALE_THRESHOLD > 0
+
+
+# ── Watchdog.start_thread ─────────────────────────────────────────────────────
+
+
+def _registry(*, alive: bool = True) -> MagicMock:
     reg = MagicMock()
     reg.is_alive.return_value = alive
-    reg.is_stale.return_value = stale
     return reg
 
 
@@ -346,6 +183,9 @@ class TestStartThread:
         Watchdog(reg, {"owner/repo": repo_cfg}).start_thread(_interval=0.01)
         time.sleep(0.1)
         reg.start.assert_called_with(repo_cfg)
+
+
+# ── module-level run() ─────────────────────────────────────────────────────────
 
 
 class TestModuleLevelRun:

@@ -8,8 +8,10 @@ import logging
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Protocol
 
@@ -239,6 +241,186 @@ def claude_run(
     )
     new_session_id = claude.extract_session_id(output)
     return new_session_id, output
+
+
+@dataclass(frozen=True)
+class PickerChoice:
+    """Result of the issue picker.
+
+    *number* is the selected issue; *reason* is a short human-readable
+    explanation of how the picker got there (logged on pickup).
+    """
+
+    number: int
+    title: str
+    reason: str
+
+
+def _has_milestone(issue: dict[str, Any]) -> bool:
+    return bool((issue.get("milestone") or {}).get("title"))
+
+
+def _issue_assignees(issue: dict[str, Any]) -> list[str]:
+    nodes = (issue.get("assignees") or {}).get("nodes") or []
+    return [n.get("login", "") for n in nodes if n.get("login")]
+
+
+def _pick_next_issue(
+    candidates: list[dict[str, Any]],
+    login: str,
+    *,
+    get_issue_node: Callable[[int], dict[str, Any]],
+    get_sub_issues: Callable[[int], list[dict[str, Any]]],
+    claim: Callable[[int], None],
+) -> PickerChoice | None:
+    """Select the next issue to work on from the picker rules in #433.
+
+    Algorithm:
+
+    1. For each assigned *candidate*, walk upward via ``.parent`` to the
+       root ancestor — the user requires the chosen issue to be the
+       "first open" item from the root down, not just from here.
+    2. Dedupe roots by issue number.
+    3. Rank roots: milestone-present before milestone-absent, then the
+       original creation order of the first assigned descendant.
+    4. Descend each root via :func:`_descend_issue` — unassigned
+       children get claimed, children assigned to someone else block
+       their branch, and the first eligible leaf wins.
+    """
+    roots: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    order: dict[int, int] = {}
+    for idx, candidate in enumerate(candidates):
+        root = _walk_to_root(candidate, get_issue_node=get_issue_node)
+        n = root["number"]
+        if n in seen:
+            continue
+        seen.add(n)
+        order[n] = idx
+        roots.append(root)
+
+    roots.sort(key=lambda r: (0 if _has_milestone(r) else 1, order[r["number"]]))
+
+    for root in roots:
+        choice = _descend_issue(
+            root,
+            login,
+            get_sub_issues=get_sub_issues,
+            claim=claim,
+            trail=[root["number"]],
+            milestone_source=root if _has_milestone(root) else None,
+        )
+        if choice is not None:
+            return choice
+    return None
+
+
+def _walk_to_root(
+    issue: dict[str, Any],
+    *,
+    get_issue_node: Callable[[int], dict[str, Any]],
+) -> dict[str, Any]:
+    """Walk ``issue.parent`` upward until we hit the root ancestor.
+
+    *get_issue_node* fetches a full issue dict (same shape as an entry
+    from :meth:`kennel.github.GitHub.find_issues`) so we can follow the
+    parent chain.  Returns the root ancestor, or *issue* itself when it
+    has no parent.
+    """
+    current = issue
+    visited: set[int] = set()
+    while True:
+        parent_ref = current.get("parent")
+        if not parent_ref or not parent_ref.get("number"):
+            return current
+        parent_number = parent_ref["number"]
+        if parent_number in visited:
+            log.warning(
+                "picker: parent cycle detected at #%s — stopping walk",
+                parent_number,
+            )
+            return current
+        visited.add(parent_number)
+        current = get_issue_node(parent_number)
+
+
+def _descend_issue(
+    issue: dict[str, Any],
+    login: str,
+    *,
+    get_sub_issues: Callable[[int], list[dict[str, Any]]],
+    claim: Callable[[int], None],
+    trail: list[int],
+    milestone_source: dict[str, Any] | None,
+) -> PickerChoice | None:
+    """Walk down *issue*'s sub-issues in rank order; return the first
+    eligible leaf (or *issue* itself if it has no open children).
+
+    Returns ``None`` when the whole subtree is blocked by other assignees.
+    """
+    children = list(issue.get("subIssues", {}).get("nodes") or [])
+    open_children = [c for c in children if c.get("state") != "CLOSED"]
+
+    if not open_children:
+        depth_note = (
+            f" (descended from #{'/#'.join(str(n) for n in trail[:-1])})"
+            if len(trail) > 1
+            else ""
+        )
+        milestone_note = ""
+        if milestone_source is not None and milestone_source is not issue:
+            milestone_note = f", milestone from parent #{milestone_source['number']}"
+        return PickerChoice(
+            number=issue["number"],
+            title=issue.get("title", ""),
+            reason=f"picker: pick #{issue['number']}{depth_note}{milestone_note}",
+        )
+
+    any_open = False
+    for child in open_children:
+        assignees = _issue_assignees(child)
+        if assignees and login not in assignees:
+            log.info(
+                "picker: skipping #%s — assigned to %s (blocks tree under #%s)",
+                child["number"],
+                ",".join(assignees),
+                trail[0],
+            )
+            continue
+        any_open = True
+        if login not in assignees:
+            log.info(
+                "picker: claiming #%s (unassigned child of #%s) as %s",
+                child["number"],
+                issue["number"],
+                login,
+            )
+            claim(child["number"])
+        # Refresh the child's sub-issue list — the node from the parent
+        # query only has the first page; deeper descent needs a fresh
+        # pull to be complete.
+        child_subs = list(get_sub_issues(child["number"]))
+        child_node = dict(child)
+        child_node["subIssues"] = {"nodes": child_subs}
+        choice = _descend_issue(
+            child_node,
+            login,
+            get_sub_issues=get_sub_issues,
+            claim=claim,
+            trail=[*trail, child["number"]],
+            milestone_source=(
+                milestone_source or (child if _has_milestone(child) else None)
+            ),
+        )
+        if choice is not None:
+            return choice
+    # Every open child was blocked by someone else.
+    if not any_open:
+        log.info(
+            "picker: #%s skipped — all open sub-issues blocked by other assignees",
+            issue["number"],
+        )
+    return None
 
 
 def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -603,33 +785,55 @@ class Worker:
     def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
         """Find the next eligible open issue assigned to gh_user.
 
-        An issue is eligible if it has no sub-issues or all sub-issues are CLOSED.
-
-        On success: saves the issue number to state, sets the GitHub status, and
-        returns the issue number.  When no eligible issue exists: sets a "done"
-        status and returns None.
+        Walks the sub-issue tree (see :func:`_pick_next_issue` for ranking
+        rules) so we fetch child work before its parent.  Children that
+        aren't assigned to us get claimed; children assigned to someone
+        else block that branch.
         """
         log.info("finding next eligible issue")
         issues = self.gh.find_issues(
             repo_ctx.owner, repo_ctx.repo_name, repo_ctx.gh_user
         )
-        for issue in issues:
-            sub_issues = issue.get("subIssues", {}).get("nodes", [])
-            if not sub_issues or all(si["state"] == "CLOSED" for si in sub_issues):
-                number = issue["number"]
-                title = issue["title"]
-                log.info("starting issue #%s: %s", number, title)
-                State(fido_dir).save({"issue": number})
-                self.set_status(f"Picking up issue #{number}: {title}")
-                return number
+
+        def get_sub_issues(number: int) -> list[dict[str, Any]]:
+            return list(
+                self.gh.get_sub_issues(repo_ctx.owner, repo_ctx.repo_name, number)
+            )
+
+        def get_issue_node(number: int) -> dict[str, Any]:
+            return self.gh.get_issue_node(repo_ctx.owner, repo_ctx.repo_name, number)
+
+        def claim(number: int) -> None:
+            self.gh.add_assignee(repo_ctx.repo, number, repo_ctx.gh_user)
+
+        choice = _pick_next_issue(
+            issues,
+            repo_ctx.gh_user,
+            get_issue_node=get_issue_node,
+            get_sub_issues=get_sub_issues,
+            claim=claim,
+        )
+        if choice is None:
+            log.info(
+                "no eligible issues assigned to %s in %s",
+                repo_ctx.gh_user,
+                repo_ctx.repo,
+            )
+            self.set_status("All done — no issues to fetch", busy=False)
+            return None
 
         log.info(
-            "no eligible issues assigned to %s in %s",
-            repo_ctx.gh_user,
-            repo_ctx.repo,
+            "starting issue #%s: %s (%s)", choice.number, choice.title, choice.reason
         )
-        self.set_status("All done — no issues to fetch", busy=False)
-        return None
+        State(fido_dir).save(
+            {
+                "issue": choice.number,
+                "issue_title": choice.title,
+                "issue_started_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        )
+        self.set_status(f"Picking up issue #{choice.number}: {choice.title}")
+        return choice.number
 
     def _git(
         self, args: list[str], check: bool = True, *, _run=subprocess.run
@@ -687,6 +891,10 @@ class Worker:
         if existing is not None:
             pr_number = existing["number"]
             slug = existing["headRefName"]
+            pr_title = existing.get("title") or request
+            with State(fido_dir).modify() as state:
+                state["pr_number"] = pr_number
+                state["pr_title"] = pr_title
             # Open PR — resume
             log.info("resuming PR #%s on branch %s", pr_number, slug)
             self._git(["fetch", remote])
@@ -774,6 +982,9 @@ class Worker:
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
+        with State(fido_dir).modify() as state:
+            state["pr_number"] = pr_number
+            state["pr_title"] = request
         _write_pr_description(
             self.gh, repo_ctx.repo, pr_number, issue, self._tasks.list()
         )

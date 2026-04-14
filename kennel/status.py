@@ -7,11 +7,21 @@ import json
 import subprocess
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from kennel.config import RepoConfig
+from kennel.state import State
+
+
+@dataclass
+class WebhookActivityInfo:
+    """Lightweight in-flight webhook handler, used purely for display."""
+
+    description: str
+    elapsed_seconds: int
 
 
 @dataclass
@@ -28,6 +38,15 @@ class RepoStatus:
     crash_count: int  # number of unexpected worker deaths since kennel started
     last_crash_error: str | None  # error from the most recent crash, if any
     worker_stuck: bool  # True if the worker is alive but making no progress
+    # Newer fields default so callers (tests) can omit them safely.
+    issue_title: str | None = None
+    issue_elapsed_seconds: int | None = None
+    pr_number: int | None = None
+    pr_title: str | None = None
+    task_number: int | None = None
+    task_total: int | None = None
+    worker_uptime: int | None = None
+    webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -175,6 +194,8 @@ def _fetch_activities(
                 "crash_count": item["crash_count"],
                 "last_crash_error": item["last_crash_error"],
                 "is_stuck": item.get("is_stuck", False),
+                "worker_uptime_seconds": item.get("worker_uptime_seconds"),
+                "webhook_activities": item.get("webhook_activities", []),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -184,8 +205,20 @@ def _fetch_activities(
 
 
 def _claude_pid(fido_dir: Path) -> int | None:
-    """Return the PID of the claude process using fido_dir/system, or None."""
+    """Return the PID of the claude process for this fido_dir, or None.
+
+    Matches both initial sessions (command line includes the system-prompt
+    file under fido_dir/system) and resumed sessions (command line includes
+    ``--resume <session_id>`` from state.json, which doesn't mention the
+    system file).
+    """
     pids = _pgrep(str(fido_dir / "system"))
+    if pids:
+        return pids[0]
+    session_id = State(fido_dir).load().get("setup_session_id")
+    if not session_id:
+        return None
+    pids = _pgrep(session_id)
     return pids[0] if pids else None
 
 
@@ -248,42 +281,86 @@ def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _task_position(task_list: list[dict[str, Any]]) -> tuple[int | None, int | None]:
+    """Return (task_number, total_non_completed) for display.
+
+    task_number is the 1-indexed position of the first in_progress or
+    pending task among all non-completed tasks; total is the count of
+    non-completed tasks.  Returns (None, None) when there are none.
+    """
+    non_completed = [t for t in task_list if t["status"] != "completed"]
+    if not non_completed:
+        return (None, None)
+    for idx, t in enumerate(non_completed, start=1):
+        if t["status"] == "in_progress":
+            return (idx, len(non_completed))
+    return (1, len(non_completed))
+
+
+def _elapsed_since_iso(iso: str | None, *, _now=None) -> int | None:
+    """Return integer seconds since *iso* (an ISO-8601 timestamp), or None."""
+    if not iso:
+        return None
+    try:
+        started = datetime.fromisoformat(iso)
+    except TypeError, ValueError:
+        return None
+    now = _now() if _now is not None else datetime.now(tz=timezone.utc)
+    return max(0, int((now - started).total_seconds()))
+
+
 def repo_status(
     repo_config: RepoConfig,
     worker_what: str | None = None,
     crash_count: int = 0,
     last_crash_error: str | None = None,
     worker_stuck: bool = False,
+    worker_uptime: int | None = None,
+    webhook_activities: list[WebhookActivityInfo] | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
+    webhook_activities = list(webhook_activities or [])
     git_dir = _git_dir(repo_config.work_dir)
     if git_dir is None:
         return RepoStatus(
             name=repo_config.name,
             fido_running=False,
             issue=None,
+            issue_title=None,
+            issue_elapsed_seconds=None,
+            pr_number=None,
+            pr_title=None,
             pending=0,
             completed=0,
             current_task=None,
+            task_number=None,
+            task_total=None,
             claude_pid=None,
             claude_uptime=None,
+            worker_uptime=worker_uptime,
             worker_what=worker_what,
             crash_count=crash_count,
             last_crash_error=last_crash_error,
             worker_stuck=worker_stuck,
+            webhook_activities=webhook_activities,
         )
 
     fido_dir = git_dir / "fido"
     running = _fido_running(fido_dir / "lock")
 
-    state = _read_state(fido_dir)
+    state = State(fido_dir).load()
     issue = state.get("issue")
+    issue_title = state.get("issue_title")
+    issue_elapsed = _elapsed_since_iso(state.get("issue_started_at"))
+    pr_number = state.get("pr_number")
+    pr_title = state.get("pr_title")
 
     task_list = _read_tasks(fido_dir)
     pending = sum(1 for t in task_list if t["status"] == "pending")
     completed = sum(1 for t in task_list if t["status"] == "completed")
 
     current = _current_task(task_list)
+    task_number, task_total = _task_position(task_list)
 
     claude_pid = _claude_pid(fido_dir)
     claude_uptime = (
@@ -294,15 +371,23 @@ def repo_status(
         name=repo_config.name,
         fido_running=running,
         issue=issue,
+        issue_title=issue_title,
+        issue_elapsed_seconds=issue_elapsed,
+        pr_number=pr_number,
+        pr_title=pr_title,
         pending=pending,
         completed=completed,
         current_task=current,
+        task_number=task_number,
+        task_total=task_total,
         claude_pid=claude_pid,
         claude_uptime=claude_uptime,
+        worker_uptime=worker_uptime,
         worker_what=worker_what,
         crash_count=crash_count,
         last_crash_error=last_crash_error,
         worker_stuck=worker_stuck,
+        webhook_activities=webhook_activities,
     )
 
 
@@ -321,6 +406,18 @@ def collect() -> KennelStatus:
     repos = []
     for rc in repo_configs:
         info = activities.get(rc.name)
+        webhook_list = []
+        worker_uptime_val: int | None = None
+        if info:
+            for w in info.get("webhook_activities") or []:
+                webhook_list.append(
+                    WebhookActivityInfo(
+                        description=w["description"],
+                        elapsed_seconds=int(w["elapsed_seconds"]),
+                    )
+                )
+            wu = info.get("worker_uptime_seconds")
+            worker_uptime_val = int(wu) if wu is not None else None
         repos.append(
             repo_status(
                 rc,
@@ -328,16 +425,94 @@ def collect() -> KennelStatus:
                 crash_count=info["crash_count"] if info else 0,
                 last_crash_error=info["last_crash_error"] if info else None,
                 worker_stuck=info["is_stuck"] if info else False,
+                worker_uptime=worker_uptime_val,
+                webhook_activities=webhook_list,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
 
 
+_SILENT_DISPLAY_THRESHOLD: int = 300  # seconds of claude silence before we note it
+
+
+def _format_repo_header(repo: RepoStatus) -> str:
+    """Top line: `<name>: fido <state> — <compact stats>`.
+
+    Stats are comma-separated and only shown when they matter right now:
+    `crashes N` (skipped when 0), `up X` (worker thread uptime, always
+    shown when known), `BUSY Xm` (no activity for ≥5m; since #444 this is
+    informational only, not a restart signal).
+    """
+    state = "fido running" if repo.fido_running else "fido idle"
+    stats: list[str] = []
+    if repo.crash_count > 0:
+        stats.append(f"crashes {repo.crash_count}")
+    if repo.worker_uptime is not None:
+        stats.append(f"up {_format_uptime(repo.worker_uptime)}")
+    if repo.worker_stuck:
+        # worker_uptime includes time on the current task; there isn't a
+        # separate "silent" counter yet, so we just flag BUSY.
+        stats.append("BUSY")
+    if repo.crash_count > 0 and repo.last_crash_error:
+        stats.append(f"last crash: {repo.last_crash_error}")
+
+    header = f"{repo.name}: {state}"
+    if stats:
+        header += " — " + ", ".join(stats)
+    return header
+
+
+def _format_repo_body(repo: RepoStatus) -> list[str]:
+    """Indented sub-lines: Issue / PR / Task / claude / webhooks."""
+    body: list[str] = []
+
+    if repo.issue is None:
+        body.append("  no assigned issues")
+        return body
+
+    issue_line = f"  Issue:  #{repo.issue}"
+    if repo.issue_title:
+        issue_line += f" — {repo.issue_title}"
+    if repo.issue_elapsed_seconds is not None:
+        issue_line += f"  (elapsed {_format_uptime(repo.issue_elapsed_seconds)})"
+    body.append(issue_line)
+
+    if repo.pr_number is not None:
+        pr_line = f"  PR:     #{repo.pr_number}"
+        if repo.pr_title:
+            pr_line += f" — {repo.pr_title}"
+        body.append(pr_line)
+
+    if repo.task_number is not None and repo.task_total is not None:
+        task_line = f"  Task:   {repo.task_number}/{repo.task_total}"
+        if repo.current_task:
+            task_line += f" — {repo.current_task}"
+        body.append(task_line)
+    elif repo.current_task:
+        body.append(f"  Task:   {repo.current_task}")
+
+    if repo.worker_what and not (repo.current_task or repo.pr_number):
+        # Only show the live activity when nothing more specific fits.
+        body.append(f"  Doing:  {repo.worker_what}")
+
+    if repo.claude_pid is not None:
+        claude_str = f"  └─ claude pid {repo.claude_pid}"
+        if repo.claude_uptime is not None:
+            claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
+        body.append(claude_str)
+
+    for w in repo.webhook_activities:
+        body.append(
+            f"  └─ webhook: {w.description} ({_format_uptime(w.elapsed_seconds)})"
+        )
+
+    return body
+
+
 def format_status(status: KennelStatus) -> str:
     """Format a KennelStatus as a human-readable string."""
-    lines = []
+    lines: list[str] = []
 
-    # Kennel server line
     if status.kennel_pid is not None:
         uptime_str = (
             f", uptime {_format_uptime(status.kennel_uptime)}"
@@ -348,45 +523,8 @@ def format_status(status: KennelStatus) -> str:
     else:
         lines.append("kennel: DOWN")
 
-    # Per-repo lines
     for repo in status.repos:
-        parts = []
-
-        if repo.fido_running:
-            parts.append("fido running")
-        else:
-            parts.append("fido idle")
-
-        if repo.worker_what:
-            parts.append(repo.worker_what)
-
-        if repo.issue is not None:
-            total = repo.pending + repo.completed
-            issue_str = f"issue #{repo.issue}"
-            if repo.current_task:
-                done = repo.completed
-                issue_str += f', task {done + 1}/{total} "{repo.current_task}"'
-            elif total > 0:
-                issue_str += f", {repo.pending} pending"
-            parts.append(issue_str)
-        else:
-            parts.append("no assigned issues")
-
-        if repo.claude_pid is not None:
-            claude_str = f"claude pid {repo.claude_pid}"
-            if repo.claude_uptime is not None:
-                claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
-            parts.append(claude_str)
-
-        if repo.worker_stuck:
-            parts.append("STUCK")
-
-        if repo.crash_count > 0:
-            crash_str = f"crashed {repo.crash_count}x"
-            if repo.last_crash_error:
-                crash_str += f": {repo.last_crash_error}"
-            parts.append(crash_str)
-
-        lines.append(f"{repo.name}: {' — '.join(parts)}")
+        lines.append(_format_repo_header(repo))
+        lines.extend(_format_repo_body(repo))
 
     return "\n".join(lines)

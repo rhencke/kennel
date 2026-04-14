@@ -154,19 +154,21 @@ class TestGetEndpoint:
         ]
         WebhookHandler.registry.get_crash_info.return_value = None
         WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
-        assert data == [
-            {
-                "repo_name": "owner/repo",
-                "what": "Working on: #1",
-                "busy": True,
-                "crash_count": 0,
-                "last_crash_error": None,
-                "is_stuck": False,
-            }
-        ]
+        assert len(data) == 1
+        entry = data[0]
+        assert entry["repo_name"] == "owner/repo"
+        assert entry["what"] == "Working on: #1"
+        assert entry["busy"] is True
+        assert entry["crash_count"] == 0
+        assert entry["last_crash_error"] is None
+        assert entry["is_stuck"] is False
+        assert entry["worker_uptime_seconds"] is None
+        assert entry["webhook_activities"] == []
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -188,6 +190,8 @@ class TestGetEndpoint:
             last_crash_time=datetime(2026, 1, 1),
         )
         WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -222,6 +226,8 @@ class TestGetEndpoint:
         ]
         WebhookHandler.registry.get_crash_info.return_value = None
         WebhookHandler.registry.is_stale.return_value = True
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["is_stuck"] is True

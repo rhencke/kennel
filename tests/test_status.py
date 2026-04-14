@@ -12,6 +12,7 @@ from kennel.config import RepoConfig
 from kennel.status import (
     KennelStatus,
     RepoStatus,
+    WebhookActivityInfo,
     _claude_pid,
     _current_task,
     _fetch_activities,
@@ -267,6 +268,117 @@ class TestPortFromPid:
         assert paths_read == [Path("/proc/1234/cmdline")]
 
 
+class TestTaskPosition:
+    def test_task_in_progress_takes_precedence(self) -> None:
+        from kennel.status import _task_position
+
+        tasks = [
+            {"status": "pending"},
+            {"status": "in_progress"},
+            {"status": "pending"},
+        ]
+        assert _task_position(tasks) == (2, 3)
+
+    def test_first_pending_when_none_in_progress(self) -> None:
+        from kennel.status import _task_position
+
+        tasks = [{"status": "pending"}, {"status": "pending"}]
+        assert _task_position(tasks) == (1, 2)
+
+    def test_empty_when_all_completed(self) -> None:
+        from kennel.status import _task_position
+
+        tasks = [{"status": "completed"}, {"status": "completed"}]
+        assert _task_position(tasks) == (None, None)
+
+
+class TestElapsedSinceIso:
+    def test_none_on_empty(self) -> None:
+        from kennel.status import _elapsed_since_iso
+
+        assert _elapsed_since_iso(None) is None
+        assert _elapsed_since_iso("") is None
+
+    def test_none_on_bad_format(self) -> None:
+        from kennel.status import _elapsed_since_iso
+
+        assert _elapsed_since_iso("not a date") is None
+
+    def test_none_on_wrong_type(self) -> None:
+        from kennel.status import _elapsed_since_iso
+
+        # datetime.fromisoformat raises TypeError for non-str input.
+        assert _elapsed_since_iso(12345) is None  # type: ignore[arg-type]
+
+    def test_returns_seconds_since(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from kennel.status import _elapsed_since_iso
+
+        ref = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        iso = (ref - timedelta(minutes=5)).isoformat()
+        assert _elapsed_since_iso(iso, _now=lambda: ref) == 300
+
+    def test_floors_at_zero_for_future_timestamps(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from kennel.status import _elapsed_since_iso
+
+        ref = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        future = (ref + timedelta(minutes=1)).isoformat()
+        assert _elapsed_since_iso(future, _now=lambda: ref) == 0
+
+
+class TestCollectWebhookPropagation:
+    """collect() forwards worker_uptime + webhook_activities into repo_status."""
+
+    def test_worker_uptime_and_webhooks_forwarded(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        activity = {
+            "what": "Working on: #1",
+            "crash_count": 0,
+            "last_crash_error": None,
+            "is_stuck": False,
+            "worker_uptime_seconds": 120,
+            "webhook_activities": [
+                {"description": "triaging", "elapsed_seconds": 5.0},
+            ],
+        }
+        fake_status = RepoStatus(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": activity},
+            ),
+            patch("kennel.status.repo_status", return_value=fake_status) as mock_rs,
+        ):
+            collect()
+        kwargs = mock_rs.call_args.kwargs
+        assert kwargs["worker_uptime"] == 120
+        assert len(kwargs["webhook_activities"]) == 1
+        assert kwargs["webhook_activities"][0].description == "triaging"
+        assert kwargs["webhook_activities"][0].elapsed_seconds == 5
+
+
 class TestFetchActivities:
     def _make_urlopen(self, data: bytes) -> MagicMock:
         mock_resp = MagicMock()
@@ -295,6 +407,8 @@ class TestFetchActivities:
                 "crash_count": 0,
                 "last_crash_error": None,
                 "is_stuck": False,
+                "worker_uptime_seconds": None,
+                "webhook_activities": [],
             }
         }
 
@@ -326,12 +440,16 @@ class TestFetchActivities:
                 "crash_count": 0,
                 "last_crash_error": None,
                 "is_stuck": False,
+                "worker_uptime_seconds": None,
+                "webhook_activities": [],
             },
             "c/d": {
                 "what": "Fixing CI",
                 "crash_count": 2,
                 "last_crash_error": "RuntimeError: boom",
                 "is_stuck": True,
+                "worker_uptime_seconds": None,
+                "webhook_activities": [],
             },
         }
 
@@ -378,17 +496,66 @@ class TestClaudePid:
             result = _claude_pid(fido_dir)
         assert result == 999
 
-    def test_returns_none_when_no_match(self, tmp_path: Path) -> None:
+    def test_returns_none_when_no_match_and_no_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
         with patch("kennel.status._pgrep", return_value=[]):
             result = _claude_pid(fido_dir)
         assert result is None
 
-    def test_searches_for_system_file(self, tmp_path: Path) -> None:
+    def test_searches_for_system_file_first(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
         with patch("kennel.status._pgrep", return_value=[]) as mock:
             _claude_pid(fido_dir)
-        mock.assert_called_once_with(str(fido_dir / "system"))
+        mock.assert_any_call(str(fido_dir / "system"))
+
+    def test_falls_back_to_resumed_session_id(self, tmp_path: Path) -> None:
+        """Resumed sessions run with --resume <id> and don't reference the
+        system file — fall back to matching the session id from state.json."""
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"setup_session_id": "abc-123", "issue": 7})
+
+        def fake_pgrep(pattern: str) -> list[int]:
+            return [42] if pattern == "abc-123" else []
+
+        with patch("kennel.status._pgrep", side_effect=fake_pgrep):
+            result = _claude_pid(fido_dir)
+        assert result == 42
+
+    def test_resumed_fallback_returns_none_when_no_process(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"setup_session_id": "abc-123"})
+        with patch("kennel.status._pgrep", return_value=[]):
+            result = _claude_pid(fido_dir)
+        assert result is None
+
+    def test_resumed_fallback_skipped_when_no_session_id(self, tmp_path: Path) -> None:
+        from kennel.state import State
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        State(fido_dir).save({"issue": 7})
+        with patch("kennel.status._pgrep", return_value=[]) as mock:
+            result = _claude_pid(fido_dir)
+        assert result is None
+        # Only the system-file pgrep fires when there's no session id.
+        assert mock.call_count == 1
+
+    def test_resumed_fallback_skipped_when_state_absent(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        with patch("kennel.status._pgrep", return_value=[]):
+            result = _claude_pid(fido_dir)
+        assert result is None
 
 
 class TestGitDir:
@@ -687,12 +854,16 @@ class TestCollect:
         crash_count: int = 0,
         last_crash_error: str | None = None,
         is_stuck: bool = False,
+        worker_uptime_seconds: int | None = None,
+        webhook_activities: list | None = None,
     ) -> dict:
         return {
             "what": what,
             "crash_count": crash_count,
             "last_crash_error": last_crash_error,
             "is_stuck": is_stuck,
+            "worker_uptime_seconds": worker_uptime_seconds,
+            "webhook_activities": webhook_activities or [],
         }
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
@@ -746,6 +917,8 @@ class TestCollect:
             crash_count=0,
             last_crash_error=None,
             worker_stuck=False,
+            worker_uptime=None,
+            webhook_activities=[],
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -774,6 +947,8 @@ class TestCollect:
             crash_count=3,
             last_crash_error="ValueError: oops",
             worker_stuck=False,
+            worker_uptime=None,
+            webhook_activities=[],
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -795,6 +970,8 @@ class TestCollect:
             crash_count=0,
             last_crash_error=None,
             worker_stuck=False,
+            worker_uptime=None,
+            webhook_activities=[],
         )
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
@@ -819,6 +996,8 @@ class TestCollect:
             crash_count=0,
             last_crash_error=None,
             worker_stuck=True,
+            worker_uptime=None,
+            webhook_activities=[],
         )
 
 
@@ -863,7 +1042,8 @@ class TestFormatStatus:
             repos=[self._repo(name="owner/myrepo")],
         )
         output = format_status(status)
-        assert "owner/myrepo: fido idle — no assigned issues" in output
+        assert "owner/myrepo: fido idle" in output
+        assert "no assigned issues" in output
 
     def test_repo_fido_running_no_issue(self) -> None:
         status = KennelStatus(
@@ -882,111 +1062,170 @@ class TestFormatStatus:
             pending=1,
             completed=2,
             current_task="Do the thing",
+            task_number=3,
+            task_total=3,
+            issue_title="Add widget",
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert 'issue #42, task 3/3 "Do the thing"' in output
+        assert "Issue:  #42 — Add widget" in output
+        assert "Task:   3/3 — Do the thing" in output
 
-    def test_repo_issue_no_current_task_but_has_tasks(self) -> None:
-        repo = self._repo(issue=5, pending=2, completed=0)
+    def test_repo_issue_without_title(self) -> None:
+        repo = self._repo(issue=5, pending=2, completed=0, task_number=1, task_total=2)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "issue #5, 2 pending" in output
+        assert "Issue:  #5" in output
+        assert "Task:   1/2" in output
 
     def test_repo_issue_no_tasks(self) -> None:
         repo = self._repo(issue=3)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "issue #3" in output
-        assert "pending" not in output
+        assert "Issue:  #3" in output
+        assert "Task:" not in output
 
     def test_claude_pid_with_uptime(self) -> None:
-        repo = self._repo(claude_pid=9999, claude_uptime=185)
+        repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "claude pid 9999 (running 3m)" in output
+        assert "└─ claude pid 9999 (running 3m)" in output
 
     def test_claude_pid_no_uptime(self) -> None:
-        repo = self._repo(claude_pid=9999, claude_uptime=None)
+        repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "claude pid 9999" in output
+        assert "└─ claude pid 9999" in output
         assert "running" not in output
 
     def test_multiple_repos(self) -> None:
+        # Each repo emits a header + "no assigned issues" body line.
         repos = [
             self._repo(name="a/b"),
             self._repo(name="c/d"),
         ]
         status = KennelStatus(kennel_pid=1, kennel_uptime=60, repos=repos)
         lines = format_status(status).splitlines()
-        assert len(lines) == 3
         assert lines[0].startswith("kennel:")
-        assert lines[1].startswith("a/b:")
-        assert lines[2].startswith("c/d:")
+        assert any(line.startswith("a/b:") for line in lines)
+        assert any(line.startswith("c/d:") for line in lines)
 
-    def test_worker_what_included_in_output(self) -> None:
-        repo = self._repo(fido_running=True, worker_what="Working on: #3 add widget")
+    def test_worker_what_included_when_no_task_or_pr(self) -> None:
+        """worker_what shows up in body when nothing more specific applies."""
+        repo = self._repo(
+            fido_running=True, issue=1, worker_what="Working on: #3 add widget"
+        )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Working on: #3 add widget" in output
 
-    def test_worker_what_none_not_included(self) -> None:
-        repo = self._repo(fido_running=True, worker_what=None)
+    def test_worker_what_hidden_when_task_present(self) -> None:
+        """worker_what is redundant when there's a specific Task line."""
+        repo = self._repo(
+            fido_running=True,
+            issue=1,
+            current_task="Do thing",
+            task_number=1,
+            task_total=1,
+            worker_what="Working on something",
+        )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Working on:" not in output
-
-    def test_worker_what_appears_after_fido_status(self) -> None:
-        repo = self._repo(fido_running=True, worker_what="Napping — waiting for work")
-        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
-        output = format_status(status)
-        assert "fido running — Napping — waiting for work" in output
+        assert "Working on something" not in output
 
     def test_crash_count_zero_not_shown(self) -> None:
         repo = self._repo(crash_count=0, last_crash_error=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "crashed" not in output
+        assert "crashes" not in output
+        assert "crash" not in output.lower()
 
     def test_crash_count_nonzero_shown_with_error(self) -> None:
         repo = self._repo(crash_count=3, last_crash_error="RuntimeError: boom")
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "crashed 3x: RuntimeError: boom" in output
+        assert "crashes 3" in output
+        assert "RuntimeError: boom" in output
 
     def test_crash_count_without_error(self) -> None:
         repo = self._repo(crash_count=1, last_crash_error=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "crashed 1x" in output
-        assert "crashed 1x:" not in output
+        assert "crashes 1" in output
+        assert "last crash" not in output
 
-    def test_crash_info_appears_after_claude_info(self) -> None:
+    def test_worker_uptime_shown_in_header(self) -> None:
+        repo = self._repo(fido_running=True, worker_uptime=7320)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        # 7320s = 2h02m
+        assert "up 2h2m" in output
+
+    def test_issue_elapsed_shown_in_body(self) -> None:
+        repo = self._repo(issue=1, issue_elapsed_seconds=3900)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        # 3900s = 1h05m
+        assert "elapsed 1h5m" in output
+
+    def test_pr_line_rendered_when_pr_number_set(self) -> None:
         repo = self._repo(
-            claude_pid=9999,
-            claude_uptime=60,
-            crash_count=2,
-            last_crash_error="OSError: disk full",
+            issue=1,
+            pr_number=42,
+            pr_title="Refactor widget",
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "claude pid 9999 (running 1m) — crashed 2x: OSError: disk full" in output
+        assert "PR:     #42 — Refactor widget" in output
 
-    def test_worker_stuck_false_not_shown(self) -> None:
+    def test_pr_line_without_title(self) -> None:
+        repo = self._repo(issue=1, pr_number=7, pr_title=None)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "PR:     #7" in output
+
+    def test_current_task_line_without_numbering(self) -> None:
+        repo = self._repo(
+            issue=1, current_task="Freeform task", task_number=None, task_total=None
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "Task:   Freeform task" in output
+
+    def test_webhook_activities_rendered_as_sub_bullets(self) -> None:
+        repo = self._repo(
+            issue=1,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description="triaging comment on PR #9", elapsed_seconds=12
+                ),
+                WebhookActivityInfo(
+                    description="replying to review", elapsed_seconds=3
+                ),
+            ],
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "└─ webhook: triaging comment on PR #9 (12s)" in output
+        assert "└─ webhook: replying to review (3s)" in output
+
+    def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK" not in output
+        assert "BUSY" not in output
 
-    def test_worker_stuck_true_shown(self) -> None:
+    def test_worker_busy_true_shown(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK" in output
+        assert "BUSY" in output
 
-    def test_stuck_appears_before_crash_info(self) -> None:
+    def test_busy_appears_in_header_with_crash(self) -> None:
         repo = self._repo(worker_stuck=True, crash_count=1, last_crash_error="err")
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "STUCK — crashed 1x: err" in output
+        # Both appear in the comma-separated top-line stats.
+        assert "crashes 1" in output
+        assert "BUSY" in output
+        assert "last crash: err" in output
