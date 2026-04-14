@@ -2420,44 +2420,6 @@ class TestClaudeRun:
         (fido_dir / "prompt").write_text("prompt")
         return fido_dir
 
-    # ── Resume path ────────────────────────────────────────────────────────
-
-    def test_resume_returns_existing_session_id(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="output text"):
-            session_id, _ = claude_run(fido_dir, session_id="existing-id")
-        assert session_id == "existing-id"
-
-    def test_resume_returns_output(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="stream output"):
-            _, output = claude_run(fido_dir, session_id="sid")
-        assert output == "stream output"
-
-    def test_resume_calls_resume_session_with_correct_args(
-        self, tmp_path: Path
-    ) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(
-                fido_dir,
-                session_id="my-session",
-                model="claude-opus-4-6",
-                timeout=120,
-            )
-        mock_rs.assert_called_once_with(
-            "my-session", fido_dir / "prompt", "claude-opus-4-6", 120, cwd=None
-        )
-
-    def test_resume_does_not_call_print_prompt_from_file(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.resume_session", return_value=""),
-            patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
-        ):
-            claude_run(fido_dir, session_id="sid")
-        mock_ppf.assert_not_called()
-
     # ── Start path ─────────────────────────────────────────────────────────
 
     def test_start_returns_new_session_id(self, tmp_path: Path) -> None:
@@ -2500,16 +2462,6 @@ class TestClaudeRun:
             cwd=None,
         )
 
-    def test_start_does_not_call_resume_session(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.claude.extract_session_id", return_value=""),
-            patch("kennel.worker.claude.resume_session") as mock_rs,
-        ):
-            claude_run(fido_dir)
-        mock_rs.assert_not_called()
-
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
@@ -2540,18 +2492,6 @@ class TestClaudeRun:
         ):
             claude_run(fido_dir)
         assert mock_ppf.call_args[0][3] == 300
-
-    def test_passes_custom_model_to_resume(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(fido_dir, session_id="sid", model="claude-haiku-4-5-20251001")
-        assert mock_rs.call_args[0][2] == "claude-haiku-4-5-20251001"
-
-    def test_passes_custom_timeout_to_resume(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            claude_run(fido_dir, session_id="sid", timeout=90)
-        assert mock_rs.call_args[0][3] == 90
 
     # ── Session path ──────────────────────────────────────────────────────
 
@@ -2585,13 +2525,9 @@ class TestClaudeRun:
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=None)
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
-            patch("kennel.worker.claude.resume_session") as mock_rs,
-        ):
+        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
             claude_run(fido_dir, session=session)
         mock_ppf.assert_not_called()
-        mock_rs.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -3166,10 +3102,9 @@ class TestFindOrCreatePr:
             patch("kennel.worker.tasks.list_tasks", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-open"),
+            patch("kennel.worker.claude_start", return_value=""),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-open"
 
     def test_open_pr_seeds_from_pr_body_before_setup(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3482,52 +3417,6 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         gh.create_pr.assert_not_called()
-
-    def test_no_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
-        """New-PR path: setup session_id is saved to state.json."""
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
-        with (
-            patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch("kennel.worker._write_pr_description"),
-            patch(
-                "kennel.worker.tasks.list_tasks",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
-        assert load_state(fido_dir).get("setup_session_id") == "setup-sess-new"
-
-    def test_no_pr_setup_persists_session_id_preserves_issue(
-        self, tmp_path: Path
-    ) -> None:
-        """New-PR path: persisting session_id does not clobber the issue key."""
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
-        with (
-            patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="setup-sess-new"),
-            patch("kennel.worker._write_pr_description"),
-            patch(
-                "kennel.worker.tasks.list_tasks",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Fix it")
-        state = load_state(fido_dir)
-        assert state.get("issue") == 5
-        assert state.get("setup_session_id") == "setup-sess-new"
 
     def test_no_pr_logs_pr_number(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -5722,9 +5611,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(
-            fido_dir, session_id="", cwd=tmp_path, session=None
-        )
+        mock_run.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5946,9 +5833,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        # First call: fresh start. Second call: resume with session_id.
         assert mock_run.call_count == 2
-        assert mock_run.call_args_list[1][1]["session_id"] == "sess-1"
 
     def test_starts_fresh_when_no_session_id(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -6020,47 +5905,6 @@ class TestExecuteTask:
         assert mock_run.call_count == 4
         mock_complete.assert_called_once()
 
-    def test_drops_stale_session_after_nudge_limit(self, tmp_path: Path) -> None:
-        """After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges, the next retry
-        drops the session id so claude starts from scratch.  We don't give
-        up on the task — just reset context."""
-        from kennel.worker import _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
-
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        task = self._pending_task("Stubborn task")
-
-        n = _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
-        # head_before=aaa, then n+1 resumes return aaa (no commits), then
-        # the fresh session lands commits at bbb so loop exits.  Every
-        # iteration rev-parses HEAD once.
-        head_seq = ["aaa"] * (1 + (n + 1)) + ["bbb"]
-        head_iter = iter(head_seq)
-
-        def git_side(args, **kw):
-            if args == ["rev-parse", "HEAD"]:
-                return MagicMock(returncode=0, stdout=next(head_iter, "bbb"), stderr="")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        # Initial + n nudged resumes on sess-1, then the fresh start returns sess-2.
-        runs = [("sess-1", "o")] * (n + 1) + [("sess-2", "fresh")]
-
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=runs) as mock_run,
-            patch.object(worker, "_git", side_effect=git_side),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
-
-        # Call index (n+1) is the fresh start — session_id kwarg missing/empty.
-        fresh_call = mock_run.call_args_list[n + 1]
-        assert fresh_call.kwargs.get("session_id", "") == ""
-
     def test_breaks_retry_loop_when_task_externally_completed(
         self, tmp_path: Path
     ) -> None:
@@ -6100,108 +5944,6 @@ class TestExecuteTask:
         mock_run.assert_called_once()
         # complete_by_id still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(tmp_path, task["id"])
-
-    def test_resumes_setup_session_when_present_in_state(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1, "setup_session_id": "setup-sess-42"})
-        task = self._pending_task("Do the thing")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch(
-                "kennel.worker.claude_run", return_value=("setup-sess-42", "")
-            ) as mock_run,
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(
-            fido_dir, session_id="setup-sess-42", cwd=tmp_path, session=None
-        )
-
-    def test_uses_empty_session_id_when_not_in_state(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("Do something")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch(
-                "kennel.worker.claude_run", return_value=("new-sess", "")
-            ) as mock_run,
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(
-            fido_dir, session_id="", cwd=tmp_path, session=None
-        )
-
-    def test_updates_state_with_returned_session_id(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("Update state")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("returned-sess", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert load_state(fido_dir).get("setup_session_id") == "returned-sess"
-
-    def test_does_not_update_state_when_session_id_empty(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
-        task = self._pending_task("No session")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert "setup_session_id" not in load_state(fido_dir)
-
-    def test_preserves_existing_state_keys_when_updating_session_id(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 99, "setup_session_id": "old-sess"})
-        task = self._pending_task("Preserve keys")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("new-sess", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_id"),
-            patch("kennel.tasks.sync_tasks"),
-        ):
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        state = load_state(fido_dir)
-        assert state.get("setup_session_id") == "new-sess"
-        assert state.get("issue") == 99
 
     def test_saves_current_task_id_to_state_before_claude_run(
         self, tmp_path: Path
@@ -6252,7 +5994,7 @@ class TestExecuteTask:
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5, "setup_session_id": "old-sess"})
+        save_state(fido_dir, {"issue": 5})
         task = {"id": "t-111", "title": "Preserve", "status": "pending"}
         captured: dict = {}
 
@@ -6272,7 +6014,6 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
         assert captured.get("issue") == 5
-        assert captured.get("setup_session_id") == "old-sess"
         assert captured.get("current_task_id") == "t-111"
 
     def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:

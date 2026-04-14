@@ -228,7 +228,6 @@ def claude_start(
 
 def claude_run(
     fido_dir: Path,
-    session_id: str = "",
     model: str = "claude-sonnet-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
@@ -239,14 +238,13 @@ def claude_run(
     When *session* is provided the prompt is sent through the persistent
     session (via :meth:`~claude.ClaudeSession.send` +
     :meth:`~claude.ClaudeSession.consume_until_result`) and ``("", "")``
-    is returned — there is no subprocess session_id to track.
+    is returned.
 
-    When *session* is ``None``: if *session_id* is non-empty the existing
-    session is resumed via ``claude --resume``; otherwise a new session is
-    started from *fido_dir/system* and *fido_dir/prompt*.  Returns
-    ``(session_id, raw_output)`` where *raw_output* is the full stream-json
-    text.  Raises ``ClaudeStreamError`` or ``FileNotFoundError`` on
-    subprocess failure — these propagate to the worker's crash handler.
+    When *session* is ``None`` a new session is started from *fido_dir/system*
+    and *fido_dir/prompt*.  Returns ``(session_id, raw_output)`` where
+    *raw_output* is the full stream-json text.  Raises ``ClaudeStreamError``
+    or ``FileNotFoundError`` on subprocess failure — these propagate to the
+    worker's crash handler.
     """
     if session is not None:
         prompt = (fido_dir / "prompt").read_text()
@@ -254,11 +252,8 @@ def claude_run(
             session.send(prompt)
             session.consume_until_result()
         return "", ""
-    prompt_file = fido_dir / "prompt"
-    if session_id:
-        output = claude.resume_session(session_id, prompt_file, model, timeout, cwd=cwd)
-        return session_id, output
     system_file = fido_dir / "system"
+    prompt_file = fido_dir / "prompt"
     output = claude.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
@@ -480,13 +475,6 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
-
-# Number of session-resume attempts with escalating nudges before we
-# abandon the stale session and start a fresh one.  Resuming the same
-# session forever can get stuck in a rut where claude keeps replying
-# with the same "nothing to do" no matter how hard we nudge; rebuilding
-# the context from scratch usually unsticks it.  See #452.
-_NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION: int = 5
 
 
 def _no_commit_nudge(
@@ -1032,12 +1020,7 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                session_id = claude_start(
-                    fido_dir, cwd=self.work_dir, session=self._session
-                )
-                log.info("setup session: %s", session_id)
-                with State(fido_dir).modify() as state:
-                    state["setup_session_id"] = session_id
+                claude_start(fido_dir, cwd=self.work_dir, session=self._session)
                 if not self._tasks.list():
                     raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
             log.info(
@@ -1079,10 +1062,7 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        session_id = claude_start(fido_dir, cwd=self.work_dir, session=self._session)
-        log.info("setup session: %s", session_id)
-        with State(fido_dir).modify() as state:
-            state["setup_session_id"] = session_id
+        claude_start(fido_dir, cwd=self.work_dir, session=self._session)
 
         if not self._tasks.list():
             raise RuntimeError("setup produced no tasks")
@@ -1488,11 +1468,9 @@ class Worker:
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         with State(fido_dir).modify() as state:
-            setup_session_id = state.get("setup_session_id", "")
             state["current_task_id"] = task["id"]
         session_id, output = claude_run(
             fido_dir,
-            session_id=setup_session_id,
             cwd=self.work_dir,
             session=self._session,
         )
@@ -1519,48 +1497,25 @@ class Worker:
                 )
                 break
             attempt += 1
-            # After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges fail, drop
-            # the stale session and start a fresh one.  Do not give up on
-            # the task — just reset context and keep going.
-            if session_id and attempt > _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION:
-                log.warning(
-                    "task produced no commits after %d nudges — starting fresh session",
-                    _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION,
-                )
-                session_id = ""
             nudge = _no_commit_nudge(
                 attempt, task_title, task["id"], self.work_dir, pr_number
             )
             (fido_dir / "prompt").write_text(nudge)
-            if session_id:
-                log.info(
-                    "task produced no commits — nudging session (attempt %d)",
-                    attempt,
-                )
-                session_id, output = claude_run(
-                    fido_dir,
-                    session_id=session_id,
-                    cwd=self.work_dir,
-                    session=self._session,
-                )
-            else:
-                log.info(
-                    "task produced no commits — fresh session with nudge (attempt %d)",
-                    attempt,
-                )
-                session_id, output = claude_run(
-                    fido_dir, cwd=self.work_dir, session=self._session
-                )
+            log.info(
+                "task produced no commits — nudging session (attempt %d)",
+                attempt,
+            )
+            session_id, output = claude_run(
+                fido_dir,
+                cwd=self.work_dir,
+                session=self._session,
+            )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
-
-        if session_id:
-            with State(fido_dir).modify() as state:
-                state["setup_session_id"] = session_id
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
