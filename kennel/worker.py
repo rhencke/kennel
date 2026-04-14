@@ -466,38 +466,48 @@ _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION: int = 5
 
 
-def _no_commit_nudge(attempt: int, task_title: str, pr_number: int | None) -> str:
-    """Build an escalating nudge prompt for the no-commit resume loop.
+def _no_commit_nudge(
+    attempt: int,
+    task_title: str,
+    task_id: str,
+    work_dir: Path | str,
+    pr_number: int | None,
+) -> str:
+    r"""Build an escalating nudge prompt for the no-commit resume loop.
 
     Each attempt demands a concrete action — commit, mark complete, or
     post a blocked-status comment on the PR.  "Explain what's blocking
     you" without posting it is intentionally not an option; an
     explanation that never leaves claude's head isn't actionable.
+
+    The exact \`kennel task complete\` and \`gh pr comment\` invocations
+    are pre-baked with the actual task ID, work_dir, and PR number so
+    claude doesn't have to guess.
     """
-    pr_hint = (
-        f"`gh pr comment {pr_number} --body ...`"
+    complete_cmd = f"kennel task complete {work_dir} {task_id}"
+    pr_comment_cmd = (
+        f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
         if pr_number is not None
-        else "`gh pr comment <pr> --body ...`"
+        else "gh pr comment <pr> --body 'BLOCKED: ...'"
     )
     if attempt <= 2:
         return (
             f"You're working on: {task_title}\n\n"
             "I don't see any commits yet.  Continue the task.  If you "
             "already have changes, commit them now.  If the task is "
-            "already fully complete, mark it done."
+            f"already fully complete in a previous commit, run:\n"
+            f"  {complete_cmd}\n"
         )
     return (
         f"You're working on: {task_title}\n\n"
         f"This is attempt {attempt} and there are still no commits on "
         "the branch.  Take exactly one of these actions:\n"
         "1. Commit the changes you have (`git add -A && git commit`)\n"
-        "2. Mark the task complete via `kennel task complete <id>` "
-        "if it was already done in a previous commit.\n"
-        "3. If something outside your control is blocking you, post a "
-        f"comment on the PR ({pr_hint}) that starts with `BLOCKED:` "
-        "and explains what's blocking you and why — so a human can "
-        "unblock you.  Do not just describe the situation internally; "
-        "post the comment.\n\n"
+        f"2. Mark this task complete: `{complete_cmd}`\n"
+        f"3. If something outside your control is blocking you, run "
+        f"`{pr_comment_cmd}` with a real explanation of what's "
+        "blocking you and why — so a human can unblock you.  Do not "
+        "just describe the situation internally; post the comment.\n\n"
         "Do not respond with a plan — just act."
     )
 
@@ -1453,7 +1463,9 @@ class Worker:
                     _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION,
                 )
                 session_id = ""
-            nudge = _no_commit_nudge(attempt, task_title, pr_number)
+            nudge = _no_commit_nudge(
+                attempt, task_title, task["id"], self.work_dir, pr_number
+            )
             (fido_dir / "prompt").write_text(nudge)
             if session_id:
                 log.info(

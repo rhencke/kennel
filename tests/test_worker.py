@@ -1308,31 +1308,33 @@ def _issue(
 
 
 class TestNoCommitNudge:
-    def test_early_attempt_is_gentle(self) -> None:
+    def test_early_attempt_is_gentle_and_includes_complete_command(self) -> None:
         from kennel.worker import _no_commit_nudge
 
-        msg = _no_commit_nudge(1, "Fix widget", 42)
+        msg = _no_commit_nudge(1, "Fix widget", "task-7", "/repo/work", 42)
         assert "Fix widget" in msg
         assert "commit" in msg.lower()
+        # Even early nudges include the exact mark-complete command so
+        # claude can use it without guessing the task id.
+        assert "kennel task complete /repo/work task-7" in msg
         # Early nudges don't threaten or list numbered actions.
         assert "attempt 1" not in msg.lower()
         assert "blocked" not in msg.lower()
 
-    def test_late_attempt_offers_blocked_comment_with_pr(self) -> None:
+    def test_late_attempt_offers_three_concrete_actions(self) -> None:
         from kennel.worker import _no_commit_nudge
 
-        msg = _no_commit_nudge(3, "Fix widget", 42)
+        msg = _no_commit_nudge(3, "Fix widget", "task-7", "/repo/work", 42)
         assert "attempt 3" in msg.lower()
-        assert "blocked:" in msg.lower()
-        assert "gh pr comment 42" in msg
-        # Two of the three actions are commit / mark complete.
+        # All three actions are concrete commands with real arguments.
         assert "git add" in msg.lower()
-        assert "kennel task complete" in msg.lower()
+        assert "kennel task complete /repo/work task-7" in msg
+        assert "gh pr comment 42 --body 'BLOCKED:" in msg
 
     def test_late_attempt_without_pr_uses_placeholder(self) -> None:
         from kennel.worker import _no_commit_nudge
 
-        msg = _no_commit_nudge(3, "Fix widget", None)
+        msg = _no_commit_nudge(3, "Fix widget", "task-7", "/repo/work", None)
         assert "gh pr comment <pr>" in msg
 
 
