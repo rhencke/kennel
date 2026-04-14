@@ -395,12 +395,12 @@ class Prompts:
             f"{plain}"
         )
 
-    def status_text_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
-        """Build the user prompt for GitHub status text generation.
+    def status_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
+        """Build the combined status-text + emoji prompt for a session nudge.
 
         *activities* is a list of ``(repo_name, what, busy)`` tuples for every
-        worker.  The prompt presents the full picture so Claude can produce a
-        unified status: busy work takes priority over idle.
+        worker.  Returns a prompt that asks for both fields at once, so the
+        worker can fire a single session turn instead of multiple one-shots.
         """
         if not activities:
             activity_block = "No active workers."
@@ -412,25 +412,21 @@ class Prompts:
             activity_block = "\n".join(lines)
         return f"{self.persona}\n\nCurrent activity across all repos:\n{activity_block}"
 
-    def status_text_system_prompt(self) -> str:
-        """Return the system prompt for GitHub status text generation."""
+    def status_system_prompt(self) -> str:
+        """System prompt for combined status-text + emoji generation.
+
+        Returns JSON-format instructions so the session nudge produces both
+        fields in a single turn.
+        """
         return (
             "You are writing your GitHub profile status as Fido the dog. "
-            "Output ONLY the status text — no emoji, no quotes, no preamble. "
-            "Keep it under 80 characters. "
-            "If any worker is busy, reflect that active work. "
-            "If all workers are idle, indicate you are napping."
-        )
-
-    def status_emoji_prompt(self, text: str) -> str:
-        """Build the user prompt for GitHub status emoji selection."""
-        return f"{self.persona}\n\nYour current GitHub status text is: {text}\n\nChoose one emoji."
-
-    def status_emoji_system_prompt(self) -> str:
-        """Return the system prompt for GitHub status emoji generation."""
-        return (
-            "You are choosing an emoji for your GitHub profile status as Fido the dog. "
-            "Output ONLY a single emoji or :shortcode:. No other text."
+            "Reply with ONLY a JSON object of the form "
+            '{"status": "<=80 char status text>", "emoji": ":shortcode:"}. '
+            "Status must be under 80 characters, no emoji embedded. "
+            "Emoji must be a single GitHub shortcode like :dog: or :wrench:. "
+            "If any worker is busy, the status should reflect that active "
+            "work.  If all workers are idle, indicate you are napping. "
+            "No other text before or after the JSON."
         )
 
     def react_prompt(self, comment_body: str) -> str:

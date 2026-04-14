@@ -189,6 +189,27 @@ def _sanitize_status_text(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text).strip()
 
 
+def _parse_status_nudge(raw: str) -> tuple[str, str]:
+    """Extract ``(status, emoji)`` from the JSON nudge response.
+
+    Scans *raw* for the first ``{...}`` object with both fields.  Returns
+    ``("", "")`` if parsing fails — callers treat empty fields as "fall back".
+    """
+    if not raw:
+        return "", ""
+    candidates = [raw] + [m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)]
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError, AttributeError:
+            continue
+        status = obj.get("status") if isinstance(obj, dict) else None
+        emoji = obj.get("emoji") if isinstance(obj, dict) else None
+        if isinstance(status, str) and isinstance(emoji, str):
+            return status, emoji
+    return "", ""
+
+
 def _sanitize_slug(raw: str, fallback: str) -> str:
     """Sanitize a branch name slug: lowercase, hyphens only, max 40 chars.
 
@@ -864,20 +885,19 @@ class Worker:
         what: str,
         busy: bool = True,
         *,
-        _generate_status_with_session: Callable[
-            ..., tuple[str, str]
-        ] = claude.generate_status_with_session,
-        _generate_status_emoji: Callable[..., str] = claude.generate_status_emoji,
-        _resume_status: Callable[..., str] = claude.resume_status,
         _sub_dir_fn: Callable[..., Path] = _sub_dir,
     ) -> None:
         """Set the authenticated user's GitHub status using Claude-generated text.
 
-        Makes two separate Opus calls: the first generates short status text
-        (≤80 chars), the second picks an emoji.  If the text exceeds 80
-        characters, retries up to 3 times in the same session to shorten it,
-        then truncates as a last resort.  Falls back to ``what[:80]`` if
-        Claude returns an empty response for the text call.
+        Fires a single nudge into the worker's persistent :class:`ClaudeSession`
+        asking for a JSON object with both ``status`` and ``emoji`` fields.  One
+        round-trip instead of the earlier three-to-five one-shot subprocesses
+        (closes #505) — no claude spawn overhead, no hang class, and the
+        preempt/cancel plumbing handles webhook interleaving cleanly.
+
+        When ``self._session`` is ``None`` (worker has not yet created a
+        session), logs and returns — status is best-effort and callers should
+        not block on it.
         """
         persona_path = _sub_dir_fn() / "persona.md"
         try:
@@ -902,45 +922,25 @@ class Worker:
             else:
                 activities = [(self.work_dir.name, what, busy)]
 
-            # Call 1: generate status text
-            log.info("set_status: requesting status text from claude")
-            text, session_id = _generate_status_with_session(
-                prompt=prompts.status_text_prompt(activities),
-                system_prompt=prompts.status_text_system_prompt(),
+            if self._session is None:
+                log.info("set_status: no session available — skipping")
+                return
+
+            log.info("set_status: nudging session for status + emoji")
+            raw = self._session.prompt(
+                prompts.status_prompt(activities),
+                system_prompt=prompts.status_system_prompt(),
             )
-            log.info(
-                "set_status: status text returned (%d chars)", len(text) if text else 0
-            )
+            text, emoji = _parse_status_nudge(raw)
             if not text:
                 log.warning(
-                    "set_status: claude returned empty — using plain-text fallback"
+                    "set_status: claude returned no status text — falling back to %r",
+                    what[:80],
                 )
                 text = what[:80]
-                session_id = ""
-
             text = _sanitize_status_text(text)
-
-            for _ in range(3):
-                if len(text) <= 80 or not session_id:
-                    break
-                retry_raw = _resume_status(
-                    session_id,
-                    f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
-                )
-                if not retry_raw:
-                    break
-                text = retry_raw.strip()
-
             if len(text) > 80:
                 text = text[:80]
-
-            # Call 2: generate emoji
-            log.info("set_status: requesting emoji from claude")
-            emoji = _generate_status_emoji(
-                prompt=prompts.status_emoji_prompt(text),
-                system_prompt=prompts.status_emoji_system_prompt(),
-            )
-            log.info("set_status: emoji returned (%r)", emoji)
             if not emoji:
                 emoji = ":dog:"
 

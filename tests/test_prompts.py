@@ -391,54 +391,35 @@ class TestIssueReplyInstruction:
 # ── Prompts.status_system_prompt ─────────────────────────────────────────────
 
 
-class TestStatusTextSystemPrompt:
+class TestStatusSystemPrompt:
     def test_returns_string(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert isinstance(result, str)
 
-    def test_no_emoji_instruction(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
-        assert "no emoji" in result.lower() or "ONLY the status text" in result
+    def test_mentions_json(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert "JSON" in result
+
+    def test_mentions_status_and_emoji_fields(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert '"status"' in result
+        assert '"emoji"' in result
 
     def test_mentions_80_chars(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "80" in result
 
     def test_mentions_fido(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "Fido" in result
 
     def test_instructs_busy_priority(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "busy" in result
 
     def test_instructs_idle_napping(self) -> None:
-        result = Prompts("persona").status_text_system_prompt()
+        result = Prompts("persona").status_system_prompt()
         assert "idle" in result or "napping" in result.lower()
-
-
-class TestStatusEmojiSystemPrompt:
-    def test_returns_string(self) -> None:
-        result = Prompts("persona").status_emoji_system_prompt()
-        assert isinstance(result, str)
-
-    def test_mentions_emoji(self) -> None:
-        result = Prompts("persona").status_emoji_system_prompt()
-        assert "emoji" in result
-
-    def test_mentions_fido(self) -> None:
-        result = Prompts("persona").status_emoji_system_prompt()
-        assert "Fido" in result
-
-
-class TestStatusEmojiPrompt:
-    def test_includes_persona(self) -> None:
-        result = Prompts("I am Fido.").status_emoji_prompt("working hard")
-        assert "I am Fido." in result
-
-    def test_includes_text(self) -> None:
-        result = Prompts("persona").status_emoji_prompt("chasing bugs")
-        assert "chasing bugs" in result
 
 
 # ── Prompts class ─────────────────────────────────────────────────────────────
@@ -506,39 +487,37 @@ class TestPromptsReactPrompt:
         assert "emoji" in result
 
 
-class TestPromptsStatusTextPrompt:
+class TestPromptsStatusPrompt:
     def test_includes_persona(self) -> None:
-        result = Prompts("I am Fido.").status_text_prompt(
+        result = Prompts("I am Fido.").status_prompt(
             [("owner/repo", "writing tests", True)]
         )
         assert "I am Fido." in result
 
     def test_includes_what(self) -> None:
-        result = Prompts("persona").status_text_prompt(
+        result = Prompts("persona").status_prompt(
             [("owner/repo", "reviewing PRs", True)]
         )
         assert "reviewing PRs" in result
 
     def test_includes_repo_name(self) -> None:
-        result = Prompts("persona").status_text_prompt(
+        result = Prompts("persona").status_prompt(
             [("rhencke/kennel", "fixing a bug", True)]
         )
         assert "rhencke/kennel" in result
 
     def test_busy_worker_labeled(self) -> None:
-        result = Prompts("persona").status_text_prompt(
+        result = Prompts("persona").status_prompt(
             [("owner/repo", "working hard", True)]
         )
         assert "busy" in result
 
     def test_idle_worker_labeled(self) -> None:
-        result = Prompts("persona").status_text_prompt(
-            [("owner/repo", "napping", False)]
-        )
+        result = Prompts("persona").status_prompt([("owner/repo", "napping", False)])
         assert "idle" in result
 
     def test_multiple_repos_all_present(self) -> None:
-        result = Prompts("persona").status_text_prompt(
+        result = Prompts("persona").status_prompt(
             [
                 ("a/busy", "Writing code", True),
                 ("b/idle", "Napping", False),
@@ -550,7 +529,7 @@ class TestPromptsStatusTextPrompt:
         assert "Napping" in result
 
     def test_empty_activities(self) -> None:
-        result = Prompts("persona").status_text_prompt([])
+        result = Prompts("persona").status_prompt([])
         assert isinstance(result, str)
         assert "No active workers" in result
 
@@ -712,9 +691,9 @@ class TestPromptsStoresPersona:
         p1 = Prompts("persona A")
         p2 = Prompts("persona B")
         activities = [("owner/repo", "working", True)]
-        assert "persona A" in p1.status_text_prompt(activities)
-        assert "persona B" in p2.status_text_prompt(activities)
-        assert "persona A" not in p2.status_text_prompt(activities)
+        assert "persona A" in p1.status_prompt(activities)
+        assert "persona B" in p2.status_prompt(activities)
+        assert "persona A" not in p2.status_prompt(activities)
 
 
 # ── rewrite_description_prompt ────────────────────────────────────────────────

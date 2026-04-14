@@ -357,146 +357,79 @@ class TestWorker:
 
     # --- set_status ---
 
-    def _ss(
+    def _session(
         self,
-        tmp_path: Path,
         *,
-        text: str = "ok",
-        session_id: str = "sess-1",
+        status: str = "ok",
         emoji: str = "🐕",
-        resume_side_effect=None,
-        sub_dir: Path | None = None,
-    ) -> dict:
-        """Return keyword args for set_status injection."""
-        if sub_dir is None:
-            sub_dir = tmp_path
-        return {
-            "_generate_status_with_session": MagicMock(return_value=(text, session_id)),
-            "_generate_status_emoji": MagicMock(return_value=emoji),
-            "_resume_status": MagicMock(
-                side_effect=resume_side_effect,
-                return_value="" if resume_side_effect is None else None,
-            ),
-            "_sub_dir_fn": lambda: sub_dir,
-        }
+        raw: str | None = None,
+    ) -> MagicMock:
+        """Build a mock :class:`ClaudeSession` whose ``prompt`` returns a JSON nudge."""
+        session = MagicMock()
+        if raw is None:
+            raw = f'{{"status": "{status}", "emoji": "{emoji}"}}'
+        session.prompt.return_value = raw
+        return session
 
     def test_set_status_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh).set_status(
-            "writing tests", **self._ss(tmp_path, text="writing tests")
+        Worker(tmp_path, gh, session=self._session(status="writing tests")).set_status(
+            "writing tests", _sub_dir_fn=lambda: tmp_path
         )
         gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
 
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh).set_status(
-            "napping", busy=False, **self._ss(tmp_path, text="napping", emoji="😴")
-        )
+        Worker(
+            tmp_path, gh, session=self._session(status="napping", emoji="😴")
+        ).set_status("napping", busy=False, _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
-    def test_set_status_uses_what_as_fallback_when_claude_returns_empty(
+    def test_set_status_uses_what_as_fallback_when_status_empty(
         self, tmp_path: Path
     ) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh).set_status(
-            "idle", **self._ss(tmp_path, text="", session_id="")
-        )
-        gh.set_user_status.assert_called_once()
-        call_args = gh.set_user_status.call_args[0]
-        assert call_args[0] == "idle"
+        Worker(
+            tmp_path, gh, session=self._session(status="", emoji=":dog:")
+        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+        assert gh.set_user_status.call_args[0][0] == "idle"
 
     def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
-        # generate_status_emoji returns empty → :dog: fallback
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh).set_status(
-            "idle",
-            **self._ss(tmp_path, text="Sniffing out endpoints", emoji=""),
-        )
+        Worker(
+            tmp_path, gh, session=self._session(status="Sniffing endpoints", emoji="")
+        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_called_once_with(
-            "Sniffing out endpoints", ":dog:", busy=True
+            "Sniffing endpoints", ":dog:", busy=True
         )
 
     def test_set_status_text_truncated_to_80_chars(self, tmp_path: Path) -> None:
-        # All retries fail (return empty) → fall back to truncation
         gh = self._make_gh()
         long_text = "x" * 100
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh).set_status(
-            "something",
-            **self._ss(tmp_path, text=long_text, resume_side_effect=[""]),
+        Worker(tmp_path, gh, session=self._session(status=long_text)).set_status(
+            "something", _sub_dir_fn=lambda: tmp_path
         )
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
-    def test_set_status_retries_when_text_exceeds_80_chars(
-        self, tmp_path: Path
-    ) -> None:
-        gh = self._make_gh()
-        long_text = "y" * 90
-        (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_resume = MagicMock(return_value="shorter text")
-        Worker(tmp_path, gh).set_status(
-            "something",
-            **{
-                **self._ss(tmp_path, text=long_text, session_id="sess-99"),
-                "_resume_status": mock_resume,
-            },
-        )
-        mock_resume.assert_called_once_with("sess-99", ANY)
-        gh.set_user_status.assert_called_once_with("shorter text", "🐕", busy=True)
+    def test_set_status_skipped_when_no_session(self, tmp_path: Path, caplog) -> None:
+        import logging
 
-    def test_set_status_stops_retrying_when_text_fits(self, tmp_path: Path) -> None:
-        # Second retry produces short text → no third retry
         gh = self._make_gh()
-        long_text = "z" * 90
         (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_resume = MagicMock(side_effect=["z" * 85, "good"])
-        Worker(tmp_path, gh).set_status(
-            "something",
-            **{
-                **self._ss(tmp_path, text=long_text, session_id="sess-7"),
-                "_resume_status": mock_resume,
-            },
-        )
-        assert mock_resume.call_count == 2
-        gh.set_user_status.assert_called_once_with("good", "🐕", busy=True)
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Worker(tmp_path, gh, session=None).set_status(
+                "idle", _sub_dir_fn=lambda: tmp_path
+            )
+        gh.set_user_status.assert_not_called()
+        assert "no session available" in caplog.text
 
-    def test_set_status_retries_up_to_3_times_max(self, tmp_path: Path) -> None:
-        gh = self._make_gh()
-        long_text = "w" * 90
-        (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_resume = MagicMock(return_value=long_text)
-        Worker(tmp_path, gh).set_status(
-            "something",
-            **{
-                **self._ss(tmp_path, text=long_text, session_id="sess-3"),
-                "_resume_status": mock_resume,
-            },
-        )
-        assert mock_resume.call_count == 3
-
-    def test_set_status_skips_retry_when_no_session_id(self, tmp_path: Path) -> None:
-        # No session_id → retry loop is skipped, truncation applied directly
-        gh = self._make_gh()
-        long_text = "v" * 100
-        (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_resume = MagicMock()
-        Worker(tmp_path, gh).set_status(
-            "something",
-            **{
-                **self._ss(tmp_path, text=long_text, session_id=""),
-                "_resume_status": mock_resume,
-            },
-        )
-        mock_resume.assert_not_called()
-        called_text = gh.set_user_status.call_args[0][0]
-        assert len(called_text) == 80
-
-    def test_set_status_logs_warning_on_empty_response(
+    def test_set_status_logs_warning_on_empty_status(
         self, tmp_path: Path, caplog
     ) -> None:
         import logging
@@ -504,10 +437,10 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.WARNING, logger="kennel"):
-            Worker(tmp_path, gh).set_status(
-                "idle", **self._ss(tmp_path, text="", session_id="")
-            )
-        assert "fallback" in caplog.text
+            Worker(
+                tmp_path, gh, session=self._session(status="", emoji=":dog:")
+            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+        assert "falling back" in caplog.text
 
     def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -515,8 +448,8 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.INFO, logger="kennel"):
-            Worker(tmp_path, gh).set_status(
-                "fetching", **self._ss(tmp_path, text="fetching")
+            Worker(tmp_path, gh, session=self._session(status="fetching")).set_status(
+                "fetching", _sub_dir_fn=lambda: tmp_path
             )
         assert "set_status" in caplog.text
 
@@ -525,41 +458,34 @@ class TestWorker:
     ) -> None:
         gh = self._make_gh()
         missing_dir = tmp_path / "no_such_dir"
-        mock_gen = MagicMock(return_value=("working", "sess-1"))
-        Worker(tmp_path, gh).set_status(
-            "working",
-            **{
-                **self._ss(tmp_path, text="working", sub_dir=missing_dir),
-                "_generate_status_with_session": mock_gen,
-            },
+        session = self._session(status="working")
+        Worker(tmp_path, gh, session=session).set_status(
+            "working", _sub_dir_fn=lambda: missing_dir
         )
-        # persona file missing — generate_status_with_session still called with empty persona
-        prompt_arg = mock_gen.call_args[1]["prompt"]
+        prompt_arg = session.prompt.call_args[0][0]
         assert "working (busy)" in prompt_arg
 
-    def test_set_status_passes_system_prompt_to_generate_status_with_session(
-        self, tmp_path: Path
-    ) -> None:
+    def test_set_status_passes_system_prompt_to_session(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_gen = MagicMock(return_value=("working", "sess-1"))
-        Worker(tmp_path, gh).set_status(
-            "working",
-            **{
-                **self._ss(tmp_path, text="working"),
-                "_generate_status_with_session": mock_gen,
-            },
+        session = self._session(status="working")
+        Worker(tmp_path, gh, session=session).set_status(
+            "working", _sub_dir_fn=lambda: tmp_path
         )
-        assert mock_gen.call_args[1]["system_prompt"] is not None
+        assert session.prompt.call_args[1]["system_prompt"] is not None
 
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         registry = MagicMock()
         registry.get_all_activities.return_value = []
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh, repo_name="owner/myrepo", registry=registry).set_status(
-            "working", busy=True, **self._ss(tmp_path, text="working")
-        )
+        Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/myrepo",
+            registry=registry,
+            session=self._session(status="working"),
+        ).set_status("working", busy=True, _sub_dir_fn=lambda: tmp_path)
         registry.report_activity.assert_called_once_with(
             "owner/myrepo", "working", True
         )
@@ -579,15 +505,15 @@ class TestWorker:
         activity_b.busy = False
         registry.get_all_activities.return_value = [activity_a, activity_b]
         (tmp_path / "persona.md").write_text("I am Fido.")
-        mock_gen = MagicMock(return_value=("fixing bug", "sess-1"))
-        Worker(tmp_path, gh, repo_name="owner/repo-a", registry=registry).set_status(
-            "fixing bug",
-            **{
-                **self._ss(tmp_path, text="fixing bug"),
-                "_generate_status_with_session": mock_gen,
-            },
-        )
-        prompt_arg = mock_gen.call_args[1]["prompt"]
+        session = self._session(status="fixing bug")
+        Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/repo-a",
+            registry=registry,
+            session=session,
+        ).set_status("fixing bug", _sub_dir_fn=lambda: tmp_path)
+        prompt_arg = session.prompt.call_args[0][0]
         assert "owner/repo-a" in prompt_arg
         assert "owner/repo-b" in prompt_arg
 
@@ -598,9 +524,13 @@ class TestWorker:
         registry = MagicMock()
         registry.get_all_activities.return_value = []
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh, repo_name="owner/repo", registry=registry).set_status(
-            "working", **self._ss(tmp_path, text="working")
-        )
+        Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/repo",
+            registry=registry,
+            session=self._session(status="working"),
+        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
         registry.status_update.assert_called_once()
 
     def test_set_status_serializes_concurrent_calls_via_registry_lock(
@@ -614,7 +544,7 @@ class TestWorker:
         max_concurrent = 0
         counter_lock = threading.Lock()
 
-        def slow_generate(*args, **kwargs) -> tuple[str, str]:
+        def slow_prompt(*args, **kwargs) -> str:
             nonlocal inside_count, max_concurrent
             with counter_lock:
                 inside_count += 1
@@ -622,11 +552,20 @@ class TestWorker:
             time.sleep(0.005)
             with counter_lock:
                 inside_count -= 1
-            return ("status text", "sess-1")
+            return '{"status": "ok", "emoji": "🐕"}'
+
+        def make_session() -> MagicMock:
+            s = MagicMock()
+            s.prompt.side_effect = slow_prompt
+            return s
 
         workers = [
             Worker(
-                tmp_path, self._make_gh(), repo_name=f"owner/repo{i}", registry=registry
+                tmp_path,
+                self._make_gh(),
+                repo_name=f"owner/repo{i}",
+                registry=registry,
+                session=make_session(),
             )
             for i in range(3)
         ]
@@ -634,12 +573,7 @@ class TestWorker:
             threading.Thread(
                 target=w.set_status,
                 args=("working",),
-                kwargs={
-                    "_generate_status_with_session": slow_generate,
-                    "_generate_status_emoji": MagicMock(return_value="🐕"),
-                    "_resume_status": MagicMock(return_value=""),
-                    "_sub_dir_fn": lambda: tmp_path / "nosub",
-                },
+                kwargs={"_sub_dir_fn": lambda: tmp_path / "nosub"},
             )
             for w in workers
         ]
@@ -2739,6 +2673,41 @@ class TestSanitizeStatusText:
 
     def test_strips_and_collapses_combined(self) -> None:
         assert _sanitize_status_text("  foo\nbar  ") == "foo bar"
+
+
+class TestParseStatusNudge:
+    """Tests for _parse_status_nudge."""
+
+    def test_empty_raw_returns_empty_tuple(self) -> None:
+        from kennel.worker import _parse_status_nudge
+
+        assert _parse_status_nudge("") == ("", "")
+
+    def test_valid_json_returns_both_fields(self) -> None:
+        from kennel.worker import _parse_status_nudge
+
+        assert _parse_status_nudge('{"status": "chasing bugs", "emoji": ":dog:"}') == (
+            "chasing bugs",
+            ":dog:",
+        )
+
+    def test_json_with_preamble_still_parsed(self) -> None:
+        from kennel.worker import _parse_status_nudge
+
+        assert _parse_status_nudge(
+            'Here you go: {"status": "ok", "emoji": ":wrench:"} thanks!'
+        ) == ("ok", ":wrench:")
+
+    def test_malformed_json_returns_empty_tuple(self) -> None:
+        from kennel.worker import _parse_status_nudge
+
+        assert _parse_status_nudge("{not json at all}") == ("", "")
+
+    def test_missing_fields_returns_empty_tuple(self) -> None:
+        from kennel.worker import _parse_status_nudge
+
+        # Valid JSON but wrong shape — no status/emoji string fields
+        assert _parse_status_nudge('{"other": "value"}') == ("", "")
 
 
 class TestGit:
