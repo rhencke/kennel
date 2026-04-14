@@ -357,6 +357,35 @@ class TestProcessAction:
         time.sleep(0.2)
         mock_task.assert_not_called()
 
+    def test_reply_to_comment_failure_skips_task(self, server: tuple) -> None:
+        """If reply posting raises, no task is created (fail closed)."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 205,
+                "body": "please add logging",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=RuntimeError("network down")
+        )
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=MagicMock())
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
+        mock_task.assert_not_called()
+
     def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
         """DO adds to tasks.json."""
         url, cfg = server
@@ -504,6 +533,32 @@ class TestProcessAction:
         assert status == 200
         time.sleep(0.2)
         mock_ic.assert_called()
+        mock_task.assert_not_called()
+
+    def test_reply_to_issue_comment_failure_skips_task(self, server: tuple) -> None:
+        """If issue comment reply raises, no task is created (fail closed)."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {"id": 302, "body": "please fix", "user": {"login": "owner"}},
+            "issue": {
+                "number": 13,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            side_effect=RuntimeError("network down")
+        )
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=MagicMock())
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        time.sleep(0.2)
         mock_task.assert_not_called()
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
