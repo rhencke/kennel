@@ -143,6 +143,24 @@ def preflight_tools(
     log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
+def preflight_gh_auth(
+    *,
+    _gh_factory: Callable[[], GitHub] = GitHub,
+) -> None:
+    """Verify gh auth works by fetching the authenticated bot user.
+
+    Raises :exc:`SystemExit` if the GitHub client cannot be constructed or
+    ``get_user()`` fails for any reason (bad token, network error, etc.).
+    Runs once at startup so auth failures surface immediately rather than
+    deep inside a webhook or worker path.
+    """
+    try:
+        bot_user = _gh_factory().get_user()
+    except Exception as e:
+        raise SystemExit(f"preflight: gh auth check failed: {e}") from e
+    log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
+
+
 def _get_head(
     runner_dir: Path,
     *,
@@ -556,6 +574,7 @@ def run(
     _Watchdog=Watchdog,
     _preflight_repo_identity=preflight_repo_identity,
     _preflight_tools=preflight_tools,
+    _preflight_gh_auth=preflight_gh_auth,
 ) -> None:
     config = _from_args()
 
@@ -603,6 +622,7 @@ def run(
 
     _startup_pull()
     _preflight_tools()
+    _preflight_gh_auth()
     _preflight_repo_identity(config.repos)
 
     _populate_memberships(config)
