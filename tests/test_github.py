@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.github import (
+    _HTTP_TIMEOUT,  # noqa: PLC2701
     GH,
     GitHub,
     GraphQLError,
@@ -449,7 +450,9 @@ class TestGHClass:
         mock_resp.json.return_value = [{"id": 1}]
         mock_s.get.return_value = mock_resp
         result = gh._get("/repos/o/r/issues")
-        mock_s.get.assert_called_once_with("https://api.github.com/repos/o/r/issues")
+        mock_s.get.assert_called_once_with(
+            "https://api.github.com/repos/o/r/issues", timeout=_HTTP_TIMEOUT
+        )
         assert result == [{"id": 1}]
 
     def test_get_raises_on_error(self) -> None:
@@ -471,6 +474,7 @@ class TestGHClass:
         mock_s.post.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1/comments",
             json={"body": "hi"},
+            timeout=_HTTP_TIMEOUT,
         )
 
     def test_post_raises_on_error(self) -> None:
@@ -504,6 +508,7 @@ class TestGHClass:
         mock_s.patch.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1",
             json={"state": "closed"},
+            timeout=_HTTP_TIMEOUT,
         )
 
     def test_patch_raises_on_error(self) -> None:
@@ -526,6 +531,7 @@ class TestGHClass:
         mock_s.put.assert_called_once_with(
             "https://api.github.com/repos/o/r/pulls/1/merge",
             json={"merge_method": "squash"},
+            timeout=_HTTP_TIMEOUT,
         )
 
     def test_put_raises_on_error(self) -> None:
@@ -538,6 +544,60 @@ class TestGHClass:
             assert False, "should have raised"
         except Exception as e:
             assert "405" in str(e)
+
+    def test_get_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = MagicMock()
+        gh._get("/anything")
+        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_post_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value = MagicMock()
+        gh._post("/anything")
+        assert mock_s.post.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_patch_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {}
+        mock_s.patch.return_value = mock_resp
+        gh._patch("/anything")
+        assert mock_s.patch.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_put_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {}
+        mock_s.put.return_value = mock_resp
+        gh._put("/anything")
+        assert mock_s.put.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_graphql_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value = MagicMock()
+        mock_s.post.return_value.json.return_value = {"data": {}}
+        gh._graphql("query {}")
+        assert mock_s.post.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_paginate_passes_timeout(self) -> None:
+        gh, mock_s = self._gh()
+        resp = MagicMock()
+        resp.json.return_value = []
+        resp.headers = {}
+        mock_s.get.return_value = resp
+        list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_get_run_log_passes_timeout_for_log_download(self) -> None:
+        gh, mock_s = self._gh()
+        jobs_resp = MagicMock()
+        jobs_resp.json.return_value = {"jobs": [{"id": 9, "conclusion": "failure"}]}
+        log_resp = MagicMock()
+        log_resp.text = "err\n"
+        mock_s.get.side_effect = [jobs_resp, log_resp]
+        gh.get_run_log("o/r", 1)
+        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
 
     def test_graphql_posts_to_graphql_endpoint(self) -> None:
         gh, mock_s = self._gh()
