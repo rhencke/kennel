@@ -7,11 +7,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from kennel.github import (
+    _HTTP_TIMEOUT,  # noqa: PLC2701
     GH,
     GitHub,
     GraphQLError,
     _get_gh,
     _gh_token,
+    _TimeoutSession,  # noqa: PLC2701
     get_github,
 )
 
@@ -428,6 +430,30 @@ class TestGitHubClass:
         log_resp.text = "log\n"
         mock_s.get.side_effect = [jobs_resp, log_resp]
         assert gh.get_run_log("o/r", 1) == "log\n"
+
+
+class TestTimeoutSession:
+    def test_injects_default_timeout(self) -> None:
+        from unittest.mock import patch
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = MagicMock()
+            s = _TimeoutSession()
+            s.request("GET", "https://example.com")
+        assert mock_req.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
+
+    def test_does_not_override_caller_timeout(self) -> None:
+        from unittest.mock import patch
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = MagicMock()
+            s = _TimeoutSession()
+            s.request("GET", "https://example.com", timeout=5)
+        assert mock_req.call_args.kwargs.get("timeout") == 5
+
+    def test_gh_uses_timeout_session_when_no_session_injected(self) -> None:
+        gh = GH("tok")
+        assert isinstance(gh._s, _TimeoutSession)
 
 
 class TestGHClass:

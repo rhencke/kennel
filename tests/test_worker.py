@@ -8203,3 +8203,38 @@ class TestWorkerThread:
 
         assert len(captured) == 1
         assert captured[0] is wt._abort_task
+
+    def test_heartbeat_emitted_each_iteration(self, tmp_path: Path) -> None:
+        """report_activity is called at the top of each loop iteration."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        call_count = 0
+
+        def fake_worker_run(self_ignored=None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        assert call_count == 2
+        assert mock_registry.report_activity.call_count == 2
+        for call in mock_registry.report_activity.call_args_list:
+            assert call.args[0] == "owner/repo"
+            assert call.kwargs.get("busy") is False or call.args[2] is False
+
+    def test_heartbeat_not_emitted_when_no_registry(self, tmp_path: Path) -> None:
+        """WorkerThread without a registry must not crash on the heartbeat path."""
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=None)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored=None) -> int:
+            wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)  # must not raise

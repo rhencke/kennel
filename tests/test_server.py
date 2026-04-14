@@ -139,13 +139,21 @@ class TestGetEndpoint:
         assert b"kennel is running" in resp.read()
 
     def test_status_endpoint_returns_activities(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
         from kennel.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(repo_name="owner/repo", what="Working on: #1", busy=True),
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
         ]
         WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
@@ -156,23 +164,30 @@ class TestGetEndpoint:
                 "busy": True,
                 "crash_count": 0,
                 "last_crash_error": None,
+                "is_stuck": False,
             }
         ]
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         from kennel.registry import WorkerActivity, WorkerCrash
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(repo_name="owner/repo", what="Napping", busy=False),
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Napping",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
         ]
         WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
             death_count=3,
             last_error="RuntimeError: boom",
             last_crash_time=datetime(2026, 1, 1),
         )
+        WebhookHandler.registry.is_stale.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
@@ -190,6 +205,26 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.headers.get("Content-Type") == "application/json"
+
+    def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = True
+        resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        assert data[0]["is_stuck"] is True
 
 
 class TestEmptyBody:
@@ -560,6 +595,22 @@ class TestProcessAction:
         assert status == 200
         time.sleep(0.2)
         mock_task.assert_not_called()
+
+    def test_process_action_emits_heartbeat(self, server: tuple) -> None:
+        """_process_action calls registry.report_activity at the start."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 14, "merged": True},
+        }
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        time.sleep(0.2)
+        WebhookHandler.registry.report_activity.assert_called_with(
+            "owner/repo", "handling webhook action", busy=True
+        )
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server

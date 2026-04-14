@@ -1593,6 +1593,8 @@ class WorkerThread(threading.Thread):
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
         try:
             while not self._stop:
+                if self._registry is not None:
+                    self._registry.report_activity(self._repo_name, "idle", busy=False)
                 result = Worker(
                     self.work_dir,
                     self._gh,

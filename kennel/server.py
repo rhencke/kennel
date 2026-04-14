@@ -28,7 +28,7 @@ from kennel.events import (
 )
 from kennel.github import GitHub
 from kennel.registry import WorkerRegistry, make_registry
-from kennel.watchdog import Watchdog
+from kennel.watchdog import _STALE_THRESHOLD, Watchdog  # noqa: PLC2701
 from kennel.worker import RepoContextFilter, RepoNameFilter
 
 log = logging.getLogger(__name__)
@@ -278,6 +278,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _process_action(self, action, repo_cfg: RepoConfig) -> None:
         try:
+            self.registry.report_activity(
+                repo_cfg.name, "handling webhook action", busy=True
+            )
             handled = False
 
             if action.reply_to:
@@ -392,6 +395,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "busy": a.busy,
                         "crash_count": crash.death_count if crash else 0,
                         "last_crash_error": crash.last_error if crash else None,
+                        "is_stuck": self.registry.is_stale(
+                            a.repo_name, _STALE_THRESHOLD
+                        ),
                     }
                 )
             body = json.dumps(activities).encode()

@@ -15,6 +15,18 @@ import requests as _requests
 
 log = logging.getLogger(__name__)
 
+_HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
+
+
+class _TimeoutSession(_requests.Session):
+    """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
+
+    def request(
+        self, method: str | bytes, url: str | bytes, **kwargs: Any
+    ) -> _requests.Response:  # type: ignore[override]
+        kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+        return super().request(method, url, **kwargs)
+
 
 class GraphQLError(Exception):
     """Raised when a GitHub GraphQL response contains an errors field."""
@@ -59,7 +71,7 @@ class GH:
     BASE = "https://api.github.com"
 
     def __init__(self, token: str, session: _requests.Session | None = None) -> None:
-        self._s = session if session is not None else _requests.Session()
+        self._s = session if session is not None else _TimeoutSession()
         self._s.headers.update(
             {
                 "Authorization": f"Bearer {token}",

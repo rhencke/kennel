@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 from kennel.config import RepoConfig
 from kennel.registry import (
-    WorkerActivity,
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
@@ -161,23 +160,28 @@ class TestWorkerRegistry:
         reg, _ = self._make_registry()
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         activities = reg.get_all_activities()
-        assert activities == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+        assert len(activities) == 1
+        assert activities[0].repo_name == "foo/bar"
+        assert activities[0].what == "Working on: #1"
+        assert activities[0].busy is True
 
     def test_report_activity_overwrites_previous(self) -> None:
         reg, _ = self._make_registry()
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/bar", "Napping", busy=False)
         activities = reg.get_all_activities()
-        assert activities == [WorkerActivity("foo/bar", "Napping", busy=False)]
+        assert len(activities) == 1
+        assert activities[0].what == "Napping"
+        assert activities[0].busy is False
 
     def test_get_all_activities_returns_all_repos(self) -> None:
         reg, _ = self._make_registry()
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/baz", "Napping", busy=False)
-        activities = reg.get_all_activities()
-        assert sorted(activities, key=lambda a: a.repo_name) == [
-            WorkerActivity("foo/bar", "Working on: #1", busy=True),
-            WorkerActivity("foo/baz", "Napping", busy=False),
+        activities = sorted(reg.get_all_activities(), key=lambda a: a.repo_name)
+        assert [(a.repo_name, a.what, a.busy) for a in activities] == [
+            ("foo/bar", "Working on: #1", True),
+            ("foo/baz", "Napping", False),
         ]
 
     def test_get_all_activities_empty_initially(self) -> None:
@@ -190,7 +194,69 @@ class TestWorkerRegistry:
         snapshot = reg.get_all_activities()
         reg.report_activity("foo/bar", "Napping", busy=False)
         # snapshot must not reflect the later update
-        assert snapshot == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+        assert snapshot[0].what == "Working on: #1"
+
+    def test_report_activity_records_last_progress_at(self) -> None:
+        import datetime as dt
+
+        fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
+        activities = reg.get_all_activities()
+        assert activities[0].last_progress_at == fixed
+
+    def test_report_activity_updates_last_progress_at(self) -> None:
+        import datetime as dt
+
+        t1 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        t2 = dt.datetime(2026, 1, 1, 12, 5, 0, tzinfo=dt.timezone.utc)
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
+        reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
+        activities = reg.get_all_activities()
+        assert activities[0].last_progress_at == t2
+
+    def test_is_stale_false_when_no_activity(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.is_stale("foo/bar", threshold=60.0) is False
+
+    def test_is_stale_false_when_recent(self) -> None:
+        import datetime as dt
+
+        t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        t_now = dt.datetime(2026, 1, 1, 12, 0, 30, tzinfo=dt.timezone.utc)  # 30s later
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
+        assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is False
+
+    def test_is_stale_true_when_old(self) -> None:
+        import datetime as dt
+
+        t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        t_now = dt.datetime(2026, 1, 1, 12, 10, 0, tzinfo=dt.timezone.utc)  # 10m later
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
+        assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is True
+
+    def test_is_stale_exactly_at_threshold_is_not_stale(self) -> None:
+        import datetime as dt
+
+        t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        t_now = dt.datetime(2026, 1, 1, 12, 1, 0, tzinfo=dt.timezone.utc)  # exactly 60s
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
+        assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is False
+
+    def test_is_stale_per_repo(self) -> None:
+        import datetime as dt
+
+        t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        t_now = dt.datetime(2026, 1, 1, 12, 10, 0, tzinfo=dt.timezone.utc)
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "old", busy=True, _now=lambda: t0)
+        reg.report_activity("foo/baz", "fresh", busy=True, _now=lambda: t_now)
+        assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is True
+        assert reg.is_stale("foo/baz", threshold=60.0, _now=lambda: t_now) is False
 
     def test_concurrent_report_and_read_are_safe(self) -> None:
         """report_activity and get_all_activities are safe under concurrent load.

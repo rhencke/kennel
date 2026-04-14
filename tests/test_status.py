@@ -284,6 +284,7 @@ class TestFetchActivities:
                     "busy": True,
                     "crash_count": 0,
                     "last_crash_error": None,
+                    "is_stuck": False,
                 }
             ]
         ).encode()
@@ -293,6 +294,7 @@ class TestFetchActivities:
                 "what": "Working on: #1",
                 "crash_count": 0,
                 "last_crash_error": None,
+                "is_stuck": False,
             }
         }
 
@@ -305,6 +307,7 @@ class TestFetchActivities:
                     "busy": False,
                     "crash_count": 0,
                     "last_crash_error": None,
+                    "is_stuck": False,
                 },
                 {
                     "repo_name": "c/d",
@@ -312,16 +315,23 @@ class TestFetchActivities:
                     "busy": True,
                     "crash_count": 2,
                     "last_crash_error": "RuntimeError: boom",
+                    "is_stuck": True,
                 },
             ]
         ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {
-            "a/b": {"what": "Napping", "crash_count": 0, "last_crash_error": None},
+            "a/b": {
+                "what": "Napping",
+                "crash_count": 0,
+                "last_crash_error": None,
+                "is_stuck": False,
+            },
             "c/d": {
                 "what": "Fixing CI",
                 "crash_count": 2,
                 "last_crash_error": "RuntimeError: boom",
+                "is_stuck": True,
             },
         }
 
@@ -338,6 +348,22 @@ class TestFetchActivities:
         data = json.dumps([{"repo_name": "a/b", "busy": True}]).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {}
+
+    def test_is_stuck_defaults_to_false_when_absent(self) -> None:
+        data = json.dumps(
+            [
+                {
+                    "repo_name": "owner/repo",
+                    "what": "Napping",
+                    "busy": False,
+                    "crash_count": 0,
+                    "last_crash_error": None,
+                    # no "is_stuck" key — older server version
+                }
+            ]
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result["owner/repo"]["is_stuck"] is False
 
     def test_calls_correct_url(self) -> None:
         mock_urlopen = self._make_urlopen(b"[]")
@@ -579,6 +605,32 @@ class TestRepoStatus:
         assert result.claude_pid is None
         assert result.claude_uptime is None
 
+    def test_worker_stuck_defaults_to_false(self, tmp_path: Path) -> None:
+        cfg = self._make_config(tmp_path)
+        with patch("kennel.status._git_dir", return_value=None):
+            result = repo_status(cfg)
+        assert result.worker_stuck is False
+
+    def test_worker_stuck_passed_through_no_git_dir(self, tmp_path: Path) -> None:
+        cfg = self._make_config(tmp_path)
+        with patch("kennel.status._git_dir", return_value=None):
+            result = repo_status(cfg, worker_stuck=True)
+        assert result.worker_stuck is True
+
+    def test_worker_stuck_passed_through_with_git_dir(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        fido_dir = git_dir / "fido"
+        fido_dir.mkdir(parents=True)
+        cfg = self._make_config(tmp_path)
+        with (
+            patch("kennel.status._git_dir", return_value=git_dir),
+            patch("kennel.status._fido_running", return_value=False),
+            patch("kennel.status._claude_pid", return_value=None),
+            patch("kennel.status._process_uptime_seconds", return_value=None),
+        ):
+            result = repo_status(cfg, worker_stuck=True)
+        assert result.worker_stuck is True
+
 
 class TestCollect:
     def _fake_repo_status(self, name: str = "owner/repo") -> RepoStatus:
@@ -594,6 +646,7 @@ class TestCollect:
             worker_what=None,
             crash_count=0,
             last_crash_error=None,
+            worker_stuck=False,
         )
 
     def test_kennel_up_with_uptime(self, tmp_path: Path) -> None:
@@ -633,11 +686,13 @@ class TestCollect:
         what: str = "Working on: #1",
         crash_count: int = 0,
         last_crash_error: str | None = None,
+        is_stuck: bool = False,
     ) -> dict:
         return {
             "what": what,
             "crash_count": crash_count,
             "last_crash_error": last_crash_error,
+            "is_stuck": is_stuck,
         }
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
@@ -686,7 +741,11 @@ class TestCollect:
         ):
             collect()
         mock_rs.assert_called_once_with(
-            rc, worker_what="Fixing CI: tests", crash_count=0, last_crash_error=None
+            rc,
+            worker_what="Fixing CI: tests",
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -714,6 +773,7 @@ class TestCollect:
             worker_what="Napping",
             crash_count=3,
             last_crash_error="ValueError: oops",
+            worker_stuck=False,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -730,7 +790,35 @@ class TestCollect:
         ):
             collect()
         mock_rs.assert_called_once_with(
-            rc, worker_what=None, crash_count=0, last_crash_error=None
+            rc,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+
+    def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": self._activity_info(is_stuck=True)},
+            ),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        mock_rs.assert_called_once_with(
+            rc,
+            worker_what="Working on: #1",
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=True,
         )
 
 
@@ -748,6 +836,7 @@ class TestFormatStatus:
             worker_what=None,
             crash_count=0,
             last_crash_error=None,
+            worker_stuck=False,
         )
         defaults.update(kwargs)
         return RepoStatus(**defaults)
@@ -883,3 +972,21 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "claude pid 9999 (running 1m) — crashed 2x: OSError: disk full" in output
+
+    def test_worker_stuck_false_not_shown(self) -> None:
+        repo = self._repo(worker_stuck=False)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "STUCK" not in output
+
+    def test_worker_stuck_true_shown(self) -> None:
+        repo = self._repo(worker_stuck=True)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "STUCK" in output
+
+    def test_stuck_appears_before_crash_info(self) -> None:
+        repo = self._repo(worker_stuck=True, crash_count=1, last_crash_error="err")
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "STUCK — crashed 1x: err" in output
