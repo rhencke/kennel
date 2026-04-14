@@ -69,7 +69,13 @@ def _fido_running(lock_path: Path) -> bool:
 
 
 def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[int]:
-    """Return PIDs whose command line matches pattern via pgrep -f."""
+    """Return PIDs whose command line matches pattern via pgrep -f.
+
+    Best-effort enrichment for status display.  A nonzero exit code (e.g.
+    pgrep exits 1 when no processes match) is not treated as an error —
+    the PID list is built from stdout alone.  Returns [] on OSError
+    (e.g. pgrep not installed).
+    """
     try:
         result = _run(
             ["pgrep", "-f", pattern],
@@ -92,7 +98,12 @@ def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[i
 def _process_uptime_seconds(
     pid: int, *, _run: Callable[..., Any] = subprocess.run
 ) -> int | None:
-    """Return elapsed seconds since the process started, or None if unavailable."""
+    """Return elapsed seconds since the process started, or None if unavailable.
+
+    Best-effort enrichment for status display.  A nonzero exit code (e.g.
+    ps exits non-zero for an unknown PID) is not treated as an error —
+    callers receive None whenever the value cannot be determined.
+    """
     try:
         result = _run(
             ["ps", "-p", str(pid), "-o", "etimes="],
@@ -179,7 +190,11 @@ def _claude_pid(fido_dir: Path) -> int | None:
 def _git_dir(
     work_dir: Path, *, _run: Callable[..., Any] = subprocess.run
 ) -> Path | None:
-    """Return the absolute git directory for work_dir, or None if unavailable."""
+    """Return the absolute git directory for work_dir, or None if unavailable.
+
+    Best-effort enrichment for status display.  Returns None on nonzero
+    exit (not a git repo) or if git is not installed.
+    """
     try:
         result = _run(
             ["git", "rev-parse", "--absolute-git-dir"],
@@ -189,7 +204,7 @@ def _git_dir(
             check=True,
         )
         return Path(result.stdout.strip())
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError, FileNotFoundError:
         return None
 
 

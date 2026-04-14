@@ -374,8 +374,12 @@ class TestGitDir:
         mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
         assert _git_dir(tmp_path, _run=mock_run) == Path("/a/b/.git")
 
-    def test_returns_none_on_error(self, tmp_path: Path) -> None:
+    def test_returns_none_on_called_process_error(self, tmp_path: Path) -> None:
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        assert _git_dir(tmp_path, _run=mock_run) is None
+
+    def test_returns_none_when_git_not_found(self, tmp_path: Path) -> None:
+        mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
         assert _git_dir(tmp_path, _run=mock_run) is None
 
 
