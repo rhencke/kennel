@@ -555,6 +555,67 @@ class TestProcessAction:
             / "pulls-205"
         ).exists()
 
+    def test_successful_redelivery_clears_stale_review_promise(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        import kennel.server as ks
+
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 206,
+                "body": "please add logging",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=[RuntimeError("network down"), ("DO", ["from redelivery"])]
+        )
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        try:
+            assert (
+                _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
+            )
+            promise = (
+                cfg.repos["owner/repo"].work_dir
+                / ".git"
+                / "fido"
+                / "reply-promises"
+                / "pulls-206"
+            )
+            assert promise.exists()
+            assert (
+                _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
+            )
+            assert not promise.exists()
+            mock_task.assert_called_once_with(
+                "from redelivery",
+                cfg,
+                cfg.repos["owner/repo"],
+                WebhookHandler.gh,
+                thread={
+                    "repo": "owner/repo",
+                    "pr": 5,
+                    "comment_id": 206,
+                    "url": "https://example.com",
+                    "author": "owner",
+                    "comment_type": "pulls",
+                },
+                registry=WebhookHandler.registry,
+            )
+        finally:
+            ks._replied_comments.discard(206)
+
     def test_failed_review_comment_webhook_recovers_once_from_live_state(
         self, server: tuple
     ) -> None:
@@ -703,6 +764,41 @@ class TestProcessAction:
         finally:
             ks._replied_comments.discard(203)
 
+    def test_duplicate_issue_comment_delivery_skips_second_reply(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        import kennel.server as ks
+
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 303,
+                "body": "looks good",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/11#issuecomment-303",
+            },
+            "issue": {
+                "number": 11,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_gh = MagicMock()
+        mock_ic = MagicMock(return_value=("ANSWER", ["because"]))
+        WebhookHandler.gh = mock_gh
+        WebhookHandler._fn_reply_to_issue_comment = mock_ic
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        try:
+            assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+            assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+            mock_ic.assert_called_once()
+        finally:
+            ks._replied_comments.discard(303)
+
     def test_review_comments_handled(self, server: tuple) -> None:
         url, cfg = server
         payload = {
@@ -820,6 +916,68 @@ class TestProcessAction:
             / "reply-promises"
             / "issues-302"
         ).exists()
+
+    def test_successful_redelivery_clears_stale_issue_promise(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        import kennel.server as ks
+
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 304,
+                "body": "please fix",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/13#issuecomment-304",
+            },
+            "issue": {
+                "number": 13,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            side_effect=[
+                RuntimeError("network down"),
+                ("ACT", ["from issue redelivery"]),
+            ]
+        )
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        try:
+            assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+            promise = (
+                cfg.repos["owner/repo"].work_dir
+                / ".git"
+                / "fido"
+                / "reply-promises"
+                / "issues-304"
+            )
+            assert promise.exists()
+            assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+            assert not promise.exists()
+            mock_task.assert_called_once_with(
+                "from issue redelivery",
+                cfg,
+                cfg.repos["owner/repo"],
+                WebhookHandler.gh,
+                thread={
+                    "repo": "owner/repo",
+                    "pr": 13,
+                    "comment_id": 304,
+                    "url": "https://github.com/owner/repo/pull/13#issuecomment-304",
+                    "author": "owner",
+                    "comment_type": "issues",
+                },
+                registry=WebhookHandler.registry,
+            )
+        finally:
+            ks._replied_comments.discard(304)
 
     def test_failed_issue_comment_webhook_recovers_once_from_live_state(
         self, server: tuple

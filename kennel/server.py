@@ -469,6 +469,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             handled = False
 
             if action.reply_to:
+                promise = self._reply_promise(action)
                 cid = action.reply_to.get("comment_id")
                 if cid and cid in _replied_comments:
                     log.info("already replied to comment %s — skipping", cid)
@@ -480,7 +481,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             action, self.config, repo_cfg, gh
                         )
                     except Exception:
-                        promise = self._reply_promise(action)
                         if promise is not None:
                             reply_promises.add_reply_promise(
                                 repo_cfg.work_dir / ".git" / "fido",
@@ -488,6 +488,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                                 promise[1],
                             )
                         raise
+                    if promise is not None:
+                        reply_promises.remove_reply_promise(
+                            repo_cfg.work_dir / ".git" / "fido",
+                            promise[0],
+                            promise[1],
+                        )
                     if cid:
                         _replied_comments.add(cid)
                     handled = True
@@ -513,19 +519,32 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                try:
-                    category, titles = type(self)._fn_reply_to_issue_comment(
-                        action, self.config, repo_cfg, gh
-                    )
-                except Exception:
-                    promise = self._reply_promise(action)
+                promise = self._reply_promise(action)
+                cid = action.thread.get("comment_id") if action.thread else None
+                if cid and cid in _replied_comments:
+                    log.info("already replied to comment %s — skipping", cid)
+                    category, titles = None, []
+                else:
+                    try:
+                        category, titles = type(self)._fn_reply_to_issue_comment(
+                            action, self.config, repo_cfg, gh
+                        )
+                    except Exception:
+                        if promise is not None:
+                            reply_promises.add_reply_promise(
+                                repo_cfg.work_dir / ".git" / "fido",
+                                promise[0],
+                                promise[1],
+                            )
+                        raise
                     if promise is not None:
-                        reply_promises.add_reply_promise(
+                        reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
                             promise[1],
                         )
-                    raise
+                    if cid:
+                        _replied_comments.add(cid)
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
