@@ -61,8 +61,8 @@ class RepoStatus:
     issue_elapsed_seconds: int | None = None
     pr_number: int | None = None
     pr_title: str | None = None
-    task_number: int | None = None
-    task_total: int | None = None
+    task_number: int | None = None  # position counting all tasks (X in "X/Y")
+    task_total: int | None = None  # total task count including completed (Y in "X/Y")
     worker_uptime: int | None = None
     webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
     session_owner: str | None = None
@@ -295,19 +295,22 @@ def _current_task(task_list: list[dict[str, Any]]) -> str | None:
 
 
 def _task_position(task_list: list[dict[str, Any]]) -> tuple[int | None, int | None]:
-    """Return (task_number, total_non_completed) for display.
+    """Return (task_number, total) for display.
 
-    task_number is the 1-indexed position of the first in_progress or
-    pending task among all non-completed tasks; total is the count of
-    non-completed tasks.  Returns (None, None) when there are none.
+    task_number counts up across the full list: completed tasks contribute
+    to the offset so the display reads 1/7 → 2/7 → 3/7 rather than
+    shrinking as tasks are completed.  total is the count of all tasks.
+    Returns (None, None) when there are no non-completed tasks.
     """
+    total = len(task_list)
     non_completed = [t for t in task_list if t["status"] != "completed"]
     if not non_completed:
         return (None, None)
+    completed_count = total - len(non_completed)
     for idx, t in enumerate(non_completed, start=1):
         if t["status"] == "in_progress":
-            return (idx, len(non_completed))
-    return (1, len(non_completed))
+            return (completed_count + idx, total)
+    return (completed_count + 1, total)
 
 
 def _elapsed_since_iso(
