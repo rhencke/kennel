@@ -14,6 +14,7 @@ from kennel import claude
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import (
+    NO_TOOLS_CLAUSE,
     Prompts,
     issue_reply_instruction,
     reply_instruction,
@@ -475,6 +476,7 @@ def needs_more_context(
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = (
+        f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
         f"{comment_body!r}\n\n"
         "Does this comment need context from sibling review threads to be understood "
@@ -500,6 +502,7 @@ def _summarize_as_action_item(
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = (
+        f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
@@ -509,6 +512,7 @@ def _summarize_as_action_item(
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
         result = _print_prompt(
+            f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             "claude-opus-4-6",
