@@ -1093,6 +1093,44 @@ class TestGitHubClass:
         }
         assert result == nodes
 
+    def test_find_all_open_issues_returns_all_issues(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "number": 1,
+                "title": "bug",
+                "state": "OPEN",
+                "subIssues": {"nodes": []},
+            },
+            {
+                "number": 2,
+                "title": "feature",
+                "state": "OPEN",
+                "subIssues": {"nodes": []},
+            },
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": nodes,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        mock_s.post.return_value = mock_resp
+        result = gh.find_all_open_issues("owner", "repo")
+        body = mock_s.post.call_args.kwargs["json"]
+        # No login/assignee filter in variables
+        assert body["variables"] == {
+            "owner": "owner",
+            "repo": "repo",
+            "cursor": None,
+        }
+        assert result == nodes
+
     def test_view_issue(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

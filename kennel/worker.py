@@ -366,11 +366,14 @@ def _pick_next_issue(
     candidates: list[dict[str, Any]],
     login: str,
     *,
-    get_issue_node: Callable[[int], dict[str, Any]],
-    get_sub_issues: Callable[[int], list[dict[str, Any]]],
+    issue_index: dict[int, dict[str, Any]],
     claim: Callable[[int], None],
 ) -> PickerChoice | None:
     """Select the next issue to work on from the picker rules in #433.
+
+    *issue_index* maps issue number → full issue dict for every open issue
+    in the repo (built from :meth:`~kennel.github.GitHub.find_all_open_issues`).
+    Issues absent from the index are closed or unplanned and are skipped.
 
     Algorithm:
 
@@ -388,7 +391,7 @@ def _pick_next_issue(
     seen: set[int] = set()
     order: dict[int, int] = {}
     for idx, candidate in enumerate(candidates):
-        root = _walk_to_root(candidate, get_issue_node=get_issue_node)
+        root = _walk_to_root(candidate, issue_index=issue_index)
         n = root["number"]
         if n in seen:
             continue
@@ -402,7 +405,7 @@ def _pick_next_issue(
         choice = _descend_issue(
             root,
             login,
-            get_sub_issues=get_sub_issues,
+            issue_index=issue_index,
             claim=claim,
             trail=[root["number"]],
             milestone_source=root if _has_milestone(root) else None,
@@ -415,14 +418,17 @@ def _pick_next_issue(
 def _walk_to_root(
     issue: dict[str, Any],
     *,
-    get_issue_node: Callable[[int], dict[str, Any]],
+    issue_index: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     """Walk ``issue.parent`` upward until we hit the root ancestor.
 
-    *get_issue_node* fetches a full issue dict (same shape as an entry
-    from :meth:`kennel.github.GitHub.find_issues`) so we can follow the
-    parent chain.  Returns the root ancestor, or *issue* itself when it
-    has no parent.
+    Uses *issue_index* (a ``{number: issue_dict}`` map built from
+    :meth:`~kennel.github.GitHub.find_all_open_issues`) to follow parent
+    refs without additional API calls.  A parent absent from the index is
+    closed or blocked — the walk stops and the current node is treated as
+    the root (the closed parent will cause the subtree to be skipped during
+    descent).  Returns the root ancestor, or *issue* itself when it has no
+    parent.
     """
     current = issue
     visited: set[int] = set()
@@ -438,14 +444,19 @@ def _walk_to_root(
             )
             return current
         visited.add(parent_number)
-        current = get_issue_node(parent_number)
+        parent = issue_index.get(parent_number)
+        if parent is None:
+            # Parent is closed or not in the repo's open set — treat current
+            # node as root so the descent can proceed from here.
+            return current
+        current = parent
 
 
 def _descend_issue(
     issue: dict[str, Any],
     login: str,
     *,
-    get_sub_issues: Callable[[int], list[dict[str, Any]]],
+    issue_index: dict[int, dict[str, Any]],
     claim: Callable[[int], None],
     trail: list[int],
     milestone_source: dict[str, Any] | None,
@@ -453,10 +464,21 @@ def _descend_issue(
     """Walk down *issue*'s sub-issues in rank order; return the first
     eligible leaf (or *issue* itself if it has no open children).
 
+    Uses *issue_index* to resolve each child's full node (including its own
+    sub-issues) without additional API calls.  Children absent from the index
+    are closed or done and are treated as CLOSED.
+
     Returns ``None`` when the whole subtree is blocked by other assignees.
     """
     children = list(issue.get("subIssues", {}).get("nodes") or [])
-    open_children = [c for c in children if c.get("state") != "CLOSED"]
+    # A child is "open" only when it is still present in the index (i.e.
+    # still open on GitHub).  Inline state values from the parent query are
+    # used as a fast pre-filter; the authoritative check is index membership.
+    open_children = [
+        issue_index[c["number"]]
+        for c in children
+        if c.get("state") != "CLOSED" and c.get("number") in issue_index
+    ]
 
     if not open_children:
         depth_note = (
@@ -493,16 +515,10 @@ def _descend_issue(
                 login,
             )
             claim(child["number"])
-        # Refresh the child's sub-issue list — the node from the parent
-        # query only has the first page; deeper descent needs a fresh
-        # pull to be complete.
-        child_subs = list(get_sub_issues(child["number"]))
-        child_node = dict(child)
-        child_node["subIssues"] = {"nodes": child_subs}
         choice = _descend_issue(
-            child_node,
+            child,
             login,
-            get_sub_issues=get_sub_issues,
+            issue_index=issue_index,
             claim=claim,
             trail=[*trail, child["number"]],
             milestone_source=(
@@ -975,32 +991,27 @@ class Worker:
     def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
         """Find the next eligible open issue assigned to gh_user.
 
-        Walks the sub-issue tree (see :func:`_pick_next_issue` for ranking
-        rules) so we fetch child work before its parent.  Children that
-        aren't assigned to us get claimed; children assigned to someone
-        else block that branch.
+        Fetches all open issues in a single paginated GraphQL query, builds
+        an in-memory ``{number: issue}`` index, then walks the sub-issue tree
+        (see :func:`_pick_next_issue` for ranking rules).  Missing parents are
+        closed or blocked — their sub-trees are skipped.  Missing children are
+        done or unplanned — they are treated as CLOSED.  No per-issue API calls
+        are needed during the walk.
         """
         log.info("finding next eligible issue")
-        issues = self.gh.find_issues(
+        all_issues = self.gh.find_all_open_issues(repo_ctx.owner, repo_ctx.repo_name)
+        issue_index: dict[int, dict[str, Any]] = {i["number"]: i for i in all_issues}
+        candidates = self.gh.find_issues(
             repo_ctx.owner, repo_ctx.repo_name, repo_ctx.gh_user
         )
-
-        def get_sub_issues(number: int) -> list[dict[str, Any]]:
-            return list(
-                self.gh.get_sub_issues(repo_ctx.owner, repo_ctx.repo_name, number)
-            )
-
-        def get_issue_node(number: int) -> dict[str, Any]:
-            return self.gh.get_issue_node(repo_ctx.owner, repo_ctx.repo_name, number)
 
         def claim(number: int) -> None:
             self.gh.add_assignee(repo_ctx.repo, number, repo_ctx.gh_user)
 
         choice = _pick_next_issue(
-            issues,
+            candidates,
             repo_ctx.gh_user,
-            get_issue_node=get_issue_node,
-            get_sub_issues=get_sub_issues,
+            issue_index=issue_index,
             claim=claim,
         )
         if choice is None:

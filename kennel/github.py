@@ -476,6 +476,39 @@ class GitHub:
             issues.append(node)
         return issues
 
+    def find_all_open_issues(self, owner: str, repo: str) -> list[dict[str, Any]]:
+        """Return all open issues in the repo (oldest first).
+
+        Each node carries ``number``, ``title``, ``createdAt``, ``state``,
+        ``milestone.title``, ``assignees.nodes[].login``, ``parent.number``
+        (or None), and a ``subIssues.nodes`` list (up to 100 items — the
+        GitHub maximum, so no sub-issue pagination is needed).
+
+        This single paginated call is the basis for the in-memory issue tree
+        used by the picker: one or two API calls total regardless of how many
+        issues the repo has.
+        """
+        issue_fields = self._ISSUE_NODE_FIELDS
+        query = (
+            "query($owner:String!,$repo:String!,$cursor:String){"
+            "repository(owner:$owner,name:$repo){"
+            "issues(first:50,after:$cursor,states:[OPEN],"
+            "orderBy:{field:CREATED_AT,direction:ASC}){"
+            f"nodes{{{issue_fields} state "
+            f"subIssues(first:100){{nodes{{state {issue_fields}}}}}"
+            "pageInfo{endCursor hasNextPage}"
+            "}}}"
+        )
+        issues: list[dict[str, Any]] = []
+        for node in self._graphql_paginate(
+            query,
+            ("repository", "issues"),
+            owner=owner,
+            repo=repo,
+        ):
+            issues.append(node)
+        return issues
+
     def get_issue_node(self, owner: str, repo: str, number: int) -> dict[str, Any]:
         """Return one issue in the shape used by :meth:`find_issues`.
 

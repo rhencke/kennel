@@ -1329,6 +1329,7 @@ class TestWorkerFindNextIssue:
 
     def test_returns_none_when_no_issues(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
@@ -1339,9 +1340,9 @@ class TestWorkerFindNextIssue:
         self, tmp_path: Path
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {"number": 42, "title": "Do the thing", "subIssues": {"nodes": []}}
-        ]
+        issue = {"number": 42, "title": "Do the thing", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1351,13 +1352,13 @@ class TestWorkerFindNextIssue:
         self, tmp_path: Path
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {
-                "number": 10,
-                "title": "Parent task",
-                "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "CLOSED"}]},
-            }
-        ]
+        issue = {
+            "number": 10,
+            "title": "Parent task",
+            "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "CLOSED"}]},
+        }
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1368,23 +1369,21 @@ class TestWorkerFindNextIssue:
     ) -> None:
         """If the only open child is someone else's, the whole tree is blocked."""
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {
-                "number": 3,
-                "title": "Blocked",
-                "subIssues": {
-                    "nodes": [
-                        {
-                            "number": 30,
-                            "title": "Owned by other",
-                            "state": "OPEN",
-                            "assignees": {"nodes": [{"login": "someone-else"}]},
-                            "parent": {"number": 3},
-                        }
-                    ]
-                },
-            }
-        ]
+        child = {
+            "number": 30,
+            "title": "Owned by other",
+            "state": "OPEN",
+            "assignees": {"nodes": [{"login": "someone-else"}]},
+            "parent": {"number": 3},
+            "subIssues": {"nodes": []},
+        }
+        parent_issue = {
+            "number": 3,
+            "title": "Blocked",
+            "subIssues": {"nodes": [child]},
+        }
+        gh.find_all_open_issues.return_value = [parent_issue, child]
+        gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1393,10 +1392,12 @@ class TestWorkerFindNextIssue:
     def test_picks_first_eligible_issue(self, tmp_path: Path) -> None:
         """With no sub-issues to descend into, picker uses creation order."""
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
+        issues = [
             {"number": 1, "title": "First", "subIssues": {"nodes": []}},
             {"number": 2, "title": "Second", "subIssues": {"nodes": []}},
         ]
+        gh.find_all_open_issues.return_value = issues
+        gh.find_issues.return_value = issues
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1404,9 +1405,9 @@ class TestWorkerFindNextIssue:
 
     def test_saves_state_when_issue_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {"number": 7, "title": "Fetch!", "subIssues": {"nodes": []}}
-        ]
+        issue = {"number": 7, "title": "Fetch!", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1417,6 +1418,7 @@ class TestWorkerFindNextIssue:
 
     def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
@@ -1425,9 +1427,9 @@ class TestWorkerFindNextIssue:
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
-        ]
+        issue = {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
         with patch.object(worker, "set_status", mock_status):
@@ -1436,6 +1438,7 @@ class TestWorkerFindNextIssue:
 
     def test_calls_set_status_done_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
@@ -1445,20 +1448,22 @@ class TestWorkerFindNextIssue:
 
     def test_passes_correct_args_to_find_issues(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         repo_ctx = self._make_repo_ctx(owner="org", repo_name="myrepo", gh_user="bot")
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, repo_ctx)
+        gh.find_all_open_issues.assert_called_once_with("org", "myrepo")
         gh.find_issues.assert_called_once_with("org", "myrepo", "bot")
 
     def test_logs_info_when_starting_issue(self, tmp_path: Path, caplog) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {"number": 9, "title": "Chase squirrel", "subIssues": {"nodes": []}}
-        ]
+        issue = {"number": 9, "title": "Chase squirrel", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -1471,6 +1476,7 @@ class TestWorkerFindNextIssue:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1480,21 +1486,19 @@ class TestWorkerFindNextIssue:
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "no eligible" in caplog.text
 
-    def test_walks_up_via_gh_get_issue_node(self, tmp_path: Path) -> None:
-        """Assigned issue has a parent — worker uses gh.get_issue_node to
-        walk up to it before descending."""
+    def test_walks_up_via_issue_index(self, tmp_path: Path) -> None:
+        """Assigned issue has a parent — worker uses the issue index built from
+        find_all_open_issues to walk up to the root before descending."""
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {
-                "number": 200,
-                "title": "child",
-                "state": "OPEN",
-                "assignees": {"nodes": [{"login": "fido-bot"}]},
-                "parent": {"number": 100},
-                "subIssues": {"nodes": []},
-            }
-        ]
-        gh.get_issue_node.return_value = {
+        child = {
+            "number": 200,
+            "title": "child",
+            "state": "OPEN",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "parent": {"number": 100},
+            "subIssues": {"nodes": []},
+        }
+        root = {
             "number": 100,
             "title": "root",
             "state": "OPEN",
@@ -1512,43 +1516,42 @@ class TestWorkerFindNextIssue:
                 ]
             },
         }
-        gh.get_sub_issues.return_value = []
+        gh.find_all_open_issues.return_value = [root, child]
+        gh.find_issues.return_value = [child]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 200
-        gh.get_issue_node.assert_called_with("alice", "proj", 100)
+        gh.find_all_open_issues.assert_called_once_with("alice", "proj")
 
     def test_picks_first_open_sub_issue_and_claims_it(self, tmp_path: Path) -> None:
         """When the assigned issue has an open, unassigned child, we claim
         and descend into that child — it must land before the parent."""
         worker, gh = self._make_worker(tmp_path)
-        gh.find_issues.return_value = [
-            {
-                "number": 11,
-                "title": "Parent",
-                "subIssues": {
-                    "nodes": [
-                        {
-                            "number": 110,
-                            "title": "Closed work",
-                            "state": "CLOSED",
-                            "assignees": {"nodes": []},
-                            "parent": {"number": 11},
-                        },
-                        {
-                            "number": 111,
-                            "title": "Open child",
-                            "state": "OPEN",
-                            "assignees": {"nodes": []},
-                            "parent": {"number": 11},
-                        },
-                    ]
-                },
-            }
-        ]
-        # Descent fetches the child's own sub-issues (none).
-        gh.get_sub_issues.return_value = []
+        closed_child = {
+            "number": 110,
+            "title": "Closed work",
+            "state": "CLOSED",
+            "assignees": {"nodes": []},
+            "parent": {"number": 11},
+            "subIssues": {"nodes": []},
+        }
+        open_child = {
+            "number": 111,
+            "title": "Open child",
+            "state": "OPEN",
+            "assignees": {"nodes": []},
+            "parent": {"number": 11},
+            "subIssues": {"nodes": []},
+        }
+        parent_issue = {
+            "number": 11,
+            "title": "Parent",
+            "subIssues": {"nodes": [closed_child, open_child]},
+        }
+        # find_all_open_issues returns only open issues; closed_child is absent
+        gh.find_all_open_issues.return_value = [parent_issue, open_child]
+        gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1629,8 +1632,7 @@ class TestPickNextIssue:
         choice = _pick_next_issue(
             [issue],
             "fido",
-            get_issue_node=lambda n: _issue(n),
-            get_sub_issues=lambda n: [],
+            issue_index={5: issue},
             claim=claim,
         )
         assert choice is not None and choice.number == 5
@@ -1644,8 +1646,7 @@ class TestPickNextIssue:
         choice = _pick_next_issue(
             [older, newer_with_ms],
             "fido",
-            get_issue_node=lambda n: _issue(n),
-            get_sub_issues=lambda n: [],
+            issue_index={1: older, 99: newer_with_ms},
             claim=lambda n: None,
         )
         assert choice is not None and choice.number == 99
@@ -1658,27 +1659,17 @@ class TestPickNextIssue:
         # Tree: #100 (root, unrelated) → [#200 (first, ours), #201 (second, ours)]
         # We're assigned #201 but #200 comes before it in sub-issue order, so
         # the descent from the root should pick #200.
-        issue_nodes = {
-            100: _issue(
-                100,
-                "root",
-                sub_issues=[
-                    _issue(200, state="OPEN", assignees=["fido"], parent=100),
-                    _issue(201, state="OPEN", assignees=["fido"], parent=100),
-                ],
-            ),
-        }
-
-        def get_issue_node(n: int) -> dict:
-            return issue_nodes[n]
+        i200 = _issue(200, state="OPEN", assignees=["fido"], parent=100)
+        i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
+        i100 = _issue(100, "root", sub_issues=[i200, i201])
+        issue_index = {100: i100, 200: i200, 201: i201}
 
         # Only #201 is in the assigned list; picker must still walk up to 100.
         assigned = _issue(201, state="OPEN", assignees=["fido"], parent=100)
         choice = _pick_next_issue(
             [assigned],
             "fido",
-            get_issue_node=get_issue_node,
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is not None and choice.number == 200
@@ -1687,23 +1678,16 @@ class TestPickNextIssue:
         from kennel.worker import _pick_next_issue
 
         # #100 → [#200 assigned to other, #201 assigned to fido]
-        issue_nodes = {
-            100: _issue(
-                100,
-                "root",
-                sub_issues=[
-                    _issue(200, state="OPEN", assignees=["alice"], parent=100),
-                    _issue(201, state="OPEN", assignees=["fido"], parent=100),
-                ],
-            )
-        }
+        i200 = _issue(200, state="OPEN", assignees=["alice"], parent=100)
+        i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
+        i100 = _issue(100, "root", sub_issues=[i200, i201])
+        issue_index = {100: i100, 200: i200, 201: i201}
         # #200 blocks the earlier slot, but there's a later sibling (#201) that's ours.
         # The descent walks each open child in order — blocked, then eligible.
         choice = _pick_next_issue(
             [_issue(201, assignees=["fido"], parent=100)],
             "fido",
-            get_issue_node=lambda n: issue_nodes[n],
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is not None and choice.number == 201
@@ -1711,22 +1695,15 @@ class TestPickNextIssue:
     def test_returns_none_when_only_open_children_are_others(self) -> None:
         from kennel.worker import _pick_next_issue
 
-        issue_nodes = {
-            100: _issue(
-                100,
-                "root",
-                sub_issues=[
-                    _issue(200, state="OPEN", assignees=["alice"], parent=100),
-                    _issue(201, state="OPEN", assignees=["bob"], parent=100),
-                ],
-            )
-        }
+        i200 = _issue(200, state="OPEN", assignees=["alice"], parent=100)
+        i201 = _issue(201, state="OPEN", assignees=["bob"], parent=100)
+        i100 = _issue(100, "root", sub_issues=[i200, i201])
+        issue_index = {100: i100, 200: i200, 201: i201}
         # Neither sibling is ours. Tree is blocked.
         choice = _pick_next_issue(
             [_issue(201, assignees=["bob"], parent=100)],
             "fido",
-            get_issue_node=lambda n: issue_nodes[n],
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is None
@@ -1735,27 +1712,18 @@ class TestPickNextIssue:
         """Walks down a chain of unassigned descendants, claiming each."""
         from kennel.worker import _pick_next_issue
 
-        # Candidate: #100 with sub-issue #200 (unassigned).  Descent then
-        # asks get_sub_issues(200) to hydrate deeper: [#300 (unassigned)].
-        candidate = _issue(
-            100,
-            "root",
-            assignees=["fido"],
-            sub_issues=[_issue(200, state="OPEN", assignees=[], parent=100)],
-        )
-
-        def get_sub_issues(n: int) -> list[dict]:
-            return {
-                200: [_issue(300, state="OPEN", assignees=[], parent=200)],
-                300: [],
-            }.get(n, [])
+        # Tree: #100 → #200 (unassigned) → #300 (unassigned).
+        # The full tree is in the index; descent claims both children.
+        i300 = _issue(300, state="OPEN", assignees=[], parent=200, sub_issues=[])
+        i200 = _issue(200, state="OPEN", assignees=[], parent=100, sub_issues=[i300])
+        i100 = _issue(100, "root", assignees=["fido"], sub_issues=[i200])
+        issue_index = {100: i100, 200: i200, 300: i300}
 
         claimed, claim = self._claim_spy()
         choice = _pick_next_issue(
-            [candidate],
+            [i100],
             "fido",
-            get_issue_node=lambda n: candidate,
-            get_sub_issues=get_sub_issues,
+            issue_index=issue_index,
             claim=claim,
         )
         assert choice is not None and choice.number == 300
@@ -1766,11 +1734,8 @@ class TestPickNextIssue:
         """A self-referencing parent doesn't infinite-loop the walk."""
         from kennel.worker import _walk_to_root
 
-        nodes = {
-            50: _issue(50, "A", parent=50),  # points at itself
-        }
-        start = _issue(50, "A", parent=50)
-        result = _walk_to_root(start, get_issue_node=lambda n: nodes[n])
+        node = _issue(50, "A", parent=50)
+        result = _walk_to_root(node, issue_index={50: node})
         # The walk bails at the first revisit; result is the node we end on.
         assert result["number"] == 50
 
@@ -1778,17 +1743,13 @@ class TestPickNextIssue:
         from kennel.worker import _pick_next_issue
 
         # root → leaf, picker ends at leaf with descent trail in reason.
-        root = _issue(
-            10,
-            "root",
-            assignees=["fido"],
-            sub_issues=[_issue(20, state="OPEN", assignees=["fido"], parent=10)],
-        )
+        leaf = _issue(20, state="OPEN", assignees=["fido"], parent=10)
+        root = _issue(10, "root", assignees=["fido"], sub_issues=[leaf])
+        issue_index = {10: root, 20: leaf}
         choice = _pick_next_issue(
             [root],
             "fido",
-            get_issue_node=lambda n: root if n == 10 else _issue(n),
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is not None
@@ -1799,55 +1760,48 @@ class TestPickNextIssue:
         """Two assigned issues sharing the same root should walk once."""
         from kennel.worker import _pick_next_issue
 
-        nodes = {
-            1: _issue(
-                1,
-                "root",
-                sub_issues=[_issue(2, state="OPEN", assignees=["fido"], parent=1)],
-            )
-        }
-        get_calls: list[int] = []
-
-        def get_issue_node(n: int) -> dict:
-            get_calls.append(n)
-            return nodes[n]
+        child = _issue(2, state="OPEN", assignees=["fido"], parent=1)
+        root = _issue(1, "root", sub_issues=[child])
+        issue_index = {1: root, 2: child}
 
         a = _issue(2, state="OPEN", assignees=["fido"], parent=1)
         b = _issue(2, state="OPEN", assignees=["fido"], parent=1)
         choice = _pick_next_issue(
             [a, b],
             "fido",
-            get_issue_node=get_issue_node,
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is not None and choice.number == 2
         # Walks up for each of the two, but descent runs exactly once (roots are deduped).
-        # We check by asserting at most one descent call, but the easier
-        # assertion is the choice matches.
 
     def test_milestone_inherited_via_parent_note_in_reason(self) -> None:
         from kennel.worker import _pick_next_issue
 
-        nodes = {
-            10: _issue(
-                10,
-                "parent",
-                milestone="v1",
-                sub_issues=[_issue(20, state="OPEN", assignees=["fido"], parent=10)],
-            )
-        }
+        child = _issue(20, state="OPEN", assignees=["fido"], parent=10)
+        parent = _issue(10, "parent", milestone="v1", sub_issues=[child])
+        issue_index = {10: parent, 20: child}
         assigned = _issue(20, state="OPEN", assignees=["fido"], parent=10)
         choice = _pick_next_issue(
             [assigned],
             "fido",
-            get_issue_node=lambda n: nodes[n],
-            get_sub_issues=lambda n: [],
+            issue_index=issue_index,
             claim=lambda n: None,
         )
         assert choice is not None
         assert choice.number == 20
         assert "milestone from parent #10" in choice.reason
+
+    def test_missing_parent_in_index_treats_current_as_root(self) -> None:
+        """When a candidate's parent is absent from the index (closed/blocked),
+        the walk stops and treats the current node as the root."""
+        from kennel.worker import _walk_to_root
+
+        # #200 claims parent #100, but #100 is not in the index (closed).
+        child = _issue(200, state="OPEN", assignees=["fido"], parent=100)
+        result = _walk_to_root(child, issue_index={200: child})
+        # Walk stops; the child itself is treated as the root.
+        assert result["number"] == 200
 
 
 class TestWorkerPostPickupComment:
