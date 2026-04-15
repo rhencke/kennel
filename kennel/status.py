@@ -15,6 +15,7 @@ from typing import Any
 from kennel.color import BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RED_BOLD, YELLOW, color
 from kennel.config import RepoConfig
 from kennel.state import State
+from kennel.tasks import Tasks
 
 
 @dataclass
@@ -282,18 +283,6 @@ def _read_state(fido_dir: Path) -> dict[str, Any]:  # pyright: ignore[reportUnus
         return {}
 
 
-def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
-    """Read tasks.json from fido_dir, returning [] if absent or unreadable."""
-    path = fido_dir / "tasks.json"
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):  # fmt: skip
-        return []
-
-
 def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     """Return the title of the first in_progress task, then the first pending task."""
     for t in task_list:
@@ -388,7 +377,7 @@ def repo_status(
     pr_number = state.get("pr_number")
     pr_title = state.get("pr_title")
 
-    task_list = _read_tasks(fido_dir)
+    task_list = Tasks(repo_config.work_dir).list()
     pending = sum(1 for t in task_list if t["status"] == "pending")
     completed = sum(1 for t in task_list if t["status"] == "completed")
 

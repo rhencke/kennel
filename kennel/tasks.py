@@ -460,7 +460,7 @@ def reorder_tasks(
     If *_on_done* is provided, it is called after a successful reorder write so
     callers can trigger follow-up work (e.g. rewriting the PR description).
     """
-    task_list = list_tasks(work_dir)
+    task_list = Tasks(work_dir).list()
     if not task_list:
         log.info("reorder_tasks: no tasks — skipping")
         return

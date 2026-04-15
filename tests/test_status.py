@@ -26,7 +26,6 @@ from kennel.status import (
     _port_from_pid,
     _process_uptime_seconds,
     _read_state,
-    _read_tasks,
     _repos_from_pid,
     collect,
     format_status,
@@ -617,39 +616,6 @@ class TestReadState:
             assert _read_state(fido_dir) == {}
 
 
-class TestReadTasks:
-    def test_absent_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        assert _read_tasks(fido_dir) == []
-
-    def test_reads_tasks(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        tasks = [{"id": "1", "title": "do thing", "status": "pending"}]
-        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
-        assert _read_tasks(fido_dir) == tasks
-
-    def test_corrupt_json_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "tasks.json").write_text("not json")
-        assert _read_tasks(fido_dir) == []
-
-    def test_non_list_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "tasks.json").write_text('{"not": "a list"}')
-        assert _read_tasks(fido_dir) == []
-
-    def test_oserror_returns_empty(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        (fido_dir / "tasks.json").touch()
-        with patch.object(Path, "read_text", side_effect=OSError("oops")):
-            assert _read_tasks(fido_dir) == []
-
-
 class TestCurrentTask:
     def test_empty_list(self) -> None:
         assert _current_task([]) is None
@@ -729,8 +695,8 @@ class TestRepoStatus:
         fido_dir.mkdir(parents=True)
         (fido_dir / "state.json").write_text('{"issue": 7}')
         tasks = [
-            {"status": "completed", "title": "done task"},
-            {"status": "pending", "title": "next task"},
+            {"status": "completed", "title": "done task", "type": "spec"},
+            {"status": "pending", "title": "next task", "type": "spec"},
         ]
         (fido_dir / "tasks.json").write_text(json.dumps(tasks))
 
