@@ -496,6 +496,7 @@ class GitHub:
             "orderBy:{field:CREATED_AT,direction:ASC}){"
             f"nodes{{{issue_fields} state "
             f"subIssues(first:100){{nodes{{state {issue_fields}}}}}"
+            "}"
             "pageInfo{endCursor hasNextPage}"
             "}}}"
         )
