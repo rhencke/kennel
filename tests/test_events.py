@@ -1573,6 +1573,50 @@ class TestReplyToComment:
         mock_gh.reply_to_review_comment.assert_called_once()
         mock_gh.edit_review_comment.assert_not_called()
 
+    def test_posts_new_reply_when_human_comments_after_fido(
+        self, tmp_path: Path
+    ) -> None:
+        """When a human posts after Fido's reply, post a new reply rather than editing."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 300},
+            comment_body="We need sub issues in priority order.",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: reorder sub issues"
+            if "Convert this PR review comment" in prompt:
+                return "Reorder sub issues by priority"
+            return "On it!"
+
+        mock_gh = MagicMock()
+        # Thread: root → fido reply → NEW human comment (fido must not edit)
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 300, "author": "rhencke", "body": "Add orderBy"},
+            {"id": 301, "author": "fidocancode", "body": "Got it!"},
+            {
+                "id": 302,
+                "author": "rhencke",
+                "body": "We need sub issues in priority order.",
+            },
+        ]
+        cat, titles = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            claude_client=_client(side_effect=fake_pp),
+        )
+        assert cat == "ACT"
+        # Human spoke last — must post a fresh reply, never edit the old one
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
+
     def test_ask_title_not_rederived_from_root(self, tmp_path: Path) -> None:
         """Non-task categories (ASK) are not affected by root body re-derivation."""
         cfg = self._cfg(tmp_path)

@@ -628,9 +628,13 @@ def reply_to_comment(
             f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
         )
 
-    # Edit the last Fido reply in the thread instead of posting a new comment.
-    # This keeps the thread tidy — one acknowledgment per thread, updated in place.
+    # Edit the last Fido reply only if it is the most recent comment in the thread
+    # (i.e. no human has spoken since). If a human posted a new comment after
+    # Fido's last reply, post a fresh reply so the conversation stays coherent.
     _fido_logins = {"fidocancode", "fido-can-code"}
+    last_thread_author = (
+        thread_comments[-1].get("author", "").lower() if thread_comments else ""
+    )
     last_fido_id = next(
         (
             c["id"]
@@ -639,7 +643,7 @@ def reply_to_comment(
         ),
         None,
     )
-    if last_fido_id:
+    if last_fido_id and last_thread_author in _fido_logins:
         log.info("editing last fido reply %s on PR #%s", last_fido_id, info["pr"])
         gh.edit_review_comment(info["repo"], last_fido_id, body)
         log.info("reply edited")
