@@ -1459,3 +1459,313 @@ def resume_status(
         return extract_result_text(result.stdout.strip())
     except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
+
+
+# ── Injectable one-shot collaborator ─────────────────────────────────────────
+
+
+class ClaudeClient:
+    """Injectable collaborator for one-shot Claude CLI interactions.
+
+    Wraps subprocess-based, session-based, and streaming Claude helpers
+    so callers can depend on an explicit boundary instead of module-level
+    functions.  Constructor-injected dependencies replace the per-call
+    ``runner=`` / ``streaming_runner=`` overrides used by the free functions.
+
+    The class does not own the persistent :class:`ClaudeSession` — it
+    receives a *session_fn* callback that resolves the session for the
+    calling context (thread-local repo in production, a test fake in
+    tests).
+    """
+
+    def __init__(
+        self,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        session_fn: Callable[[], "ClaudeSession"] = _session_for_current_repo,
+        streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._runner = runner
+        self._session_fn = session_fn
+        self._streaming_runner = streaming_runner
+        self._sleep_fn = sleep_fn
+
+    # ── Session-based helpers ────────────────────────────────────────────
+
+    def print_prompt(
+        self,
+        prompt: str,
+        model: str,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Run a prompt turn on the persistent session, returning the result text."""
+        session = self._session_fn()
+        return session.prompt(prompt, model=model, system_prompt=system_prompt)
+
+    def print_prompt_json(
+        self,
+        prompt: str,
+        key: str,
+        model: str,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Run a prompt turn and parse JSON from the response at *key*."""
+        json_instruction = (
+            f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
+            " No other text before or after the JSON."
+        )
+        full_system = (
+            f"{system_prompt}\n\n{json_instruction}"
+            if system_prompt
+            else json_instruction
+        )
+        raw = self.print_prompt(prompt, model, system_prompt=full_system)
+        if not raw:
+            return ""
+        candidates = [raw] + [
+            m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)
+        ]
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj.get(key), str):
+                    return obj[key]
+            except json.JSONDecodeError, AttributeError:
+                continue
+        return ""
+
+    def generate_status(
+        self,
+        prompt: str,
+        system_prompt: str,
+        model: str = "claude-opus-4-6",
+    ) -> str:
+        """Ask claude to generate a GitHub status (two lines: emoji + text)."""
+        return self.print_prompt(
+            prompt=prompt, model=model, system_prompt=system_prompt
+        )
+
+    def generate_status_emoji(
+        self,
+        prompt: str,
+        system_prompt: str,
+        model: str = "claude-opus-4-6",
+    ) -> str:
+        """Ask claude to choose a single emoji for a GitHub status."""
+        return self.print_prompt(
+            prompt=prompt, model=model, system_prompt=system_prompt
+        )
+
+    # ── Streaming file-based helpers ─────────────────────────────────────
+
+    def print_prompt_from_file(
+        self,
+        system_file: Path,
+        prompt_file: Path,
+        model: str,
+        timeout: int = 30,
+        idle_timeout: float = 1800.0,
+        cwd: Path | str | None = None,
+    ) -> str:
+        """Run claude --print reading system prompt and user prompt from files."""
+        cmd = [
+            "claude",
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--system-prompt-file",
+            str(system_file),
+            "--print",
+        ]
+        return "".join(
+            self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
+        ).strip()
+
+    def resume_session(
+        self,
+        session_id: str,
+        prompt_file: Path,
+        model: str,
+        timeout: int = 300,
+        idle_timeout: float = 1800.0,
+        cwd: Path | str | None = None,
+    ) -> str:
+        """Continue an existing claude session by ID, feeding prompt_file on stdin."""
+        cmd = [
+            "claude",
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--resume",
+            session_id,
+            "--print",
+        ]
+        return "".join(
+            self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
+        ).strip()
+
+    # ── Subprocess one-shot helpers ──────────────────────────────────────
+
+    def triage_comment(
+        self,
+        prompt: str,
+        model: str = "claude-opus-4-6",
+        timeout: int = 15,
+    ) -> str:
+        """Ask claude to triage a PR comment. Returns the raw first line of output."""
+        try:
+            result = _claude(
+                "--model",
+                model,
+                "--print",
+                "-p",
+                prompt,
+                timeout=timeout,
+                runner=self._runner,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().splitlines()[0]
+            return ""
+        except subprocess.TimeoutExpired, FileNotFoundError:
+            return ""
+
+    def generate_reply(
+        self,
+        prompt: str,
+        model: str = "claude-opus-4-6",
+        timeout: int = 30,
+    ) -> str:
+        """Ask claude to generate a short reply. Returns stripped output or empty string."""
+        try:
+            result = _claude(
+                "--model",
+                model,
+                "--print",
+                "-p",
+                prompt,
+                timeout=timeout,
+                runner=self._runner,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except subprocess.TimeoutExpired, FileNotFoundError:
+            return ""
+
+    def generate_branch_name(
+        self,
+        prompt: str,
+        model: str = "claude-haiku-4-5-20251001",
+        timeout: int = 15,
+    ) -> str:
+        """Ask claude to generate a git branch name slug. Returns first line of output."""
+        try:
+            result = _claude(
+                "--model",
+                model,
+                "--print",
+                "-p",
+                prompt,
+                timeout=timeout,
+                runner=self._runner,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().splitlines()[0]
+            return ""
+        except subprocess.TimeoutExpired, FileNotFoundError:
+            return ""
+
+    def generate_status_with_session(
+        self,
+        prompt: str,
+        system_prompt: str,
+        model: str = "claude-opus-4-6",
+        timeout: int = 15,
+    ) -> tuple[str, str]:
+        """Generate a GitHub status, returning (status_text, session_id)."""
+        for attempt in range(_EMPTY_RETRY_COUNT + 1):
+            try:
+                result = _claude(
+                    "--model",
+                    model,
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    "--system-prompt",
+                    system_prompt,
+                    "--print",
+                    "-p",
+                    prompt,
+                    timeout=timeout,
+                    runner=self._runner,
+                )
+                if result.returncode != 0:
+                    log.warning(
+                        "generate_status_with_session: claude exited %d",
+                        result.returncode,
+                    )
+                    return "", ""
+                raw = result.stdout.strip()
+                text = extract_result_text(raw)
+                sid = extract_session_id(raw)
+                if text:
+                    return text, sid
+                if result.stderr:
+                    log.warning(
+                        "generate_status_with_session: stderr=%r",
+                        _Trunc(result.stderr),
+                    )
+                log.debug(
+                    "generate_status_with_session: stdout=%r",
+                    _Trunc(result.stdout),
+                )
+                if attempt < _EMPTY_RETRY_COUNT:
+                    log.warning(
+                        "generate_status_with_session: empty output on attempt %d"
+                        " — retrying",
+                        attempt + 1,
+                    )
+                    self._sleep_fn(_EMPTY_RETRY_DELAY)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                log.warning("generate_status_with_session: %s", exc)
+                return "", ""
+        log.warning(
+            "generate_status_with_session: empty output after %d attempts",
+            _EMPTY_RETRY_COUNT + 1,
+        )
+        return "", ""
+
+    def resume_status(
+        self,
+        session_id: str,
+        prompt: str,
+        model: str = "claude-opus-4-6",
+        timeout: int = 15,
+    ) -> str:
+        """Resume an existing claude session to refine a status response."""
+        try:
+            result = _claude(
+                "--model",
+                model,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--resume",
+                session_id,
+                "--print",
+                "-p",
+                prompt,
+                timeout=timeout,
+                runner=self._runner,
+            )
+            if result.returncode != 0:
+                return ""
+            return extract_result_text(result.stdout.strip())
+        except subprocess.TimeoutExpired, FileNotFoundError:
+            return ""
