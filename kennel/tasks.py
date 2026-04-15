@@ -189,12 +189,10 @@ def _auto_complete_ask_tasks(
     gh: GitHub,
     repo: str,
     pr_number: int | str,
-    *,
-    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
-    _complete_by_id: Callable[[Path, str], dict[str, Any] | None] = complete_by_id,
 ) -> None:
     """Mark pending ASK tasks complete when their review thread is resolved."""
-    task_list = _list_tasks(work_dir)
+    tasks = Tasks(work_dir)
+    task_list = tasks.list()
     ask_tasks = [
         t
         for t in task_list
@@ -221,7 +219,7 @@ def _auto_complete_ask_tasks(
             log.info(
                 "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
             )
-            _complete_by_id(work_dir, task["id"])
+            tasks.complete_by_id(task["id"])
 
 
 def sync_tasks(
@@ -229,7 +227,6 @@ def sync_tasks(
     gh: GitHub,
     *,
     _resolve_git_dir_fn: Callable[[Path], Path] = _resolve_git_dir,
-    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
     _auto_complete_ask_tasks_fn: Callable[..., None] = _auto_complete_ask_tasks,
 ) -> None:
     """Sync tasks.json → PR body work queue.
@@ -273,7 +270,7 @@ def sync_tasks(
         pr_number = pr_data["number"]
         _auto_complete_ask_tasks_fn(work_dir, gh, repo, pr_number)
 
-        task_list = _list_tasks(work_dir)
+        task_list = Tasks(work_dir).list()
         if not task_list:
             log.info("sync_tasks: no tasks — nothing to sync")
             return

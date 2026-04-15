@@ -8250,25 +8250,20 @@ class TestAutoCompleteAskTasks:
 
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path, gh, "owner/repo", 1, _list_tasks=MagicMock(return_value=[])
-        )
+        with patch("kennel.tasks.Tasks.list", return_value=[]):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
     def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(42)
         gh.get_review_threads.return_value = [self._resolved_node(42)]
-        mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
-        mock_complete.assert_called_once_with(tmp_path, "ask-1")
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_called_once_with("ask-1")
 
     def test_does_not_complete_ask_task_when_thread_not_resolved(
         self, tmp_path: Path
@@ -8278,31 +8273,23 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}
         ]
-        mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
 
     def test_get_review_threads_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(1)
         gh.get_review_threads.side_effect = RuntimeError("api fail")
-        mock_complete = MagicMock()
-        with pytest.raises(RuntimeError, match="api fail"):
-            _auto_complete_ask_tasks(
-                tmp_path,
-                gh,
-                "owner/repo",
-                1,
-                _list_tasks=MagicMock(return_value=[task]),
-                _complete_by_id=mock_complete,
-            )
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            pytest.raises(RuntimeError, match="api fail"),
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
 
     def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
@@ -8313,29 +8300,21 @@ class TestAutoCompleteAskTasks:
             "thread": {"comment_id": 1},
         }
         gh.get_review_threads.return_value = [self._resolved_node(1)]
-        mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
 
     def test_ask_task_without_thread_ignored(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = {"title": "ASK: question", "status": "pending"}
-        mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
         gh.get_review_threads.assert_not_called()
 
@@ -8345,15 +8324,11 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": True, "comments": {"nodes": [{}]}}
         ]
-        mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
 
 
@@ -8366,15 +8341,10 @@ class TestSyncTasks:
     def _state_with_issue(self, fido_dir: Path, issue: int = 1) -> None:
         (fido_dir / "state.json").write_text(f'{{"issue": {issue}}}')
 
-    def _sync_kwargs(
-        self,
-        fido_dir: Path,
-        task_list: list | None = None,
-    ) -> dict:
+    def _sync_kwargs(self, fido_dir: Path) -> dict:
         """Return injection kwargs for sync_tasks pointing _resolve_git_dir at fido_dir.parent."""
         return {
             "_resolve_git_dir_fn": MagicMock(return_value=fido_dir.parent),
-            "_list_tasks": MagicMock(return_value=task_list or []),
             "_auto_complete_ask_tasks_fn": MagicMock(),
         }
 
@@ -8437,7 +8407,8 @@ class TestSyncTasks:
         gh.get_repo_info.return_value = "owner/repo"
         gh.get_user.return_value = "fido-bot"
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[]))
+        with patch("kennel.tasks.Tasks.list", return_value=[]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.get_pr_body.assert_not_called()
 
     def test_syncs_pr_body_when_queue_markers_present(self, tmp_path: Path) -> None:
@@ -8450,7 +8421,8 @@ class TestSyncTasks:
         body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nfooter"
         gh.get_pr_body.return_value = body
         task = {"title": "Do it", "status": "pending"}
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_called_once()
         new_body = gh.edit_pr_body.call_args[0][2]
         assert "Do it" in new_body
@@ -8470,7 +8442,8 @@ class TestSyncTasks:
         )
         gh.get_pr_body.return_value = body
         task = {"title": "Do it", "status": "pending", "type": "spec"}
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_called_once()
         new_body = gh.edit_pr_body.call_args[0][2]
         assert "My PR description." in new_body
@@ -8485,7 +8458,8 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.return_value = "no markers here"
         task = {"title": "Do it", "status": "pending"}
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
@@ -8506,8 +8480,11 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        with pytest.raises(RuntimeError, match="api down"):
-            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            pytest.raises(RuntimeError, match="api down"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
     def test_edit_pr_body_exception_propagates(self, tmp_path: Path) -> None:
@@ -8521,8 +8498,11 @@ class TestSyncTasks:
         gh.get_pr_body.return_value = body
         gh.edit_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        with pytest.raises(RuntimeError, match="api down"):
-            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            pytest.raises(RuntimeError, match="api down"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
 
 
 class TestSyncTasksBackground:
