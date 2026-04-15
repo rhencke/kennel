@@ -292,6 +292,31 @@ class TestTaskPosition:
         tasks = [{"status": "completed"}, {"status": "completed"}]
         assert _task_position(tasks) == (None, None)
 
+    def test_counts_up_past_completed_tasks(self) -> None:
+        from kennel.status import _task_position
+
+        # 2 done, 1 in_progress, 1 pending → "3/4" not "1/2"
+        tasks = [
+            {"status": "completed"},
+            {"status": "completed"},
+            {"status": "in_progress"},
+            {"status": "pending"},
+        ]
+        assert _task_position(tasks) == (3, 4)
+
+    def test_pending_offsets_past_completed(self) -> None:
+        from kennel.status import _task_position
+
+        # 3 done, 2 pending, no in_progress → "4/5"
+        tasks = [
+            {"status": "completed"},
+            {"status": "completed"},
+            {"status": "completed"},
+            {"status": "pending"},
+            {"status": "pending"},
+        ]
+        assert _task_position(tasks) == (4, 5)
+
 
 class TestElapsedSinceIso:
     def test_none_on_empty(self) -> None:
