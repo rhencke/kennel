@@ -38,7 +38,7 @@ class TestFromArgs:
             ]
         )
         assert cfg.port == 9000
-        assert cfg.log_level == "INFO"
+        assert cfg.log_level == "DEBUG"
         assert "copilot[bot]" in cfg.allowed_bots
 
     def test_custom_port(self, tmp_path: Path) -> None:

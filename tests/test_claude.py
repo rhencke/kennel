@@ -1451,6 +1451,173 @@ class TestClaudeSessionDrainToBoundary:
         assert session._in_turn is False
 
 
+class TestClaudeSessionLogEvent:
+    def test_assistant_text(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "thinking hard"}]},
+                }
+            )
+        assert "claude>" in caplog.text and "thinking hard" in caplog.text
+
+    def test_tool_use_command(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": "ls -la"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Bash" in caplog.text and "ls -la" in caplog.text
+
+    def test_tool_use_file_path(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {"file_path": "/tmp/foo.py"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Read" in caplog.text and "/tmp/foo.py" in caplog.text
+
+    def test_tool_use_fallback_first_value(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Thing",
+                                "input": {"other": "value-xyz"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Thing" in caplog.text and "value-xyz" in caplog.text
+
+    def test_content_non_dict_skipped(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        # Must not raise
+        session._log_event(
+            {"type": "assistant", "message": {"content": ["not a dict"]}}
+        )
+
+    def test_user_tool_result(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "content": "abcdefghij"}]
+                    },
+                }
+            )
+        assert "claude tool result" in caplog.text
+
+    def test_system_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event({"type": "system", "subtype": "init"})
+        assert "claude system: init" in caplog.text
+
+    def test_result_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event({"type": "result", "result": "all done"})
+        assert "claude result: all done" in caplog.text
+
+    def test_error_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.WARNING, logger="kennel"):
+            session._log_event({"type": "error", "error": "kaboom"})
+        assert "claude error: kaboom" in caplog.text
+
+
+class TestClaudeSessionWaitForPendingPreempt:
+    def test_returns_false_when_not_pending(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        # _preempt_pending starts cleared
+        assert session.wait_for_pending_preempt(timeout=0.01) is False
+
+    def test_returns_true_when_pending_clears(self, tmp_path: Path) -> None:
+        import threading as _t
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._preempt_pending.set()
+
+        # Clear the event from another thread after a brief delay.
+        def _clearer() -> None:
+            import time as _time
+
+            _time.sleep(0.02)
+            session._preempt_pending.clear()
+
+        t = _t.Thread(target=_clearer)
+        t.start()
+        assert session.wait_for_pending_preempt(timeout=1.0) is True
+        t.join()
+
+    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._preempt_pending.set()
+        # Never cleared → waits out the deadline.
+        assert session.wait_for_pending_preempt(timeout=0.05) is False
+
+
 class TestClaudeSessionIterEvents:
     def test_yields_parsed_json_events(self, tmp_path: Path) -> None:
         import json as _json

@@ -61,7 +61,9 @@ class Config:
             help="Comma-separated bot allowlist",
         )
         parser.add_argument(
-            "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+            "--log-level",
+            default="DEBUG",
+            choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         )
         parser.add_argument(
             "repos",
