@@ -6,7 +6,6 @@ import hmac
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -32,6 +31,7 @@ from kennel.events import (
     reply_to_review,
 )
 from kennel.github import GitHub
+from kennel.infra import Filesystem, ProcessRunner, RealFilesystem, RealProcessRunner
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -128,8 +128,7 @@ def _get_self_repo(
 
 def preflight_repo_identity(
     repos: dict[str, RepoConfig],
-    *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    proc: ProcessRunner,
 ) -> None:
     """Verify each configured work_dir is a git repo whose origin matches its name.
 
@@ -138,7 +137,7 @@ def preflight_repo_identity(
     """
     for name, repo_cfg in repos.items():
         try:
-            result = _run(
+            result = proc.run(
                 ["git", "remote", "get-url", "origin"],
                 cwd=str(repo_cfg.work_dir),
                 capture_output=True,
@@ -167,27 +166,20 @@ def preflight_repo_identity(
 _REQUIRED_TOOLS = ("git", "gh", "claude")
 
 
-def preflight_tools(
-    *,
-    _which: Callable[[str], str | None] = shutil.which,
-) -> None:
+def preflight_tools(fs: Filesystem) -> None:
     """Verify that all required CLI tools are on PATH.
 
     Raises :exc:`PreflightError` naming the first missing tool.
     """
     for tool in _REQUIRED_TOOLS:
-        if _which(tool) is None:
+        if fs.which(tool) is None:
             raise PreflightError(
                 f"preflight: required tool not found on PATH: {tool!r}"
             )
     log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
-def preflight_sub_dir(
-    config: Config,
-    *,
-    _is_dir: Callable[[Path], bool] = Path.is_dir,
-) -> None:
+def preflight_sub_dir(config: Config, fs: Filesystem) -> None:
     """Verify that the skill-files directory exists.
 
     Raises :exc:`PreflightError` if ``config.sub_dir`` is not an existing
@@ -195,7 +187,7 @@ def preflight_sub_dir(
     every task run — a missing directory causes every worker invocation to fail
     with an obscure I/O error rather than a clear startup message.
     """
-    if not _is_dir(config.sub_dir):
+    if not fs.is_dir(config.sub_dir):
         raise PreflightError(
             f"preflight: skill-files directory not found: {config.sub_dir}"
         )
@@ -758,13 +750,16 @@ def run(
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_exception
 
+    proc = RealProcessRunner()
+    fs = RealFilesystem()
+
     gh = _GitHub()
     _startup_pull()
     try:
-        _preflight_tools()
-        _preflight_sub_dir(config)
+        _preflight_tools(fs)
+        _preflight_sub_dir(config, fs)
         _preflight_gh_auth(gh)
-        _preflight_repo_identity(config.repos)
+        _preflight_repo_identity(config.repos, proc)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 

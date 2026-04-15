@@ -11,7 +11,7 @@ from collections.abc import Callable
 from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -1551,49 +1551,64 @@ class TestParseRepoFromUrl:
         assert _parse_repo_from_url("garbage") is None
 
 
+class _FakeProcessRunner:
+    """Minimal ProcessRunner fake for preflight tests."""
+
+    def __init__(
+        self, results: list[Any] | None = None, error: Exception | None = None
+    ) -> None:
+        self._results = list(results or [])
+        self._error = error
+        self.call_count = 0
+
+    def run(self, cmd: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        if self._error is not None:
+            raise self._error
+        return self._results.pop(0)
+
+
 class TestPreflightRepoIdentity:
     def test_succeeds_when_remote_matches(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_run = MagicMock(
-            return_value=MagicMock(stdout="git@github.com:owner/repo.git\n")
-        )
-        preflight_repo_identity(repos, _run=mock_run)  # no exception
+        fake = _FakeProcessRunner([MagicMock(stdout="git@github.com:owner/repo.git\n")])
+        preflight_repo_identity(repos, fake)  # no exception
 
     def test_raises_on_remote_mismatch(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_run = MagicMock(
-            return_value=MagicMock(stdout="git@github.com:other/thing.git\n")
+        fake = _FakeProcessRunner(
+            [MagicMock(stdout="git@github.com:other/thing.git\n")]
         )
         with pytest.raises(PreflightError, match="other/thing"):
-            preflight_repo_identity(repos, _run=mock_run)
+            preflight_repo_identity(repos, fake)
 
     def test_raises_on_subprocess_error(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
+        fake = _FakeProcessRunner(error=subprocess.CalledProcessError(128, []))
         with pytest.raises(PreflightError):
-            preflight_repo_identity(repos, _run=mock_run)
+            preflight_repo_identity(repos, fake)
 
     def test_raises_when_git_not_found(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_run = MagicMock(side_effect=FileNotFoundError())
+        fake = _FakeProcessRunner(error=FileNotFoundError())
         with pytest.raises(PreflightError):
-            preflight_repo_identity(repos, _run=mock_run)
+            preflight_repo_identity(repos, fake)
 
     def test_raises_on_unparseable_url(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n"))
+        fake = _FakeProcessRunner([MagicMock(stdout="garbage\n")])
         with pytest.raises(PreflightError):
-            preflight_repo_identity(repos, _run=mock_run)
+            preflight_repo_identity(repos, fake)
 
     def test_checks_all_repos(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
@@ -1602,14 +1617,14 @@ class TestPreflightRepoIdentity:
             "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
             "owner/repo2": RepoConfig(name="owner/repo2", work_dir=tmp_path),
         }
-        mock_run = MagicMock(
-            side_effect=[
+        fake = _FakeProcessRunner(
+            [
                 MagicMock(stdout="git@github.com:owner/repo1.git\n"),
                 MagicMock(stdout="git@github.com:owner/repo2.git\n"),
             ]
         )
-        preflight_repo_identity(repos, _run=mock_run)  # no exception
-        assert mock_run.call_count == 2
+        preflight_repo_identity(repos, fake)  # no exception
+        assert fake.call_count == 2
 
     def test_raises_on_second_repo_mismatch(self, tmp_path: Path) -> None:
         from kennel.server import preflight_repo_identity
@@ -1618,14 +1633,14 @@ class TestPreflightRepoIdentity:
             "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
             "owner/repo2": RepoConfig(name="owner/repo2", work_dir=tmp_path),
         }
-        mock_run = MagicMock(
-            side_effect=[
+        fake = _FakeProcessRunner(
+            [
                 MagicMock(stdout="git@github.com:owner/repo1.git\n"),
                 MagicMock(stdout="git@github.com:other/thing.git\n"),
             ]
         )
         with pytest.raises(PreflightError, match="other/thing"):
-            preflight_repo_identity(repos, _run=mock_run)
+            preflight_repo_identity(repos, fake)
 
     def test_run_calls_preflight_repo_identity(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -1657,7 +1672,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
         )
 
-        mock_preflight.assert_called_once_with(fake_cfg.repos)
+        mock_preflight.assert_called_once_with(fake_cfg.repos, ANY)
 
     def test_run_calls_preflight_tools(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -1689,7 +1704,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
         )
 
-        mock_preflight.assert_called_once_with()
+        mock_preflight.assert_called_once_with(ANY)
 
     def test_run_calls_preflight_gh_auth(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -1753,7 +1768,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
         )
 
-        mock_preflight.assert_called_once_with(fake_cfg)
+        mock_preflight.assert_called_once_with(fake_cfg, ANY)
 
     def test_run_converts_preflight_error_to_system_exit(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -1787,32 +1802,48 @@ class TestPreflightRepoIdentity:
             )
 
 
+class _FakeFilesystem:
+    """Minimal Filesystem fake for preflight tests."""
+
+    def __init__(
+        self, missing: set[str] | None = None, dirs: set[Path] | None = None
+    ) -> None:
+        self._missing = missing or set()
+        self._dirs = dirs or set()
+
+    def which(self, name: str) -> str | None:
+        return None if name in self._missing else f"/usr/bin/{name}"
+
+    def is_dir(self, path: Path) -> bool:
+        return path in self._dirs
+
+
 class TestPreflightTools:
     def test_succeeds_when_all_tools_found(self) -> None:
         from kennel.server import preflight_tools
 
-        preflight_tools(_which=lambda _: "/usr/bin/git")  # no exception
+        preflight_tools(_FakeFilesystem())  # no exception
 
     def test_raises_when_git_missing(self) -> None:
         from kennel.server import preflight_tools
 
         missing = "git"
         with pytest.raises(PreflightError, match=repr(missing)):
-            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+            preflight_tools(_FakeFilesystem(missing={missing}))
 
     def test_raises_when_gh_missing(self) -> None:
         from kennel.server import preflight_tools
 
         missing = "gh"
         with pytest.raises(PreflightError, match=repr(missing)):
-            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+            preflight_tools(_FakeFilesystem(missing={missing}))
 
     def test_raises_when_claude_missing(self) -> None:
         from kennel.server import preflight_tools
 
         missing = "claude"
         with pytest.raises(PreflightError, match=repr(missing)):
-            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+            preflight_tools(_FakeFilesystem(missing={missing}))
 
     def test_required_tools_constant(self) -> None:
         from kennel.server import _REQUIRED_TOOLS
@@ -1824,15 +1855,16 @@ class TestPreflightSubDir:
     def test_succeeds_when_sub_dir_exists(self, tmp_path: Path) -> None:
         from kennel.server import preflight_sub_dir
 
+        sub = tmp_path / "sub"
         cfg = Config(
             port=0,
             secret=b"s",
             repos={},
             allowed_bots=frozenset(),
             log_level="INFO",
-            sub_dir=tmp_path / "sub",
+            sub_dir=sub,
         )
-        preflight_sub_dir(cfg, _is_dir=lambda _: True)  # no exception
+        preflight_sub_dir(cfg, _FakeFilesystem(dirs={sub}))  # no exception
 
     def test_raises_when_sub_dir_missing(self, tmp_path: Path) -> None:
         from kennel.server import preflight_sub_dir
@@ -1846,7 +1878,7 @@ class TestPreflightSubDir:
             sub_dir=tmp_path / "sub",
         )
         with pytest.raises(PreflightError, match="skill-files directory not found"):
-            preflight_sub_dir(cfg, _is_dir=lambda _: False)
+            preflight_sub_dir(cfg, _FakeFilesystem())
 
     def test_error_message_includes_path(self, tmp_path: Path) -> None:
         from kennel.server import preflight_sub_dir
@@ -1861,7 +1893,7 @@ class TestPreflightSubDir:
             sub_dir=sub,
         )
         with pytest.raises(PreflightError, match=str(sub)):
-            preflight_sub_dir(cfg, _is_dir=lambda _: False)
+            preflight_sub_dir(cfg, _FakeFilesystem())
 
 
 class TestPreflightGhAuth:
