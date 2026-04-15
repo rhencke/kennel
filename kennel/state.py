@@ -6,10 +6,10 @@ import fcntl
 import json
 import subprocess
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any, Generator
+from typing import Any
 
 
 class JsonFileStore(ABC):
@@ -46,6 +46,14 @@ class JsonFileStore(ABC):
         """Value yielded when the data file is absent or empty."""
         return {}
 
+    def _validate(self, data: Any) -> None:
+        """Validate loaded data.  Raise :exc:`ValueError` if invalid.
+
+        Called by :meth:`modify` after deserialising the JSON and before
+        yielding to the caller.  The default implementation is a no-op;
+        override in subclasses to add schema checks.
+        """
+
     @contextmanager
     def modify(self) -> Generator[Any, None, None]:
         """Atomic read-modify-write: hold the exclusive flock for the entire block.
@@ -54,6 +62,9 @@ class JsonFileStore(ABC):
         the file is absent or empty).  Any mutations are written back when the
         ``with`` block exits, while the exclusive lock is still held —
         preventing interleaved concurrent modifications.
+
+        Raises :exc:`ValueError` if the file contains invalid JSON or if
+        :meth:`_validate` rejects the loaded data.
         """
         lock_path = self._lock_path
         data_path = self._data_path
@@ -62,39 +73,16 @@ class JsonFileStore(ABC):
         with open(lock_path) as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             text = data_path.read_text() if data_path.exists() else ""
-            data = json.loads(text) if text.strip() else self._default()
+            if text.strip():
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"corrupt {data_path.name}: {e}") from e
+            else:
+                data = self._default()
+            self._validate(data)
             yield data
             data_path.write_text(json.dumps(data))
-
-
-def _state_lock(fido_dir: Path, exclusive: bool = False) -> IO[str]:
-    """Open and flock state.lock in fido_dir. Caller must close the returned fd."""
-    lock_path = fido_dir / "state.lock"
-    lock_path.touch(exist_ok=True)
-    lock_fd = open(lock_path)  # noqa: SIM115
-    fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-    return lock_fd
-
-
-def load_state(fido_dir: Path) -> dict[str, Any]:
-    """Load state.json from fido_dir, returning an empty dict if absent."""
-    with _state_lock(fido_dir):
-        state_path = fido_dir / "state.json"
-        if not state_path.exists():
-            return {}
-        return json.loads(state_path.read_text())
-
-
-def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-    """Write state to state.json in fido_dir."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").write_text(json.dumps(state))
-
-
-def clear_state(fido_dir: Path) -> None:
-    """Remove state.json from fido_dir (no-op if absent)."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").unlink(missing_ok=True)
 
 
 class State(JsonFileStore):
@@ -105,7 +93,7 @@ class State(JsonFileStore):
 
     Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write.
     The lock is held on ``state.lock`` (separate from the data file) so that
-    shared reads via :func:`load_state` are not blocked by concurrent
+    shared reads via :meth:`load` are not blocked by concurrent
     ``modify`` calls.
     """
 
@@ -120,19 +108,34 @@ class State(JsonFileStore):
     def _lock_path(self) -> Path:
         return self._fido_dir / "state.lock"
 
+    @contextmanager
+    def _flock(self, exclusive: bool = False) -> Generator[None, None, None]:
+        """Hold a flock on ``state.lock`` for the duration of the block."""
+        lock_path = self._lock_path
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:  # noqa: SIM115
+            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+
     def load(self) -> dict[str, Any]:
         """Return state dict, or {} when the directory or state file is absent."""
         if not self._fido_dir.exists():
             return {}
-        return load_state(self._fido_dir)
+        with self._flock():
+            if not self._data_path.exists():
+                return {}
+            return json.loads(self._data_path.read_text())
 
     def save(self, data: dict[str, Any]) -> None:
         """Write *data* to state.json."""
-        save_state(self._fido_dir, data)
+        with self._flock(exclusive=True):
+            self._data_path.write_text(json.dumps(data))
 
     def clear(self) -> None:
         """Remove state.json."""
-        clear_state(self._fido_dir)
+        with self._flock(exclusive=True):
+            self._data_path.unlink(missing_ok=True)
 
 
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker

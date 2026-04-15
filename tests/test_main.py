@@ -19,7 +19,7 @@ class TestMain:
             "type": "spec",
             "status": "pending",
         }
-        with patch("kennel.tasks.add_task", return_value=fake_task) as mock_add:
+        with patch("kennel.tasks.Tasks.add", return_value=fake_task) as mock_add:
             main(["task", str(tmp_path), "add", "spec", "my task"], _GitHub=MagicMock())
 
         mock_add.assert_called_once()
@@ -55,7 +55,7 @@ class TestMain:
 
         with (
             patch("sys.argv", ["kennel", "task", str(tmp_path), "list"]),
-            patch("kennel.tasks.list_tasks", return_value=[]),
+            patch("kennel.tasks.Tasks.list", return_value=[]),
         ):
             main(_GitHub=MagicMock())  # should not raise
 

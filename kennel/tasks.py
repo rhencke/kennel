@@ -19,8 +19,8 @@ from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
 from kennel.state import (
     JsonFileStore,
+    State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
-    load_state,
 )
 from kennel.types import TaskStatus, TaskType
 
@@ -81,6 +81,9 @@ def _locked(path: Path, write: bool = False):
     return Lock()
 
 
+# Compatibility shims — callers are migrated to Tasks in subsequent commits.
+
+
 def add_task(
     work_dir: Path,
     title: str,
@@ -89,108 +92,35 @@ def add_task(
     status: TaskStatus = TaskStatus.PENDING,
     thread: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Add a task to the shared task file. Returns the new task.
-
-    task_type: mandatory — one of TaskType.CI, TaskType.THREAD, TaskType.SPEC.
-    thread: optional {repo, pr, comment_id, review_id} for comment/review tasks.
-    """
-    if not isinstance(task_type, TaskType):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise TypeError(f"task_type must be TaskType, got {type(task_type).__name__}")
-    title = " ".join(title.split())
-    task: dict[str, Any] = {
-        "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
-        "title": title,
-        "type": str(task_type),
-        "description": description,
-        "status": str(status),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    if thread:
-        task["thread"] = thread
-    comment_id = (thread or {}).get("comment_id")
-    path = _task_file(work_dir)
-    with _locked(path, write=True) as lock:
-        existing = lock.read()
-        for t in existing:
-            if comment_id is not None:
-                # Never re-create a task for the same comment, regardless of status.
-                if (t.get("thread") or {}).get("comment_id") == comment_id:
-                    log.info(
-                        "task already exists for comment_id %s (status: %s)",
-                        comment_id,
-                        t["status"],
-                    )
-                    return t
-            elif t["status"] == TaskStatus.PENDING and t["title"] == title:
-                log.info("task already exists: %s", title[:80])
-                return t
-        existing.append(task)
-        lock.write(existing)
-    log.info("task added: %s", title[:80])
-    return task
+    """Add a task.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).add(
+        title, task_type, description=description, status=status, thread=thread
+    )
 
 
 def update_task(work_dir: Path, task_id: str, status: TaskStatus) -> bool:
-    """Update a task's status. Returns True if found."""
-    path = _task_file(work_dir)
-    with _locked(path, write=True) as lock:
-        tasks = lock.read()
-        for t in tasks:
-            if t["id"] == task_id:
-                t["status"] = str(status)
-                lock.write(tasks)
-                log.info("task %s → %s", task_id, status)
-                return True
-    return False
+    """Update a task's status.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).update(task_id, status)
 
 
 def list_tasks(work_dir: Path) -> list[dict[str, Any]]:
-    """Read all tasks."""
-    path = _task_file(work_dir)
-    with _locked(path) as lock:
-        return lock.read()
+    """Read all tasks.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).list()
 
 
 def complete_by_id(work_dir: Path, task_id: str) -> dict[str, Any] | None:
-    """Mark the task with the given ID as completed.
-
-    Returns the task's thread dict if it had one, else None.
-    Returns None silently if no matching task is found.
-    """
-    path = _task_file(work_dir)
-    with _locked(path, write=True) as lock:
-        tasks = lock.read()
-        for t in tasks:
-            if t["id"] == task_id and t["status"] != TaskStatus.COMPLETED:
-                t["status"] = str(TaskStatus.COMPLETED)
-                lock.write(tasks)
-                log.info("task completed (id=%s): %s", task_id, t["title"][:80])
-                return t.get("thread")
-    return None
+    """Mark a task completed.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).complete_by_id(task_id)
 
 
 def has_pending_tasks_for_comment(work_dir: Path, comment_id: int | str) -> bool:
-    """Return True if any pending task references the given comment_id."""
-    cid = int(comment_id)
-    path = _task_file(work_dir)
-    with _locked(path) as lock:
-        for t in lock.read():
-            if t.get("status") == TaskStatus.PENDING:
-                if int((t.get("thread") or {}).get("comment_id", -1)) == cid:
-                    return True
-    return False
+    """Check pending tasks for comment.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).has_pending_for_comment(comment_id)
 
 
 def remove_task(work_dir: Path, task_id: str) -> bool:
-    """Remove a task. Returns True if found."""
-    path = _task_file(work_dir)
-    with _locked(path, write=True) as lock:
-        tasks = lock.read()
-        new_tasks = [t for t in tasks if t["id"] != task_id]
-        if len(new_tasks) < len(tasks):
-            lock.write(new_tasks)
-            return True
-    return False
+    """Remove a task.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).remove(task_id)
 
 
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
@@ -259,12 +189,10 @@ def _auto_complete_ask_tasks(
     gh: GitHub,
     repo: str,
     pr_number: int | str,
-    *,
-    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
-    _complete_by_id: Callable[[Path, str], dict[str, Any] | None] = complete_by_id,
 ) -> None:
     """Mark pending ASK tasks complete when their review thread is resolved."""
-    task_list = _list_tasks(work_dir)
+    tasks = Tasks(work_dir)
+    task_list = tasks.list()
     ask_tasks = [
         t
         for t in task_list
@@ -291,7 +219,7 @@ def _auto_complete_ask_tasks(
             log.info(
                 "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
             )
-            _complete_by_id(work_dir, task["id"])
+            tasks.complete_by_id(task["id"])
 
 
 def sync_tasks(
@@ -299,7 +227,6 @@ def sync_tasks(
     gh: GitHub,
     *,
     _resolve_git_dir_fn: Callable[[Path], Path] = _resolve_git_dir,
-    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
     _auto_complete_ask_tasks_fn: Callable[..., None] = _auto_complete_ask_tasks,
 ) -> None:
     """Sync tasks.json → PR body work queue.
@@ -326,7 +253,7 @@ def sync_tasks(
         return
 
     try:
-        state = load_state(fido_dir)
+        state = State(fido_dir).load()
         issue = state.get("issue")
         if issue is None:
             log.info("sync_tasks: no current issue — nothing to sync")
@@ -343,7 +270,7 @@ def sync_tasks(
         pr_number = pr_data["number"]
         _auto_complete_ask_tasks_fn(work_dir, gh, repo, pr_number)
 
-        task_list = _list_tasks(work_dir)
+        task_list = Tasks(work_dir).list()
         if not task_list:
             log.info("sync_tasks: no tasks — nothing to sync")
             return
@@ -530,7 +457,7 @@ def reorder_tasks(
     If *_on_done* is provided, it is called after a successful reorder write so
     callers can trigger follow-up work (e.g. rewriting the PR description).
     """
-    task_list = list_tasks(work_dir)
+    task_list = Tasks(work_dir).list()
     if not task_list:
         log.info("reorder_tasks: no tasks — skipping")
         return
@@ -633,9 +560,16 @@ class Tasks(JsonFileStore):
     def _default(self) -> list[dict[str, Any]]:
         return []
 
+    def _validate(self, data: Any) -> None:
+        """Ensure every task has a ``type`` field."""
+        for t in data:
+            if "type" not in t:
+                raise ValueError(f"task {t.get('id', '?')} missing required type field")
+
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
-        return list_tasks(self._work_dir)
+        with _locked(self._data_path) as lock:
+            return lock.read()
 
     def add(
         self,
@@ -646,27 +580,85 @@ class Tasks(JsonFileStore):
         thread: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Add a task. Returns the new (or existing duplicate) task."""
-        return add_task(
-            self._work_dir,
-            title,
-            task_type,
-            description=description,
-            status=status,
-            thread=thread,
-        )
+        if not isinstance(task_type, TaskType):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(
+                f"task_type must be TaskType, got {type(task_type).__name__}"
+            )
+        title = " ".join(title.split())
+        task: dict[str, Any] = {
+            "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
+            "title": title,
+            "type": str(task_type),
+            "description": description,
+            "status": str(status),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if thread:
+            task["thread"] = thread
+        comment_id = (thread or {}).get("comment_id")
+        with _locked(self._data_path, write=True) as lock:
+            existing = lock.read()
+            for t in existing:
+                if comment_id is not None:
+                    # Never re-create a task for the same comment, regardless of status.
+                    if (t.get("thread") or {}).get("comment_id") == comment_id:
+                        log.info(
+                            "task already exists for comment_id %s (status: %s)",
+                            comment_id,
+                            t["status"],
+                        )
+                        return t
+                elif t["status"] == TaskStatus.PENDING and t["title"] == title:
+                    log.info("task already exists: %s", title[:80])
+                    return t
+            existing.append(task)
+            lock.write(existing)
+        log.info("task added: %s", title[:80])
+        return task
 
     def complete_by_id(self, task_id: str) -> dict[str, Any] | None:
-        """Mark a task completed. Returns its thread dict or None."""
-        return complete_by_id(self._work_dir, task_id)
+        """Mark a task completed. Returns its thread dict or None.
+
+        Returns ``None`` silently if no matching task is found.
+        """
+        with _locked(self._data_path, write=True) as lock:
+            tasks = lock.read()
+            for t in tasks:
+                if t["id"] == task_id and t["status"] != TaskStatus.COMPLETED:
+                    t["status"] = str(TaskStatus.COMPLETED)
+                    lock.write(tasks)
+                    log.info("task completed (id=%s): %s", task_id, t["title"][:80])
+                    return t.get("thread")
+        return None
 
     def has_pending_for_comment(self, comment_id: int | str) -> bool:
         """Return True if any pending task references *comment_id*."""
-        return has_pending_tasks_for_comment(self._work_dir, comment_id)
+        cid = int(comment_id)
+        with _locked(self._data_path) as lock:
+            for t in lock.read():
+                if t.get("status") == TaskStatus.PENDING:
+                    if int((t.get("thread") or {}).get("comment_id", -1)) == cid:
+                        return True
+        return False
 
     def remove(self, task_id: str) -> bool:
         """Remove a task. Returns True if found."""
-        return remove_task(self._work_dir, task_id)
+        with _locked(self._data_path, write=True) as lock:
+            tasks = lock.read()
+            new_tasks = [t for t in tasks if t["id"] != task_id]
+            if len(new_tasks) < len(tasks):
+                lock.write(new_tasks)
+                return True
+        return False
 
     def update(self, task_id: str, status: TaskStatus) -> bool:
         """Update a task's status. Returns True if found."""
-        return update_task(self._work_dir, task_id, status)
+        with _locked(self._data_path, write=True) as lock:
+            tasks = lock.read()
+            for t in tasks:
+                if t["id"] == task_id:
+                    t["status"] = str(status)
+                    lock.write(tasks)
+                    log.info("task %s → %s", task_id, status)
+                    return True
+        return False
