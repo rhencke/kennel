@@ -86,11 +86,9 @@ def _restore_handler_fns():
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
-        "_fn_get_self_repo": WebhookHandler._fn_get_self_repo,
-        "_fn_get_head": WebhookHandler._fn_get_head,
-        "_fn_pull_with_backoff": WebhookHandler._fn_pull_with_backoff,
-        "_fn_os_chdir": WebhookHandler._fn_os_chdir,
-        "_fn_os_execvp": WebhookHandler._fn_os_execvp,
+        "proc": WebhookHandler.proc,
+        "clock": WebhookHandler.clock,
+        "os_proc": WebhookHandler.os_proc,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -1552,20 +1550,64 @@ class TestParseRepoFromUrl:
 
 
 class _FakeProcessRunner:
-    """Minimal ProcessRunner fake for preflight tests."""
+    """Minimal ProcessRunner fake.
+
+    Results are consumed in order.  Each item is either a return value or an
+    exception instance — exceptions are raised, everything else is returned.
+    The ``error`` parameter overrides the results list and raises the same
+    exception on every call (backward-compat shorthand for single-error tests).
+    """
 
     def __init__(
         self, results: list[Any] | None = None, error: Exception | None = None
     ) -> None:
         self._results = list(results or [])
         self._error = error
-        self.call_count = 0
+        self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
 
     def run(self, cmd: Any, **kwargs: Any) -> Any:
-        self.call_count += 1
+        self.calls.append((cmd, kwargs))
         if self._error is not None:
             raise self._error
-        return self._results.pop(0)
+        result = self._results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class _FakeClock:
+    """Minimal Clock fake: returns pre-configured monotonic values, records sleeps."""
+
+    def __init__(self, times: list[float] | None = None) -> None:
+        self._times = iter(times or [])
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return next(self._times)
+
+    def sleep(self, secs: float) -> None:
+        self.slept.append(secs)
+
+
+class _FakeOsProcess:
+    """Minimal OsProcess fake: captures execvp and chdir calls."""
+
+    def __init__(self) -> None:
+        self.execvp_calls: list[tuple[str, list[str]]] = []
+        self.chdir_calls: list[Any] = []
+
+    def execvp(self, file: str, args: list[str]) -> None:
+        self.execvp_calls.append((file, args))
+
+    def chdir(self, path: Any) -> None:
+        self.chdir_calls.append(path)
+
+    def install_signal(self, signum: Any, handler: Any) -> Any:
+        return None
 
 
 class TestPreflightRepoIdentity:
@@ -1925,70 +1967,64 @@ class TestGetSelfRepo:
     def test_parses_ssh_remote(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(
-            return_value=MagicMock(
-                stdout="git@github.com:owner/kennel.git\n", returncode=0
-            )
+        proc = _FakeProcessRunner(
+            [MagicMock(stdout="git@github.com:owner/kennel.git\n")]
         )
-        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
 
     def test_parses_https_remote(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(
-            return_value=MagicMock(
-                stdout="https://github.com/owner/kennel.git\n", returncode=0
-            )
+        proc = _FakeProcessRunner(
+            [MagicMock(stdout="https://github.com/owner/kennel.git\n")]
         )
-        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
 
     def test_parses_remote_without_git_suffix(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(
-            return_value=MagicMock(
-                stdout="https://github.com/owner/kennel\n", returncode=0
-            )
+        proc = _FakeProcessRunner(
+            [MagicMock(stdout="https://github.com/owner/kennel\n")]
         )
-        assert _get_self_repo(tmp_path, _run=mock_run) == "owner/kennel"
+        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
 
     def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
-        assert _get_self_repo(tmp_path, _run=mock_run) is None
+        proc = _FakeProcessRunner([subprocess.CalledProcessError(128, [])])
+        assert _get_self_repo(tmp_path, proc) is None
 
     def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(side_effect=FileNotFoundError())
-        assert _get_self_repo(tmp_path, _run=mock_run) is None
+        proc = _FakeProcessRunner([FileNotFoundError()])
+        assert _get_self_repo(tmp_path, proc) is None
 
     def test_returns_none_on_unparseable_url(self, tmp_path: Path) -> None:
         from kennel.server import _get_self_repo
 
-        mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n", returncode=0))
-        assert _get_self_repo(tmp_path, _run=mock_run) is None
+        proc = _FakeProcessRunner([MagicMock(stdout="garbage\n")])
+        assert _get_self_repo(tmp_path, proc) is None
 
 
 class TestGetHead:
     def test_returns_sha(self, tmp_path: Path) -> None:
         from kennel.server import _get_head
 
-        run = MagicMock(return_value=MagicMock(stdout="abc123def456\n"))
-        assert _get_head(tmp_path, _run=run) == "abc123def456"
+        proc = _FakeProcessRunner([MagicMock(stdout="abc123def456\n")])
+        assert _get_head(tmp_path, proc) == "abc123def456"
 
     def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
         from kennel.server import _get_head
 
-        run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
-        assert _get_head(tmp_path, _run=run) is None
+        proc = _FakeProcessRunner([subprocess.CalledProcessError(128, [])])
+        assert _get_head(tmp_path, proc) is None
 
     def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
         from kennel.server import _get_head
 
-        run = MagicMock(side_effect=FileNotFoundError())
-        assert _get_head(tmp_path, _run=run) is None
+        proc = _FakeProcessRunner([FileNotFoundError()])
+        assert _get_head(tmp_path, proc) is None
 
 
 class TestRunnerDir:
@@ -2003,39 +2039,27 @@ class TestPullWithBackoff:
     def test_success_on_first_try(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        mock_sleep = MagicMock()
-        assert _pull_with_backoff(
-            tmp_path, _run=mock_run, _sleep=mock_sleep, _monotonic=lambda: 0.0
-        )
+        proc = _FakeProcessRunner([MagicMock(), MagicMock()])  # fetch + reset
+        clock = _FakeClock(times=[0.0, 0.0])  # start + success log
+        assert _pull_with_backoff(tmp_path, proc, clock)
         # Each sync attempt runs two git commands: fetch + reset.
-        assert mock_run.call_count == 2
-        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert proc.call_count == 2
+        cmds = [c[0] for c in proc.calls]
         assert cmds[0] == ["git", "fetch", "origin", "main"]
         assert cmds[1] == ["git", "reset", "--hard", "origin/main"]
-        mock_sleep.assert_not_called()
+        assert clock.slept == []
 
     def test_success_after_retry(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
         # First attempt: fetch fails.  Second attempt: fetch + reset both succeed.
-        mock_run = MagicMock(
-            side_effect=[
-                subprocess.CalledProcessError(1, []),
-                MagicMock(returncode=0),
-                MagicMock(returncode=0),
-            ]
+        proc = _FakeProcessRunner(
+            [subprocess.CalledProcessError(1, []), MagicMock(), MagicMock()]
         )
-        mock_sleep = MagicMock()
-        times = iter([0.0, 1.0, 1.0])
-        assert _pull_with_backoff(
-            tmp_path,
-            _run=mock_run,
-            _sleep=mock_sleep,
-            _monotonic=lambda: next(times),
-        )
-        assert mock_run.call_count == 3
-        mock_sleep.assert_called_once_with(10)
+        clock = _FakeClock(times=[0.0, 1.0, 1.0])  # start, fail-elapsed, success-log
+        assert _pull_with_backoff(tmp_path, proc, clock)
+        assert proc.call_count == 3
+        assert clock.slept == [10]
 
     def test_recovers_from_divergent_local(self, tmp_path: Path) -> None:
         """The whole point of using fetch+reset: divergent local branch is fine.
@@ -2047,138 +2071,119 @@ class TestPullWithBackoff:
         """
         from kennel.server import _pull_with_backoff
 
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        mock_sleep = MagicMock()
-        assert _pull_with_backoff(
-            tmp_path, _run=mock_run, _sleep=mock_sleep, _monotonic=lambda: 0.0
-        )
-        assert ["git", "reset", "--hard", "origin/main"] in [
-            c.args[0] for c in mock_run.call_args_list
-        ]
-        mock_sleep.assert_not_called()
+        proc = _FakeProcessRunner([MagicMock(), MagicMock()])  # fetch + reset
+        clock = _FakeClock(times=[0.0, 0.0])
+        assert _pull_with_backoff(tmp_path, proc, clock)
+        assert ["git", "reset", "--hard", "origin/main"] in [c[0] for c in proc.calls]
+        assert clock.slept == []
 
     def test_gives_up_after_all_retries_fail(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
         # Fetch fails on every attempt — 4 attempts total.
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
-        mock_sleep = MagicMock()
-        times = iter([0.0, 1.0, 1.0, 12.0, 12.0, 43.0, 43.0, 104.0])
-        assert not _pull_with_backoff(
-            tmp_path,
-            _run=mock_run,
-            _sleep=mock_sleep,
-            _monotonic=lambda: next(times),
-        )
+        proc = _FakeProcessRunner(error=subprocess.CalledProcessError(1, []))
+        # start + one elapsed read per failed attempt (4 total)
+        clock = _FakeClock(times=[0.0, 1.0, 12.0, 43.0, 104.0])
+        assert not _pull_with_backoff(tmp_path, proc, clock)
         # 4 attempts × 1 failing fetch each = 4 calls.
-        assert mock_run.call_count == 4
+        assert proc.call_count == 4
         # 3 sleeps at 10s, 30s, 60s between retries.
-        assert [c.args[0] for c in mock_sleep.call_args_list] == [10, 30, 60]
+        assert clock.slept == [10, 30, 60]
 
     def test_reset_failure_retries(self, tmp_path: Path) -> None:
         """Fetch succeeds but reset fails — both commands matter for the result."""
         from kennel.server import _pull_with_backoff
 
-        mock_run = MagicMock(
-            side_effect=[
-                MagicMock(returncode=0),  # fetch
+        proc = _FakeProcessRunner(
+            [
+                MagicMock(),  # fetch
                 subprocess.CalledProcessError(1, []),  # reset
-                MagicMock(returncode=0),  # fetch retry
-                MagicMock(returncode=0),  # reset retry
+                MagicMock(),  # fetch retry
+                MagicMock(),  # reset retry
             ]
         )
-        mock_sleep = MagicMock()
-        times = iter([0.0, 1.0, 1.0])
-        assert _pull_with_backoff(
-            tmp_path,
-            _run=mock_run,
-            _sleep=mock_sleep,
-            _monotonic=lambda: next(times),
-        )
-        assert mock_run.call_count == 4
-        mock_sleep.assert_called_once_with(10)
+        clock = _FakeClock(times=[0.0, 1.0, 1.0])  # start, fail-elapsed, success-log
+        assert _pull_with_backoff(tmp_path, proc, clock)
+        assert proc.call_count == 4
+        assert clock.slept == [10]
 
     def test_gives_up_when_budget_exhausted(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, []))
-        mock_sleep = MagicMock()
+        proc = _FakeProcessRunner(error=subprocess.CalledProcessError(1, []))
         # First attempt at t=0, elapsed=595; next delay of 10s would exceed 600s budget.
-        times = iter([0.0, 595.0, 595.0])
-        assert not _pull_with_backoff(
-            tmp_path,
-            _run=mock_run,
-            _sleep=mock_sleep,
-            _monotonic=lambda: next(times),
-        )
+        clock = _FakeClock(times=[0.0, 595.0])
+        assert not _pull_with_backoff(tmp_path, proc, clock)
         # Slept zero times because budget was exhausted before any sleep.
-        mock_sleep.assert_not_called()
+        assert clock.slept == []
 
     def test_returns_false_on_file_not_found(self, tmp_path: Path) -> None:
         from kennel.server import _pull_with_backoff
 
-        mock_run = MagicMock(side_effect=FileNotFoundError())
-        mock_sleep = MagicMock()
-        times = iter([0.0, 1.0, 1.0, 12.0, 12.0, 43.0, 43.0, 104.0])
-        assert not _pull_with_backoff(
-            tmp_path,
-            _run=mock_run,
-            _sleep=mock_sleep,
-            _monotonic=lambda: next(times),
-        )
+        proc = _FakeProcessRunner(error=FileNotFoundError())
+        clock = _FakeClock(times=[0.0, 1.0, 12.0, 43.0, 104.0])
+        assert not _pull_with_backoff(tmp_path, proc, clock)
 
 
 class TestStartupPull:
     def test_reexecs_when_head_changes(self) -> None:
         from kennel.server import _startup_pull
 
-        heads = iter(["aaa", "bbb"])
-        mock_exec = MagicMock()
-        _startup_pull(
-            _runner_dir=lambda: Path("/fake"),
-            _get_head=lambda _d: next(heads),
-            _pull=lambda _d: True,
-            _execvp=mock_exec,
+        # rev-parse before, fetch, reset, rev-parse after — different SHAs
+        proc = _FakeProcessRunner(
+            [
+                MagicMock(stdout="sha1\n"),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(stdout="sha2\n"),
+            ]
         )
-        mock_exec.assert_called_once()
-        assert mock_exec.call_args.args[0] == "uv"
+        clock = _FakeClock(times=[0.0, 0.0])  # start + success log
+        os_proc = _FakeOsProcess()
+        _startup_pull(proc, clock, os_proc)
+        assert len(os_proc.execvp_calls) == 1
+        assert os_proc.execvp_calls[0][0] == "uv"
 
     def test_skips_exec_when_head_unchanged(self) -> None:
         from kennel.server import _startup_pull
 
-        mock_exec = MagicMock()
-        _startup_pull(
-            _runner_dir=lambda: Path("/fake"),
-            _get_head=lambda _d: "same_sha",
-            _pull=lambda _d: True,
-            _execvp=mock_exec,
+        proc = _FakeProcessRunner(
+            [
+                MagicMock(stdout="same\n"),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(stdout="same\n"),
+            ]
         )
-        mock_exec.assert_not_called()
+        clock = _FakeClock(times=[0.0, 0.0])
+        os_proc = _FakeOsProcess()
+        _startup_pull(proc, clock, os_proc)
+        assert os_proc.execvp_calls == []
 
     def test_continues_on_pull_failure(self) -> None:
         from kennel.server import _startup_pull
 
-        mock_exec = MagicMock()
-        _startup_pull(
-            _runner_dir=lambda: Path("/fake"),
-            _get_head=lambda _d: "aaa",
-            _pull=lambda _d: False,
-            _execvp=mock_exec,
+        # get_head fails → None; fetch fails with budget exhausted immediately
+        proc = _FakeProcessRunner(
+            [FileNotFoundError(), subprocess.CalledProcessError(1, [])]
         )
-        mock_exec.assert_not_called()
+        clock = _FakeClock(times=[0.0, 601.0])  # budget exhausted on first attempt
+        os_proc = _FakeOsProcess()
+        _startup_pull(proc, clock, os_proc)
+        assert os_proc.execvp_calls == []
 
     def test_execs_when_head_unknown(self) -> None:
         from kennel.server import _startup_pull
 
-        mock_exec = MagicMock()
-        _startup_pull(
-            _runner_dir=lambda: Path("/fake"),
-            _get_head=lambda _d: None,
-            _pull=lambda _d: True,
-            _execvp=mock_exec,
+        # Both rev-parse calls fail → head_before and head_after are None
+        proc = _FakeProcessRunner(
+            [FileNotFoundError(), MagicMock(), MagicMock(), FileNotFoundError()]
         )
-        # Can't compare HEAD — but pull succeeded, so log and continue
-        mock_exec.assert_not_called()
+        clock = _FakeClock(times=[0.0, 0.0])
+        os_proc = _FakeOsProcess()
+        _startup_pull(proc, clock, os_proc)
+        # Can't compare HEAD — pull succeeded, log and continue without exec
+        assert os_proc.execvp_calls == []
 
 
 class TestSelfRestart:
@@ -2200,50 +2205,56 @@ class TestSelfRestart:
     def test_triggers_exec_on_matching_repo(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-            WebhookHandler._fn_pull_with_backoff = lambda _d: True
-            mock_chdir = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_chdir = mock_chdir
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(),  # fetch
+                    MagicMock(),  # reset
+                ]
+            )
+            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            mock_chdir.assert_called_once_with(tmp_path)
-            mock_exec.assert_called_once()
-            args = mock_exec.call_args.args
-            assert args[0] == "uv"
-            assert args[1][:3] == ["uv", "run", "kennel"]
+            assert os_proc.chdir_calls == [tmp_path]
+            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.execvp_calls[0][0] == "uv"
+            assert os_proc.execvp_calls[0][1][:3] == ["uv", "run", "kennel"]
         finally:
             srv.shutdown()
 
     def test_skips_when_self_repo_mismatch(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "other/repo"
-            mock_pull = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_pull_with_backoff = mock_pull
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            proc = _FakeProcessRunner(
+                [MagicMock(stdout="git@github.com:other/repo.git\n")]
+            )
+            WebhookHandler.proc = proc
+            WebhookHandler.clock = _FakeClock()
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            mock_pull.assert_not_called()
-            mock_exec.assert_not_called()
+            assert proc.call_count == 1  # only the get-url call; no pull attempted
+            assert os_proc.execvp_calls == []
         finally:
             srv.shutdown()
 
     def test_skips_when_self_repo_unknown(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: None
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner([FileNotFoundError()])
+            WebhookHandler.clock = _FakeClock()
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            mock_exec.assert_not_called()
+            assert os_proc.execvp_calls == []
         finally:
             srv.shutdown()
 
@@ -2257,69 +2268,81 @@ class TestSelfRestart:
         """
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-            WebhookHandler._fn_pull_with_backoff = lambda _d: False
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    subprocess.CalledProcessError(
+                        1, []
+                    ),  # fetch fails; budget exhausted
+                ]
+            )
+            WebhookHandler.clock = _FakeClock(times=[0.0, 601.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            mock_exec.assert_not_called()
+            assert os_proc.execvp_calls == []
         finally:
             srv.shutdown()
 
     def test_pull_precedes_stop_and_join(self, tmp_path: Path) -> None:
-        """Pull MUST run before stop_and_join, so a failed pull leaves the
+        """Pull MUST complete before stop_and_join so a failed pull leaves the
         worker intact."""
-        call_order: list[str] = []
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
-        mock_registry.stop_and_join.side_effect = lambda *_a, **_kw: call_order.append(
-            "stop_and_join"
-        )
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-
-            def fake_pull(_d):
-                call_order.append("pull")
-                return True
-
-            WebhookHandler._fn_pull_with_backoff = fake_pull
-            WebhookHandler._fn_os_chdir = MagicMock()
-            WebhookHandler._fn_os_execvp = MagicMock()
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(),  # fetch
+                    MagicMock(),  # reset
+                ]
+            )
+            WebhookHandler.proc = proc
+            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            # All 3 proc calls (get-url + fetch + reset) happened before stop_and_join.
+            assert proc.call_count == 3
+            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
         finally:
             srv.shutdown()
-        assert call_order == ["pull", "stop_and_join"]
 
     def test_push_to_default_branch_triggers_restart(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-            WebhookHandler._fn_pull_with_backoff = lambda _d: True
-            mock_chdir = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_chdir = mock_chdir
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(),  # fetch
+                    MagicMock(),  # reset
+                ]
+            )
+            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            mock_exec.assert_called_once()
+            assert len(os_proc.execvp_calls) == 1
         finally:
             srv.shutdown()
 
     def test_push_to_non_default_branch_ignored(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            mock_pull = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_pull_with_backoff = mock_pull
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            proc = _FakeProcessRunner([])
+            WebhookHandler.proc = proc
+            WebhookHandler.clock = _FakeClock()
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
             _post_webhook(url, cfg, "push", payload)
-            mock_pull.assert_not_called()
-            mock_exec.assert_not_called()
+            assert proc.calls == []
+            assert os_proc.execvp_calls == []
         finally:
             srv.shutdown()
 
@@ -2358,16 +2381,20 @@ class TestSelfRestart:
         """Self-restart fires for merged PR even when the repo is not registered."""
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-            WebhookHandler._fn_pull_with_backoff = lambda _d: True
-            mock_chdir = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_chdir = mock_chdir
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(),  # fetch
+                    MagicMock(),  # reset
+                ]
+            )
+            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            mock_exec.assert_called_once()
+            assert len(os_proc.execvp_calls) == 1
         finally:
             srv.shutdown()
 
@@ -2377,15 +2404,19 @@ class TestSelfRestart:
         """Self-restart fires for push to default branch even when repo is not registered."""
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path
-            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
-            WebhookHandler._fn_pull_with_backoff = lambda _d: True
-            mock_chdir = MagicMock()
-            mock_exec = MagicMock()
-            WebhookHandler._fn_os_chdir = mock_chdir
-            WebhookHandler._fn_os_execvp = mock_exec
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.proc = _FakeProcessRunner(
+                [
+                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(),  # fetch
+                    MagicMock(),  # reset
+                ]
+            )
+            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
+            os_proc = _FakeOsProcess()
+            WebhookHandler.os_proc = os_proc
             status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             assert status == 200
-            mock_exec.assert_called_once()
+            assert len(os_proc.execvp_calls) == 1
         finally:
             srv.shutdown()
