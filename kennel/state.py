@@ -46,6 +46,14 @@ class JsonFileStore(ABC):
         """Value yielded when the data file is absent or empty."""
         return {}
 
+    def _validate(self, data: Any) -> None:
+        """Validate loaded data.  Raise :exc:`ValueError` if invalid.
+
+        Called by :meth:`modify` after deserialising the JSON and before
+        yielding to the caller.  The default implementation is a no-op;
+        override in subclasses to add schema checks.
+        """
+
     @contextmanager
     def modify(self) -> Generator[Any, None, None]:
         """Atomic read-modify-write: hold the exclusive flock for the entire block.
@@ -54,6 +62,9 @@ class JsonFileStore(ABC):
         the file is absent or empty).  Any mutations are written back when the
         ``with`` block exits, while the exclusive lock is still held —
         preventing interleaved concurrent modifications.
+
+        Raises :exc:`ValueError` if the file contains invalid JSON or if
+        :meth:`_validate` rejects the loaded data.
         """
         lock_path = self._lock_path
         data_path = self._data_path
@@ -62,7 +73,14 @@ class JsonFileStore(ABC):
         with open(lock_path) as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             text = data_path.read_text() if data_path.exists() else ""
-            data = json.loads(text) if text.strip() else self._default()
+            if text.strip():
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"corrupt {data_path.name}: {e}") from e
+            else:
+                data = self._default()
+            self._validate(data)
             yield data
             data_path.write_text(json.dumps(data))
 

@@ -633,6 +633,12 @@ class Tasks(JsonFileStore):
     def _default(self) -> list[dict[str, Any]]:
         return []
 
+    def _validate(self, data: Any) -> None:
+        """Ensure every task has a ``type`` field."""
+        for t in data:
+            if "type" not in t:
+                raise ValueError(f"task {t.get('id', '?')} missing required type field")
+
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
         return list_tasks(self._work_dir)

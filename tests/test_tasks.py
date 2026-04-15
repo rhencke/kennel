@@ -968,3 +968,21 @@ class TestTasks:
         with Tasks(work_dir).modify() as tasks:
             tasks[0]["title"] = "Modified task"
         assert list_tasks(work_dir)[0]["title"] == "Modified task"
+
+    def test_modify_raises_on_corrupt_json(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        _task_file(work_dir).write_text("not json")
+        with pytest.raises(ValueError, match="corrupt tasks.json"):
+            with Tasks(work_dir).modify() as _:
+                pass
+
+    def test_modify_raises_on_missing_type_field(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        _task_file(work_dir).write_text(
+            '[{"id": "bad", "title": "no type", "status": "pending"}]'
+        )
+        with pytest.raises(ValueError, match="missing required type field"):
+            with Tasks(work_dir).modify() as _:
+                pass
