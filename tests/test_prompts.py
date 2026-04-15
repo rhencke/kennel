@@ -800,3 +800,121 @@ class TestRewriteDescriptionPrompt:
         result = rewrite_description_prompt(self._body(), [])
         assert isinstance(result, str)
         assert "(none)" in result
+
+
+# ── Prompts method delegates ─────────────────────────────────────────────────
+# Each method on the class delegates to its module-level counterpart.  These
+# tests verify that the method produces the same output as the free function.
+
+
+class TestPromptsTriagePrompt:
+    def test_matches_free_function(self) -> None:
+        p = Prompts("persona")
+        assert p.triage_prompt("fix bug", is_bot=False) == triage_prompt(
+            "fix bug", is_bot=False
+        )
+
+    def test_with_context(self) -> None:
+        p = Prompts("")
+        ctx = {"pr_title": "Refactor"}
+        assert p.triage_prompt("x", is_bot=True, context=ctx) == triage_prompt(
+            "x", is_bot=True, context=ctx
+        )
+
+    def test_includes_comment(self) -> None:
+        result = Prompts("").triage_prompt("please fix the bug", is_bot=False)
+        assert "please fix the bug" in result
+
+    def test_includes_categories(self) -> None:
+        result = Prompts("").triage_prompt("fix this", is_bot=False)
+        assert "ACT" in result
+
+
+class TestPromptsReplyInstruction:
+    def test_matches_free_function(self) -> None:
+        p = Prompts("persona")
+        assert p.reply_instruction(
+            "ACT", "fix it", "will fix", {}
+        ) == reply_instruction("ACT", "fix it", "will fix", {})
+
+    def test_with_issue_url(self) -> None:
+        p = Prompts("")
+        url = "https://github.com/x/y/issues/1"
+        assert p.reply_instruction(
+            "DEFER", "big refactor", "defer", {}, issue_url=url
+        ) == reply_instruction("DEFER", "big refactor", "defer", {}, issue_url=url)
+
+    def test_act_includes_acknowledge(self) -> None:
+        result = Prompts("").reply_instruction("ACT", "fix this", "will fix", {})
+        assert "acknowledge" in result.lower() or "Acknowledge" in result
+
+
+class TestPromptsIssueReplyInstruction:
+    def test_matches_free_function(self) -> None:
+        p = Prompts("persona")
+        assert p.issue_reply_instruction(
+            "ACT", "fix it", "will fix", {}
+        ) == issue_reply_instruction("ACT", "fix it", "will fix", {})
+
+    def test_with_issue_url(self) -> None:
+        p = Prompts("")
+        url = "https://github.com/x/y/issues/2"
+        assert p.issue_reply_instruction(
+            "DEFER", "feature", "defer", {}, issue_url=url
+        ) == issue_reply_instruction("DEFER", "feature", "defer", {}, issue_url=url)
+
+    def test_answer_includes_question(self) -> None:
+        result = Prompts("").issue_reply_instruction(
+            "ANSWER", "what is X?", "explain", {}
+        )
+        assert "Question: what is X?" in result
+
+
+class TestPromptsRescopePrompt:
+    def _task(self, title: str, task_id: str = "1", status: str = "pending") -> dict:
+        return {"id": task_id, "title": title, "status": status}
+
+    def test_matches_free_function(self) -> None:
+        p = Prompts("persona")
+        tasks = [self._task("Add feature")]
+        assert p.rescope_prompt(tasks, "commit msg") == rescope_prompt(
+            tasks, "commit msg"
+        )
+
+    def test_includes_task_title(self) -> None:
+        p = Prompts("")
+        result = p.rescope_prompt([self._task("Add caching")], "")
+        assert "Add caching" in result
+
+    def test_includes_commit_summary(self) -> None:
+        p = Prompts("")
+        result = p.rescope_prompt([self._task("X")], "feat: add parser")
+        assert "feat: add parser" in result
+
+
+class TestPromptsRewriteDescriptionPrompt:
+    def _task(self, title: str, status: str = "pending") -> dict:
+        return {"id": "1", "title": title, "status": status}
+
+    def _body(self) -> str:
+        return "Does stuff.\n\nFixes #5.\n\n---\n\n## Work queue\n<!-- WORK_QUEUE_START -->\n- [ ] task\n<!-- WORK_QUEUE_END -->"
+
+    def test_matches_free_function(self) -> None:
+        p = Prompts("persona")
+        body = self._body()
+        tasks = [self._task("New task")]
+        assert p.rewrite_description_prompt(body, tasks) == rewrite_description_prompt(
+            body, tasks
+        )
+
+    def test_includes_pending_task(self) -> None:
+        p = Prompts("")
+        result = p.rewrite_description_prompt(self._body(), [self._task("Add caching")])
+        assert "Add caching" in result
+
+    def test_excludes_completed(self) -> None:
+        p = Prompts("")
+        result = p.rewrite_description_prompt(
+            self._body(), [self._task("Done", status="completed")]
+        )
+        assert "Done" not in result

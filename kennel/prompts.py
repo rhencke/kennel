@@ -340,15 +340,19 @@ def rewrite_description_prompt(
 
 
 class Prompts:
-    """Persona-aware prompt builder.
+    """Persona-aware prompt builder and one-stop prompt collaborator.
 
     Accepts a ``persona`` string via the constructor so callers need only read
     the persona file once and inject it — rather than re-reading it inside
     every prompt function.  Follows the dependency injection pattern described
     in CLAUDE.md.
 
-    Stateless helpers that do not depend on the persona remain as module-level
-    functions above (e.g. :func:`triage_prompt`, :func:`reply_instruction`).
+    Prompt builders that do not depend on the persona are also methods here
+    so callers can depend on a single injected collaborator rather than a mix
+    of the class and bare module-level functions.  Value-only helpers
+    (e.g. :func:`triage_categories`, :func:`triage_context_block`,
+    :func:`reply_context_block`) remain module-level since they only
+    transform data.
 
     Usage::
 
@@ -356,8 +360,9 @@ class Prompts:
         prompt = p.persona_wrap(instruction)
         prompt = p.react_prompt(comment_body)
         prompt = p.pickup_comment_prompt(issue_title)
-        prompt = p.status_text_prompt(what)
-        prompt = p.status_emoji_prompt(text)
+        prompt = p.triage_prompt(comment_body, is_bot)
+        prompt = p.reply_instruction(category, comment_body, title)
+        prompt = p.rescope_prompt(task_list, commit_summary)
     """
 
     def __init__(self, persona: str) -> None:
@@ -463,3 +468,59 @@ class Prompts:
             "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
             "If you wouldn't react, reply NONE."
         )
+
+    # ── Prompt builders (persona-independent) ────────────────────────────
+
+    def triage_prompt(
+        self,
+        comment_body: str,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Build a triage prompt for Haiku/Opus.
+
+        Delegates to the module-level helper functions
+        :func:`triage_categories` and :func:`triage_context_block` for the
+        subcomponents.
+        """
+        return triage_prompt(comment_body, is_bot, context)
+
+    def reply_instruction(
+        self,
+        category: str,
+        comment_body: str,
+        title: str,
+        context: dict[str, Any] | None = None,
+        issue_url: str | None = None,
+    ) -> str:
+        """Build the instruction text for a review-comment reply."""
+        return reply_instruction(category, comment_body, title, context, issue_url)
+
+    def issue_reply_instruction(
+        self,
+        category: str,
+        comment_body: str,
+        title: str,
+        context: dict[str, Any] | None = None,
+        issue_url: str | None = None,
+    ) -> str:
+        """Build the instruction text for a top-level issue/PR comment reply."""
+        return issue_reply_instruction(
+            category, comment_body, title, context, issue_url
+        )
+
+    def rescope_prompt(
+        self,
+        task_list: list[dict[str, Any]],
+        commit_summary: str,
+    ) -> str:
+        """Build an Opus prompt for dependency-aware task reordering."""
+        return rescope_prompt(task_list, commit_summary)
+
+    def rewrite_description_prompt(
+        self,
+        pr_body: str,
+        task_list: list[dict[str, Any]],
+    ) -> str:
+        """Build an Opus prompt to rewrite the PR description after rescoping."""
+        return rewrite_description_prompt(pr_body, task_list)
