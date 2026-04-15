@@ -10,6 +10,7 @@ Tests inject fakes or mocks constructed at the call site.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import signal
@@ -153,3 +154,33 @@ class RealOsProcess:
 
     def install_signal(self, signum: int, handler: Any) -> Any:
         return signal.signal(signum, handler)
+
+
+# ---------------------------------------------------------------------------
+# Grouped bundle
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Infra:
+    """All four infrastructure ports bundled as a single injectable collaborator.
+
+    Callers that need all ports accept one :class:`Infra` instead of four
+    separate arguments.  Tests construct an :class:`Infra` with fakes and
+    inject the whole bundle at the composition root.
+    """
+
+    proc: ProcessRunner
+    clock: Clock
+    fs: Filesystem
+    os_proc: OsProcess
+
+
+def real_infra() -> Infra:
+    """Construct an :class:`Infra` wired to the real stdlib implementations."""
+    return Infra(
+        proc=RealProcessRunner(),
+        clock=RealClock(),
+        fs=RealFilesystem(),
+        os_proc=RealOsProcess(),
+    )

@@ -33,12 +33,10 @@ from kennel.github import GitHub
 from kennel.infra import (
     Clock,
     Filesystem,
+    Infra,
     OsProcess,
     ProcessRunner,
-    RealClock,
-    RealFilesystem,
-    RealOsProcess,
-    RealProcessRunner,
+    real_infra,
 )
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.watchdog import (  # noqa: PLC2701
@@ -317,9 +315,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # can replace them without patching module-level names.
     gh: GitHub | None = None
     # Infrastructure ports — set by server.run() composition root.
-    proc: ProcessRunner = RealProcessRunner()
-    clock: Clock = RealClock()
-    os_proc: OsProcess = RealOsProcess()
+    infra: Infra = real_infra()
     _fn_dispatch = staticmethod(dispatch)
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
@@ -546,7 +542,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
         runner_dir = type(self)._fn_runner_dir()
-        self_repo = _get_self_repo(runner_dir, self.proc)
+        self_repo = _get_self_repo(runner_dir, self.infra.proc)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
         log.info(
@@ -559,15 +555,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # log and return without touching the running workers — fido on the
         # kennel repo keeps running its old code rather than being silently
         # left without a worker thread.
-        if not _pull_with_backoff(runner_dir, self.proc, self.clock):
+        if not _pull_with_backoff(runner_dir, self.infra.proc, self.infra.clock):
             log.error("self-restart: gave up — running old version (%s)", reason)
             return
         log.info(
             "self-restart: runner synced — stopping workers and re-execing (%s)", reason
         )
         self.registry.stop_and_join(repo_name)
-        self.os_proc.chdir(runner_dir)
-        self.os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+        self.infra.os_proc.chdir(runner_dir)
+        self.infra.os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
 
     def do_GET(self) -> None:
         if self.path == "/status":
@@ -741,22 +737,16 @@ def run(
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_exception
 
-    proc = RealProcessRunner()
-    fs = RealFilesystem()
-    clock = RealClock()
-    os_proc = RealOsProcess()
-
-    WebhookHandler.proc = proc
-    WebhookHandler.clock = clock
-    WebhookHandler.os_proc = os_proc
+    infra = real_infra()
+    WebhookHandler.infra = infra
 
     gh = _GitHub()
-    _startup_pull(proc, clock, os_proc)
+    _startup_pull(infra.proc, infra.clock, infra.os_proc)
     try:
-        _preflight_tools(fs)
-        _preflight_sub_dir(config, fs)
+        _preflight_tools(infra.fs)
+        _preflight_sub_dir(config, infra.fs)
         _preflight_gh_auth(gh)
-        _preflight_repo_identity(config.repos, proc)
+        _preflight_repo_identity(config.repos, infra.proc)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 

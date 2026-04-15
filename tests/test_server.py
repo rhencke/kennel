@@ -16,6 +16,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel.config import Config, RepoConfig
+from kennel.infra import Infra
 from kennel.server import PreflightError, WebhookHandler
 
 # Thread-capture and do_POST synchronisation helpers ---------------------------
@@ -86,9 +87,7 @@ def _restore_handler_fns():
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
-        "proc": WebhookHandler.proc,
-        "clock": WebhookHandler.clock,
-        "os_proc": WebhookHandler.os_proc,
+        "infra": WebhookHandler.infra,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -2206,16 +2205,19 @@ class TestSelfRestart:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner(
-                [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
-                    MagicMock(),  # fetch
-                    MagicMock(),  # reset
-                ]
-            )
-            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(),  # fetch
+                        MagicMock(),  # reset
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
@@ -2233,10 +2235,13 @@ class TestSelfRestart:
             proc = _FakeProcessRunner(
                 [MagicMock(stdout="git@github.com:other/repo.git\n")]
             )
-            WebhookHandler.proc = proc
-            WebhookHandler.clock = _FakeClock()
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=proc,
+                clock=_FakeClock(),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
             assert proc.call_count == 1  # only the get-url call; no pull attempted
@@ -2248,10 +2253,13 @@ class TestSelfRestart:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner([FileNotFoundError()])
-            WebhookHandler.clock = _FakeClock()
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner([FileNotFoundError()]),
+                clock=_FakeClock(),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
             assert os_proc.execvp_calls == []
@@ -2269,17 +2277,20 @@ class TestSelfRestart:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner(
-                [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
-                    subprocess.CalledProcessError(
-                        1, []
-                    ),  # fetch fails; budget exhausted
-                ]
-            )
-            WebhookHandler.clock = _FakeClock(times=[0.0, 601.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        subprocess.CalledProcessError(
+                            1, []
+                        ),  # fetch fails; budget exhausted
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 601.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
             assert os_proc.execvp_calls == []
@@ -2299,10 +2310,13 @@ class TestSelfRestart:
                     MagicMock(),  # reset
                 ]
             )
-            WebhookHandler.proc = proc
-            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=proc,
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             # All 3 proc calls (get-url + fetch + reset) happened before stop_and_join.
             assert proc.call_count == 3
@@ -2314,16 +2328,19 @@ class TestSelfRestart:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner(
-                [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
-                    MagicMock(),  # fetch
-                    MagicMock(),  # reset
-                ]
-            )
-            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(),  # fetch
+                        MagicMock(),  # reset
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
             assert len(os_proc.execvp_calls) == 1
@@ -2335,10 +2352,13 @@ class TestSelfRestart:
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
             proc = _FakeProcessRunner([])
-            WebhookHandler.proc = proc
-            WebhookHandler.clock = _FakeClock()
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=proc,
+                clock=_FakeClock(),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
             _post_webhook(url, cfg, "push", payload)
             assert proc.calls == []
@@ -2382,16 +2402,19 @@ class TestSelfRestart:
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner(
-                [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
-                    MagicMock(),  # fetch
-                    MagicMock(),  # reset
-                ]
-            )
-            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(),  # fetch
+                        MagicMock(),  # reset
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             assert len(os_proc.execvp_calls) == 1
@@ -2405,16 +2428,19 @@ class TestSelfRestart:
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
-            WebhookHandler.proc = _FakeProcessRunner(
-                [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
-                    MagicMock(),  # fetch
-                    MagicMock(),  # reset
-                ]
-            )
-            WebhookHandler.clock = _FakeClock(times=[0.0, 0.0])
             os_proc = _FakeOsProcess()
-            WebhookHandler.os_proc = os_proc
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(),  # fetch
+                        MagicMock(),  # reset
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
             status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             assert status == 200
             assert len(os_proc.execvp_calls) == 1
