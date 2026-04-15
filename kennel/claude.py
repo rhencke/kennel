@@ -843,7 +843,7 @@ class ClaudeSession:
         self._proc = self._spawn()
         _register_child(self._proc)
 
-    def wait_for_pending_preempt(self, timeout: float = 2.0) -> bool:
+    def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
         """Block for up to *timeout* seconds while a preempter holds the
         lock queue.  Returns ``True`` if the preemption completed within the
         window, ``False`` on timeout (no preempter pending in the first place

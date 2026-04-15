@@ -1120,81 +1120,29 @@ class TestReplyToReview:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def test_no_review_comments_returns_early(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        action = Action(prompt="review", review_comments=None)
-        # should return without error
-        reply_to_review(action, cfg, self._repo_cfg(tmp_path), MagicMock())
-
-    def test_fetches_and_replies(self, tmp_path: Path) -> None:
+    def test_is_a_no_op_for_inline_comments(self, tmp_path: Path) -> None:
+        """Inline comments are now exclusively handled by the per-comment
+        webhook (``pull_request_review_comment``).  ``reply_to_review`` no
+        longer iterates the inline comments — closes #518 (double-reply on
+        review submission)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="review",
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 777},
         )
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix it"
-            return "Will fix."
-
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), mock_gh, _print_prompt=fake_pp
+            action, cfg, self._repo_cfg(tmp_path), mock_gh, _print_prompt=MagicMock()
         )
+        # Doesn't fetch, doesn't post — no GitHub side effects at all.
+        mock_gh.get_review_comments.assert_not_called()
+        mock_gh.reply_to_review_comment.assert_not_called()
 
-    def test_skips_already_replied(self, tmp_path: Path) -> None:
+    def test_no_op_with_no_review_comments(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="review",
-            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 778},
-        )
-        already = {100, 200}
-        calls = []
-
-        def fake_pp(prompt, model, **kwargs):
-            calls.append((prompt, model))
-            return ""
-
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
-        reply_to_review(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            already_replied=already,
-            _print_prompt=fake_pp,
-        )
-        # no claude calls since all comments already replied
-        assert not calls
-
-    def test_fetch_exception_returns_early(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="review",
-            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 779},
-        )
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.side_effect = Exception("network fail")
-        reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), mock_gh
-        )  # should not raise
-
-    def test_no_inline_comments(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="review",
-            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 780},
-        )
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = []
-        reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), mock_gh
-        )  # empty → no replies
+        action = Action(prompt="review", review_comments=None)
+        # should return without error
+        reply_to_review(action, cfg, self._repo_cfg(tmp_path), MagicMock())
 
 
 class TestReplyToIssueComment:
@@ -1547,6 +1495,49 @@ class TestCreateTask:
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
+
+    def test_skips_when_thread_already_resolved(self, tmp_path: Path) -> None:
+        """Late-arriving triage for a thread fido has already auto-resolved
+        is dropped on the floor (closes #520)."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 999}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.return_value = True
+        with patch("kennel.events.launch_sync"):
+            result = create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_not_called()
+        assert result["status"] == "skipped_resolved"
+
+    def test_queues_when_thread_resolved_check_raises(self, tmp_path: Path) -> None:
+        """If the GitHub thread-resolved check fails, fail open and queue
+        the task — better to dedup later than drop work."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 999}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.side_effect = RuntimeError("api down")
+        with patch("kennel.events.launch_sync"):
+            create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_called_once()
 
     def test_returns_created_task(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2943,88 +2934,6 @@ class TestReplyToCommentElseBranch:
                 mock_gh,
                 _print_prompt=fake_pp,
             )
-
-
-class TestReplyToReviewAlreadyRepliedTracking:
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-
-    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
-        return RepoConfig(name="owner/repo", work_dir=tmp_path)
-
-    def test_adds_to_already_replied_set(self, tmp_path: Path) -> None:
-        """When already_replied set is passed, processed comment ids are added (line 452)."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="review",
-            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 900},
-        )
-        already: set[int] = set()
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix it"
-            return "Will fix."
-
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [(500, "please fix")]
-        reply_to_review(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            already_replied=already,
-            _print_prompt=fake_pp,
-        )
-        assert 500 in already
-
-    def test_does_not_add_to_already_replied_on_post_failure(
-        self, tmp_path: Path
-    ) -> None:
-        """Failed comment is not added to already_replied; loop continues for others."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="review",
-            review_comments={"repo": "owner/repo", "pr": 5, "review_id": 901},
-        )
-        already: set[int] = set()
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix it"
-            return "Will fix."
-
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [
-            (501, "please fix"),
-            (502, "also fix this"),
-        ]
-        # First comment fails, second succeeds
-        mock_gh.reply_to_review_comment.side_effect = [
-            RuntimeError("network down"),
-            None,
-        ]
-        reply_to_review(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            already_replied=already,
-            _print_prompt=fake_pp,
-        )
-        assert 501 not in already  # post failed — should not be marked as replied
-        assert 502 in already  # second comment still processed
 
 
 class TestReplyToCommentTerseEnrichment:

@@ -438,61 +438,29 @@ def reply_to_review(
     *,
     _print_prompt: _PrintPrompt | None = None,
 ) -> None:
-    """Fetch inline comments from a review and reply to each."""
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
-    info = action.review_comments
-    if not info:
-        return
+    """No-op for inline comments — they are handled per-comment.
 
-    log.info(
-        "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
+    GitHub fires both ``pull_request_review`` (this handler) and a separate
+    ``pull_request_review_comment`` for each inline comment within the
+    review.  Iterating the inline comments here too caused two independent
+    handlers to triage and post against the same comment in parallel — the
+    per-comment lock didn't serialize them because triage takes the lock
+    only after a long pre-flight, so both posted clarification replies on
+    the same thread.  Closes #518.
+
+    Inline comments are now exclusively handled by the per-comment
+    webhook.  This handler is left as a stub so the dispatcher can still
+    register it for the event type (and so future top-level review-body
+    handling has a place to live).
+
+    Note: the review's *top-level* body text (the box at the bottom of
+    \"Submit review\") still arrives only through this event and is not
+    yet handled.  Tracked separately — out of scope for the dedup fix.
+    """
+    _ = (action, config, repo_cfg, gh, already_replied, _print_prompt)
+    log.debug(
+        "reply_to_review: skipping inline comments — handled per-comment (closes #518)"
     )
-    try:
-        comments = gh.get_review_comments(info["repo"], info["pr"], info["review_id"])
-    except Exception:
-        log.exception("failed to fetch review comments")
-        return
-
-    if not comments:
-        log.info("no inline comments in review")
-        return
-
-    skipped = [
-        cid for cid, _body in comments if already_replied and cid in already_replied
-    ]
-    todo = [
-        (cid, body)
-        for cid, body in comments
-        if not already_replied or cid not in already_replied
-    ]
-    if skipped:
-        log.info("skipping %d already-replied comments", len(skipped))
-    if not todo:
-        return
-    log.info("replying to %d review comments", len(todo))
-    for cid, body in todo:
-        try:
-            reply_to_comment(
-                Action(
-                    prompt=action.prompt,
-                    reply_to={
-                        "repo": info["repo"],
-                        "pr": info["pr"],
-                        "comment_id": cid,
-                    },
-                    comment_body=body,
-                ),
-                config,
-                repo_cfg,
-                gh,
-                _print_prompt=_print_prompt,
-            )
-        except Exception:
-            log.exception("failed to reply to review comment %s — skipping", cid)
-            continue
-        if already_replied is not None:
-            already_replied.add(cid)
 
 
 def needs_more_context(
@@ -566,7 +534,13 @@ def _triage(
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
+    log.info("triage classifier: requesting category from opus")
     text = _print_prompt(prompt, "claude-opus-4-6")
+    log.info(
+        "triage classifier: returned %d chars (preview=%r)",
+        len(text or ""),
+        (text or "")[:80],
+    )
     category: str | None = None
     titles: list[str] = []
     for line in text.splitlines() if text else []:
@@ -583,6 +557,10 @@ def _triage(
             titles.append(title)
     if category is not None and titles:
         return category, titles
+    log.warning(
+        "triage classifier: unparseable response, falling back to %s + summarize",
+        "DO" if is_bot else "ACT",
+    )
     # Fallback: ACT for humans, DO for bots; summarize comment into action item
     category = "DO" if is_bot else "ACT"
     title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
@@ -1056,6 +1034,41 @@ def create_task(
     """
     if _tasks is None:
         _tasks = Tasks(repo_cfg.work_dir)
+    # Race guard for thread tasks (#520): if the originating review thread
+    # has already been resolved on GitHub (most often because fido completed
+    # an earlier task in the same thread and auto-resolved it before this
+    # late-arriving triage queued the new task), don't queue.  Without this
+    # check the worker re-does work that's already shipped (#521), or
+    # rejects the resolved-thread state and reopens it.
+    if thread and thread.get("repo") and thread.get("pr") and thread.get("comment_id"):
+        try:
+            already = gh.is_thread_resolved_for_comment(
+                thread["repo"], int(thread["pr"]), int(thread["comment_id"])
+            )
+        except Exception:
+            log.exception(
+                "create_task: thread-resolved check failed for comment %s; queuing anyway",
+                thread.get("comment_id"),
+            )
+            already = False
+        # Strict ``is True`` so MagicMock test gh stubs (whose method calls
+        # return another MagicMock — truthy by default) don't cause this
+        # guard to swallow every test-level task creation.  Real GitHub
+        # always returns a real bool from ``is_thread_resolved_for_comment``.
+        if already is True:
+            log.info(
+                "create_task: thread for comment %s already resolved on GitHub — "
+                "skipping queue (closes #520)",
+                thread["comment_id"],
+            )
+            # Return a synthetic task-shaped dict so callers that don't check
+            # status don't choke; callers that DO walk tasks.json won't see it.
+            return {
+                "title": prompt,
+                "type": (TaskType.THREAD if thread else TaskType.SPEC).value,
+                "status": "skipped_resolved",
+                "thread": thread,
+            }
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)

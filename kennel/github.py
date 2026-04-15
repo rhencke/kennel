@@ -746,6 +746,24 @@ class GitHub:
         )
         self._graphql(query, id=thread_id)
 
+    def is_thread_resolved_for_comment(
+        self, repo: str, pr: int | str, comment_id: int
+    ) -> bool:
+        """Return True if the review thread containing *comment_id* is
+        already resolved on GitHub.
+
+        Used by webhook task creation to skip queuing late-arriving thread
+        tasks for threads fido has already auto-resolved (closes #520 race
+        / #521 redo loop).  Returns False when the comment isn't found in
+        any thread (treat as "go ahead and queue").
+        """
+        owner, name = repo.split("/", 1)
+        for node in self.get_review_threads(owner, name, pr):
+            for c in node.get("comments", {}).get("nodes", []):
+                if c.get("databaseId") == comment_id:
+                    return bool(node.get("isResolved"))
+        return False
+
     def get_required_checks(self, repo: str, branch: str) -> list[str]:
         """Return required status check names for branch, or [] if unprotected."""
         try:

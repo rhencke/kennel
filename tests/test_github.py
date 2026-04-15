@@ -1496,6 +1496,50 @@ class TestGitHubClass:
         assert "resolveReviewThread" in body["query"]
         assert body["variables"] == {"id": "T_abc"}
 
+    def test_is_thread_resolved_for_comment_resolved(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "isResolved": True,
+                "comments": {"nodes": [{"databaseId": 42}, {"databaseId": 43}]},
+            },
+            {
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 99}]},
+            },
+        ]
+        resp = MagicMock()
+        resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = resp
+        assert gh.is_thread_resolved_for_comment("o/r", 10, 43) is True
+
+    def test_is_thread_resolved_for_comment_unresolved(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 99}]},
+            },
+        ]
+        resp = MagicMock()
+        resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = resp
+        assert gh.is_thread_resolved_for_comment("o/r", 10, 99) is False
+
+    def test_is_thread_resolved_for_comment_not_found(self) -> None:
+        gh, mock_s = self._gh()
+        nodes: list[dict[str, object]] = []
+        resp = MagicMock()
+        resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = resp
+        assert gh.is_thread_resolved_for_comment("o/r", 10, 7777) is False
+
     def test_get_reviews_returns_dict(self) -> None:
         gh, mock_s = self._gh()
         pr_resp = MagicMock()
