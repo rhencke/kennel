@@ -6,10 +6,10 @@ import fcntl
 import json
 import subprocess
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any, Generator
+from typing import Any
 
 
 class JsonFileStore(ABC):
@@ -67,36 +67,6 @@ class JsonFileStore(ABC):
             data_path.write_text(json.dumps(data))
 
 
-def _state_lock(fido_dir: Path, exclusive: bool = False) -> IO[str]:
-    """Open and flock state.lock in fido_dir. Caller must close the returned fd."""
-    lock_path = fido_dir / "state.lock"
-    lock_path.touch(exist_ok=True)
-    lock_fd = open(lock_path)  # noqa: SIM115
-    fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-    return lock_fd
-
-
-def load_state(fido_dir: Path) -> dict[str, Any]:
-    """Load state.json from fido_dir, returning an empty dict if absent."""
-    with _state_lock(fido_dir):
-        state_path = fido_dir / "state.json"
-        if not state_path.exists():
-            return {}
-        return json.loads(state_path.read_text())
-
-
-def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-    """Write state to state.json in fido_dir."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").write_text(json.dumps(state))
-
-
-def clear_state(fido_dir: Path) -> None:
-    """Remove state.json from fido_dir (no-op if absent)."""
-    with _state_lock(fido_dir, exclusive=True):
-        (fido_dir / "state.json").unlink(missing_ok=True)
-
-
 class State(JsonFileStore):
     """Encapsulates fido state.json operations for a single worker directory.
 
@@ -105,7 +75,7 @@ class State(JsonFileStore):
 
     Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write.
     The lock is held on ``state.lock`` (separate from the data file) so that
-    shared reads via :func:`load_state` are not blocked by concurrent
+    shared reads via :meth:`load` are not blocked by concurrent
     ``modify`` calls.
     """
 
@@ -120,19 +90,52 @@ class State(JsonFileStore):
     def _lock_path(self) -> Path:
         return self._fido_dir / "state.lock"
 
+    @contextmanager
+    def _flock(self, exclusive: bool = False) -> Generator[None, None, None]:
+        """Hold a flock on ``state.lock`` for the duration of the block."""
+        lock_path = self._lock_path
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:  # noqa: SIM115
+            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+
     def load(self) -> dict[str, Any]:
         """Return state dict, or {} when the directory or state file is absent."""
         if not self._fido_dir.exists():
             return {}
-        return load_state(self._fido_dir)
+        with self._flock():
+            if not self._data_path.exists():
+                return {}
+            return json.loads(self._data_path.read_text())
 
     def save(self, data: dict[str, Any]) -> None:
         """Write *data* to state.json."""
-        save_state(self._fido_dir, data)
+        with self._flock(exclusive=True):
+            self._data_path.write_text(json.dumps(data))
 
     def clear(self) -> None:
         """Remove state.json."""
-        clear_state(self._fido_dir)
+        with self._flock(exclusive=True):
+            self._data_path.unlink(missing_ok=True)
+
+
+# Compatibility shims — callers are migrated to State in subsequent commits.
+
+
+def load_state(fido_dir: Path) -> dict[str, Any]:
+    """Load state.json from fido_dir, returning an empty dict if absent."""
+    return State(fido_dir).load()
+
+
+def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
+    """Write state to state.json in fido_dir."""
+    State(fido_dir).save(state)
+
+
+def clear_state(fido_dir: Path) -> None:
+    """Remove state.json from fido_dir (no-op if absent)."""
+    State(fido_dir).clear()
 
 
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker
