@@ -898,7 +898,7 @@ class TestComputeThreadChanges:
 
 
 class TestTasks:
-    def test_list_delegates_to_list_tasks(self, tmp_path: Path) -> None:
+    def test_list_returns_all_tasks(self, tmp_path: Path) -> None:
         from kennel.types import TaskType
 
         work_dir = tmp_path / "work"
@@ -908,7 +908,7 @@ class TestTasks:
         assert len(result) == 1
         assert result[0]["title"] == "Task A"
 
-    def test_add_delegates_to_add_task(self, tmp_path: Path) -> None:
+    def test_add_creates_task(self, tmp_path: Path) -> None:
         from kennel.types import TaskType
 
         work_dir = tmp_path / "work"
@@ -917,7 +917,7 @@ class TestTasks:
         assert task["title"] == "Task B"
         assert task["type"] == "ci"
 
-    def test_complete_by_id_delegates(self, tmp_path: Path) -> None:
+    def test_complete_by_id_marks_task_completed(self, tmp_path: Path) -> None:
         from kennel.types import TaskType
 
         work_dir = tmp_path / "work"
@@ -926,7 +926,7 @@ class TestTasks:
         Tasks(work_dir).complete_by_id(task["id"])
         assert list_tasks(work_dir)[0]["status"] == "completed"
 
-    def test_has_pending_for_comment_delegates(self, tmp_path: Path) -> None:
+    def test_has_pending_for_comment_returns_bool(self, tmp_path: Path) -> None:
         from kennel.types import TaskType
 
         work_dir = tmp_path / "work"
@@ -935,7 +935,7 @@ class TestTasks:
         assert Tasks(work_dir).has_pending_for_comment(7) is True
         assert Tasks(work_dir).has_pending_for_comment(99) is False
 
-    def test_remove_delegates(self, tmp_path: Path) -> None:
+    def test_remove_deletes_task(self, tmp_path: Path) -> None:
         from kennel.types import TaskType
 
         work_dir = tmp_path / "work"
@@ -944,7 +944,7 @@ class TestTasks:
         assert Tasks(work_dir).remove(task["id"]) is True
         assert list_tasks(work_dir) == []
 
-    def test_update_delegates(self, tmp_path: Path) -> None:
+    def test_update_changes_status(self, tmp_path: Path) -> None:
         from kennel.types import TaskStatus, TaskType
 
         work_dir = tmp_path / "work"
