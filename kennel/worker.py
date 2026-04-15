@@ -1273,6 +1273,14 @@ class Worker:
         6. Triggers a background sync of the work queue.
         """
         log.info("checking: ci")
+        pr_info = self.gh.get_pr(repo_ctx.repo, pr_number)
+        merge_state = pr_info.get("mergeStateStatus", "")
+        if merge_state not in ("BLOCKED", "DIRTY"):
+            log.info(
+                "CI check skipped — mergeStateStatus=%s (non-required failures ignored)",
+                merge_state,
+            )
+            return False
         checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
         failing = next(
             (c for c in checks if c.get("state") in ("FAILURE", "ERROR")),

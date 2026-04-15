@@ -4077,6 +4077,7 @@ class TestHandleCi:
 
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
         return Worker(tmp_path, gh), gh
 
     def _repo_ctx(self) -> RepoContext:
@@ -4366,6 +4367,50 @@ class TestHandleCi:
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert "flaky" in caplog.text
+
+    def test_returns_false_when_merge_state_not_blocked(self, tmp_path: Path) -> None:
+        """Non-required check failures (UNSTABLE) must not trigger CI fixing."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "UNSTABLE"}
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch") is False
+        gh.pr_checks.assert_not_called()
+
+    def test_returns_false_when_merge_state_clean(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch") is False
+        gh.pr_checks.assert_not_called()
+
+    def test_proceeds_when_merge_state_blocked(self, tmp_path: Path) -> None:
+        """BLOCKED merge state should still trigger CI fixing on failure."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        gh.pr_checks.return_value = [
+            {"name": "required-check", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_run_log.return_value = ""
+        gh.get_review_threads.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_proceeds_when_merge_state_dirty(self, tmp_path: Path) -> None:
+        """DIRTY merge state (merge conflicts) should still check CI."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "DIRTY"}
+        gh.pr_checks.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch") is False
+        gh.pr_checks.assert_called_once()
 
 
 class TestRunHandleCiIntegration:
