@@ -20,7 +20,7 @@ from kennel import claude, hooks, tasks
 from kennel.claude import ClaudeClient
 from kennel.config import RepoMembership
 from kennel.github import GitHub
-from kennel.prompts import Prompts, rewrite_description_prompt
+from kennel.prompts import Prompts
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -720,7 +720,7 @@ def _write_pr_description(
             queue = "<!-- no tasks yet -->"
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
-    prompt = rewrite_description_prompt(existing_body, task_list)
+    prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
     raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
     new_desc = _extract_body(raw)
     if not new_desc:

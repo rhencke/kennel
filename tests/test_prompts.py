@@ -6,14 +6,9 @@ import pytest
 
 from kennel.prompts import (
     Prompts,
-    issue_reply_instruction,
     reply_context_block,
-    reply_instruction,
-    rescope_prompt,
-    rewrite_description_prompt,
     triage_categories,
     triage_context_block,
-    triage_prompt,
 )
 
 # ── triage_categories ─────────────────────────────────────────────────────────
@@ -174,42 +169,50 @@ class TestTriageContextBlock:
         assert "alice: hi" in result
 
 
-# ── triage_prompt ─────────────────────────────────────────────────────────────
+# ── Prompts.triage_prompt ────────────────────────────────────────────────────
 
 
 class TestTriagePrompt:
     def test_includes_comment(self) -> None:
-        result = triage_prompt("please fix the bug", is_bot=False)
+        result = Prompts("").triage_prompt("please fix the bug", is_bot=False)
         assert "please fix the bug" in result
 
     def test_includes_categories(self) -> None:
-        result = triage_prompt("fix this", is_bot=False)
+        result = Prompts("").triage_prompt("fix this", is_bot=False)
         assert "ACT" in result
         assert "DEFER" in result
 
     def test_includes_bot_categories(self) -> None:
-        result = triage_prompt("suggestion", is_bot=True)
+        result = Prompts("").triage_prompt("suggestion", is_bot=True)
         assert "DO" in result
         assert "DEFER" in result
 
     def test_includes_context(self) -> None:
-        result = triage_prompt("comment", is_bot=False, context={"pr_title": "My PR"})
+        result = Prompts("").triage_prompt(
+            "comment", is_bot=False, context={"pr_title": "My PR"}
+        )
         assert "PR: My PR" in result
 
     def test_includes_example(self) -> None:
-        result = triage_prompt("x", is_bot=False)
+        result = Prompts("").triage_prompt("x", is_bot=False)
         assert "Example" in result
 
     def test_requires_imperative_action_item_title(self) -> None:
-        result = triage_prompt("x", is_bot=False)
+        result = Prompts("").triage_prompt("x", is_bot=False)
         assert "imperative" in result
         assert "verb" in result
         assert "never quote" in result.lower()
 
     def test_no_context(self) -> None:
         # Prompt with empty context still works — just has an empty ctx_str
-        result = triage_prompt("hello", is_bot=False, context=None)
+        result = Prompts("").triage_prompt("hello", is_bot=False, context=None)
         assert "hello" in result
+
+    def test_with_context(self) -> None:
+        p = Prompts("")
+        ctx = {"pr_title": "Refactor"}
+        result = p.triage_prompt("x", is_bot=True, context=ctx)
+        assert "Refactor" in result
 
 
 # ── reply_context_block ───────────────────────────────────────────────────────
@@ -247,13 +250,13 @@ class TestReplyContextBlock:
         assert "Your plan: p" in result
 
 
-# ── reply_instruction ─────────────────────────────────────────────────────────
+# ── Prompts.reply_instruction ────────────────────────────────────────────────
 
 
 class TestReplyInstruction:
     @pytest.mark.parametrize("category", ["ACT", "DO"])
     def test_act_do_acknowledges(self, category: str) -> None:
-        result = reply_instruction(category, "fix this", "will fix", {})
+        result = Prompts("").reply_instruction(category, "fix this", "will fix", {})
         assert "Acknowledge" in result or "acknowledge" in result
         assert "approach" in result
         assert "Do NOT promise" in result
@@ -268,25 +271,27 @@ class TestReplyInstruction:
         the constraint must not say 'create tasks' or it would misrepresent
         what the system actually does.
         """
-        result = reply_instruction(category, "please fix this", "fix: edge case", {})
+        result = Prompts("").reply_instruction(
+            category, "please fix this", "fix: edge case", {}
+        )
         assert "Do NOT promise" in result
         assert "create tasks" not in result
 
     def test_ask_asks_question(self) -> None:
-        result = reply_instruction("ASK", "unclear", "need info", {})
+        result = Prompts("").reply_instruction("ASK", "unclear", "need info", {})
         assert "clarifying question" in result
 
     def test_answer_no_code_changes(self) -> None:
-        result = reply_instruction("ANSWER", "what is X?", "explain X", {})
+        result = Prompts("").reply_instruction("ANSWER", "what is X?", "explain X", {})
         assert "Do NOT say you'll make code changes" in result
         assert "Question: what is X?" in result
 
     def test_defer_out_of_scope(self) -> None:
-        result = reply_instruction("DEFER", "big refactor", "defer", {})
+        result = Prompts("").reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
 
     def test_defer_issue_opened_with_url(self) -> None:
-        result = reply_instruction(
+        result = Prompts("").reply_instruction(
             "DEFER",
             "big refactor",
             "defer",
@@ -297,35 +302,44 @@ class TestReplyInstruction:
         assert "https://github.com/x/y/issues/1" in result
 
     def test_defer_issue_will_be_opened_without_url(self) -> None:
-        result = reply_instruction("DEFER", "big refactor", "defer", {})
+        result = Prompts("").reply_instruction("DEFER", "big refactor", "defer", {})
         assert "An issue will be opened" in result
 
     def test_dump_politely_declines(self) -> None:
-        result = reply_instruction("DUMP", "bad idea", "decline", {})
+        result = Prompts("").reply_instruction("DUMP", "bad idea", "decline", {})
         assert "politely declining" in result or "politely" in result
 
     def test_unknown_category_fallback(self) -> None:
-        result = reply_instruction("UNKNOWN", "comment", "title", {})
+        result = Prompts("").reply_instruction("UNKNOWN", "comment", "title", {})
         assert "Write a short GitHub PR reply" in result
         assert "Comment: comment" in result
 
     def test_passes_context_to_act(self) -> None:
-        result = reply_instruction("ACT", "fix it", "patch", {"pr_title": "Bugfix PR"})
+        result = Prompts("").reply_instruction(
+            "ACT", "fix it", "patch", {"pr_title": "Bugfix PR"}
+        )
         assert "PR: Bugfix PR" in result
 
+    def test_with_issue_url(self) -> None:
+        url = "https://github.com/x/y/issues/1"
+        result = Prompts("").reply_instruction(
+            "DEFER", "big refactor", "defer", {}, issue_url=url
+        )
+        assert url in result
 
-# ── issue_reply_instruction ───────────────────────────────────────────────────
+
+# ── Prompts.issue_reply_instruction ──────────────────────────────────────────
 
 
 class TestIssueReplyInstruction:
     @pytest.mark.parametrize("category", ["ACT", "DO"])
     def test_act_do_acknowledging(self, category: str) -> None:
-        result = issue_reply_instruction(category, "fix it", "will fix", {})
+        result = Prompts("").issue_reply_instruction(category, "fix it", "will fix", {})
         assert "acknowledging" in result
 
     @pytest.mark.parametrize("category", ["ACT", "DO"])
     def test_act_do_no_promises(self, category: str) -> None:
-        result = issue_reply_instruction(category, "fix it", "will fix", {})
+        result = Prompts("").issue_reply_instruction(category, "fix it", "will fix", {})
         assert "Do NOT promise to open issues" in result
 
     @pytest.mark.parametrize("category", ["ACT", "DO"])
@@ -338,26 +352,32 @@ class TestIssueReplyInstruction:
         the constraint must not say 'create tasks' or it would misrepresent
         what the system actually does.
         """
-        result = issue_reply_instruction(
+        result = Prompts("").issue_reply_instruction(
             category, "please fix this", "fix: edge case", {}
         )
         assert "Do NOT promise" in result
         assert "create tasks" not in result
 
     def test_ask_clarifying(self) -> None:
-        result = issue_reply_instruction("ASK", "unclear", "need more info", {})
+        result = Prompts("").issue_reply_instruction(
+            "ASK", "unclear", "need more info", {}
+        )
         assert "clarifying question" in result
 
     def test_answer_direct(self) -> None:
-        result = issue_reply_instruction("ANSWER", "what is X?", "explain", {})
+        result = Prompts("").issue_reply_instruction(
+            "ANSWER", "what is X?", "explain", {}
+        )
         assert "Question: what is X?" in result
 
     def test_defer_out_of_scope(self) -> None:
-        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        result = Prompts("").issue_reply_instruction(
+            "DEFER", "add feature", "defer", {}
+        )
         assert "out of scope" in result
 
     def test_defer_issue_opened_with_url(self) -> None:
-        result = issue_reply_instruction(
+        result = Prompts("").issue_reply_instruction(
             "DEFER",
             "add feature",
             "defer",
@@ -368,24 +388,35 @@ class TestIssueReplyInstruction:
         assert "https://github.com/x/y/issues/2" in result
 
     def test_defer_issue_will_be_opened_without_url(self) -> None:
-        result = issue_reply_instruction("DEFER", "add feature", "defer", {})
+        result = Prompts("").issue_reply_instruction(
+            "DEFER", "add feature", "defer", {}
+        )
         assert "An issue will be opened" in result
 
     def test_dump_decline(self) -> None:
-        result = issue_reply_instruction("DUMP", "bad idea", "decline", {})
+        result = Prompts("").issue_reply_instruction("DUMP", "bad idea", "decline", {})
         assert "decline" in result
 
     def test_unknown_fallback(self) -> None:
-        result = issue_reply_instruction("MYSTERY", "hello", "hmm", {})
+        result = Prompts("").issue_reply_instruction("MYSTERY", "hello", "hmm", {})
         assert "short GitHub PR reply" in result
 
     def test_includes_pr_title_in_context(self) -> None:
-        result = issue_reply_instruction("ACT", "fix it", "fix", {"pr_title": "My PR"})
+        result = Prompts("").issue_reply_instruction(
+            "ACT", "fix it", "fix", {"pr_title": "My PR"}
+        )
         assert "PR: My PR" in result
 
     def test_no_context(self) -> None:
-        result = issue_reply_instruction("ACT", "do something", "will do")
+        result = Prompts("").issue_reply_instruction("ACT", "do something", "will do")
         assert "Comment: do something" in result
+
+    def test_with_issue_url(self) -> None:
+        url = "https://github.com/x/y/issues/2"
+        result = Prompts("").issue_reply_instruction(
+            "DEFER", "feature", "defer", {}, issue_url=url
+        )
+        assert url in result
 
 
 # ── Prompts.status_system_prompt ─────────────────────────────────────────────
@@ -567,7 +598,7 @@ class TestPromptsPickupCommentPrompt:
         assert isinstance(Prompts("persona").pickup_comment_prompt("title"), str)
 
 
-# ── rescope_prompt ────────────────────────────────────────────────────────────
+# ── Prompts.rescope_prompt ───────────────────────────────────────────────────
 
 
 class TestRescopePrompt:
@@ -589,7 +620,7 @@ class TestRescopePrompt:
 
     def test_includes_pending_tasks_json(self) -> None:
         tasks = [self._task("Add feature", task_id="1")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "Add feature" in result
         assert '"id": "1"' in result
 
@@ -598,7 +629,7 @@ class TestRescopePrompt:
             self._task("Done task", task_id="1", status="completed"),
             self._task("Todo task", task_id="2"),
         ]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         # Completed appears in the completed block, not the pending JSON
         assert '"id": "2"' in result
         assert '"id": "1"' not in result.split("Pending tasks")[1]
@@ -608,44 +639,44 @@ class TestRescopePrompt:
             self._task("Already done", task_id="1", status="completed"),
             self._task("Still pending", task_id="2"),
         ]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "Already done" in result.split("Pending tasks")[0]
 
     def test_no_completed_tasks_shows_none(self) -> None:
         tasks = [self._task("Only pending", task_id="1")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "(none)" in result.split("Pending tasks")[0]
 
     def test_commit_summary_included(self) -> None:
         tasks = [self._task("Add tests", task_id="1")]
-        result = rescope_prompt(tasks, "feat: add parser method")
+        result = Prompts("").rescope_prompt(tasks, "feat: add parser method")
         assert "feat: add parser method" in result
 
     def test_empty_commit_summary_shows_none(self) -> None:
         tasks = [self._task("Add tests", task_id="1")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "(none)" in result
 
     def test_ci_tasks_must_come_first_rule_stated(self) -> None:
         tasks = [self._task("Fix CI", task_id="1", task_type="ci")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "ci" in result.lower()
         assert "first" in result
 
     def test_json_output_format_instructed(self) -> None:
         tasks = [self._task("Do something", task_id="1")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert '{"tasks": [...]}' in result
 
     def test_preserve_ids_rule_stated(self) -> None:
         tasks = [self._task("Task A", task_id="abc-123")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "ID" in result or "id" in result
         assert "preserve" in result.lower() or "never change" in result.lower()
 
     def test_remove_covered_tasks_rule_stated(self) -> None:
         tasks = [self._task("Task A", task_id="1")]
-        result = rescope_prompt(tasks, "commit covering this")
+        result = Prompts("").rescope_prompt(tasks, "commit covering this")
         assert "commit" in result.lower() or "covered" in result.lower()
 
     def test_rewrite_spec_on_thread_conflict_rule_stated(self) -> None:
@@ -653,28 +684,28 @@ class TestRescopePrompt:
             self._task("Old spec title", task_id="1", task_type="spec"),
             self._task("New comment task", task_id="2", task_type="thread"),
         ]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "thread" in result.lower() or "rewrite" in result.lower()
 
     def test_no_other_text_instruction_present(self) -> None:
         tasks = [self._task("X", task_id="1")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "No other text" in result
 
     def test_in_progress_tasks_included_in_pending(self) -> None:
         tasks = [
             self._task("Running task", task_id="1", status="in_progress"),
         ]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert '"id": "1"' in result
 
     def test_description_included_in_task_json(self) -> None:
         tasks = [self._task("X", task_id="1", description="important details")]
-        result = rescope_prompt(tasks, "")
+        result = Prompts("").rescope_prompt(tasks, "")
         assert "important details" in result
 
     def test_empty_task_list(self) -> None:
-        result = rescope_prompt([], "")
+        result = Prompts("").rescope_prompt([], "")
         assert isinstance(result, str)
         assert "(none)" in result  # both completed and commit summary
 
@@ -696,7 +727,7 @@ class TestPromptsStoresPersona:
         assert "persona A" not in p2.status_prompt(activities)
 
 
-# ── rewrite_description_prompt ────────────────────────────────────────────────
+# ── Prompts.rewrite_description_prompt ───────────────────────────────────────
 
 
 class TestRewriteDescriptionPrompt:
@@ -721,26 +752,28 @@ class TestRewriteDescriptionPrompt:
         )
 
     def test_includes_current_description(self) -> None:
-        result = rewrite_description_prompt(
+        result = Prompts("").rewrite_description_prompt(
             self._body("Implements the feature.\n\nFixes #7."),
             [self._task("New task")],
         )
         assert "Implements the feature." in result
 
     def test_excludes_work_queue_section_from_context(self) -> None:
-        result = rewrite_description_prompt(self._body(), [self._task("A task")])
+        result = Prompts("").rewrite_description_prompt(
+            self._body(), [self._task("A task")]
+        )
         assert "WORK_QUEUE_START" not in result
         assert "do a thing" not in result
 
     def test_includes_pending_tasks(self) -> None:
-        result = rewrite_description_prompt(
+        result = Prompts("").rewrite_description_prompt(
             self._body(),
             [self._task("Add caching layer")],
         )
         assert "Add caching layer" in result
 
     def test_excludes_completed_tasks(self) -> None:
-        result = rewrite_description_prompt(
+        result = Prompts("").rewrite_description_prompt(
             self._body(),
             [
                 self._task("Done already", status="completed"),
@@ -750,171 +783,56 @@ class TestRewriteDescriptionPrompt:
         assert "Done already" not in result
 
     def test_empty_pending_shows_none(self) -> None:
-        result = rewrite_description_prompt(
+        result = Prompts("").rewrite_description_prompt(
             self._body(),
             [self._task("Finished", status="completed")],
         )
         assert "(none)" in result
 
     def test_task_description_included(self) -> None:
-        result = rewrite_description_prompt(
+        result = Prompts("").rewrite_description_prompt(
             self._body(),
             [self._task("Cache results", description="use Redis")],
         )
         assert "use Redis" in result
 
     def test_fixes_line_preservation_rule_stated(self) -> None:
-        result = rewrite_description_prompt(self._body(), [])
+        result = Prompts("").rewrite_description_prompt(self._body(), [])
         assert "Fixes #N" in result or "Fixes #" in result
         assert "preserve" in result.lower() or "exactly" in result.lower()
 
     def test_no_work_queue_content_rule_stated(self) -> None:
-        result = rewrite_description_prompt(self._body(), [])
+        result = Prompts("").rewrite_description_prompt(self._body(), [])
         assert "work queue" in result.lower()
 
     def test_body_tag_contract_stated(self) -> None:
         """Prompt must instruct Opus to wrap output in <body> tags so we can
         reliably strip preamble and trailing chatter."""
-        result = rewrite_description_prompt(self._body(), [])
+        result = Prompts("").rewrite_description_prompt(self._body(), [])
         assert "<body>" in result
         assert "</body>" in result
 
     def test_extracts_description_at_divider(self) -> None:
         body = "My description.\n\nFixes #3.\n\n---\n\nStuff below divider."
-        result = rewrite_description_prompt(body, [])
+        result = Prompts("").rewrite_description_prompt(body, [])
         assert "My description." in result
         assert "Stuff below divider." not in result
 
     def test_fallback_to_wq_marker_when_no_divider(self) -> None:
-        body = "Short desc.\n<!-- WORK_QUEUE_START -->\n- [ ] task\n<!-- WORK_QUEUE_END -->"
-        result = rewrite_description_prompt(body, [])
+        body = (
+            "Short desc.\n<!-- WORK_QUEUE_START -->"
+            "\n- [ ] task\n<!-- WORK_QUEUE_END -->"
+        )
+        result = Prompts("").rewrite_description_prompt(body, [])
         assert "Short desc." in result
         assert "WORK_QUEUE_START" not in result
 
     def test_fallback_to_full_body_when_no_markers(self) -> None:
         body = "Plain description with no markers."
-        result = rewrite_description_prompt(body, [])
+        result = Prompts("").rewrite_description_prompt(body, [])
         assert "Plain description with no markers." in result
 
     def test_empty_task_list(self) -> None:
-        result = rewrite_description_prompt(self._body(), [])
+        result = Prompts("").rewrite_description_prompt(self._body(), [])
         assert isinstance(result, str)
         assert "(none)" in result
-
-
-# ── Prompts method delegates ─────────────────────────────────────────────────
-# Each method on the class delegates to its module-level counterpart.  These
-# tests verify that the method produces the same output as the free function.
-
-
-class TestPromptsTriagePrompt:
-    def test_matches_free_function(self) -> None:
-        p = Prompts("persona")
-        assert p.triage_prompt("fix bug", is_bot=False) == triage_prompt(
-            "fix bug", is_bot=False
-        )
-
-    def test_with_context(self) -> None:
-        p = Prompts("")
-        ctx = {"pr_title": "Refactor"}
-        assert p.triage_prompt("x", is_bot=True, context=ctx) == triage_prompt(
-            "x", is_bot=True, context=ctx
-        )
-
-    def test_includes_comment(self) -> None:
-        result = Prompts("").triage_prompt("please fix the bug", is_bot=False)
-        assert "please fix the bug" in result
-
-    def test_includes_categories(self) -> None:
-        result = Prompts("").triage_prompt("fix this", is_bot=False)
-        assert "ACT" in result
-
-
-class TestPromptsReplyInstruction:
-    def test_matches_free_function(self) -> None:
-        p = Prompts("persona")
-        assert p.reply_instruction(
-            "ACT", "fix it", "will fix", {}
-        ) == reply_instruction("ACT", "fix it", "will fix", {})
-
-    def test_with_issue_url(self) -> None:
-        p = Prompts("")
-        url = "https://github.com/x/y/issues/1"
-        assert p.reply_instruction(
-            "DEFER", "big refactor", "defer", {}, issue_url=url
-        ) == reply_instruction("DEFER", "big refactor", "defer", {}, issue_url=url)
-
-    def test_act_includes_acknowledge(self) -> None:
-        result = Prompts("").reply_instruction("ACT", "fix this", "will fix", {})
-        assert "acknowledge" in result.lower() or "Acknowledge" in result
-
-
-class TestPromptsIssueReplyInstruction:
-    def test_matches_free_function(self) -> None:
-        p = Prompts("persona")
-        assert p.issue_reply_instruction(
-            "ACT", "fix it", "will fix", {}
-        ) == issue_reply_instruction("ACT", "fix it", "will fix", {})
-
-    def test_with_issue_url(self) -> None:
-        p = Prompts("")
-        url = "https://github.com/x/y/issues/2"
-        assert p.issue_reply_instruction(
-            "DEFER", "feature", "defer", {}, issue_url=url
-        ) == issue_reply_instruction("DEFER", "feature", "defer", {}, issue_url=url)
-
-    def test_answer_includes_question(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "ANSWER", "what is X?", "explain", {}
-        )
-        assert "Question: what is X?" in result
-
-
-class TestPromptsRescopePrompt:
-    def _task(self, title: str, task_id: str = "1", status: str = "pending") -> dict:
-        return {"id": task_id, "title": title, "status": status}
-
-    def test_matches_free_function(self) -> None:
-        p = Prompts("persona")
-        tasks = [self._task("Add feature")]
-        assert p.rescope_prompt(tasks, "commit msg") == rescope_prompt(
-            tasks, "commit msg"
-        )
-
-    def test_includes_task_title(self) -> None:
-        p = Prompts("")
-        result = p.rescope_prompt([self._task("Add caching")], "")
-        assert "Add caching" in result
-
-    def test_includes_commit_summary(self) -> None:
-        p = Prompts("")
-        result = p.rescope_prompt([self._task("X")], "feat: add parser")
-        assert "feat: add parser" in result
-
-
-class TestPromptsRewriteDescriptionPrompt:
-    def _task(self, title: str, status: str = "pending") -> dict:
-        return {"id": "1", "title": title, "status": status}
-
-    def _body(self) -> str:
-        return "Does stuff.\n\nFixes #5.\n\n---\n\n## Work queue\n<!-- WORK_QUEUE_START -->\n- [ ] task\n<!-- WORK_QUEUE_END -->"
-
-    def test_matches_free_function(self) -> None:
-        p = Prompts("persona")
-        body = self._body()
-        tasks = [self._task("New task")]
-        assert p.rewrite_description_prompt(body, tasks) == rewrite_description_prompt(
-            body, tasks
-        )
-
-    def test_includes_pending_task(self) -> None:
-        p = Prompts("")
-        result = p.rewrite_description_prompt(self._body(), [self._task("Add caching")])
-        assert "Add caching" in result
-
-    def test_excludes_completed(self) -> None:
-        p = Prompts("")
-        result = p.rewrite_description_prompt(
-            self._body(), [self._task("Done", status="completed")]
-        )
-        assert "Done" not in result

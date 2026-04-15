@@ -209,13 +209,13 @@ def _session_for_current_repo() -> "ClaudeSession":
     repo = current_repo()
     if repo is None:
         raise RuntimeError(
-            "claude.print_prompt called without a thread-local repo_name — "
-            "server.WebhookHandler._process_action and WorkerThread.run both "
-            "set it; this caller is missing the install."
+            "ClaudeClient.print_prompt called without a thread-local repo_name"
+            " — server.WebhookHandler._process_action and WorkerThread.run"
+            " both set it; this caller is missing the install."
         )
     if _session_resolver is None:
         raise RuntimeError(
-            "claude.print_prompt called before set_session_resolver — "
+            "ClaudeClient.print_prompt called before set_session_resolver — "
             "server._run() installs it at startup; nothing should run before."
         )
     session = _session_resolver(repo)
@@ -393,63 +393,8 @@ def extract_result_text(output: str) -> str:
     return result
 
 
-# ── Simple print calls (no tool use) ─────────────────────────────────────────
-
-
 _EMPTY_RETRY_COUNT = 2
 _EMPTY_RETRY_DELAY = 1.0
-
-
-def print_prompt(
-    prompt: str,
-    model: str,
-    system_prompt: str | None = None,
-) -> str:
-    """Run a prompt turn on this thread's persistent :class:`ClaudeSession`,
-    returning the result text.
-
-    Always routes through the session resolved via :func:`set_session_resolver`
-    — production has one claude subprocess per repo, and every prompt call
-    shares it.  Errors propagate (we fail open, not silently masked).
-    """
-    session = _session_for_current_repo()
-    return session.prompt(prompt, model=model, system_prompt=system_prompt)
-
-
-def print_prompt_json(
-    prompt: str,
-    key: str,
-    model: str,
-    system_prompt: str | None = None,
-) -> str:
-    """Run a prompt turn and parse JSON from the response at *key*.
-
-    Appends a JSON-format instruction to *system_prompt* so Claude outputs
-    ``{"key": "..."}``.  Scans the raw response for a JSON object so
-    preamble or trailing text from Opus does not corrupt the result.
-    Returns ``""`` if the JSON parse fails (but claude errors propagate
-    from :func:`print_prompt` — we fail open on infrastructure failure).
-    """
-    json_instruction = (
-        f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
-        " No other text before or after the JSON."
-    )
-    full_system = (
-        f"{system_prompt}\n\n{json_instruction}" if system_prompt else json_instruction
-    )
-    raw = print_prompt(prompt, model, system_prompt=full_system)
-    if not raw:
-        return ""
-    # Try parsing whole output, then scan for JSON objects (handles preamble).
-    candidates = [raw] + [m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)]
-    for candidate in candidates:
-        try:
-            obj = json.loads(candidate)
-            if isinstance(obj.get(key), str):
-                return obj[key]
-        except json.JSONDecodeError, AttributeError:
-            continue
-    return ""
 
 
 def _run_streaming(
@@ -527,230 +472,6 @@ def _run_streaming(
         if talker_registered and repo_name is not None:
             unregister_talker(repo_name, thread_id)
         _unregister_child(proc)
-
-
-def print_prompt_from_file(
-    system_file: Path,
-    prompt_file: Path,
-    model: str,
-    timeout: int = 30,
-    idle_timeout: float = 1800.0,
-    cwd: Path | str | None = None,
-    streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
-) -> str:
-    """Run claude --print reading system prompt and user prompt from files.
-
-    Returns the full stdout on success.  Kills the process if no output
-    is produced for *idle_timeout* seconds (default 30 min).
-
-    Raises ``ClaudeStreamError`` on nonzero exit or idle timeout.
-    ``FileNotFoundError`` propagates if the claude CLI is not installed.
-    Both are authoritative failures — callers should not silently ignore them.
-    """
-    cmd = [
-        "claude",
-        "--model",
-        model,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--system-prompt-file",
-        str(system_file),
-        "--print",
-    ]
-    return "".join(streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
-
-
-def resume_session(
-    session_id: str,
-    prompt_file: Path,
-    model: str,
-    timeout: int = 300,
-    idle_timeout: float = 1800.0,
-    cwd: Path | str | None = None,
-    streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
-) -> str:
-    """Continue an existing claude session by ID, feeding prompt_file on stdin.
-
-    Returns the full stdout on success.  Kills the process if no output
-    is produced for *idle_timeout* seconds (default 30 min).
-
-    Raises ``ClaudeStreamError`` on nonzero exit or idle timeout.
-    ``FileNotFoundError`` propagates if the claude CLI is not installed.
-    Both are authoritative failures — callers should not silently ignore them.
-    """
-    cmd = [
-        "claude",
-        "--model",
-        model,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--resume",
-        session_id,
-        "--print",
-    ]
-    return "".join(streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)).strip()
-
-
-# ── Specialised wrappers used by events.py ───────────────────────────────────
-
-
-def triage_comment(
-    prompt: str,
-    model: str = "claude-opus-4-6",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str:
-    """Ask claude to triage a PR comment. Returns the raw first line of output.
-
-    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
-    CLI — callers must treat an empty result as "unable to triage".
-    """
-    try:
-        result = _claude(
-            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().splitlines()[0]
-        return ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
-
-
-def generate_reply(
-    prompt: str,
-    model: str = "claude-opus-4-6",
-    timeout: int = 30,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str:
-    """Ask claude to generate a short reply. Returns stripped output or empty string.
-
-    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
-    CLI — callers must treat an empty result as "no reply generated".
-    """
-    try:
-        result = _claude(
-            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
-
-
-def generate_branch_name(
-    prompt: str,
-    model: str = "claude-haiku-4-5-20251001",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str:
-    """Ask claude to generate a git branch name slug. Returns first line of output.
-
-    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
-    CLI — callers must treat an empty result as "use a fallback branch name".
-    """
-    try:
-        result = _claude(
-            "--model", model, "--print", "-p", prompt, timeout=timeout, runner=runner
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().splitlines()[0]
-        return ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
-
-
-def generate_status(
-    prompt: str,
-    system_prompt: str,
-    model: str = "claude-opus-4-6",
-) -> str:
-    """Ask claude to generate a GitHub status (two lines: emoji + text)."""
-    return print_prompt(
-        prompt=prompt,
-        model=model,
-        system_prompt=system_prompt,
-    )
-
-
-def generate_status_emoji(
-    prompt: str,
-    system_prompt: str,
-    model: str = "claude-opus-4-6",
-) -> str:
-    """Ask claude to choose a single emoji for a GitHub status."""
-    return print_prompt(
-        prompt=prompt,
-        model=model,
-        system_prompt=system_prompt,
-    )
-
-
-def generate_status_with_session(
-    prompt: str,
-    system_prompt: str,
-    model: str = "claude-opus-4-6",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    _sleep: Callable[[float], None] = time.sleep,
-) -> tuple[str, str]:
-    """Generate a GitHub status, returning (status_text, session_id).
-
-    Best-effort enrichment: returns ``("", "")`` on any failure — callers must
-    treat an all-empty tuple as "status unavailable".  Uses stream-json output
-    format to capture the session_id alongside the response text, enabling
-    follow-up calls (e.g., ``resume_status`` to shorten a long response).
-    Retries up to ``_EMPTY_RETRY_COUNT`` times when Claude exits 0 but
-    produces no output.
-    """
-    for attempt in range(_EMPTY_RETRY_COUNT + 1):
-        try:
-            result = _claude(
-                "--model",
-                model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--system-prompt",
-                system_prompt,
-                "--print",
-                "-p",
-                prompt,
-                timeout=timeout,
-                runner=runner,
-            )
-            if result.returncode != 0:
-                log.warning(
-                    "generate_status_with_session: claude exited %d", result.returncode
-                )
-                return "", ""
-            raw = result.stdout.strip()
-            text = extract_result_text(raw)
-            sid = extract_session_id(raw)
-            if text:
-                return text, sid
-            if result.stderr:
-                log.warning(
-                    "generate_status_with_session: stderr=%r", _Trunc(result.stderr)
-                )
-            log.debug("generate_status_with_session: stdout=%r", _Trunc(result.stdout))
-            if attempt < _EMPTY_RETRY_COUNT:
-                log.warning(
-                    "generate_status_with_session: empty output on attempt %d — retrying",
-                    attempt + 1,
-                )
-                _sleep(_EMPTY_RETRY_DELAY)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            log.warning("generate_status_with_session: %s", exc)
-            return "", ""
-    log.warning(
-        "generate_status_with_session: empty output after %d attempts",
-        _EMPTY_RETRY_COUNT + 1,
-    )
-    return "", ""
 
 
 # ── Persistent bidirectional session ─────────────────────────────────────────
@@ -1423,42 +1144,6 @@ class ClaudeSession:
                 log.debug("ClaudeSession.stop: wait failed: %s", exc)
         finally:
             _unregister_child(self._proc)
-
-
-def resume_status(
-    session_id: str,
-    prompt: str,
-    model: str = "claude-opus-4-6",
-    timeout: int = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str:
-    """Resume an existing claude session to refine a status response.
-
-    Best-effort enrichment: returns ``""`` on nonzero exit, timeout, or missing
-    CLI — callers must treat an empty result as "refinement unavailable".
-    Passes *prompt* as a positional argument (``-p``), so no file is needed.
-    """
-    try:
-        result = _claude(
-            "--model",
-            model,
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--resume",
-            session_id,
-            "--print",
-            "-p",
-            prompt,
-            timeout=timeout,
-            runner=runner,
-        )
-        if result.returncode != 0:
-            return ""
-        return extract_result_text(result.stdout.strip())
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        return ""
 
 
 # ── Injectable one-shot collaborator ─────────────────────────────────────────
