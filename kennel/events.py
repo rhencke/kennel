@@ -218,6 +218,10 @@ def recover_reply_promises(
                 claude_client=claude_client,
                 prompts=prompts,
             )
+            reply_promises.remove_reply_promise(
+                fido_dir, promise.comment_type, promise.comment_id
+            )
+            handled_keys.add(key)
             _apply_reply_result(
                 category,
                 titles,
@@ -227,10 +231,6 @@ def recover_reply_promises(
                 thread=action.thread,
                 registry=registry,
             )
-            reply_promises.remove_reply_promise(
-                fido_dir, promise.comment_type, promise.comment_id
-            )
-            handled_keys.add(key)
             processed_any = True
             continue
 
@@ -276,6 +276,11 @@ def recover_reply_promises(
             claude_client=claude_client,
             prompts=prompts,
         )
+        for group_promise, _ in group:
+            reply_promises.remove_reply_promise(
+                fido_dir, group_promise.comment_type, group_promise.comment_id
+            )
+            handled_keys.add((group_promise.comment_type, group_promise.comment_id))
         _apply_reply_result(
             category,
             titles,
@@ -285,11 +290,6 @@ def recover_reply_promises(
             thread=action.reply_to,
             registry=registry,
         )
-        for group_promise, _ in group:
-            reply_promises.remove_reply_promise(
-                fido_dir, group_promise.comment_type, group_promise.comment_id
-            )
-            handled_keys.add((group_promise.comment_type, group_promise.comment_id))
         processed_any = True
 
     return processed_any

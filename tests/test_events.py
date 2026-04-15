@@ -310,6 +310,42 @@ class TestRecoverReplyPromises:
         mock_create_task.assert_not_called()
         assert not (fido_dir / "reply-promises" / "issues-302").exists()
 
+    def test_issue_recovery_clears_promise_before_task_creation(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        promise_path = add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+            "user": {"login": "owner"},
+        }
+
+        def fail_after_reply(*args, **kwargs):
+            assert not promise_path.exists()
+            raise RuntimeError("task add failed")
+
+        with (
+            patch(
+                "kennel.events.reply_to_issue_comment",
+                return_value=("ACT", ["task one"]),
+            ),
+            patch("kennel.events.create_task", side_effect=fail_after_reply),
+        ):
+            with pytest.raises(RuntimeError, match="task add failed"):
+                recover_reply_promises(
+                    fido_dir,
+                    _config(tmp_path),
+                    _repo_cfg(tmp_path),
+                    gh,
+                    7,
+                )
+        assert not promise_path.exists()
+
     def test_coalesces_review_comment_promises_in_same_thread(
         self, tmp_path: Path
     ) -> None:
@@ -368,6 +404,63 @@ class TestRecoverReplyPromises:
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
         assert mock_create_task.call_count == 2
         assert not any((fido_dir / "reply-promises").iterdir())
+
+    def test_review_recovery_clears_group_promises_before_task_creation(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        first = add_reply_promise(fido_dir, "pulls", 101)
+        second = add_reply_promise(fido_dir, "pulls", 102)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                101: {
+                    "id": 101,
+                    "body": "first",
+                    "path": "foo.py",
+                    "line": 1,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                    "user": {"login": "owner"},
+                },
+                102: {
+                    "id": 102,
+                    "body": "second",
+                    "path": "foo.py",
+                    "line": 2,
+                    "diff_hunk": "@@ @@",
+                    "in_reply_to_id": 101,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_pull_comment.side_effect = get_pull_comment
+
+        def fail_after_reply(*args, **kwargs):
+            assert not first.exists()
+            assert not second.exists()
+            raise RuntimeError("task add failed")
+
+        with (
+            patch("kennel.events.reply_to_comment", return_value=("DO", ["task a"])),
+            patch("kennel.events.create_task", side_effect=fail_after_reply),
+        ):
+            with pytest.raises(RuntimeError, match="task add failed"):
+                recover_reply_promises(
+                    fido_dir,
+                    _config(tmp_path),
+                    _repo_cfg(tmp_path),
+                    gh,
+                    7,
+                )
+        assert not first.exists()
+        assert not second.exists()
 
     def test_recovery_skips_handled_and_invalid_candidates_in_later_groups(
         self, tmp_path: Path
