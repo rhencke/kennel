@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from kennel import reply_promises
-from kennel.claude import ClaudeClient
+from kennel.claude import ClaudeClient, set_thread_repo
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
@@ -1264,6 +1264,8 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
+        if repo_cfg is not None:
+            set_thread_repo(repo_cfg.name)
         if registry is not None and repo_cfg is not None:
             registry.set_rescoping(repo_cfg.name, True)
         try:
@@ -1279,6 +1281,8 @@ def _reorder_tasks_background(
         finally:
             if registry is not None and repo_cfg is not None:
                 registry.set_rescoping(repo_cfg.name, False)
+            if repo_cfg is not None:
+                set_thread_repo(None)
 
     t = threading.Thread(
         target=run_loop,

@@ -3128,6 +3128,100 @@ class TestReorderTasksBackground:
         self._run_thread(started)
         # No registry provided — must not raise and must complete normally
 
+    def test_sets_thread_local_repo_name_during_reorder(self, tmp_path: Path) -> None:
+        """Thread-local repo_name is set to repo_cfg.name when reorder runs."""
+        from kennel.claude import current_repo
+
+        started: list = []
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        seen: list = []
+
+        def mock_reorder(work_dir, commit_summary, **kwargs):
+            seen.append(current_repo())
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        assert seen == ["owner/repo"]
+
+    def test_clears_thread_local_repo_name_after_reorder(self, tmp_path: Path) -> None:
+        """Thread-local repo_name is cleared in the finally block after reorder."""
+        from kennel.claude import current_repo, set_thread_repo
+
+        started: list = []
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _, mock_reorder = self._capture_reorder_calls()
+
+        set_thread_repo("owner/repo")  # pre-set to confirm it gets cleared
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        assert current_repo() is None
+
+    def test_clears_thread_local_repo_name_on_reorder_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """Thread-local repo_name is cleared even when reorder raises."""
+        from kennel.claude import current_repo
+
+        started: list = []
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+        def boom(work_dir, commit_summary, **kwargs):
+            raise RuntimeError("reorder exploded")
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            _start=lambda t: started.append(t),
+            _reorder_fn=boom,
+            _coalesce_state={},
+        )
+        with pytest.raises(RuntimeError, match="reorder exploded"):
+            self._run_thread(started)
+        assert current_repo() is None
+
+    def test_no_thread_local_set_when_no_repo_cfg(self, tmp_path: Path) -> None:
+        """When repo_cfg is None, set_thread_repo is not called (no crash)."""
+        from kennel.claude import current_repo
+
+        started: list = []
+        seen: list = []
+
+        def mock_reorder(work_dir, commit_summary, **kwargs):
+            seen.append(current_repo())
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        assert seen == [None]
+
 
 class TestNotifyThreadChange:
     def _cfg(self, tmp_path: Path) -> Config:
