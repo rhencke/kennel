@@ -78,31 +78,6 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
     return "\n".join(parts)
 
 
-def triage_prompt(
-    comment_body: str,
-    is_bot: bool,
-    context: dict[str, Any] | None = None,
-) -> str:
-    """Build a triage prompt for Haiku/Opus.
-
-    Returns a prompt that asks the model to classify the comment and return one
-    or more ``CATEGORY: title`` lines.  A single comment may produce zero tasks
-    (ANSWER/ASK/DEFER/DUMP) or multiple tasks (multiple ACT/DO lines).
-    """
-    categories = triage_categories(is_bot)
-    ctx_str = triage_context_block(context)
-    return (
-        f"{NO_TOOLS_CLAUSE}\n\n"
-        f"Triage this PR comment into one or more categories: {categories}\n\n"
-        f"{ctx_str}\n\nComment: {comment_body}\n\n"
-        "Reply with one line per task: category word, colon, short imperative task title. "
-        "For ACT/DO, list each distinct required change on its own line. "
-        "Task titles must start with a verb — never quote or paraphrase the comment text. "
-        "Example (one task): ACT: add unit tests for parser\n"
-        "Example (two tasks): ACT: add unit tests for parser\nACT: update documentation"
-    )
-
-
 # ── Reply instructions ────────────────────────────────────────────────────────
 
 
@@ -138,237 +113,23 @@ def reply_context_block(
     return "\n\n".join(parts)
 
 
-def reply_instruction(
-    category: str,
-    comment_body: str,
-    title: str,
-    context: dict[str, Any] | None = None,
-    issue_url: str | None = None,
-) -> str:
-    """Build the instruction text for a review-comment reply.
-
-    Used by ``reply_to_comment`` in events.py.  Returns a plain instruction
-    string (no persona wrapper) so the caller can compose it with
-    :meth:`Prompts.persona_wrap`.
-    """
-    ctx = reply_context_block(context, comment_body, title)
-    match category:
-        case "ACT" | "DO":
-            return (
-                f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-                f"and briefly explain your approach. "
-                f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
-            )
-        case "ASK":
-            return (
-                f"Write a short GitHub PR reply asking a focused clarifying question. "
-                f"You need more information before you can act.\n\n{ctx}"
-            )
-        case "ANSWER":
-            return (
-                f"Write a short GitHub PR reply directly answering this question. "
-                f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
-            )
-        case "DEFER":
-            issue_line = (
-                f"An issue has been opened to track this: {issue_url}"
-                if issue_url
-                else "An issue will be opened to track this"
-            )
-            return (
-                f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                f"out of scope for this PR. "
-                f"{issue_line} — mention it in your reply.\n\n{ctx}"
-            )
-        case "DUMP":
-            return (
-                f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-                f"explaining why it's not applicable.\n\n{ctx}"
-            )
-        case _:
-            return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
-
-
-def issue_reply_instruction(
-    category: str,
-    comment_body: str,
-    title: str,
-    context: dict[str, Any] | None = None,
-    issue_url: str | None = None,
-) -> str:
-    """Build the instruction text for a top-level issue/PR comment reply.
-
-    Used by ``reply_to_issue_comment`` in events.py.
-    """
-    ctx = context or {}
-    parts: list[str] = []
-    if ctx.get("pr_title"):
-        parts.append(f"PR: {ctx['pr_title']}")
-    parts.append(f"Comment: {comment_body}")
-    parts.append(f"Your plan: {title}")
-    context_str = "\n\n".join(parts)
-
-    match category:
-        case "ACT" | "DO":
-            return (
-                f"Write a short GitHub PR reply acknowledging and explaining your approach. "
-                f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
-            )
-        case "ASK":
-            return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
-        case "ANSWER":
-            return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
-        case "DEFER":
-            issue_line = (
-                f"An issue has been opened to track this: {issue_url}"
-                if issue_url
-                else "An issue will be opened to track this"
-            )
-            return (
-                f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                f"out of scope for this PR. "
-                f"{issue_line} — mention it in your reply.\n\n{context_str}"
-            )
-        case "DUMP":
-            return f"Write a short polite decline.\n\n{context_str}"
-        case _:
-            return f"Write a short GitHub PR reply.\n\n{context_str}"
-
-
-# ── Rescoping ────────────────────────────────────────────────────────────────
-
-
-def rescope_prompt(
-    task_list: list[dict[str, Any]],
-    commit_summary: str,
-) -> str:
-    """Build an Opus prompt for dependency-aware task reordering.
-
-    Presents the full task list and a summary of commits already made, then
-    asks Opus to return a JSON array of the reordered pending tasks.
-
-    Rules enforced in the prompt:
-    - CI tasks (type "ci") must remain first.
-    - Completed tasks are excluded from the output.
-    - Task IDs must be preserved exactly.
-    - Tasks already covered by a commit should be omitted — they will be marked
-      completed automatically by the caller.
-    - Thread-task requirements that conflict with a spec task should cause
-      the spec task title/description to be updated.
-
-    The caller is responsible for parsing the returned JSON and applying it.
-    """
-    pending = [t for t in task_list if t.get("status") != "completed"]
-    completed = [t for t in task_list if t.get("status") == "completed"]
-
-    def _fmt(t: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "id": t.get("id", ""),
-            "type": t.get("type", "spec"),
-            "status": t.get("status", "pending"),
-            "title": t.get("title", ""),
-            "description": t.get("description", ""),
-        }
-
-    pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
-    completed_titles = [t.get("title", "") for t in completed]
-    completed_block = (
-        "\n".join(f"- {title}" for title in completed_titles)
-        if completed_titles
-        else "(none)"
-    )
-
-    return (
-        f"{NO_TOOLS_CLAUSE}\n\n"
-        "You are reviewing the pending work queue for a pull request in progress.\n\n"
-        "Already completed tasks:\n"
-        f"{completed_block}\n\n"
-        "Recent commits (already implemented):\n"
-        f"{commit_summary or '(none)'}\n\n"
-        "Pending tasks (current order):\n"
-        f"{pending_json}\n\n"
-        "Reorder these tasks for the optimal implementation sequence based on "
-        "dependency analysis. Apply these rules:\n"
-        '1. Tasks with type "ci" must come first — do not move them.\n'
-        "2. Reorder remaining tasks so each task builds on what comes before it.\n"
-        "3. If a task is already covered by a recent commit, omit it from the output — it will be marked done.\n"
-        "4. If a thread task changes the requirements of an existing spec task, "
-        "rewrite that spec task's title and/or description to reflect the updated "
-        "requirements.\n"
-        "5. Preserve every task ID exactly — never change or drop IDs.\n"
-        "6. Include only pending and in_progress tasks in the output — omit completed.\n\n"
-        'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
-        'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
-        "No other text before or after the JSON."
-    )
-
-
-# ── PR description rewrite ───────────────────────────────────────────────────
-
-
-def rewrite_description_prompt(
-    pr_body: str,
-    task_list: list[dict[str, Any]],
-) -> str:
-    """Build an Opus prompt to rewrite the PR description after rescoping.
-
-    Presents the current PR description section and the updated task list,
-    then asks Opus to rewrite only the descriptive summary while preserving
-    required structural lines like ``Fixes #N``.
-
-    The caller is responsible for substituting the result back into the PR
-    body, keeping the work-queue section intact.
-    """
-    divider = "\n\n---\n\n"
-    if divider in pr_body:
-        description_section = pr_body.split(divider)[0]
-    elif "<!-- WORK_QUEUE_START -->" in pr_body:
-        description_section = pr_body.split("<!-- WORK_QUEUE_START -->")[0].strip()
-    else:
-        description_section = pr_body
-
-    pending = [t for t in task_list if t.get("status") != "completed"]
-
-    def _fmt(t: dict[str, Any]) -> str:
-        title = t.get("title", "")
-        desc = t.get("description", "")
-        return f"- {title}" + (f": {desc}" if desc else "")
-
-    task_block = "\n".join(_fmt(t) for t in pending) if pending else "(none)"
-
-    return (
-        "You are rewriting the description section of a pull request after the plan changed.\n\n"
-        "Current PR description section:\n"
-        f"{description_section.strip()}\n\n"
-        "Updated task list (pending work):\n"
-        f"{task_block}\n\n"
-        "Rewrite the descriptive summary to match the updated plan. Rules:\n"
-        "1. Keep it to 2-3 sentences.\n"
-        "2. Preserve any 'Fixes #N.' lines exactly as they appear — do not add, remove, or modify them.\n"
-        "3. Do not include work queue content, markdown headers, or HTML comments.\n"
-        "4. Wrap your final output in <body>...</body> tags. Only text between the tags is used.\n"
-        "5. Do not add any text before the opening <body> tag or after the closing </body> tag.\n\n"
-        "Example output:\n"
-        "<body>\n"
-        "Fixes #123.\n\n"
-        "Refactors the foo module to use bar so we can add baz support later.\n"
-        "</body>"
-    )
-
-
 # ── Prompts DI class ──────────────────────────────────────────────────────────
 
 
 class Prompts:
-    """Persona-aware prompt builder.
+    """Persona-aware prompt builder and one-stop prompt collaborator.
 
     Accepts a ``persona`` string via the constructor so callers need only read
     the persona file once and inject it — rather than re-reading it inside
     every prompt function.  Follows the dependency injection pattern described
     in CLAUDE.md.
 
-    Stateless helpers that do not depend on the persona remain as module-level
-    functions above (e.g. :func:`triage_prompt`, :func:`reply_instruction`).
+    Prompt builders that do not depend on the persona are also methods here
+    so callers can depend on a single injected collaborator rather than a mix
+    of the class and bare module-level functions.  Value-only helpers
+    (e.g. :func:`triage_categories`, :func:`triage_context_block`,
+    :func:`reply_context_block`) remain module-level since they only
+    transform data.
 
     Usage::
 
@@ -376,8 +137,9 @@ class Prompts:
         prompt = p.persona_wrap(instruction)
         prompt = p.react_prompt(comment_body)
         prompt = p.pickup_comment_prompt(issue_title)
-        prompt = p.status_text_prompt(what)
-        prompt = p.status_emoji_prompt(text)
+        prompt = p.triage_prompt(comment_body, is_bot)
+        prompt = p.reply_instruction(category, comment_body, title)
+        prompt = p.rescope_prompt(task_list, commit_summary)
     """
 
     def __init__(self, persona: str) -> None:
@@ -483,4 +245,240 @@ class Prompts:
             "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
             "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
             "If you wouldn't react, reply NONE."
+        )
+
+    # ── Prompt builders (persona-independent) ────────────────────────────
+
+    def triage_prompt(
+        self,
+        comment_body: str,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Build a triage prompt for Haiku/Opus.
+
+        Returns a prompt that asks the model to classify the comment and return
+        one or more ``CATEGORY: title`` lines.  A single comment may produce
+        zero tasks (ANSWER/ASK/DEFER/DUMP) or multiple tasks (multiple
+        ACT/DO lines).
+        """
+        categories = triage_categories(is_bot)
+        ctx_str = triage_context_block(context)
+        return (
+            f"{NO_TOOLS_CLAUSE}\n\n"
+            f"Triage this PR comment into one or more categories: {categories}\n\n"
+            f"{ctx_str}\n\nComment: {comment_body}\n\n"
+            "Reply with one line per task: category word, colon, short imperative task title. "
+            "For ACT/DO, list each distinct required change on its own line. "
+            "Task titles must start with a verb — never quote or paraphrase the comment text. "
+            "Example (one task): ACT: add unit tests for parser\n"
+            "Example (two tasks): ACT: add unit tests for parser\nACT: update documentation"
+        )
+
+    def reply_instruction(
+        self,
+        category: str,
+        comment_body: str,
+        title: str,
+        context: dict[str, Any] | None = None,
+        issue_url: str | None = None,
+    ) -> str:
+        """Build the instruction text for a review-comment reply.
+
+        Returns a plain instruction string (no persona wrapper) so the caller
+        can compose it with :meth:`persona_wrap`.
+        """
+        ctx = reply_context_block(context, comment_body, title)
+        match category:
+            case "ACT" | "DO":
+                return (
+                    f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
+                    f"and briefly explain your approach. "
+                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
+                )
+            case "ASK":
+                return (
+                    f"Write a short GitHub PR reply asking a focused clarifying question. "
+                    f"You need more information before you can act.\n\n{ctx}"
+                )
+            case "ANSWER":
+                return (
+                    f"Write a short GitHub PR reply directly answering this question. "
+                    f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
+                )
+            case "DEFER":
+                issue_line = (
+                    f"An issue has been opened to track this: {issue_url}"
+                    if issue_url
+                    else "An issue will be opened to track this"
+                )
+                return (
+                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+                    f"out of scope for this PR. "
+                    f"{issue_line} — mention it in your reply.\n\n{ctx}"
+                )
+            case "DUMP":
+                return (
+                    f"Write a short GitHub PR reply politely declining this suggestion and briefly "
+                    f"explaining why it's not applicable.\n\n{ctx}"
+                )
+            case _:
+                return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
+
+    def issue_reply_instruction(
+        self,
+        category: str,
+        comment_body: str,
+        title: str,
+        context: dict[str, Any] | None = None,
+        issue_url: str | None = None,
+    ) -> str:
+        """Build the instruction text for a top-level issue/PR comment reply."""
+        ctx = context or {}
+        parts: list[str] = []
+        if ctx.get("pr_title"):
+            parts.append(f"PR: {ctx['pr_title']}")
+        parts.append(f"Comment: {comment_body}")
+        parts.append(f"Your plan: {title}")
+        context_str = "\n\n".join(parts)
+
+        match category:
+            case "ACT" | "DO":
+                return (
+                    f"Write a short GitHub PR reply acknowledging and explaining your approach. "
+                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
+                )
+            case "ASK":
+                return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
+            case "ANSWER":
+                return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
+            case "DEFER":
+                issue_line = (
+                    f"An issue has been opened to track this: {issue_url}"
+                    if issue_url
+                    else "An issue will be opened to track this"
+                )
+                return (
+                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+                    f"out of scope for this PR. "
+                    f"{issue_line} — mention it in your reply.\n\n{context_str}"
+                )
+            case "DUMP":
+                return f"Write a short polite decline.\n\n{context_str}"
+            case _:
+                return f"Write a short GitHub PR reply.\n\n{context_str}"
+
+    def rescope_prompt(
+        self,
+        task_list: list[dict[str, Any]],
+        commit_summary: str,
+    ) -> str:
+        """Build an Opus prompt for dependency-aware task reordering.
+
+        Presents the full task list and a summary of commits already made, then
+        asks Opus to return a JSON array of the reordered pending tasks.
+
+        Rules enforced in the prompt:
+        - CI tasks (type "ci") must remain first.
+        - Completed tasks are excluded from the output.
+        - Task IDs must be preserved exactly.
+        - Tasks already covered by a commit should be omitted -- they will be
+          marked completed automatically by the caller.
+        - Thread-task requirements that conflict with a spec task should cause
+          the spec task title/description to be updated.
+
+        The caller is responsible for parsing the returned JSON and applying it.
+        """
+        pending = [t for t in task_list if t.get("status") != "completed"]
+        completed = [t for t in task_list if t.get("status") == "completed"]
+
+        def _fmt(t: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": t.get("id", ""),
+                "type": t.get("type", "spec"),
+                "status": t.get("status", "pending"),
+                "title": t.get("title", ""),
+                "description": t.get("description", ""),
+            }
+
+        pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
+        completed_titles = [t.get("title", "") for t in completed]
+        completed_block = (
+            "\n".join(f"- {title}" for title in completed_titles)
+            if completed_titles
+            else "(none)"
+        )
+
+        return (
+            f"{NO_TOOLS_CLAUSE}\n\n"
+            "You are reviewing the pending work queue for a pull request in progress.\n\n"
+            "Already completed tasks:\n"
+            f"{completed_block}\n\n"
+            "Recent commits (already implemented):\n"
+            f"{commit_summary or '(none)'}\n\n"
+            "Pending tasks (current order):\n"
+            f"{pending_json}\n\n"
+            "Reorder these tasks for the optimal implementation sequence based on "
+            "dependency analysis. Apply these rules:\n"
+            '1. Tasks with type "ci" must come first — do not move them.\n'
+            "2. Reorder remaining tasks so each task builds on what comes before it.\n"
+            "3. If a task is already covered by a recent commit, omit it from the output — it will be marked done.\n"
+            "4. If a thread task changes the requirements of an existing spec task, "
+            "rewrite that spec task's title and/or description to reflect the updated "
+            "requirements.\n"
+            "5. Preserve every task ID exactly — never change or drop IDs.\n"
+            "6. Include only pending and in_progress tasks in the output — omit completed.\n\n"
+            'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
+            'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+            "No other text before or after the JSON."
+        )
+
+    def rewrite_description_prompt(
+        self,
+        pr_body: str,
+        task_list: list[dict[str, Any]],
+    ) -> str:
+        """Build an Opus prompt to rewrite the PR description after rescoping.
+
+        Presents the current PR description section and the updated task list,
+        then asks Opus to rewrite only the descriptive summary while preserving
+        required structural lines like ``Fixes #N``.
+
+        The caller is responsible for substituting the result back into the PR
+        body, keeping the work-queue section intact.
+        """
+        divider = "\n\n---\n\n"
+        if divider in pr_body:
+            description_section = pr_body.split(divider)[0]
+        elif "<!-- WORK_QUEUE_START -->" in pr_body:
+            description_section = pr_body.split("<!-- WORK_QUEUE_START -->")[0].strip()
+        else:
+            description_section = pr_body
+
+        pending = [t for t in task_list if t.get("status") != "completed"]
+
+        def _fmt(t: dict[str, Any]) -> str:
+            title = t.get("title", "")
+            desc = t.get("description", "")
+            return f"- {title}" + (f": {desc}" if desc else "")
+
+        task_block = "\n".join(_fmt(t) for t in pending) if pending else "(none)"
+
+        return (
+            "You are rewriting the description section of a pull request after the plan changed.\n\n"
+            "Current PR description section:\n"
+            f"{description_section.strip()}\n\n"
+            "Updated task list (pending work):\n"
+            f"{task_block}\n\n"
+            "Rewrite the descriptive summary to match the updated plan. Rules:\n"
+            "1. Keep it to 2-3 sentences.\n"
+            "2. Preserve any 'Fixes #N.' lines exactly as they appear — do not add, remove, or modify them.\n"
+            "3. Do not include work queue content, markdown headers, or HTML comments.\n"
+            "4. Wrap your final output in <body>...</body> tags. Only text between the tags is used.\n"
+            "5. Do not add any text before the opening <body> tag or after the closing </body> tag.\n\n"
+            "Example output:\n"
+            "<body>\n"
+            "Fixes #123.\n\n"
+            "Refactors the foo module to use bar so we can add baz support later.\n"
+            "</body>"
         )

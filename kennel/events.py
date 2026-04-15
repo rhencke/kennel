@@ -10,25 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kennel import claude
+from kennel.claude import ClaudeClient
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
-from kennel.prompts import (
-    NO_TOOLS_CLAUSE,
-    Prompts,
-    issue_reply_instruction,
-    reply_instruction,
-    triage_prompt,
-)
+from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
 from kennel.registry import WorkerRegistry
 from kennel.tasks import Tasks
 from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
-
-# Type alias for the claude.print_prompt DI callback.
-# Uses Callable[..., str] because some callsites pass system_prompt= as a kwarg.
-_PrintPrompt = Callable[..., str]
 
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
@@ -239,17 +229,21 @@ def maybe_react(
     config: Config,
     gh: GitHub,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
-    prompts = Prompts(_load_persona(config))
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
     reaction = (
-        _print_prompt(prompts.react_prompt(comment_body), "claude-opus-4-6")
+        claude_client.print_prompt(
+            prompts.react_prompt(comment_body), "claude-opus-4-6"
+        )
         .lower()
         .split("\n")[0]
         .strip()
@@ -273,7 +267,8 @@ def reply_to_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
@@ -283,8 +278,10 @@ def reply_to_comment(
     Uses a per-comment lockfile to prevent concurrent replies.
     Raises on reply-post failure so callers fail closed.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
     info = action.reply_to
     if not info or not action.comment_body:
         return ("ACT", [action.comment_body or action.prompt])
@@ -303,7 +300,6 @@ def reply_to_comment(
     else:
         lock_fd = None
 
-    prompts = Prompts(_load_persona(config))
     comment = action.comment_body
 
     context: dict[str, Any] = dict(action.context) if action.context else {}
@@ -327,7 +323,7 @@ def reply_to_comment(
 
     # Enrich context with sibling threads when the comment needs more context
     if (
-        needs_more_context(comment, _print_prompt=_print_prompt)
+        needs_more_context(comment, claude_client=claude_client)
         and info.get("repo")
         and info.get("pr")
     ):
@@ -341,7 +337,7 @@ def reply_to_comment(
 
     # Step 1: Haiku triage (on the triggering comment to determine category)
     category, titles = _triage(
-        comment, action.is_bot, context, _print_prompt=_print_prompt
+        comment, action.is_bot, context, claude_client=claude_client, prompts=prompts
     )
     log.info("triage: %s — %s", category, titles)
 
@@ -352,7 +348,7 @@ def reply_to_comment(
     # reflects what the reviewer originally asked.
     if category in ("ACT", "DO"):
         log.info("deriving task title from root comment")
-        titles = [_summarize_as_action_item(root_body, _print_prompt=_print_prompt)]
+        titles = [_summarize_as_action_item(root_body, claude_client=claude_client)]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
@@ -362,7 +358,7 @@ def reply_to_comment(
         issue_url = _open_defer_issue(gh, info["repo"], pr_url, titles[0], comment)
 
     # Step 3: Opus reply based on triage
-    instr = reply_instruction(
+    instr = prompts.reply_instruction(
         category, comment, ", ".join(titles), context, issue_url=issue_url
     )
 
@@ -372,7 +368,7 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = _print_prompt(
+    body = claude_client.print_prompt(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
@@ -410,7 +406,8 @@ def reply_to_comment(
         info.get("repo", ""),
         config,
         gh,
-        _print_prompt=_print_prompt,
+        claude_client=claude_client,
+        prompts=prompts,
     )
 
     # For DUMP: also resolve the thread
@@ -437,7 +434,8 @@ def reply_to_review(
     gh: GitHub,
     already_replied: set[int] | None = None,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> None:
     """No-op for inline comments — they are handled per-comment.
 
@@ -458,14 +456,14 @@ def reply_to_review(
     \"Submit review\") still arrives only through this event and is not
     yet handled.  Tracked separately — out of scope for the dedup fix.
     """
-    _ = (action, config, repo_cfg, gh, already_replied, _print_prompt)
+    _ = (action, config, repo_cfg, gh, already_replied, claude_client, prompts)
     log.debug(
         "reply_to_review: skipping inline comments — handled per-comment (closes #518)"
     )
 
 
 def needs_more_context(
-    comment_body: str, *, _print_prompt: _PrintPrompt | None = None
+    comment_body: str, *, claude_client: ClaudeClient | None = None
 ) -> bool:
     """Ask Haiku whether this comment needs sibling thread context to act on.
 
@@ -473,8 +471,8 @@ def needs_more_context(
     to act on alone (e.g. "same", "ditto", "^"), False otherwise.
     Falls back to False on any error.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
@@ -484,7 +482,7 @@ def needs_more_context(
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = _print_prompt(prompt, "claude-haiku-4-5").upper()
+    answer = claude_client.print_prompt(prompt, "claude-haiku-4-5").upper()
     return answer.startswith("YES")
 
 
@@ -492,26 +490,26 @@ _MAX_TITLE_LEN = 80
 
 
 def _summarize_as_action_item(
-    comment_body: str, *, _print_prompt: _PrintPrompt | None = None
+    comment_body: str, *, claude_client: ClaudeClient | None = None
 ) -> str:
     """Ask Opus to convert a comment into a short imperative action-item title.
 
     If the result is too long, asks Claude to shorten it up to 3 times before
     falling back to hard truncation.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
-    result = _print_prompt(prompt, "claude-opus-4-6").strip()
+    result = claude_client.print_prompt(prompt, "claude-opus-4-6").strip()
     for _ in range(3):
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
-        result = _print_prompt(
+        result = claude_client.print_prompt(
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
@@ -527,7 +525,8 @@ def _triage(
     is_bot: bool,
     context: dict[str, Any] | None = None,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Ask Opus to triage a comment. Returns (category, titles).
 
@@ -535,11 +534,13 @@ def _triage(
     for ANSWER/ASK/DEFER/DUMP (used as reply context), or one or more entries
     for ACT/DO (each becomes a separate work-queue task).
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
-    prompt = triage_prompt(comment_body, is_bot, context)
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts("")
+    prompt = prompts.triage_prompt(comment_body, is_bot, context)
     log.info("triage classifier: requesting category from opus")
-    text = _print_prompt(prompt, "claude-opus-4-6")
+    text = claude_client.print_prompt(prompt, "claude-opus-4-6")
     log.info(
         "triage classifier: returned %d chars (preview=%r)",
         len(text or ""),
@@ -567,7 +568,7 @@ def _triage(
     )
     # Fallback: ACT for humans, DO for bots; summarize comment into action item
     category = "DO" if is_bot else "ACT"
-    title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
+    title = _summarize_as_action_item(comment_body, claude_client=claude_client)
     return category, [title]
 
 
@@ -577,14 +578,17 @@ def reply_to_issue_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event).
 
     Raises on reply-post failure so callers fail closed.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
 
     # Extract PR number from prompt
@@ -615,9 +619,12 @@ def reply_to_issue_comment(
     if conversation_context:
         context["conversation"] = conversation_context
 
-    prompts = Prompts(_load_persona(config))
     category, titles = _triage(
-        comment, action.is_bot, context or None, _print_prompt=_print_prompt
+        comment,
+        action.is_bot,
+        context or None,
+        claude_client=claude_client,
+        prompts=prompts,
     )
     log.info("issue comment triage: %s — %s", category, titles)
 
@@ -628,12 +635,12 @@ def reply_to_issue_comment(
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
         issue_url = _open_defer_issue(gh, repo_full, pr_url, titles[0], comment)
 
-    instr = issue_reply_instruction(
+    instr = prompts.issue_reply_instruction(
         category, comment, ", ".join(titles), action.context, issue_url=issue_url
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = _print_prompt(
+    body = claude_client.print_prompt(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
@@ -657,7 +664,8 @@ def reply_to_issue_comment(
             repo_full,
             config,
             gh,
-            _print_prompt=_print_prompt,
+            claude_client=claude_client,
+            prompts=prompts,
         )
 
     return (category, titles)
@@ -740,7 +748,8 @@ def _notify_thread_change(
     config: Config,
     gh: GitHub,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
 
@@ -752,8 +761,10 @@ def _notify_thread_change(
     review comment API; for issue comments (comment_type='issues') posts via
     the issue comments API.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
 
     task = change["task"]
     thread = task.get("thread") or {}
@@ -768,7 +779,6 @@ def _notify_thread_change(
 
     kind = change["kind"]
     original_title = task.get("title", "")
-    prompts = Prompts(_load_persona(config))
 
     if kind == "completed":
         instruction = (
@@ -793,7 +803,7 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    body = _print_prompt(
+    body = claude_client.print_prompt(
         prompts.persona_wrap(instruction),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
@@ -826,7 +836,7 @@ def _rewrite_pr_description(
     work_dir: Path,
     gh: Any,
     *,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
     _state: Any = None,
     _tasks: Any = None,
     _max_retries: int = 3,
@@ -878,7 +888,13 @@ def _rewrite_pr_description(
 
         body = gh.get_pr_body(repo, pr_number)
         _write_pr_description(
-            gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+            gh,
+            repo,
+            pr_number,
+            issue,
+            task_list,
+            body,
+            claude_client=claude_client,
         )
 
         snapshot_after = _task_snapshot(_tasks.list())
@@ -905,19 +921,27 @@ def _make_reorder_kwargs(
     repo_cfg: RepoConfig | None,
     registry: WorkerRegistry | None,
     gh: Any,
-    print_prompt: Any,
+    claude_client: ClaudeClient | None,
+    prompts: Prompts | None,
     rewrite_fn: Any,
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
-            _notify_thread_change(change, config, gh)
+            _notify_thread_change(
+                change, config, gh, claude_client=claude_client, prompts=prompts
+            )
 
     def on_done() -> None:
-        rewrite_fn(work_dir, gh, _print_prompt=print_prompt)
+        rewrite_fn(work_dir, gh, claude_client=claude_client)
 
-    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
+    kwargs: dict[str, Any] = {
+        "_on_changes": on_changes,
+        "_on_done": on_done,
+        "claude_client": claude_client,
+        "prompts": prompts,
+    }
     if registry is not None and repo_cfg is not None:
 
         def on_inprogress_affected() -> None:
@@ -940,7 +964,8 @@ def _reorder_tasks_background(
     registry: WorkerRegistry | None = None,
     *,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
-    _print_prompt: _PrintPrompt | None = None,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
     _rewrite_fn: Callable[..., None] | None = None,
     _reorder_fn: Callable[..., None] | None = None,
     _coalesce_state: dict[str, Any] | None = None,
@@ -974,7 +999,7 @@ def _reorder_tasks_background(
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(
-        work_dir, config, repo_cfg, registry, gh, _print_prompt, rewrite_fn
+        work_dir, config, repo_cfg, registry, gh, claude_client, prompts, rewrite_fn
     )
 
     with _reorder_coalesce_lock:

@@ -12,7 +12,9 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from kennel.claude import ClaudeClient
 from kennel.config import RepoMembership
+from kennel.prompts import Prompts
 from kennel.state import (
     State,
     _resolve_git_dir,
@@ -61,6 +63,16 @@ def _no_claude_session_spawn(monkeypatch):
     from kennel import claude
 
     monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
+
+
+def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+    """Build a mock ClaudeClient with print_prompt configured."""
+    client = MagicMock(spec=ClaudeClient)
+    if side_effect is not None:
+        client.print_prompt.side_effect = side_effect
+    else:
+        client.print_prompt.return_value = return_value
+    return client
 
 
 class TestRepoContextFilter:
@@ -1800,11 +1812,13 @@ class TestPickNextIssue:
 class TestWorkerPostPickupComment:
     """Tests for Worker.post_pickup_comment."""
 
-    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+    def _make_worker(
+        self, tmp_path: Path, claude_client: MagicMock | None = None
+    ) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
         gh.view_issue.return_value = {"created_at": "2024-01-01T00:00:00Z"}
         gh.get_issue_events.return_value = []
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, claude_client=claude_client), gh
 
     def test_skips_when_already_commented(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -1819,101 +1833,83 @@ class TestWorkerPostPickupComment:
         gh.comment_issue.assert_not_called()
 
     def test_posts_comment_when_no_previous_comment(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Woof! On it!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = [
             {"user": {"login": "other-user"}, "body": "Hi"}
         ]
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value="Woof! On it!"),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
         gh.comment_issue.assert_called_once_with("owner/repo", 1, "Woof! On it!")
 
     def test_posts_comment_when_no_existing_comments(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "I am on it!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = []
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value="I am on it!"),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            worker.post_pickup_comment("owner/repo", 3, "Some task", "fido-bot")
+        worker.post_pickup_comment("owner/repo", 3, "Some task", "fido-bot")
         gh.comment_issue.assert_called_once()
 
     def test_falls_back_to_plain_text_when_claude_returns_empty(
         self, tmp_path: Path
     ) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = ""
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = []
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value=""),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
+        worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
         gh.comment_issue.assert_called_once_with(
             "owner/repo", 5, "Picking up issue: A task"
         )
 
     def test_uses_persona_from_sub_dir(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Fetched!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("I am a very good dog.")
         gh.get_issue_comments.return_value = []
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch(
-                "kennel.worker.claude.generate_reply", return_value="Fetched!"
-            ) as mock_gen,
-        ):
-            (tmp_path / "persona.md").write_text("I am a very good dog.")
-            worker.post_pickup_comment("owner/repo", 2, "Some work", "fido-bot")
-        prompt_arg = mock_gen.call_args[0][0]
+        worker.post_pickup_comment("owner/repo", 2, "Some work", "fido-bot")
+        prompt_arg = mock_client.generate_reply.call_args[0][0]
         assert "I am a very good dog." in prompt_arg
 
     def test_falls_back_to_empty_persona_on_oserror(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "On it!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
-        missing = tmp_path / "no_such_dir"
-        with (
-            patch("kennel.worker._sub_dir", return_value=missing),
-            patch(
-                "kennel.worker.claude.generate_reply", return_value="On it!"
-            ) as mock_gen,
-        ):
-            worker.post_pickup_comment("owner/repo", 2, "Work item", "fido-bot")
-        prompt_arg = mock_gen.call_args[0][0]
+        worker.post_pickup_comment("owner/repo", 2, "Work item", "fido-bot")
+        prompt_arg = mock_client.generate_reply.call_args[0][0]
         assert "Picking up issue: Work item" in prompt_arg
 
     def test_prompt_includes_issue_title(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "On it!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch(
-                "kennel.worker.claude.generate_reply", return_value="On it!"
-            ) as mock_gen,
-        ):
-            (tmp_path / "persona.md").write_text("")
-            worker.post_pickup_comment("owner/repo", 4, "Refactor auth", "fido-bot")
-        prompt_arg = mock_gen.call_args[0][0]
+        worker.post_pickup_comment("owner/repo", 4, "Refactor auth", "fido-bot")
+        prompt_arg = mock_client.generate_reply.call_args[0][0]
         assert "Refactor auth" in prompt_arg
 
     def test_checks_comments_for_correct_repo_and_issue(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Arf!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value="Arf!"),
-        ):
-            (tmp_path / "persona.md").write_text("")
-            worker.post_pickup_comment("org/myrepo", 99, "Title", "fido-bot")
+        worker.post_pickup_comment("org/myrepo", 99, "Title", "fido-bot")
         gh.get_issue_comments.assert_called_once_with("org/myrepo", 99)
 
     def test_logs_info_when_skipping(self, tmp_path: Path, caplog) -> None:
         import logging
 
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Woof!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.get_issue_comments.return_value = [
             {
                 "user": {"login": "fido-bot"},
@@ -1921,17 +1917,15 @@ class TestWorkerPostPickupComment:
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value="Woof!"),
-        ):
-            with caplog.at_level(logging.INFO, logger="kennel"):
-                worker.post_pickup_comment("owner/repo", 7, "Title", "fido-bot")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            worker.post_pickup_comment("owner/repo", 7, "Title", "fido-bot")
         assert "already exists" in caplog.text
 
     def test_posts_comment_on_reopened_issue(self, tmp_path: Path) -> None:
         """Old comment predates reopen, so a new pickup comment is posted."""
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Back on it!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.get_issue_events.return_value = [
             {"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}
         ]
@@ -1942,12 +1936,8 @@ class TestWorkerPostPickupComment:
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
-        with (
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-            patch("kennel.worker.claude.generate_reply", return_value="Back on it!"),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        worker._prompts = Prompts("I am Fido.")
+        worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
         gh.comment_issue.assert_called_once_with("owner/repo", 1, "Back on it!")
 
 
@@ -2312,37 +2302,32 @@ class TestClaudeStart:
     def test_returns_session_id_on_success(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         output = '{"type":"result","session_id":"sess-abc"}'
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=output),
-            patch(
-                "kennel.claude.extract_session_id",
-                return_value="sess-abc",
-            ),
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = output
+        with patch(
+            "kennel.claude.extract_session_id",
+            return_value="sess-abc",
         ):
-            result = claude_start(fido_dir)
+            result = claude_start(fido_dir, claude_client=mock_client)
         assert result == "sess-abc"
 
     def test_returns_empty_when_extract_fails(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            result = claude_start(fido_dir)
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            result = claude_start(fido_dir, claude_client=mock_client)
         assert result == ""
 
     def test_calls_print_prompt_from_file_with_correct_files(
         self, tmp_path: Path
     ) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_start(fido_dir)
-        mock_ppf.assert_called_once_with(
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_start(fido_dir, claude_client=mock_client)
+        mock_client.print_prompt_from_file.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
             "claude-opus-4-6",
@@ -2352,56 +2337,43 @@ class TestClaudeStart:
 
     def test_passes_custom_model(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_start(fido_dir, model="claude-sonnet-4-6")
-        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_start(fido_dir, model="claude-sonnet-4-6", claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_passes_custom_timeout(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_start(fido_dir, timeout=600)
-        assert mock_ppf.call_args[0][3] == 600
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_start(fido_dir, timeout=600, claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][3] == 600
 
     def test_default_model_is_opus(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_start(fido_dir)
-        assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_start(fido_dir, claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-opus-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_start(fido_dir)
-        assert mock_ppf.call_args[0][3] == 300
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_start(fido_dir, claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][3] == 300
 
     def test_passes_output_to_extract_session_id(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         raw = '{"type":"result","session_id":"xyz"}'
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch("kennel.claude.extract_session_id", return_value="xyz") as mock_ext,
-        ):
-            claude_start(fido_dir)
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = raw
+        with patch("kennel.claude.extract_session_id", return_value="xyz") as mock_ext:
+            claude_start(fido_dir, claude_client=mock_client)
         mock_ext.assert_called_once_with(raw)
 
     # ── Session path ──────────────────────────────────────────────────────
@@ -2459,9 +2431,9 @@ class TestClaudeStart:
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
-            claude_start(fido_dir, session=session)
-        mock_ppf.assert_not_called()
+        mock_client = _client()
+        claude_start(fido_dir, session=session, claude_client=mock_client)
+        mock_client.print_prompt_from_file.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -2469,6 +2441,17 @@ class TestClaudeStart:
         claude_start(fido_dir, session=session)
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()
+
+    def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch(
+            "kennel.worker.ClaudeClient",
+            return_value=_client(),
+        ) as mock_cls:
+            mock_cls.return_value.print_prompt_from_file.return_value = ""
+            with patch("kennel.claude.extract_session_id", return_value=""):
+                claude_start(fido_dir)
+            mock_cls.assert_called_once_with()
 
 
 class TestClaudeRun:
@@ -2487,36 +2470,31 @@ class TestClaudeRun:
     def test_start_returns_new_session_id(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         raw = '{"type":"result","session_id":"new-sess"}'
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch(
-                "kennel.claude.extract_session_id",
-                return_value="new-sess",
-            ),
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = raw
+        with patch(
+            "kennel.claude.extract_session_id",
+            return_value="new-sess",
         ):
-            session_id, _ = claude_run(fido_dir)
+            session_id, _ = claude_run(fido_dir, claude_client=mock_client)
         assert session_id == "new-sess"
 
     def test_start_returns_raw_output(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         raw = '{"type":"result","session_id":"s"}'
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch("kennel.claude.extract_session_id", return_value="s"),
-        ):
-            _, output = claude_run(fido_dir)
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = raw
+        with patch("kennel.claude.extract_session_id", return_value="s"):
+            _, output = claude_run(fido_dir, claude_client=mock_client)
         assert output == raw
 
     def test_start_calls_print_prompt_from_file(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_run(fido_dir)
-        mock_ppf.assert_called_once_with(
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_run(fido_dir, claude_client=mock_client)
+        mock_client.print_prompt_from_file.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
             "claude-sonnet-4-6",
@@ -2526,34 +2504,27 @@ class TestClaudeRun:
 
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            session_id, _ = claude_run(fido_dir)
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            session_id, _ = claude_run(fido_dir, claude_client=mock_client)
         assert session_id == ""
 
     def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_run(fido_dir)
-        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_run(fido_dir, claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with (
-            patch(
-                "kennel.worker.claude.print_prompt_from_file", return_value=""
-            ) as mock_ppf,
-            patch("kennel.claude.extract_session_id", return_value=""),
-        ):
-            claude_run(fido_dir)
-        assert mock_ppf.call_args[0][3] == 300
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_run(fido_dir, claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][3] == 300
 
     # ── Session path ──────────────────────────────────────────────────────
 
@@ -2589,9 +2560,9 @@ class TestClaudeRun:
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
-            claude_run(fido_dir, session=session)
-        mock_ppf.assert_not_called()
+        mock_client = _client()
+        claude_run(fido_dir, session=session, claude_client=mock_client)
+        mock_client.print_prompt_from_file.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -2599,6 +2570,17 @@ class TestClaudeRun:
         claude_run(fido_dir, session=session)
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()
+
+    def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with patch(
+            "kennel.worker.ClaudeClient",
+            return_value=_client(),
+        ) as mock_cls:
+            mock_cls.return_value.print_prompt_from_file.return_value = ""
+            with patch("kennel.claude.extract_session_id", return_value=""):
+                claude_run(fido_dir)
+            mock_cls.assert_called_once_with()
 
 
 class TestSanitizeSlug:
@@ -2893,7 +2875,7 @@ class TestWritePrDescription:
         issue=1,
         pr_number=42,
     ):
-        mock_pp = MagicMock(return_value=print_return)
+        mock_cc = _client(print_return)
         return (
             _write_pr_description(
                 gh,
@@ -2902,9 +2884,9 @@ class TestWritePrDescription:
                 issue,
                 task_list or [],
                 existing_body,
-                _print_prompt=mock_pp,
+                claude_client=mock_cc,
             ),
-            mock_pp,
+            mock_cc,
         )
 
     def test_writes_to_github(self) -> None:
@@ -3059,22 +3041,24 @@ class TestWritePrDescription:
             self._call(gh, existing_body="no divider here")
         gh.edit_pr_body.assert_not_called()
 
-    def test_defaults_to_claude_print_prompt(self) -> None:
+    def test_defaults_to_claude_client(self) -> None:
         gh = MagicMock()
-        with patch(
-            "kennel.claude.print_prompt",
-            return_value="<body>Desc.\n\nFixes #1.</body>",
-        ) as mock_pp:
-            _write_pr_description(gh, "owner/repo", 1, 1, [])
-        mock_pp.assert_called_once()
+        with patch("kennel.worker.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = (
+                "<body>Desc.\n\nFixes #42.</body>"
+            )
+            _write_pr_description(gh, "owner/repo", 99, 42, [])
+        MockCls.assert_called_once_with()
 
 
 class TestFindOrCreatePr:
     """Tests for Worker.find_or_create_pr."""
 
-    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+    def _make_worker(
+        self, tmp_path: Path, claude_client: MagicMock | None = None
+    ) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, claude_client=claude_client), gh
 
     def _make_repo_ctx(
         self,
@@ -3133,7 +3117,8 @@ class TestFindOrCreatePr:
         assert "resuming" in caplog.text
 
     def test_open_pr_runs_setup_when_no_tasks(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
@@ -3148,7 +3133,9 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
+        mock_start.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=mock_client
+        )
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3308,13 +3295,14 @@ class TestFindOrCreatePr:
     # --- No PR (new branch) path ---
 
     def test_no_pr_returns_pr_number_and_slug(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "fix-bug"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/55"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
             patch("kennel.worker._write_pr_description"),
@@ -3334,13 +3322,14 @@ class TestFindOrCreatePr:
     def test_no_pr_logs_new_branch(self, tmp_path: Path, caplog) -> None:
         import logging
 
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -3352,7 +3341,9 @@ class TestFindOrCreatePr:
         assert "new branch" in caplog.text
 
     def test_no_pr_calls_setup(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3360,7 +3351,6 @@ class TestFindOrCreatePr:
         mock_start = MagicMock(return_value="s")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", mock_start),
             patch("kennel.worker._write_pr_description"),
@@ -3369,17 +3359,20 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
+        mock_start.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=mock_client
+        )
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt", mock_build),
             patch("kennel.worker.claude_start", return_value="s"),
             patch("kennel.worker._write_pr_description"),
@@ -3391,14 +3384,15 @@ class TestFindOrCreatePr:
         assert f"Work dir: {tmp_path}" in context
 
     def test_no_pr_creates_pr_with_correct_params(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/99"
         fido_dir = self._fido_dir(tmp_path)
         repo_ctx = self._make_repo_ctx(repo="owner/proj", default_branch="main")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -3417,7 +3411,9 @@ class TestFindOrCreatePr:
         )
 
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3429,7 +3425,6 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -3445,7 +3440,9 @@ class TestFindOrCreatePr:
         self, tmp_path: Path
     ) -> None:
         """Always start fresh — delete existing branch before checkout -b."""
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "slug"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3457,7 +3454,6 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -3469,7 +3465,9 @@ class TestFindOrCreatePr:
         assert ["checkout", "-b", "slug", "origin/main"] in git_calls
 
     def test_no_pr_slug_sanitized(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "Add New Feature!"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3481,10 +3479,6 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch(
-                "kennel.worker.claude.generate_branch_name",
-                return_value="Add New Feature!",
-            ),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -3501,12 +3495,13 @@ class TestFindOrCreatePr:
 
     def test_no_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
         """New-PR path: setup produces no tasks → raises RuntimeError, skips PR creation."""
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "fix-bug"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
@@ -3518,13 +3513,14 @@ class TestFindOrCreatePr:
     def test_no_pr_logs_pr_number(self, tmp_path: Path, caplog) -> None:
         import logging
 
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "work"
+        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/42"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.claude.generate_branch_name", return_value="work"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
@@ -4246,7 +4242,9 @@ class TestHandleCi:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
+        mock_cr.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+        )
 
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
         """CI failures have no task entry — no complete call needed."""
@@ -4939,7 +4937,9 @@ class TestHandleThreads:
             patch("kennel.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_cr.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
+        mock_cr.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+        )
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -5701,7 +5701,9 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_run.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
+        mock_run.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+        )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)

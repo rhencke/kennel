@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
+from kennel.claude import ClaudeClient
 from kennel.config import RepoMembership
 from kennel.github import GitHub
-from kennel.prompts import Prompts, rewrite_description_prompt
+from kennel.prompts import Prompts
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -229,6 +230,7 @@ def claude_start(
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: claude.ClaudeSession | None = None,
+    claude_client: ClaudeClient | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
@@ -238,17 +240,19 @@ def claude_start(
     is returned — there is no subprocess session_id to track.
 
     When *session* is ``None`` a fresh subprocess is spawned via
-    ``claude.print_prompt_from_file`` and the session_id extracted from its
-    stream-json output is returned.  Raises ``ClaudeStreamError`` or
+    :meth:`~ClaudeClient.print_prompt_from_file` and the session_id extracted
+    from its stream-json output is returned.  Raises ``ClaudeStreamError`` or
     ``FileNotFoundError`` on subprocess failure — these propagate to the
     worker's crash handler.
     """
     if session is not None:
         _run_session_turn(session, _session_turn_prompt(fido_dir))
         return ""
+    if claude_client is None:
+        claude_client = ClaudeClient()
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = claude.print_prompt_from_file(
+    output = claude_client.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
     return claude.extract_session_id(output)
@@ -307,6 +311,7 @@ def claude_run(
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: claude.ClaudeSession | None = None,
+    claude_client: ClaudeClient | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
@@ -324,9 +329,11 @@ def claude_run(
     if session is not None:
         _run_session_turn(session, _session_turn_prompt(fido_dir))
         return "", ""
+    if claude_client is None:
+        claude_client = ClaudeClient()
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = claude.print_prompt_from_file(
+    output = claude_client.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
     new_session_id = claude.extract_session_id(output)
@@ -670,7 +677,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    _print_prompt: Callable[..., str] | None = None,
+    claude_client: ClaudeClient | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -684,8 +691,8 @@ def _write_pr_description(
     ``---`` divider (rewrite precondition) or when Opus returns no
     ``<body>``-tagged content.
     """
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
+    if claude_client is None:
+        claude_client = ClaudeClient()
 
     divider = "\n\n---\n\n"
 
@@ -713,8 +720,8 @@ def _write_pr_description(
             queue = "<!-- no tasks yet -->"
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
-    prompt = rewrite_description_prompt(existing_body, task_list)
-    raw = _print_prompt(prompt, "claude-opus-4-6")
+    prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
+    raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
     new_desc = _extract_body(raw)
     if not new_desc:
         raise ValueError(
@@ -751,6 +758,8 @@ class Worker:
         session: claude.ClaudeSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
+        claude_client: ClaudeClient | None = None,
+        prompts: Prompts | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -761,6 +770,21 @@ class Worker:
         self._session: claude.ClaudeSession | None = session
         self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        self._claude_client = (
+            claude_client if claude_client is not None else ClaudeClient()
+        )
+        self._prompts = prompts
+
+    def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
+        """Return the injected Prompts or build one from the persona file."""
+        if self._prompts is not None:
+            return self._prompts
+        persona_path = _sub_dir_fn() / "persona.md"
+        try:
+            persona = persona_path.read_text()
+        except OSError:
+            persona = ""
+        return Prompts(persona)
 
     def resolve_git_dir(
         self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
@@ -906,13 +930,7 @@ class Worker:
         session), logs and returns — status is best-effort and callers should
         not block on it.
         """
-        persona_path = _sub_dir_fn() / "persona.md"
-        try:
-            persona = persona_path.read_text()
-        except OSError:
-            persona = ""
-
-        prompts = Prompts(persona)
+        prompts = self._get_prompts(_sub_dir_fn=_sub_dir_fn)
 
         ctx = (
             self._registry.status_update()
@@ -1095,7 +1113,12 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                claude_start(fido_dir, cwd=self.work_dir, session=self._session)
+                claude_start(
+                    fido_dir,
+                    cwd=self.work_dir,
+                    session=self._session,
+                    claude_client=self._claude_client,
+                )
                 if not self._tasks.list():
                     raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
             log.info(
@@ -1107,7 +1130,7 @@ class Worker:
             return pr_number, slug
 
         # Generate branch slug via Haiku
-        raw_slug = claude.generate_branch_name(
+        raw_slug = self._claude_client.generate_branch_name(
             "Output ONLY a git branch name: 2-4 lowercase words separated by"
             " hyphens, no issue numbers, summarising this request."
             " No explanation, no punctuation, just the branch name."
@@ -1137,7 +1160,12 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        claude_start(fido_dir, cwd=self.work_dir, session=self._session)
+        claude_start(
+            fido_dir,
+            cwd=self.work_dir,
+            session=self._session,
+            claude_client=self._claude_client,
+        )
 
         if not self._tasks.list():
             raise RuntimeError("setup produced no tasks")
@@ -1156,7 +1184,12 @@ class Worker:
             state["pr_number"] = pr_number
             state["pr_title"] = request
         _write_pr_description(
-            self.gh, repo_ctx.repo, pr_number, issue, self._tasks.list()
+            self.gh,
+            repo_ctx.repo,
+            pr_number,
+            issue,
+            self._tasks.list(),
+            claude_client=self._claude_client,
         )
         task_count = len(
             [t for t in self._tasks.list() if t.get("status") == "pending"]
@@ -1278,7 +1311,12 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
+        session_id, _ = claude_run(
+            fido_dir,
+            cwd=self.work_dir,
+            session=self._session,
+            claude_client=self._claude_client,
+        )
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
@@ -1402,7 +1440,12 @@ class Worker:
             f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = claude_run(fido_dir, cwd=self.work_dir, session=self._session)
+        session_id, _ = claude_run(
+            fido_dir,
+            cwd=self.work_dir,
+            session=self._session,
+            claude_client=self._claude_client,
+        )
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
@@ -1548,6 +1591,7 @@ class Worker:
             fido_dir,
             cwd=self.work_dir,
             session=self._session,
+            claude_client=self._claude_client,
         )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1584,6 +1628,7 @@ class Worker:
                 fido_dir,
                 cwd=self.work_dir,
                 session=self._session,
+                claude_client=self._claude_client,
             )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1678,15 +1723,9 @@ class Worker:
             log.info("issue #%s: pickup comment already exists — skipping", issue)
             return
 
-        persona_path = _sub_dir() / "persona.md"
-        try:
-            persona = persona_path.read_text()
-        except OSError:
-            persona = ""
-
-        prompts = Prompts(persona)
+        prompts = self._get_prompts()
         prompt = prompts.pickup_comment_prompt(issue_title)
-        msg = claude.generate_reply(prompt)
+        msg = self._claude_client.generate_reply(prompt)
         if not msg:
             msg = f"Picking up issue: {issue_title}"
 
