@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from kennel.claude import ClaudeClient
 from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
@@ -59,47 +60,54 @@ def _payload(repo_owner: str = "owner") -> dict:
     }
 
 
+def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+    """Build a mock ClaudeClient with print_prompt configured."""
+    client = MagicMock(spec=ClaudeClient)
+    if side_effect is not None:
+        client.print_prompt.side_effect = side_effect
+    else:
+        client.print_prompt.return_value = return_value
+    return client
+
+
 class TestNeedsMoreContext:
     def test_haiku_yes_returns_true(self) -> None:
-        assert needs_more_context("same", _print_prompt=MagicMock(return_value="YES"))
+        assert needs_more_context("same", claude_client=_client("YES"))
 
     def test_haiku_yes_with_explanation_returns_true(self) -> None:
-        assert needs_more_context(
-            "^", _print_prompt=MagicMock(return_value="YES, this is vague")
-        )
+        assert needs_more_context("^", claude_client=_client("YES, this is vague"))
 
     def test_haiku_no_returns_false(self) -> None:
         assert not needs_more_context(
             "This is a detailed review comment.",
-            _print_prompt=MagicMock(return_value="NO"),
+            claude_client=_client("NO"),
         )
 
     def test_haiku_no_with_explanation_returns_false(self) -> None:
         assert not needs_more_context(
             "Please rename this variable to be more descriptive.",
-            _print_prompt=MagicMock(return_value="NO, it's clear"),
+            claude_client=_client("NO, it's clear"),
         )
 
     def test_subprocess_exception_returns_false(self) -> None:
-        assert not needs_more_context("ditto", _print_prompt=MagicMock(return_value=""))
+        assert not needs_more_context("ditto", claude_client=_client(""))
 
     def test_timeout_returns_false(self) -> None:
-        assert not needs_more_context("same", _print_prompt=MagicMock(return_value=""))
+        assert not needs_more_context("same", claude_client=_client(""))
 
     def test_empty_output_returns_false(self) -> None:
-        assert not needs_more_context(
-            "here too", _print_prompt=MagicMock(return_value="")
-        )
+        assert not needs_more_context("here too", claude_client=_client(""))
 
     def test_uses_haiku_model(self) -> None:
-        mock_pp = MagicMock(return_value="YES")
-        needs_more_context("same", _print_prompt=mock_pp)
-        assert mock_pp.call_args.args[1] == "claude-haiku-4-5"
+        client = _client("YES")
+        needs_more_context("same", claude_client=client)
+        assert client.print_prompt.call_args.args[1] == "claude-haiku-4-5"
 
-    def test_defaults_to_claude_print_prompt(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="NO") as mock_pp:
+    def test_defaults_to_claude_client(self) -> None:
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = "NO"
             result = needs_more_context("some comment")
-        mock_pp.assert_called_once()
+        MockCls.assert_called_once_with()
         assert result is False
 
 
@@ -368,56 +376,57 @@ class TestCommentLock:
 
 class TestSummarizeAsActionItem:
     def test_returns_model_result(self) -> None:
-        pp = MagicMock(return_value="add logging to streamed sub-Claude output")
+        client = _client("add logging to streamed sub-Claude output")
         result = _summarize_as_action_item(
-            "Ensure we log at that level too.", _print_prompt=pp
+            "Ensure we log at that level too.", claude_client=client
         )
         assert result == "add logging to streamed sub-Claude output"
 
     def test_empty_result_raises(self) -> None:
-        pp = MagicMock(return_value="")
+        client = _client("")
         with pytest.raises(ValueError, match="_summarize_as_action_item"):
-            _summarize_as_action_item("short comment", _print_prompt=pp)
+            _summarize_as_action_item("short comment", claude_client=client)
 
     def test_strips_whitespace_from_result(self) -> None:
-        pp = MagicMock(return_value="  add tests  ")
-        result = _summarize_as_action_item("add tests please", _print_prompt=pp)
+        client = _client("  add tests  ")
+        result = _summarize_as_action_item("add tests please", claude_client=client)
         assert result == "add tests"
 
-    def test_defaults_to_claude_print_prompt(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="add tests") as mock_pp:
+    def test_defaults_to_claude_client(self) -> None:
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = "add tests"
             result = _summarize_as_action_item("add some tests")
-        mock_pp.assert_called_once()
+        MockCls.assert_called_once_with()
         assert result == "add tests"
 
     def test_short_result_returned_without_retry(self) -> None:
         short_title = "add unit tests"
-        pp = MagicMock(return_value=short_title)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        client = _client(short_title)
+        result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == short_title
-        pp.assert_called_once()  # no retry needed
+        client.print_prompt.assert_called_once()  # no retry needed
 
     def test_retries_when_result_too_long(self) -> None:
         long_title = "a" * 81
         short_title = "add tests"
-        pp = MagicMock(side_effect=[long_title, short_title])
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        client = _client(side_effect=[long_title, short_title])
+        result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == short_title
-        assert pp.call_count == 2
+        assert client.print_prompt.call_count == 2
 
     def test_retries_up_to_three_times_then_truncates(self) -> None:
         long_title = "a" * 81
-        pp = MagicMock(return_value=long_title)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        client = _client(long_title)
+        result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == long_title[:80]
-        assert pp.call_count == 4  # 1 initial + 3 retries
+        assert client.print_prompt.call_count == 4  # 1 initial + 3 retries
 
     def test_stops_retrying_once_short_enough(self) -> None:
         titles = ["a" * 81, "b" * 81, "short title"]
-        pp = MagicMock(side_effect=titles)
-        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        client = _client(side_effect=titles)
+        result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == "short title"
-        assert pp.call_count == 3  # 1 initial + 2 retries
+        assert client.print_prompt.call_count == 3  # 1 initial + 2 retries
 
 
 class TestTriage:
@@ -425,20 +434,20 @@ class TestTriage:
         cat, titles = _triage(
             "please add tests",
             is_bot=False,
-            _print_prompt=MagicMock(return_value="ACT: add tests"),
+            claude_client=_client("ACT: add tests"),
         )
         assert cat == "ACT"
         assert titles == ["add tests"]
 
     def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=False, _print_prompt=pp)
+        client = _client(side_effect=["", "implement the thing"])
+        cat, titles = _triage("do stuff", is_bot=False, claude_client=client)
         assert cat == "ACT"
         assert titles == ["implement the thing"]
 
     def test_fallback_for_bot(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=True, _print_prompt=pp)
+        client = _client(side_effect=["", "implement the thing"])
+        cat, titles = _triage("do stuff", is_bot=True, claude_client=client)
         assert cat == "DO"
         assert titles == ["implement the thing"]
 
@@ -448,25 +457,25 @@ class TestTriage:
             "nit comment",
             is_bot=False,
             context=ctx,
-            _print_prompt=MagicMock(return_value="DEFER: out of scope"),
+            claude_client=_client("DEFER: out of scope"),
         )
         assert cat == "DEFER"
 
     def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["WEIRD: something", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
+        client = _client(side_effect=["WEIRD: something", "do the thing"])
+        cat, titles = _triage("hi", is_bot=False, claude_client=client)
         assert cat == "ACT"
         assert titles == ["do the thing"]
 
     def test_timeout_falls_back(self, tmp_path: Path) -> None:
-        pp = MagicMock(side_effect=["", "do the thing"])
-        cat, titles = _triage("hi", is_bot=True, _print_prompt=pp)
+        client = _client(side_effect=["", "do the thing"])
+        cat, titles = _triage("hi", is_bot=True, claude_client=client)
         assert cat == "DO"
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
-        pp = MagicMock(side_effect=["TASK: add caching", "add result caching"])
-        cat, titles = _triage("cache results", is_bot=True, _print_prompt=pp)
+        client = _client(side_effect=["TASK: add caching", "add result caching"])
+        cat, titles = _triage("cache results", is_bot=True, claude_client=client)
         assert cat == "DO"
         assert titles == ["add result caching"]
 
@@ -478,15 +487,18 @@ class TestTriage:
             captured["prompt"] = prompt
             return "DO: implement feature"
 
-        cat, _ = _triage("implement feature", is_bot=True, _print_prompt=fake_pp)
+        cat, _ = _triage(
+            "implement feature", is_bot=True, claude_client=_client(side_effect=fake_pp)
+        )
         assert cat == "DO"
         assert "DO" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
 
-    def test_defaults_to_claude_print_prompt(self) -> None:
-        with patch("kennel.claude.print_prompt", return_value="ACT: do it") as mock_pp:
+    def test_defaults_to_claude_client(self) -> None:
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = "ACT: do it"
             cat, titles = _triage("do it", is_bot=False)
-        mock_pp.assert_called_once()
+        MockCls.assert_called_once_with()
         assert cat == "ACT"
 
     def test_multiple_act_lines_returns_all_titles(self) -> None:
@@ -494,7 +506,7 @@ class TestTriage:
         cat, titles = _triage(
             "please add tests and docs",
             is_bot=False,
-            _print_prompt=MagicMock(return_value=response),
+            claude_client=_client(response),
         )
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
@@ -505,15 +517,15 @@ class TestTriage:
         cat, titles = _triage(
             "comment",
             is_bot=False,
-            _print_prompt=MagicMock(return_value=response),
+            claude_client=_client(response),
         )
         assert cat == "ACT"
         assert titles == ["add tests"]
 
     def test_zero_act_tasks_falls_back(self) -> None:
         """ACT with empty title is treated as parse failure → fallback."""
-        pp = MagicMock(side_effect=["ACT: ", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, _print_prompt=pp)
+        client = _client(side_effect=["ACT: ", "do the thing"])
+        cat, titles = _triage("hi", is_bot=False, claude_client=client)
         # empty title → stripped to "" → falsy → no titles collected → fallback
         assert cat == "ACT"
         assert titles == ["do the thing"]
@@ -524,7 +536,7 @@ class TestTriage:
         cat, titles = _triage(
             "add tests",
             is_bot=False,
-            _print_prompt=MagicMock(return_value=response),
+            claude_client=_client(response),
         )
         assert cat == "ACT"
         assert titles == ["add unit tests"]
@@ -551,7 +563,7 @@ class TestMaybeReact:
             "owner/repo",
             cfg,
             mock_gh,
-            _print_prompt=MagicMock(return_value="heart"),
+            claude_client=_client("heart"),
         )
         mock_gh.add_reaction.assert_called_once_with("owner/repo", "pulls", 99, "heart")
 
@@ -565,7 +577,7 @@ class TestMaybeReact:
             "owner/repo",
             cfg,
             mock_gh,
-            _print_prompt=MagicMock(return_value="NONE"),
+            claude_client=_client("NONE"),
         )
         mock_gh.add_reaction.assert_not_called()
 
@@ -578,7 +590,7 @@ class TestMaybeReact:
             "owner/repo",
             cfg,
             MagicMock(),
-            _print_prompt=MagicMock(return_value=""),
+            claude_client=_client(""),
         )
 
     def test_file_not_found_warns_and_returns(self, tmp_path: Path) -> None:
@@ -590,7 +602,7 @@ class TestMaybeReact:
             "owner/repo",
             cfg,
             MagicMock(),
-            _print_prompt=MagicMock(return_value=""),
+            claude_client=_client(""),
         )
 
     def test_reads_persona_if_present(self, tmp_path: Path) -> None:
@@ -618,15 +630,16 @@ class TestMaybeReact:
             "owner/repo",
             cfg,
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert "you are fido" in captured.get("prompt", "")
 
-    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+    def test_defaults_to_claude_client(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.claude.print_prompt", return_value="NONE") as mock_pp:
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = "NONE"
             maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
-        mock_pp.assert_called_once()
+        MockCls.assert_called_once_with()
 
 
 class TestReplyToComment:
@@ -689,7 +702,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
@@ -715,7 +728,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
 
@@ -740,7 +753,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ANSWER"
 
@@ -768,7 +781,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "DO"
         assert titles == ["Cache results for performance"]
@@ -797,7 +810,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
@@ -827,7 +840,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "DUMP"
 
@@ -858,7 +871,7 @@ class TestReplyToComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
         mock_gh.reply_to_review_comment.assert_not_called()
 
@@ -886,7 +899,7 @@ class TestReplyToComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 MagicMock(),
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
@@ -935,7 +948,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
 
@@ -963,7 +976,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
         # Title comes from _summarize_as_action_item(root_body), not multi-item triage
@@ -1006,7 +1019,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
         # Title derived from root comment, not the "Woof" reply
@@ -1052,7 +1065,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
         # Title always comes from _summarize_as_action_item(root_body), even when
@@ -1094,7 +1107,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
         # _summarize_as_action_item must not be called for non-task categories
@@ -1132,7 +1145,7 @@ class TestReplyToReview:
         )
         mock_gh = MagicMock()
         reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), mock_gh, _print_prompt=MagicMock()
+            action, cfg, self._repo_cfg(tmp_path), mock_gh, claude_client=_client()
         )
         # Doesn't fetch, doesn't post — no GitHub side effects at all.
         mock_gh.get_review_comments.assert_not_called()
@@ -1180,7 +1193,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
 
@@ -1197,7 +1210,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
 
@@ -1214,7 +1227,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ANSWER"
 
@@ -1231,7 +1244,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "DUMP"
 
@@ -1251,7 +1264,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
@@ -1280,7 +1293,7 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
         mock_gh.comment_issue.assert_not_called()
 
@@ -1298,7 +1311,7 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 MagicMock(),
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
     def test_post_exception_propagates(self, tmp_path: Path) -> None:
@@ -1324,7 +1337,7 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
@@ -1346,11 +1359,11 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
 
-    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+    def test_defaults_to_claude_client(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = self._action()
 
@@ -1359,11 +1372,12 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        with patch("kennel.claude.print_prompt", side_effect=fake_pp) as mock_pp:
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.side_effect = fake_pp
             cat, titles = reply_to_issue_comment(
                 action, cfg, self._repo_cfg(tmp_path), MagicMock()
             )
-        assert mock_pp.called
+        MockCls.assert_called_once_with()
         assert cat == "ACT"
 
     def test_includes_conversation_context_in_triage(self, tmp_path: Path) -> None:
@@ -1389,7 +1403,7 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
         assert cat == "ACT"
         mock_gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
@@ -1415,7 +1429,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
 
@@ -1433,7 +1447,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            _print_prompt=fake_pp,
+            claude_client=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
@@ -2267,7 +2281,9 @@ class TestReorderTasksBackground:
         }
         with patch("kennel.events._notify_thread_change") as mock_notify:
             on_changes([change])
-        mock_notify.assert_called_once_with(change, self._cfg(tmp_path), mock_gh)
+        mock_notify.assert_called_once_with(
+            change, self._cfg(tmp_path), mock_gh, claude_client=None, prompts=None
+        )
 
     def test_on_inprogress_affected_aborts_worker_via_registry(
         self, tmp_path: Path
@@ -2334,10 +2350,10 @@ class TestReorderTasksBackground:
         args, kwargs = rewrite_calls[0]
         assert args[0] == tmp_path
 
-    def test_on_done_passes_print_prompt_to_rewrite_fn(self, tmp_path: Path) -> None:
+    def test_on_done_passes_claude_client_to_rewrite_fn(self, tmp_path: Path) -> None:
         started: list = []
         rewrite_calls: list = []
-        fake_pp = MagicMock()
+        fake_client = MagicMock()
         calls, mock_reorder = self._capture_reorder_calls()
 
         def mock_rewrite(*a, **kw):
@@ -2350,14 +2366,14 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _rewrite_fn=mock_rewrite,
-            _print_prompt=fake_pp,
+            claude_client=fake_client,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
         on_done()
-        assert rewrite_calls[0].get("_print_prompt") is fake_pp
+        assert rewrite_calls[0].get("claude_client") is fake_client
 
     def test_coalesces_when_already_running(self, tmp_path: Path) -> None:
         """Second call while first is running marks pending, does not spawn thread."""
@@ -2559,9 +2575,7 @@ class TestNotifyThreadChange:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Noted!")
-        )
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client("Noted!"))
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Noted!")
 
     def test_modified_posts_comment(self, tmp_path: Path) -> None:
@@ -2573,9 +2587,7 @@ class TestNotifyThreadChange:
             "new_title": "Updated title",
             "new_description": "",
         }
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Updated!")
-        )
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client("Updated!"))
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Updated!")
 
     def test_missing_thread_skips_comment(self, tmp_path: Path) -> None:
@@ -2584,7 +2596,7 @@ class TestNotifyThreadChange:
         task = self._task()
         task["thread"] = {}
         change = {"task": task, "kind": "completed"}
-        _notify_thread_change(change, cfg, mock_gh, _print_prompt=MagicMock())
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client())
         mock_gh.comment_issue.assert_not_called()
 
     def test_empty_opus_raises_for_completed(self, tmp_path: Path) -> None:
@@ -2592,9 +2604,7 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
         with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(
-                change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
-            )
+            _notify_thread_change(change, cfg, mock_gh, claude_client=_client(""))
 
     def test_empty_opus_raises_for_modified(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2606,9 +2616,7 @@ class TestNotifyThreadChange:
             "new_description": "",
         }
         with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(
-                change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
-            )
+            _notify_thread_change(change, cfg, mock_gh, claude_client=_client(""))
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2620,7 +2628,7 @@ class TestNotifyThreadChange:
             change,
             cfg,
             mock_gh,
-            _print_prompt=MagicMock(return_value="In-thread reply"),
+            claude_client=_client("In-thread reply"),
         )
         mock_gh.reply_to_review_comment.assert_called_once_with(
             "owner/repo", 42, "In-thread reply", 999
@@ -2635,9 +2643,7 @@ class TestNotifyThreadChange:
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
         # Should not raise
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="ok")
-        )
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client("ok"))
 
     def test_no_comment_type_defaults_to_issue_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2645,9 +2651,7 @@ class TestNotifyThreadChange:
         task = self._task()
         del task["thread"]["comment_type"]
         change = {"task": task, "kind": "completed"}
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Fallback")
-        )
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client("Fallback"))
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Fallback")
         mock_gh.reply_to_review_comment.assert_not_called()
 
@@ -2660,7 +2664,9 @@ class TestNotifyThreadChange:
             return "ok"
 
         change = {"task": self._task(), "kind": "completed"}
-        _notify_thread_change(change, cfg, MagicMock(), _print_prompt=fake_pp)
+        _notify_thread_change(
+            change, cfg, MagicMock(), claude_client=_client(side_effect=fake_pp)
+        )
         assert "alice" in captured_prompt[0]
 
     def test_comment_issue_exception_does_not_raise(self, tmp_path: Path) -> None:
@@ -2669,16 +2675,16 @@ class TestNotifyThreadChange:
         mock_gh.comment_issue.side_effect = RuntimeError("api error")
         change = {"task": self._task(), "kind": "completed"}
         # Should not raise
-        _notify_thread_change(
-            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="ok")
-        )
+        _notify_thread_change(change, cfg, mock_gh, claude_client=_client("ok"))
 
-    def test_default_print_prompt_uses_claude(self, tmp_path: Path) -> None:
+    def test_default_claude_client_used(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        with patch("kennel.events.claude.print_prompt", return_value="Auto reply"):
+        with patch("kennel.events.ClaudeClient") as MockCls:
+            MockCls.return_value.print_prompt.return_value = "Auto reply"
             _notify_thread_change(change, cfg, mock_gh)
+        MockCls.assert_called_once_with()
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
 
 
@@ -2862,7 +2868,7 @@ class TestMaybeReactGhException:
             "owner/repo",
             cfg,
             mock_gh,
-            _print_prompt=MagicMock(return_value="heart"),
+            claude_client=_client("heart"),
         )  # must not raise
 
 
@@ -2903,7 +2909,7 @@ class TestReplyToCommentElseBranch:
                 cfg,
                 self._repo_cfg(tmp_path),
                 MagicMock(),
-                _print_prompt=MagicMock(return_value="I'll look into this."),
+                claude_client=_client("I'll look into this."),
             )
         assert cat == "UNKNOWN_CAT"
 
@@ -2932,7 +2938,7 @@ class TestReplyToCommentElseBranch:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
 
@@ -2964,7 +2970,9 @@ class TestReplyToCommentTerseEnrichment:
         )
         captured_context: dict = {}
 
-        def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
+        def fake_triage(
+            body, is_bot, context=None, *, claude_client=None, prompts=None
+        ):
             if context is not None:
                 captured_context.update(context)
             return ("ACT", ["handle same comment"])
@@ -2987,7 +2995,7 @@ class TestReplyToCommentTerseEnrichment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=MagicMock(return_value="On it!"),
+                claude_client=_client("On it!"),
             )
 
         mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
@@ -3016,7 +3024,7 @@ class TestReplyToCommentTerseEnrichment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
         mock_gh.fetch_sibling_threads.assert_not_called()
@@ -3044,7 +3052,7 @@ class TestReplyToCommentTerseEnrichment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=fake_pp,
+                claude_client=_client(side_effect=fake_pp),
             )
 
         assert cat == "ACT"
@@ -3061,7 +3069,9 @@ class TestReplyToCommentTerseEnrichment:
         )
         captured_context: dict = {}
 
-        def fake_triage(body, is_bot, context=None, *, _print_prompt=None):
+        def fake_triage(
+            body, is_bot, context=None, *, claude_client=None, prompts=None
+        ):
             if context is not None:
                 captured_context.update(context)
             return ("ACT", ["check caret comment"])
@@ -3078,7 +3088,7 @@ class TestReplyToCommentTerseEnrichment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                _print_prompt=MagicMock(return_value="On it!"),
+                claude_client=_client("On it!"),
             )
 
         assert "sibling_threads" not in captured_context
@@ -3117,7 +3127,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(),
+            claude_client=_client(),
             _state=self._mock_state(issue=None),
         )
         mock_gh.edit_pr_body.assert_not_called()
@@ -3129,7 +3139,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(),
+                claude_client=_client(),
                 _state=self._mock_state(),
             )
         mock_gh.edit_pr_body.assert_not_called()
@@ -3140,7 +3150,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(),
+            claude_client=_client(),
             _state=self._mock_state(),
         )
         mock_gh.edit_pr_body.assert_not_called()
@@ -3151,7 +3161,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(),
+            claude_client=_client(),
             _state=self._mock_state(),
         )
         mock_gh.edit_pr_body.assert_not_called()
@@ -3163,7 +3173,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(),
+                claude_client=_client(),
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
@@ -3177,7 +3187,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(),
+                claude_client=_client(),
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
@@ -3189,7 +3199,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(return_value=""),
+                claude_client=_client(""),
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
@@ -3200,9 +3210,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New description.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>New description.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
@@ -3215,9 +3223,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>Updated description.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>Updated description.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
@@ -3231,9 +3237,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>Fresh desc.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>Fresh desc.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
         )
@@ -3249,26 +3253,22 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(
-                    return_value="<body>New desc.\n\nFixes #42.</body>"
-                ),
+                claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
 
-    def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
+    def test_defaults_to_none_claude_client(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with patch(
-            "kennel.claude.print_prompt",
-            return_value="<body>Desc.\n\nFixes #42.</body>",
-        ) as mock_pp:
+        with patch("kennel.worker._write_pr_description") as mock_write:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
-        mock_pp.assert_called_once()
+        mock_write.assert_called_once()
+        assert mock_write.call_args.kwargs.get("_print_prompt") is None
 
     def test_defaults_to_state(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
@@ -3277,7 +3277,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(),
+                claude_client=_client(),
                 _tasks=self._mock_tasks(),
             )
         mock_state_cls.assert_called_once_with(tmp_path / ".git" / "fido")
@@ -3292,9 +3292,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New desc.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3316,9 +3314,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New desc.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=tasks,
         )
@@ -3339,9 +3335,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New desc.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=tasks,
             _max_retries=3,
@@ -3355,9 +3349,7 @@ class TestRewritePrDescription:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
-                _print_prompt=MagicMock(
-                    return_value="<body>New desc.\n\nFixes #42.</body>"
-                ),
+                claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
                 _state=self._mock_state(),
                 _tasks=self._mock_tasks(),
             )
@@ -3378,9 +3370,7 @@ class TestRewritePrDescription:
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
-            _print_prompt=MagicMock(
-                return_value="<body>New desc.\n\nFixes #42.</body>"
-            ),
+            claude_client=_client("<body>New desc.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
             _tasks=tasks,
         )
