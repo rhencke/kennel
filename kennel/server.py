@@ -663,6 +663,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "claude_talker": _serialize_talker(
                             claude.get_talker(a.repo_name)
                         ),
+                        "rescoping": self.registry.is_rescoping(a.repo_name),
                     }
                 )
             body = json.dumps(activities).encode()

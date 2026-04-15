@@ -862,6 +862,7 @@ class TestCollect:
         worker_uptime_seconds: int | None = None,
         webhook_activities: list | None = None,
         session_owner: str | None = None,
+        rescoping: bool = False,
     ) -> dict:
         return {
             "what": what,
@@ -871,6 +872,7 @@ class TestCollect:
             "worker_uptime_seconds": worker_uptime_seconds,
             "webhook_activities": webhook_activities or [],
             "session_owner": session_owner,
+            "rescoping": rescoping,
         }
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
@@ -930,6 +932,7 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             claude_talker=None,
+            rescoping=False,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -964,6 +967,7 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             claude_talker=None,
+            rescoping=False,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -991,6 +995,7 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             claude_talker=None,
+            rescoping=False,
         )
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
@@ -1066,7 +1071,44 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             claude_talker=None,
+            rescoping=False,
         )
+
+    def test_passes_rescoping_true_to_repo_status(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch(
+                "kennel.status._fetch_activities",
+                return_value={"owner/repo": self._activity_info(rescoping=True)},
+            ),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        kwargs = mock_rs.call_args.kwargs
+        assert kwargs["rescoping"] is True
+
+    def test_rescoping_false_when_no_activity_info(self, tmp_path: Path) -> None:
+        """Repos with no activity entry (unknown to the live server) get rescoping=False."""
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=0),
+            patch("kennel.status._port_from_pid", return_value=9000),
+            patch("kennel.status._fetch_activities", return_value={}),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        kwargs = mock_rs.call_args.kwargs
+        assert kwargs["rescoping"] is False
 
 
 class TestFormatStatus:
@@ -1138,6 +1180,31 @@ class TestFormatStatus:
         output = format_status(status)
         assert "Issue:  #42 — Add widget" in output
         assert "Worker: task 3/3 — Do the thing" in output
+
+    def test_task_count_shows_question_mark_when_rescoping(self) -> None:
+        repo = self._repo(
+            issue=1,
+            current_task="Reorder spec",
+            task_number=2,
+            task_total=5,
+            rescoping=True,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "task 2/5?" in output
+
+    def test_task_count_no_question_mark_when_not_rescoping(self) -> None:
+        repo = self._repo(
+            issue=1,
+            current_task="Do stuff",
+            task_number=2,
+            task_total=5,
+            rescoping=False,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "task 2/5" in output
+        assert "task 2/5?" not in output
 
     def test_repo_issue_without_title(self) -> None:
         repo = self._repo(issue=5, pending=2, completed=0, task_number=1, task_total=2)

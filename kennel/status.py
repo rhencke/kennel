@@ -68,6 +68,7 @@ class RepoStatus:
     session_owner: str | None = None
     session_alive: bool = False
     claude_talker: ClaudeTalkerInfo | None = None
+    rescoping: bool = False  # True while a background Opus reorder is in flight
 
 
 @dataclass
@@ -339,6 +340,7 @@ def repo_status(
     session_alive: bool = False,
     session_pid: int | None = None,
     claude_talker: ClaudeTalkerInfo | None = None,
+    rescoping: bool = False,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -368,6 +370,7 @@ def repo_status(
             session_owner=session_owner,
             session_alive=session_alive,
             claude_talker=claude_talker,
+            rescoping=rescoping,
         )
 
     fido_dir = git_dir / "fido"
@@ -419,6 +422,7 @@ def repo_status(
         session_owner=session_owner,
         session_alive=session_alive,
         claude_talker=claude_talker,
+        rescoping=rescoping,
     )
 
 
@@ -475,6 +479,7 @@ def collect() -> KennelStatus:
                 session_alive=bool(info.get("session_alive")) if info else False,
                 session_pid=session_pid_val,
                 claude_talker=talker_info,
+                rescoping=bool(info.get("rescoping")) if info else False,
             )
         )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
@@ -607,8 +612,9 @@ def _worker_thread_state(repo: RepoStatus) -> str:
     Never shows webhook-thread activity — that's surfaced separately.
     """
     if repo.task_number is not None and repo.task_total is not None:
+        uncertainty = "?" if repo.rescoping else ""
         suffix = f" — {repo.current_task}" if repo.current_task else ""
-        return f"{color(BOLD, f'task {repo.task_number}/{repo.task_total}')}{suffix}"
+        return f"{color(BOLD, f'task {repo.task_number}/{repo.task_total}{uncertainty}')}{suffix}"
     if repo.current_task is not None:
         return f"task: {repo.current_task}"
     what = (repo.worker_what or "").strip()
