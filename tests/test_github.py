@@ -273,6 +273,35 @@ class TestGitHubClass:
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/7/comments" in url
 
+    def test_get_pull_comment(self) -> None:
+        gh, mock_s = self._gh()
+        comment = {"id": 10, "body": "hi"}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = comment
+        mock_s.get.return_value = mock_resp
+        assert gh.get_pull_comment("o/r", 10) == comment
+
+    def test_get_pull_comment_returns_none_on_404(self) -> None:
+        import requests
+
+        gh, mock_s = self._gh()
+        response = MagicMock(status_code=404)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_s.get.return_value = mock_resp
+        assert gh.get_pull_comment("o/r", 10) is None
+
+    def test_get_pull_comment_reraises_non_404(self) -> None:
+        import requests
+
+        gh, mock_s = self._gh()
+        response = MagicMock(status_code=500)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_s.get.return_value = mock_resp
+        with pytest.raises(requests.HTTPError):
+            gh.get_pull_comment("o/r", 10)
+
     def test_get_review_comments(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
@@ -1093,6 +1122,35 @@ class TestGitHubClass:
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/issues/9/comments" in url
         assert result == comments
+
+    def test_get_issue_comment(self) -> None:
+        gh, mock_s = self._gh()
+        comment = {"id": 9, "body": "hi"}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = comment
+        mock_s.get.return_value = mock_resp
+        assert gh.get_issue_comment("o/r", 9) == comment
+
+    def test_get_issue_comment_returns_none_on_404(self) -> None:
+        import requests
+
+        gh, mock_s = self._gh()
+        response = MagicMock(status_code=404)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_s.get.return_value = mock_resp
+        assert gh.get_issue_comment("o/r", 9) is None
+
+    def test_get_issue_comment_reraises_non_404(self) -> None:
+        import requests
+
+        gh, mock_s = self._gh()
+        response = MagicMock(status_code=500)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_s.get.return_value = mock_resp
+        with pytest.raises(requests.HTTPError):
+            gh.get_issue_comment("o/r", 9)
 
     def test_get_issue_events(self) -> None:
         gh, mock_s = self._gh()

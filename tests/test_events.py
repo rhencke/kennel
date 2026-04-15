@@ -24,10 +24,12 @@ from kennel.events import (
     launch_worker,
     maybe_react,
     needs_more_context,
+    recover_reply_promises,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
 )
+from kennel.reply_promises import add_reply_promise
 
 
 def _config(tmp_path: Path) -> Config:
@@ -109,6 +111,502 @@ class TestNeedsMoreContext:
             result = needs_more_context("some comment")
         MockCls.assert_called_once_with()
         assert result is False
+
+
+class TestRecoverReplyPromises:
+    def test_returns_false_when_no_promises(self, tmp_path: Path) -> None:
+        assert not recover_reply_promises(
+            tmp_path / ".git" / "fido",
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            MagicMock(),
+            7,
+        )
+
+    def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+            "user": {"login": "owner"},
+        }
+        with (
+            patch(
+                "kennel.events.reply_to_issue_comment",
+                return_value=("ACT", ["task one"]),
+            ),
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            result = recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert result is True
+        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+        mock_create_task.assert_called_once()
+        assert mock_create_task.call_args.args[0] == "task one"
+        assert mock_create_task.call_args.kwargs["thread"] == {
+            "repo": "owner/repo",
+            "pr": 7,
+            "comment_id": 302,
+            "url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "author": "owner",
+            "comment_type": "issues",
+        }
+
+    def test_deleted_comment_promise_is_removed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "pulls", 205)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_pull_comment.return_value = None
+        assert not recover_reply_promises(
+            fido_dir,
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            7,
+        )
+        assert not (fido_dir / "reply-promises" / "pulls-205").exists()
+
+    def test_deleted_issue_comment_promise_is_removed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = None
+        assert not recover_reply_promises(
+            fido_dir,
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            7,
+        )
+        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+
+    def test_other_pr_promise_is_left_for_later(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "pulls", 205)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_pull_comment.return_value = {
+            "id": 205,
+            "body": "please fix",
+            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/8",
+            "html_url": "https://github.com/owner/repo/pull/8#discussion_r205",
+            "user": {"login": "owner"},
+        }
+        assert not recover_reply_promises(
+            fido_dir,
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            7,
+        )
+        assert (fido_dir / "reply-promises" / "pulls-205").exists()
+
+    def test_other_pr_issue_promise_is_left_for_later(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/8",
+            "html_url": "https://github.com/owner/repo/pull/8#issuecomment-302",
+            "user": {"login": "owner"},
+        }
+        assert not recover_reply_promises(
+            fido_dir,
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            7,
+        )
+        assert (fido_dir / "reply-promises" / "issues-302").exists()
+
+    def test_issue_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "issue_url": "https://api.github.com/repos/owner/repo/not-an-issue",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "user": {"login": "owner"},
+        }
+        with (
+            pytest.raises(ValueError, match="invalid GitHub API URL"),
+            patch("kennel.events.reply_to_issue_comment") as mock_reply,
+        ):
+            recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        mock_reply.assert_not_called()
+        assert (fido_dir / "reply-promises" / "issues-302").exists()
+
+    def test_pull_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "pulls", 205)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_pull_comment.return_value = {
+            "id": 205,
+            "body": "please fix",
+            "pull_request_url": "https://api.github.com/repos/owner/repo/not-a-pr",
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r205",
+            "user": {"login": "owner"},
+        }
+        with (
+            pytest.raises(ValueError, match="invalid GitHub API URL"),
+            patch("kennel.events.reply_to_comment") as mock_reply,
+        ):
+            recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        mock_reply.assert_not_called()
+        assert (fido_dir / "reply-promises" / "pulls-205").exists()
+
+    def test_defer_recovery_skips_task_creation(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+            "user": {"login": "owner"},
+        }
+        with (
+            patch(
+                "kennel.events.reply_to_issue_comment",
+                return_value=("DEFER", ["later"]),
+            ),
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            result = recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert result is True
+        mock_create_task.assert_not_called()
+        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+
+    def test_issue_recovery_clears_promise_before_task_creation(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        promise_path = add_reply_promise(fido_dir, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+            "user": {"login": "owner"},
+        }
+
+        def fail_after_reply(*args, **kwargs):
+            assert not promise_path.exists()
+            raise RuntimeError("task add failed")
+
+        with (
+            patch(
+                "kennel.events.reply_to_issue_comment",
+                return_value=("ACT", ["task one"]),
+            ),
+            patch("kennel.events.create_task", side_effect=fail_after_reply),
+        ):
+            with pytest.raises(RuntimeError, match="task add failed"):
+                recover_reply_promises(
+                    fido_dir,
+                    _config(tmp_path),
+                    _repo_cfg(tmp_path),
+                    gh,
+                    7,
+                )
+        assert not promise_path.exists()
+
+    def test_coalesces_review_comment_promises_in_same_thread(
+        self, tmp_path: Path
+    ) -> None:
+        import os
+
+        fido_dir = tmp_path / ".git" / "fido"
+        first = add_reply_promise(fido_dir, "pulls", 101)
+        second = add_reply_promise(fido_dir, "pulls", 102)
+        os.utime(first, ns=(1, 1))
+        os.utime(second, ns=(2, 2))
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                101: {
+                    "id": 101,
+                    "body": "first",
+                    "path": "foo.py",
+                    "line": 1,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                    "user": {"login": "owner"},
+                },
+                102: {
+                    "id": 102,
+                    "body": "second",
+                    "path": "foo.py",
+                    "line": 2,
+                    "diff_hunk": "@@ @@",
+                    "in_reply_to_id": 101,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_pull_comment.side_effect = get_pull_comment
+        with (
+            patch(
+                "kennel.events.reply_to_comment",
+                return_value=("DO", ["task a", "task b"]),
+            ) as mock_reply,
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            result = recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert result is True
+        assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
+        assert mock_create_task.call_count == 2
+        assert not any((fido_dir / "reply-promises").iterdir())
+
+    def test_review_recovery_clears_group_promises_before_task_creation(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        first = add_reply_promise(fido_dir, "pulls", 101)
+        second = add_reply_promise(fido_dir, "pulls", 102)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                101: {
+                    "id": 101,
+                    "body": "first",
+                    "path": "foo.py",
+                    "line": 1,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                    "user": {"login": "owner"},
+                },
+                102: {
+                    "id": 102,
+                    "body": "second",
+                    "path": "foo.py",
+                    "line": 2,
+                    "diff_hunk": "@@ @@",
+                    "in_reply_to_id": 101,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_pull_comment.side_effect = get_pull_comment
+
+        def fail_after_reply(*args, **kwargs):
+            assert not first.exists()
+            assert not second.exists()
+            raise RuntimeError("task add failed")
+
+        with (
+            patch("kennel.events.reply_to_comment", return_value=("DO", ["task a"])),
+            patch("kennel.events.create_task", side_effect=fail_after_reply),
+        ):
+            with pytest.raises(RuntimeError, match="task add failed"):
+                recover_reply_promises(
+                    fido_dir,
+                    _config(tmp_path),
+                    _repo_cfg(tmp_path),
+                    gh,
+                    7,
+                )
+        assert not first.exists()
+        assert not second.exists()
+
+    def test_recovery_raises_on_invalid_candidate_in_later_group(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "pulls", 101)
+        add_reply_promise(fido_dir, "pulls", 102)
+        add_reply_promise(fido_dir, "pulls", 201)
+        add_reply_promise(fido_dir, "pulls", 999)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                101: {
+                    "id": 101,
+                    "body": "first",
+                    "path": "foo.py",
+                    "line": 1,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                    "user": {"login": "owner"},
+                },
+                102: {
+                    "id": 102,
+                    "body": "second",
+                    "path": "foo.py",
+                    "line": 2,
+                    "diff_hunk": "@@ @@",
+                    "in_reply_to_id": 101,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                    "user": {"login": "owner"},
+                },
+                201: {
+                    "id": 201,
+                    "body": "third",
+                    "path": "bar.py",
+                    "line": 3,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r201",
+                    "user": {"login": "owner"},
+                },
+                999: {
+                    "id": 999,
+                    "body": "ignored",
+                    "path": "zap.py",
+                    "line": 9,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/not-a-pr",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r999",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_pull_comment.side_effect = get_pull_comment
+        with (
+            patch(
+                "kennel.events.reply_to_comment", return_value=("ANSWER", [])
+            ) as mock_reply,
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            with pytest.raises(ValueError, match="invalid GitHub API URL"):
+                recover_reply_promises(
+                    fido_dir,
+                    _config(tmp_path),
+                    _repo_cfg(tmp_path),
+                    gh,
+                    7,
+                )
+        assert mock_reply.call_count == 0
+        mock_create_task.assert_not_called()
+        assert (fido_dir / "reply-promises" / "pulls-101").exists()
+        assert (fido_dir / "reply-promises" / "pulls-102").exists()
+        assert (fido_dir / "reply-promises" / "pulls-201").exists()
+        assert (fido_dir / "reply-promises" / "pulls-999").exists()
+
+    def test_recovery_skips_handled_candidates_when_processing_later_groups(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        add_reply_promise(fido_dir, "pulls", 101)
+        add_reply_promise(fido_dir, "pulls", 102)
+        add_reply_promise(fido_dir, "pulls", 201)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                101: {
+                    "id": 101,
+                    "body": "first",
+                    "path": "foo.py",
+                    "line": 1,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                    "user": {"login": "owner"},
+                },
+                102: {
+                    "id": 102,
+                    "body": "second",
+                    "path": "foo.py",
+                    "line": 2,
+                    "diff_hunk": "@@ @@",
+                    "in_reply_to_id": 101,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                    "user": {"login": "owner"},
+                },
+                201: {
+                    "id": 201,
+                    "body": "third",
+                    "path": "bar.py",
+                    "line": 3,
+                    "diff_hunk": "@@ @@",
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                    "html_url": "https://github.com/owner/repo/pull/7#discussion_r201",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_pull_comment.side_effect = get_pull_comment
+        with patch(
+            "kennel.events.reply_to_comment", return_value=("ANSWER", [])
+        ) as mock_reply:
+            result = recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert result is True
+        assert mock_reply.call_count == 2
+        assert not any((fido_dir / "reply-promises").iterdir())
 
 
 class TestIsAllowed:

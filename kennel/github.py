@@ -173,6 +173,17 @@ class GitHub:
         """Return all inline review comments on a pull request."""
         return list(self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/comments"))
 
+    def get_pull_comment(
+        self, repo: str, comment_id: int | str
+    ) -> dict[str, Any] | None:
+        """Return one inline review comment by id, or None if it no longer exists."""
+        try:
+            return self._get(f"/repos/{repo}/pulls/comments/{comment_id}")
+        except _requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+
     def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all review-comment threads for a PR as a structured list.
 
@@ -537,6 +548,17 @@ class GitHub:
         return list(
             self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/comments")
         )
+
+    def get_issue_comment(
+        self, repo: str, comment_id: int | str
+    ) -> dict[str, Any] | None:
+        """Return one issue comment by id, or None if it no longer exists."""
+        try:
+            return self._get(f"/repos/{repo}/issues/comments/{comment_id}")
+        except _requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
 
     def get_issue_events(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all events on an issue."""

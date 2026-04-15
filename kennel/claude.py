@@ -346,6 +346,23 @@ class ClaudeStreamError(Exception):
         super().__init__(f"claude exited with code {returncode}")
 
 
+class ClaudeProviderError(RuntimeError):
+    """Raised when Claude reports an API/provider failure for a turn."""
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        status_code: int | None = None,
+        request_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.request_id = request_id
+        self.payload = payload or {}
+        super().__init__(message)
+
+
 # ── Stream-JSON helpers ───────────────────────────────────────────────────────
 
 
@@ -391,6 +408,74 @@ def extract_result_text(output: str) -> str:
             if text:
                 result = text
     return result
+
+
+def _provider_error_from_result_text(text: str) -> ClaudeProviderError | None:
+    """Parse a Claude CLI API error string from ``type=result`` text."""
+    match = re.match(r"^API Error:\s*(\d+)\s+(.*)$", text.strip(), re.DOTALL)
+    if not match:
+        return None
+    status_code = int(match.group(1))
+    tail = match.group(2).strip()
+    payload: dict[str, Any] = {}
+    message = tail
+    request_id = None
+    try:
+        parsed = json.loads(tail)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        payload = parsed
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or tail)
+        request_id_value = parsed.get("request_id")
+        if isinstance(request_id_value, str) and request_id_value:
+            request_id = request_id_value
+    return ClaudeProviderError(
+        message=f"Claude API error {status_code}: {message}",
+        status_code=status_code,
+        request_id=request_id,
+        payload=payload,
+    )
+
+
+def _provider_error_from_event(obj: dict[str, Any]) -> ClaudeProviderError | None:
+    """Return a provider error for a stream-json event when it encodes one."""
+    event_type = obj.get("type")
+    if event_type == "result" and isinstance(obj.get("result"), str):
+        return _provider_error_from_result_text(obj["result"])
+    if event_type != "error":
+        return None
+    error_obj = obj.get("error")
+    if isinstance(error_obj, dict):
+        message = str(error_obj.get("message") or error_obj)
+    else:
+        message = str(error_obj or obj)
+    request_id = obj.get("request_id")
+    return ClaudeProviderError(
+        message=f"Claude API error: {message}",
+        request_id=request_id if isinstance(request_id, str) else None,
+        payload=obj,
+    )
+
+
+def raise_for_provider_error_output(output: str) -> None:
+    """Raise the first provider error encoded in stream-json *output*."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            provider_error = _provider_error_from_result_text(stripped)
+            if provider_error is not None:
+                raise provider_error
+            continue
+        provider_error = _provider_error_from_event(obj)
+        if provider_error is not None:
+            raise provider_error
 
 
 _EMPTY_RETRY_COUNT = 2
@@ -1114,6 +1199,17 @@ class ClaudeSession:
         """
         result_text = ""
         for event in self.iter_events():
+            provider_error = _provider_error_from_event(event)
+            if provider_error is not None:
+                log.error(
+                    "ClaudeSession: provider failure during turn: %s"
+                    " (status=%s, request_id=%s)",
+                    provider_error,
+                    provider_error.status_code,
+                    provider_error.request_id or "—",
+                )
+                self.restart()
+                raise provider_error
             if event.get("type") == "result" and isinstance(event.get("result"), str):
                 result_text = event["result"]
         return result_text
@@ -1265,9 +1361,11 @@ class ClaudeClient:
             str(system_file),
             "--print",
         ]
-        return "".join(
+        output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()
+        raise_for_provider_error_output(output)
+        return output
 
     def resume_session(
         self,
@@ -1291,9 +1389,11 @@ class ClaudeClient:
             session_id,
             "--print",
         ]
-        return "".join(
+        output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()
+        raise_for_provider_error_output(output)
+        return output
 
     # ── Subprocess one-shot helpers ──────────────────────────────────────
 

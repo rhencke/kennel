@@ -11,6 +11,7 @@ from kennel.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
     ClaudeClient,
+    ClaudeProviderError,
     ClaudeSession,
     ClaudeStreamError,
     _active_children,
@@ -21,6 +22,7 @@ from kennel.claude import (
     extract_result_text,
     extract_session_id,
     kill_active_children,
+    raise_for_provider_error_output,
 )
 
 
@@ -1396,7 +1398,29 @@ class TestClaudeSessionConsumeUntilResult:
         lines = [_json.dumps({"type": "error", "error": "something broke"}) + "\n"]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        assert session.consume_until_result() == ""
+        with patch.object(session, "restart") as mock_restart:
+            with pytest.raises(ClaudeProviderError, match="something broke"):
+                session.consume_until_result()
+        mock_restart.assert_called_once_with()
+
+    def test_raises_on_provider_error_result(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps(
+                {
+                    "type": "result",
+                    "result": 'API Error: 500 {"type":"error","message":"Internal server error"}',
+                }
+            )
+            + "\n"
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        with patch.object(session, "restart") as mock_restart:
+            with pytest.raises(ClaudeProviderError, match="500"):
+                session.consume_until_result()
+        mock_restart.assert_called_once_with()
 
     def test_returns_empty_when_result_field_not_a_string(self, tmp_path: Path) -> None:
         import json as _json
@@ -2153,6 +2177,58 @@ class TestClaudeClientPrintPromptFromFile:
         client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6", cwd="/some/dir")
         assert mock_stream.call_args[1]["cwd"] == "/some/dir"
 
+    def test_raises_on_provider_error_output(self, tmp_path: Path) -> None:
+        sys, prompt = self._files(tmp_path)
+        mock_stream = MagicMock(
+            return_value=iter(
+                ['API Error: 500 {"type":"error","message":"Internal server error"}']
+            )
+        )
+        client = ClaudeClient(streaming_runner=mock_stream)
+        with pytest.raises(ClaudeProviderError, match="500"):
+            client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+
+
+class TestRaiseForProviderErrorOutput:
+    def test_parses_plain_text_api_error(self) -> None:
+        with pytest.raises(ClaudeProviderError) as exc_info:
+            raise_for_provider_error_output("API Error: 500 upstream unavailable")
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.request_id is None
+        assert exc_info.value.payload == {}
+        assert "upstream unavailable" in str(exc_info.value)
+
+    def test_parses_result_event_with_json_payload(self) -> None:
+        import json as _json
+
+        output = "\n" + _json.dumps(
+            {
+                "type": "result",
+                "result": 'API Error: 500 {"error":{"message":"Internal server error"},"request_id":"req_123"}',
+            }
+        )
+        with pytest.raises(ClaudeProviderError) as exc_info:
+            raise_for_provider_error_output(output)
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.request_id == "req_123"
+        assert exc_info.value.payload == {
+            "error": {"message": "Internal server error"},
+            "request_id": "req_123",
+        }
+        assert "Internal server error" in str(exc_info.value)
+
+    def test_parses_error_event_dict(self) -> None:
+        import json as _json
+
+        output = _json.dumps(
+            {"type": "error", "error": {"message": "boom"}, "request_id": "req_9"}
+        )
+        with pytest.raises(ClaudeProviderError) as exc_info:
+            raise_for_provider_error_output(output)
+        assert exc_info.value.request_id == "req_9"
+        assert exc_info.value.payload["type"] == "error"
+        assert "boom" in str(exc_info.value)
+
 
 class TestClaudeClientResumeSession:
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
@@ -2183,6 +2259,18 @@ class TestClaudeClientResumeSession:
         assert "--resume" in cmd
         assert "sess-123" in cmd
         assert "--print" in cmd
+
+    def test_raises_on_provider_error_output(self, tmp_path: Path) -> None:
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("continue")
+        mock_stream = MagicMock(
+            return_value=iter(
+                ['API Error: 500 {"type":"error","message":"Internal server error"}']
+            )
+        )
+        client = ClaudeClient(streaming_runner=mock_stream)
+        with pytest.raises(ClaudeProviderError, match="500"):
+            client.resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
 
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"

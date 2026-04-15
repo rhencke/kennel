@@ -685,6 +685,7 @@ class TestWorker:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     # --- create_session / stop_session ---
@@ -823,6 +824,46 @@ class TestWorker:
         ):
             worker.run()
         mock_create.assert_called_once_with()
+
+    def test_run_recovers_reply_promises_before_normal_handlers(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        order: list[str] = []
+
+        def mark_recover(*args, **kwargs):
+            order.append("recover")
+            return True
+
+        def mark_ci(*args, **kwargs):
+            order.append("ci")
+            return False
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch("kennel.events.recover_reply_promises", side_effect=mark_recover),
+            patch.object(worker, "handle_ci", side_effect=mark_ci),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        assert order[:2] == ["recover", "ci"]
 
     def test_run_switches_to_sonnet_after_setup_for_fresh_session(
         self, tmp_path: Path
@@ -3781,6 +3822,7 @@ class TestRunSeedTasksIntegration:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     def test_seed_called_after_find_or_create_pr(self, tmp_path: Path) -> None:
@@ -4348,6 +4390,7 @@ class TestRunHandleCiIntegration:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     def test_handle_ci_called_with_pr_and_slug(self, tmp_path: Path) -> None:
@@ -4993,6 +5036,7 @@ class TestRunThreadsIntegration:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     def test_handle_threads_called_when_review_feedback_passes(
@@ -6312,6 +6356,7 @@ class TestRunExecuteTaskIntegration:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     def test_execute_task_called_when_all_others_return_false(
@@ -7993,6 +8038,7 @@ class TestRunPromoteMergeIntegration:
         repo_ctx.repo = "owner/repo"
         repo_ctx.gh_user = "fido-bot"
         repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
         return repo_ctx
 
     def test_handle_promote_merge_called_when_execute_task_returns_false(

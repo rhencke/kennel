@@ -18,7 +18,7 @@ from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
 from kennel.claude import ClaudeClient
-from kennel.config import RepoMembership
+from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
 from kennel.state import (
@@ -1961,6 +1961,30 @@ class Worker:
                 pr_number, slug = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
+                recovery_repo_cfg = RepoConfig(
+                    name=repo_ctx.repo,
+                    work_dir=self.work_dir,
+                    membership=repo_ctx.membership,
+                )
+                recovery_config = Config(
+                    port=0,
+                    secret=b"",
+                    repos={repo_ctx.repo: recovery_repo_cfg},
+                    allowed_bots=frozenset(),
+                    log_level="WARNING",
+                    sub_dir=_sub_dir(),
+                )
+                from kennel.events import recover_reply_promises
+
+                recovered_promises = recover_reply_promises(
+                    ctx.fido_dir,
+                    recovery_config,
+                    recovery_repo_cfg,
+                    self.gh,
+                    pr_number,
+                    claude_client=self._claude_client,
+                    prompts=self._get_prompts(),
+                )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
                 if session_fresh and self._session is not None:
                     self._session.switch_model("claude-sonnet-4-6")
@@ -1972,8 +1996,11 @@ class Worker:
                 if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
                     self.resolve_addressed_threads(repo_ctx, pr_number)
                     return 1
-                return self.handle_promote_merge(
+                promote_result = self.handle_promote_merge(
                     ctx.fido_dir, repo_ctx, pr_number, slug, issue
+                )
+                return (
+                    1 if recovered_promises and promote_result == 0 else promote_result
                 )
             finally:
                 self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)

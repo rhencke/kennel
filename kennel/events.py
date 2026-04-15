@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kennel import reply_promises
 from kennel.claude import ClaudeClient
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
@@ -37,6 +38,255 @@ class Action:
     thread: dict[str, Any] | None = (
         None  # {repo, pr, comment_id} for task prioritisation
     )
+
+
+def _pr_number_from_api_url(url: str, kind: str) -> int:
+    """Extract a PR/issue number from a GitHub API URL."""
+    pattern = r"/issues/(\d+)$" if kind == "issues" else r"/pulls/(\d+)$"
+    match = re.search(pattern, url)
+    if match is None:
+        raise ValueError(f"invalid GitHub API URL for {kind}: {url!r}")
+    return int(match.group(1))
+
+
+def _build_review_comment_action(
+    repo: str,
+    pr_number: int,
+    pr_title: str,
+    pr_body: str,
+    comment: dict[str, Any],
+    *,
+    comment_body: str | None = None,
+) -> Action:
+    """Rebuild a review-comment Action from live GitHub state."""
+    user = comment["user"]["login"]
+    body = comment_body if comment_body is not None else (comment["body"] or "")
+    is_bot = user.endswith("[bot]")
+    return Action(
+        prompt=(
+            f"Review comment on PR #{pr_number} by {user}"
+            f" ({'bot' if is_bot else 'human/owner'}):\n\n{body}"
+        ),
+        reply_to={
+            "repo": repo,
+            "pr": pr_number,
+            "comment_id": comment["id"],
+            "url": comment["html_url"],
+            "author": user,
+            "comment_type": "pulls",
+        },
+        comment_body=body,
+        is_bot=is_bot,
+        context={
+            "pr_title": pr_title,
+            "pr_body": pr_body,
+            "file": comment["path"],
+            "line": comment["line"],
+            "diff_hunk": comment["diff_hunk"],
+        },
+    )
+
+
+def _build_issue_comment_action(
+    repo: str,
+    pr_number: int,
+    pr_title: str,
+    pr_body: str,
+    comment: dict[str, Any],
+) -> Action:
+    """Rebuild a top-level PR-comment Action from live GitHub state."""
+    user = comment["user"]["login"]
+    body = comment["body"] or ""
+    is_bot = user.endswith("[bot]")
+    comment_id = int(comment["id"])
+    return Action(
+        prompt=f"PR top-level comment on #{pr_number} by {user}:\n\n{body}",
+        reply_to=None,
+        comment_body=body,
+        is_bot=is_bot,
+        context={
+            "pr_title": pr_title,
+            "pr_body": pr_body,
+            "comment_id": comment_id,
+        },
+        thread={
+            "repo": repo,
+            "pr": pr_number,
+            "comment_id": comment_id,
+            "url": comment["html_url"],
+            "author": user,
+            "comment_type": "issues",
+        },
+    )
+
+
+def _apply_reply_result(
+    category: str,
+    titles: list[str],
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    *,
+    thread: dict[str, Any] | None,
+    registry: WorkerRegistry | None,
+) -> None:
+    """Apply ACT/DO titles from a recovered reply just like webhook handling."""
+    if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
+        return
+    for title in titles:
+        create_task(
+            title,
+            config,
+            repo_cfg,
+            gh,
+            thread=thread,
+            registry=registry,
+        )
+
+
+def recover_reply_promises(
+    fido_dir: Path,
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    pr_number: int,
+    *,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
+    registry: WorkerRegistry | None = None,
+) -> bool:
+    """Recover queued webhook replies for the current PR from promise files."""
+    promises = reply_promises.list_reply_promises(fido_dir)
+    if not promises:
+        return False
+
+    pr_issue = gh.view_issue(repo_cfg.name, pr_number)
+    pr_title = pr_issue["title"]
+    pr_body = pr_issue["body"] or ""
+    processed_any = False
+    handled_keys: set[tuple[str, int]] = set()
+    promise_by_key = {
+        (promise.comment_type, promise.comment_id): promise for promise in promises
+    }
+
+    pull_entries: dict[tuple[str, int], tuple[dict[str, Any], int, int]] = {}
+    issue_entries: dict[tuple[str, int], tuple[dict[str, Any], int]] = {}
+
+    for promise in promises:
+        key = (promise.comment_type, promise.comment_id)
+        if promise.comment_type == "pulls":
+            comment = gh.get_pull_comment(repo_cfg.name, promise.comment_id)
+            if comment is None:
+                promise.path.unlink()
+                handled_keys.add(key)
+                continue
+            comment_pr = _pr_number_from_api_url(comment["pull_request_url"], "pulls")
+            root_id = (
+                int(comment["in_reply_to_id"])
+                if "in_reply_to_id" in comment and comment["in_reply_to_id"] is not None
+                else int(comment["id"])
+            )
+            pull_entries[key] = (comment, comment_pr, root_id)
+        else:
+            comment = gh.get_issue_comment(repo_cfg.name, promise.comment_id)
+            if comment is None:
+                promise.path.unlink()
+                handled_keys.add(key)
+                continue
+            comment_pr = _pr_number_from_api_url(comment["issue_url"], "issues")
+            issue_entries[key] = (comment, comment_pr)
+
+    for promise in promises:
+        key = (promise.comment_type, promise.comment_id)
+        if key in handled_keys:
+            continue
+
+        if promise.comment_type == "issues":
+            comment, comment_pr = issue_entries[key]
+            if comment_pr != pr_number:
+                continue
+            action = _build_issue_comment_action(
+                repo_cfg.name, pr_number, pr_title, pr_body, comment
+            )
+            category, titles = reply_to_issue_comment(
+                action,
+                config,
+                repo_cfg,
+                gh,
+                claude_client=claude_client,
+                prompts=prompts,
+            )
+            reply_promises.remove_reply_promise(
+                fido_dir, promise.comment_type, promise.comment_id
+            )
+            handled_keys.add(key)
+            _apply_reply_result(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                gh,
+                thread=action.thread,
+                registry=registry,
+            )
+            processed_any = True
+            continue
+
+        comment, comment_pr, root_id = pull_entries[key]
+        if comment_pr != pr_number:
+            continue
+
+        group: list[tuple[reply_promises.ReplyPromise, dict[str, Any]]] = []
+        for candidate_key, (
+            candidate_comment,
+            candidate_pr,
+            candidate_root_id,
+        ) in pull_entries.items():
+            if candidate_key in handled_keys:
+                continue
+            if candidate_pr == pr_number and candidate_root_id == root_id:
+                group.append((promise_by_key[candidate_key], candidate_comment))
+
+        combined_parts: list[str] = []
+        for _, group_comment in group:
+            body = group_comment["body"] or ""
+            if body and body not in combined_parts:
+                combined_parts.append(body)
+        combined_body = "\n\n---\n\n".join(combined_parts) if combined_parts else None
+        representative = group[-1][1]
+        action = _build_review_comment_action(
+            repo_cfg.name,
+            pr_number,
+            pr_title,
+            pr_body,
+            representative,
+            comment_body=combined_body,
+        )
+        category, titles = reply_to_comment(
+            action,
+            config,
+            repo_cfg,
+            gh,
+            claude_client=claude_client,
+            prompts=prompts,
+        )
+        for group_promise, _ in group:
+            reply_promises.remove_reply_promise(
+                fido_dir, group_promise.comment_type, group_promise.comment_id
+            )
+            handled_keys.add((group_promise.comment_type, group_promise.comment_id))
+        _apply_reply_result(
+            category,
+            titles,
+            config,
+            repo_cfg,
+            gh,
+            thread=action.reply_to,
+            registry=registry,
+        )
+        processed_any = True
+
+    return processed_any
 
 
 def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
