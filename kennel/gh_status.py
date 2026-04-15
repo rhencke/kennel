@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
-from kennel import claude
+from kennel.claude import ClaudeClient
 from kennel.github import GitHub
 
 _SUB_DIR = Path(__file__).resolve().parent.parent / "sub"
@@ -28,10 +27,12 @@ def generate_persona_status(
     message: str,
     persona: str,
     *,
-    _print_prompt: Callable[..., str] = claude.print_prompt,
+    claude_client: ClaudeClient | None = None,
 ) -> str:
+    if claude_client is None:
+        claude_client = ClaudeClient()
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
-    result = _print_prompt(
+    result = claude_client.print_prompt(
         prompt=f"Rewrite this status in Fido's voice: {message}",
         model="claude-opus-4-6",
         system_prompt=system,
@@ -45,10 +46,12 @@ def generate_persona_emoji(
     status_text: str,
     persona: str,
     *,
-    _print_prompt_json: Callable[..., str] = claude.print_prompt_json,
+    claude_client: ClaudeClient | None = None,
 ) -> str:
+    if claude_client is None:
+        claude_client = ClaudeClient()
     system = f"{persona}\n\n{_EMOJI_SYSTEM}" if persona else _EMOJI_SYSTEM
-    result = _print_prompt_json(
+    result = claude_client.print_prompt_json(
         prompt=f"Pick an emoji for this status: {status_text}",
         key="emoji",
         model="claude-opus-4-6",
@@ -63,16 +66,17 @@ def set_gh_status(
     message: str,
     *,
     persona_path: Path = _PERSONA_PATH,
-    _generate_persona_status: Callable[..., str] = generate_persona_status,
-    _generate_persona_emoji: Callable[..., str] = generate_persona_emoji,
+    claude_client: ClaudeClient | None = None,
     _gh: GitHub,
 ) -> None:
+    if claude_client is None:
+        claude_client = ClaudeClient()
     try:
         persona = persona_path.read_text()
     except FileNotFoundError:
         persona = ""
-    text = _generate_persona_status(message, persona)
-    emoji = _generate_persona_emoji(text, persona)
+    text = generate_persona_status(message, persona, claude_client=claude_client)
+    emoji = generate_persona_emoji(text, persona, claude_client=claude_client)
     _gh.set_user_status(text, emoji, busy=True)
 
 

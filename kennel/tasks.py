@@ -14,9 +14,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
-from kennel.claude import print_prompt as _claude_print_prompt
+from kennel.claude import ClaudeClient
 from kennel.github import GitHub
-from kennel.prompts import rescope_prompt as _rescope_prompt_default
+from kennel.prompts import Prompts
 from kennel.state import (
     JsonFileStore,
     State,
@@ -426,8 +426,8 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
-    _print_prompt: Callable[..., str] = _claude_print_prompt,
-    _rescope_prompt_fn: Callable[..., str] = _rescope_prompt_default,
+    claude_client: ClaudeClient | None = None,
+    prompts: Prompts | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[], None] | None = None,
     _on_done: Callable[[], None] | None = None,
@@ -462,9 +462,14 @@ def reorder_tasks(
         log.info("reorder_tasks: no tasks — skipping")
         return
 
+    if claude_client is None:
+        claude_client = ClaudeClient()
+    if prompts is None:
+        prompts = Prompts("")
+
     original_ids = frozenset(t["id"] for t in task_list)
-    prompt = _rescope_prompt_fn(task_list, commit_summary)
-    raw = _print_prompt(prompt, "claude-opus-4-6")
+    prompt = prompts.rescope_prompt(task_list, commit_summary)
+    raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return

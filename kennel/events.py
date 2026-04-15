@@ -933,7 +933,12 @@ def _make_reorder_kwargs(
     def on_done() -> None:
         rewrite_fn(work_dir, gh, claude_client=claude_client)
 
-    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
+    kwargs: dict[str, Any] = {
+        "_on_changes": on_changes,
+        "_on_done": on_done,
+        "claude_client": claude_client,
+        "prompts": prompts,
+    }
     if registry is not None and repo_cfg is not None:
 
         def on_inprogress_affected() -> None:

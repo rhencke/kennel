@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kennel.claude import ClaudeClient
 from kennel.gh_status import (
     generate_persona_emoji,
     generate_persona_status,
@@ -14,82 +15,130 @@ from kennel.gh_status import (
 )
 
 
+def _client(**overrides: object) -> MagicMock:
+    """Create a mock ClaudeClient with optional attribute overrides."""
+    client = MagicMock(spec=ClaudeClient)
+    for k, v in overrides.items():
+        setattr(client, k, v)
+    return client
+
+
 class TestGeneratePersonaStatus:
     def test_happy_path(self) -> None:
+        mock_client = _client()
+        mock_client.print_prompt.return_value = "sniffing out a bug *tail wag*"
         result = generate_persona_status(
             "fixing a bug",
             "You are Fido",
-            _print_prompt=lambda **kw: "sniffing out a bug *tail wag*",
+            claude_client=mock_client,
         )
         assert result == "sniffing out a bug *tail wag*"
 
     def test_empty_response_raises(self) -> None:
+        mock_client = _client()
+        mock_client.print_prompt.return_value = ""
         with pytest.raises(ValueError, match="humanify_status"):
-            generate_persona_status(
-                "at the vet", "persona", _print_prompt=lambda **kw: ""
-            )
+            generate_persona_status("at the vet", "persona", claude_client=mock_client)
 
     def test_empty_persona(self) -> None:
-        result = generate_persona_status("test", "", _print_prompt=lambda **kw: "woof")
+        mock_client = _client()
+        mock_client.print_prompt.return_value = "woof"
+        result = generate_persona_status("test", "", claude_client=mock_client)
         assert result == "woof"
+
+    def test_creates_default_client_when_none(self) -> None:
+        with patch(
+            "kennel.gh_status.ClaudeClient",
+            return_value=_client(),
+        ) as mock_cls:
+            mock_cls.return_value.print_prompt.return_value = "woof"
+            generate_persona_status("test", "persona")
+            mock_cls.assert_called_once_with()
 
 
 class TestGeneratePersonaEmoji:
     def test_happy_path(self) -> None:
+        mock_client = _client()
+        mock_client.print_prompt_json.return_value = ":wrench:"
         result = generate_persona_emoji(
             "fixing bugs",
             "persona",
-            _print_prompt_json=lambda **kw: ":wrench:",
+            claude_client=mock_client,
         )
         assert result == ":wrench:"
 
     def test_empty_response_raises(self) -> None:
+        mock_client = _client()
+        mock_client.print_prompt_json.return_value = ""
         with pytest.raises(ValueError, match="generate_persona_emoji"):
-            generate_persona_emoji(
-                "test", "persona", _print_prompt_json=lambda **kw: ""
-            )
+            generate_persona_emoji("test", "persona", claude_client=mock_client)
 
     def test_empty_persona(self) -> None:
-        result = generate_persona_emoji(
-            "test", "", _print_prompt_json=lambda **kw: ":rocket:"
-        )
+        mock_client = _client()
+        mock_client.print_prompt_json.return_value = ":rocket:"
+        result = generate_persona_emoji("test", "", claude_client=mock_client)
         assert result == ":rocket:"
+
+    def test_creates_default_client_when_none(self) -> None:
+        with patch(
+            "kennel.gh_status.ClaudeClient",
+            return_value=_client(),
+        ) as mock_cls:
+            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            generate_persona_emoji("test", "persona")
+            mock_cls.assert_called_once_with()
 
 
 class TestSetGhStatus:
-    def test_happy_path(self, tmp_path) -> None:
+    def test_happy_path(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("You are Fido")
         mock_gh = MagicMock()
+        mock_client = _client()
+        mock_client.print_prompt.return_value = "sniffing around"
+        mock_client.print_prompt_json.return_value = ":dog2:"
 
         set_gh_status(
             "diagnosing issue",
             persona_path=persona_file,
-            _generate_persona_status=lambda msg, p: "sniffing around",
-            _generate_persona_emoji=lambda txt, p: ":dog2:",
+            claude_client=mock_client,
             _gh=mock_gh,
         )
         mock_gh.set_user_status.assert_called_once_with(
             "sniffing around", ":dog2:", busy=True
         )
 
-    def test_missing_persona_file(self, tmp_path) -> None:
+    def test_missing_persona_file(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         mock_gh = MagicMock()
-        calls: list[str] = []
-
-        def track_status(msg: str, persona: str) -> str:
-            calls.append(persona)
-            return "woof"
+        mock_client = _client()
+        mock_client.print_prompt.return_value = "woof"
+        mock_client.print_prompt_json.return_value = ":dog:"
 
         set_gh_status(
             "test",
             persona_path=tmp_path / "nonexistent.md",
-            _generate_persona_status=track_status,
-            _generate_persona_emoji=lambda txt, p: ":dog:",
+            claude_client=mock_client,
             _gh=mock_gh,
         )
-        assert calls == [""]
+        # Verify empty persona was passed through
+        call_kwargs = mock_client.print_prompt.call_args
+        assert call_kwargs is not None
+        system = call_kwargs.kwargs.get("system_prompt", "")
+        assert system.startswith("\n\n") or "rewriting a status" in system
         mock_gh.set_user_status.assert_called_once()
+
+    def test_creates_default_client_when_none(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+        with patch(
+            "kennel.gh_status.ClaudeClient",
+            return_value=_client(),
+        ) as mock_cls:
+            mock_cls.return_value.print_prompt.return_value = "woof"
+            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
+            mock_cls.assert_called_once_with()
 
 
 class TestMain:
