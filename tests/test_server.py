@@ -16,7 +16,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel.config import Config, RepoConfig
-from kennel.events import Action
+from kennel.events import Action, recover_reply_promises
 from kennel.infra import Infra
 from kennel.server import PreflightError, WebhookHandler
 
@@ -555,6 +555,93 @@ class TestProcessAction:
             / "pulls-205"
         ).exists()
 
+    def test_failed_review_comment_webhook_recovers_once_from_live_state(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 205,
+                "body": "please add logging",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=RuntimeError("network down")
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
+        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
+
+        promise_dir = (
+            cfg.repos["owner/repo"].work_dir / ".git" / "fido" / "reply-promises"
+        )
+        assert sorted(path.name for path in promise_dir.iterdir()) == ["pulls-205"]
+
+        recovery_gh = MagicMock()
+        recovery_gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        recovery_gh.get_pull_comment.return_value = {
+            "id": 205,
+            "body": "edited after webhook",
+            "path": "foo.py",
+            "line": 2,
+            "diff_hunk": "@@ @@",
+            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/5",
+            "html_url": "https://github.com/owner/repo/pull/5#discussion_r205",
+            "user": {"login": "owner"},
+        }
+
+        def fake_reply(action, *args, **kwargs):
+            assert action.comment_body == "edited after webhook"
+            return ("DO", ["task from recovery"])
+
+        with (
+            patch(
+                "kennel.events.reply_to_comment", side_effect=fake_reply
+            ) as mock_reply,
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            assert recover_reply_promises(
+                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
+                cfg,
+                cfg.repos["owner/repo"],
+                recovery_gh,
+                5,
+            )
+            assert not recover_reply_promises(
+                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
+                cfg,
+                cfg.repos["owner/repo"],
+                recovery_gh,
+                5,
+            )
+        assert mock_reply.call_count == 1
+        mock_create_task.assert_called_once_with(
+            "task from recovery",
+            cfg,
+            cfg.repos["owner/repo"],
+            recovery_gh,
+            thread={
+                "repo": "owner/repo",
+                "pr": 5,
+                "comment_id": 205,
+                "url": "https://github.com/owner/repo/pull/5#discussion_r205",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            registry=None,
+        )
+        assert list(promise_dir.iterdir()) == []
+
     def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
         """DO adds to tasks.json."""
         url, cfg = server
@@ -733,6 +820,87 @@ class TestProcessAction:
             / "reply-promises"
             / "issues-302"
         ).exists()
+
+    def test_failed_issue_comment_webhook_recovers_once_from_live_state(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {"id": 302, "body": "please fix", "user": {"login": "owner"}},
+            "issue": {
+                "number": 13,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            side_effect=RuntimeError("network down")
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
+
+        promise_dir = (
+            cfg.repos["owner/repo"].work_dir / ".git" / "fido" / "reply-promises"
+        )
+        assert sorted(path.name for path in promise_dir.iterdir()) == ["issues-302"]
+
+        recovery_gh = MagicMock()
+        recovery_gh.view_issue.return_value = {"title": "my pr", "body": "body"}
+        recovery_gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "edited top-level comment",
+            "html_url": "https://github.com/owner/repo/pull/13#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/13",
+            "user": {"login": "owner"},
+        }
+
+        def fake_reply(action, *args, **kwargs):
+            assert action.comment_body == "edited top-level comment"
+            return ("ACT", ["task from issue recovery"])
+
+        with (
+            patch(
+                "kennel.events.reply_to_issue_comment", side_effect=fake_reply
+            ) as mock_reply,
+            patch("kennel.events.create_task") as mock_create_task,
+        ):
+            assert recover_reply_promises(
+                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
+                cfg,
+                cfg.repos["owner/repo"],
+                recovery_gh,
+                13,
+            )
+            assert not recover_reply_promises(
+                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
+                cfg,
+                cfg.repos["owner/repo"],
+                recovery_gh,
+                13,
+            )
+        assert mock_reply.call_count == 1
+        mock_create_task.assert_called_once_with(
+            "task from issue recovery",
+            cfg,
+            cfg.repos["owner/repo"],
+            recovery_gh,
+            thread={
+                "repo": "owner/repo",
+                "pr": 13,
+                "comment_id": 302,
+                "url": "https://github.com/owner/repo/pull/13#issuecomment-302",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            registry=None,
+        )
+        assert list(promise_dir.iterdir()) == []
 
     def test_process_action_does_not_overwrite_worker_what(self, server: tuple) -> None:
         """_process_action must not call report_activity — the webhook runs on
