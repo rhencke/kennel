@@ -410,10 +410,17 @@ class TestReplyPromiseKey:
         handler = object.__new__(WebhookHandler)
         assert handler._reply_promise(Action(prompt="x")) is None
 
-    def test_returns_none_for_invalid_thread_data(self) -> None:
+    def test_raises_for_invalid_thread_data(self) -> None:
         handler = object.__new__(WebhookHandler)
         action = Action(prompt="x", thread={"comment_type": "wat", "comment_id": "5"})
-        assert handler._reply_promise(action) is None
+        with pytest.raises(ValueError, match="invalid reply promise comment type"):
+            handler._reply_promise(action)
+
+    def test_raises_for_non_integer_comment_id(self) -> None:
+        handler = object.__new__(WebhookHandler)
+        action = Action(prompt="x", thread={"comment_type": "pulls", "comment_id": "5"})
+        with pytest.raises(TypeError, match="invalid reply promise comment id"):
+            handler._reply_promise(action)
 
 
 class TestProcessAction:

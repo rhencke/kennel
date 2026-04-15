@@ -40,11 +40,13 @@ class Action:
     )
 
 
-def _pr_number_from_api_url(url: str, kind: str) -> int | None:
+def _pr_number_from_api_url(url: str, kind: str) -> int:
     """Extract a PR/issue number from a GitHub API URL."""
     pattern = r"/issues/(\d+)$" if kind == "issues" else r"/pulls/(\d+)$"
     match = re.search(pattern, url)
-    return int(match.group(1)) if match else None
+    if match is None:
+        raise ValueError(f"invalid GitHub API URL for {kind}: {url!r}")
+    return int(match.group(1))
 
 
 def _build_review_comment_action(
@@ -57,8 +59,8 @@ def _build_review_comment_action(
     comment_body: str | None = None,
 ) -> Action:
     """Rebuild a review-comment Action from live GitHub state."""
-    user = comment.get("user", {}).get("login", "")
-    body = comment_body if comment_body is not None else (comment.get("body", "") or "")
+    user = comment["user"]["login"]
+    body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     return Action(
         prompt=(
@@ -69,7 +71,7 @@ def _build_review_comment_action(
             "repo": repo,
             "pr": pr_number,
             "comment_id": comment["id"],
-            "url": comment.get("html_url", ""),
+            "url": comment["html_url"],
             "author": user,
             "comment_type": "pulls",
         },
@@ -78,9 +80,9 @@ def _build_review_comment_action(
         context={
             "pr_title": pr_title,
             "pr_body": pr_body,
-            "file": comment.get("path", ""),
-            "line": comment.get("line"),
-            "diff_hunk": comment.get("diff_hunk", ""),
+            "file": comment["path"],
+            "line": comment["line"],
+            "diff_hunk": comment["diff_hunk"],
         },
     )
 
@@ -93,8 +95,8 @@ def _build_issue_comment_action(
     comment: dict[str, Any],
 ) -> Action:
     """Rebuild a top-level PR-comment Action from live GitHub state."""
-    user = comment.get("user", {}).get("login", "")
-    body = comment.get("body", "") or ""
+    user = comment["user"]["login"]
+    body = comment["body"] or ""
     is_bot = user.endswith("[bot]")
     comment_id = int(comment["id"])
     return Action(
@@ -111,7 +113,7 @@ def _build_issue_comment_action(
             "repo": repo,
             "pr": pr_number,
             "comment_id": comment_id,
-            "url": comment.get("html_url", ""),
+            "url": comment["html_url"],
             "author": user,
             "comment_type": "issues",
         },
@@ -160,9 +162,12 @@ def recover_reply_promises(
 
     pr_issue = gh.view_issue(repo_cfg.name, pr_number)
     pr_title = pr_issue["title"]
-    pr_body = pr_issue.get("body", "") or ""
+    pr_body = pr_issue["body"] or ""
     processed_any = False
     handled_keys: set[tuple[str, int]] = set()
+    promise_by_key = {
+        (promise.comment_type, promise.comment_id): promise for promise in promises
+    }
 
     pull_entries: dict[tuple[str, int], tuple[dict[str, Any], int, int]] = {}
     issue_entries: dict[tuple[str, int], tuple[dict[str, Any], int]] = {}
@@ -172,27 +177,23 @@ def recover_reply_promises(
         if promise.comment_type == "pulls":
             comment = gh.get_pull_comment(repo_cfg.name, promise.comment_id)
             if comment is None:
-                promise.path.unlink(missing_ok=True)
+                promise.path.unlink()
                 handled_keys.add(key)
                 continue
-            comment_pr = _pr_number_from_api_url(
-                str(comment.get("pull_request_url", "")), "pulls"
+            comment_pr = _pr_number_from_api_url(comment["pull_request_url"], "pulls")
+            root_id = (
+                int(comment["in_reply_to_id"])
+                if "in_reply_to_id" in comment and comment["in_reply_to_id"] is not None
+                else int(comment["id"])
             )
-            if comment_pr is None:
-                continue
-            root_id = int(comment.get("in_reply_to_id") or comment["id"])
             pull_entries[key] = (comment, comment_pr, root_id)
         else:
             comment = gh.get_issue_comment(repo_cfg.name, promise.comment_id)
             if comment is None:
-                promise.path.unlink(missing_ok=True)
+                promise.path.unlink()
                 handled_keys.add(key)
                 continue
-            comment_pr = _pr_number_from_api_url(
-                str(comment.get("issue_url", "")), "issues"
-            )
-            if comment_pr is None:
-                continue
+            comment_pr = _pr_number_from_api_url(comment["issue_url"], "issues")
             issue_entries[key] = (comment, comment_pr)
 
     for promise in promises:
@@ -201,10 +202,7 @@ def recover_reply_promises(
             continue
 
         if promise.comment_type == "issues":
-            entry = issue_entries.get(key)
-            if entry is None:
-                continue
-            comment, comment_pr = entry
+            comment, comment_pr = issue_entries[key]
             if comment_pr != pr_number:
                 continue
             action = _build_issue_comment_action(
@@ -234,28 +232,24 @@ def recover_reply_promises(
             processed_any = True
             continue
 
-        entry = pull_entries.get(key)
-        if entry is None:
-            continue
-        comment, comment_pr, root_id = entry
+        comment, comment_pr, root_id = pull_entries[key]
         if comment_pr != pr_number:
             continue
 
         group: list[tuple[reply_promises.ReplyPromise, dict[str, Any]]] = []
-        for candidate in promises:
-            candidate_key = (candidate.comment_type, candidate.comment_id)
+        for candidate_key, (
+            candidate_comment,
+            candidate_pr,
+            candidate_root_id,
+        ) in pull_entries.items():
             if candidate_key in handled_keys:
                 continue
-            candidate_entry = pull_entries.get(candidate_key)
-            if candidate_entry is None:
-                continue
-            candidate_comment, candidate_pr, candidate_root_id = candidate_entry
             if candidate_pr == pr_number and candidate_root_id == root_id:
-                group.append((candidate, candidate_comment))
+                group.append((promise_by_key[candidate_key], candidate_comment))
 
         combined_parts: list[str] = []
         for _, group_comment in group:
-            body = group_comment.get("body", "") or ""
+            body = group_comment["body"] or ""
             if body and body not in combined_parts:
                 combined_parts.append(body)
         combined_body = "\n\n---\n\n".join(combined_parts) if combined_parts else None

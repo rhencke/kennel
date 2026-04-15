@@ -451,10 +451,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         thread = action.reply_to or action.thread
         if not thread:
             return None
-        comment_type = thread.get("comment_type")
-        comment_id = thread.get("comment_id")
-        if comment_type not in {"issues", "pulls"} or not isinstance(comment_id, int):
-            return None
+        comment_type = thread["comment_type"]
+        comment_id = thread["comment_id"]
+        if comment_type not in {"issues", "pulls"}:
+            raise ValueError(f"invalid reply promise comment type: {comment_type!r}")
+        if not isinstance(comment_id, int):
+            raise TypeError(f"invalid reply promise comment id: {comment_id!r}")
         return comment_type, comment_id
 
     def _process_action_inner(self, action: Action, repo_cfg: RepoConfig) -> None:
@@ -488,7 +490,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                                 promise[1],
                             )
                         raise
-                    if promise is not None:
+                    if promise is not None and reply_promises.has_reply_promise(
+                        repo_cfg.work_dir / ".git" / "fido",
+                        promise[0],
+                        promise[1],
+                    ):
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
@@ -537,7 +543,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                                 promise[1],
                             )
                         raise
-                    if promise is not None:
+                    if promise is not None and reply_promises.has_reply_promise(
+                        repo_cfg.work_dir / ".git" / "fido",
+                        promise[0],
+                        promise[1],
+                    ):
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
