@@ -6,12 +6,10 @@ import hmac
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +30,14 @@ from kennel.events import (
     reply_to_review,
 )
 from kennel.github import GitHub
+from kennel.infra import (
+    Clock,
+    Filesystem,
+    Infra,
+    OsProcess,
+    ProcessRunner,
+    real_infra,
+)
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -97,18 +103,14 @@ def _parse_repo_from_url(url: str) -> str | None:
     return path if len(parts) == 2 and all(parts) else None
 
 
-def _get_self_repo(
-    runner_dir: Path,
-    *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str | None:
+def _get_self_repo(runner_dir: Path, proc: ProcessRunner) -> str | None:
     """Return 'owner/repo' from the runner clone's origin remote, or None on error.
 
     Handles both SSH (``git@github.com:owner/repo.git``) and HTTPS
     (``https://github.com/owner/repo.git``) remote URLs.
     """
     try:
-        result = _run(
+        result = proc.run(
             ["git", "remote", "get-url", "origin"],
             cwd=str(runner_dir),
             capture_output=True,
@@ -128,8 +130,7 @@ def _get_self_repo(
 
 def preflight_repo_identity(
     repos: dict[str, RepoConfig],
-    *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    proc: ProcessRunner,
 ) -> None:
     """Verify each configured work_dir is a git repo whose origin matches its name.
 
@@ -138,7 +139,7 @@ def preflight_repo_identity(
     """
     for name, repo_cfg in repos.items():
         try:
-            result = _run(
+            result = proc.run(
                 ["git", "remote", "get-url", "origin"],
                 cwd=str(repo_cfg.work_dir),
                 capture_output=True,
@@ -167,27 +168,20 @@ def preflight_repo_identity(
 _REQUIRED_TOOLS = ("git", "gh", "claude")
 
 
-def preflight_tools(
-    *,
-    _which: Callable[[str], str | None] = shutil.which,
-) -> None:
+def preflight_tools(fs: Filesystem) -> None:
     """Verify that all required CLI tools are on PATH.
 
     Raises :exc:`PreflightError` naming the first missing tool.
     """
     for tool in _REQUIRED_TOOLS:
-        if _which(tool) is None:
+        if fs.which(tool) is None:
             raise PreflightError(
                 f"preflight: required tool not found on PATH: {tool!r}"
             )
     log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
-def preflight_sub_dir(
-    config: Config,
-    *,
-    _is_dir: Callable[[Path], bool] = Path.is_dir,
-) -> None:
+def preflight_sub_dir(config: Config, fs: Filesystem) -> None:
     """Verify that the skill-files directory exists.
 
     Raises :exc:`PreflightError` if ``config.sub_dir`` is not an existing
@@ -195,7 +189,7 @@ def preflight_sub_dir(
     every task run — a missing directory causes every worker invocation to fail
     with an obscure I/O error rather than a clear startup message.
     """
-    if not _is_dir(config.sub_dir):
+    if not fs.is_dir(config.sub_dir):
         raise PreflightError(
             f"preflight: skill-files directory not found: {config.sub_dir}"
         )
@@ -215,14 +209,10 @@ def preflight_gh_auth(gh: GitHub) -> None:
     log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
 
 
-def _get_head(
-    runner_dir: Path,
-    *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str | None:
+def _get_head(runner_dir: Path, proc: ProcessRunner) -> str | None:
     """Return the current HEAD commit hash of the runner clone, or None on error."""
     try:
-        result = _run(
+        result = proc.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(runner_dir),
             capture_output=True,
@@ -236,10 +226,8 @@ def _get_head(
 
 def _pull_with_backoff(
     runner_dir: Path,
-    *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    _sleep: Callable[[float], None] = time.sleep,
-    _monotonic: Callable[[], float] = time.monotonic,
+    proc: ProcessRunner,
+    clock: Clock,
 ) -> bool:
     """Sync the runner clone to ``origin/main`` with exponential backoff.
 
@@ -255,19 +243,19 @@ def _pull_with_backoff(
     each attempt and the elapsed time.  Returns ``True`` on success,
     ``False`` if every retry fails or the budget is exhausted.
     """
-    start = _monotonic()
+    start = clock.monotonic()
     attempt = 0
     while True:
         attempt += 1
         try:
-            _run(
+            proc.run(
                 ["git", "fetch", "origin", "main"],
                 cwd=str(runner_dir),
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            _run(
+            proc.run(
                 ["git", "reset", "--hard", "origin/main"],
                 cwd=str(runner_dir),
                 capture_output=True,
@@ -277,11 +265,11 @@ def _pull_with_backoff(
             log.info(
                 "self-restart: runner synced on attempt %d (%.1fs elapsed)",
                 attempt,
-                _monotonic() - start,
+                clock.monotonic() - start,
             )
             return True
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            elapsed = _monotonic() - start
+            elapsed = clock.monotonic() - start
             log.error(
                 "self-restart: runner sync attempt %d failed after %.1fs: %s",
                 attempt,
@@ -303,7 +291,7 @@ def _pull_with_backoff(
                 )
                 return False
             log.info("self-restart: sleeping %ds before retry", delay)
-            _sleep(delay)
+            clock.sleep(delay)
 
 
 def _spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
@@ -326,6 +314,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
+    # Infrastructure ports — set by server.run() composition root.
+    infra: Infra = real_infra()
     _fn_dispatch = staticmethod(dispatch)
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
@@ -335,11 +325,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
-    _fn_get_self_repo = staticmethod(_get_self_repo)
-    _fn_get_head = staticmethod(_get_head)
-    _fn_pull_with_backoff = staticmethod(_pull_with_backoff)
-    _fn_os_chdir = staticmethod(os.chdir)
-    _fn_os_execvp = staticmethod(os.execvp)
 
     def do_POST(self) -> None:
         try:
@@ -557,7 +542,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
         runner_dir = type(self)._fn_runner_dir()
-        self_repo = type(self)._fn_get_self_repo(runner_dir)
+        self_repo = _get_self_repo(runner_dir, self.infra.proc)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
         log.info(
@@ -570,15 +555,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # log and return without touching the running workers — fido on the
         # kennel repo keeps running its old code rather than being silently
         # left without a worker thread.
-        if not type(self)._fn_pull_with_backoff(runner_dir):
+        if not _pull_with_backoff(runner_dir, self.infra.proc, self.infra.clock):
             log.error("self-restart: gave up — running old version (%s)", reason)
             return
         log.info(
             "self-restart: runner synced — stopping workers and re-execing (%s)", reason
         )
         self.registry.stop_and_join(repo_name)
-        type(self)._fn_os_chdir(runner_dir)
-        type(self)._fn_os_execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+        self.infra.os_proc.chdir(runner_dir)
+        self.infra.os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
 
     def do_GET(self) -> None:
         if self.path == "/status":
@@ -665,27 +650,21 @@ def populate_memberships(config: Config, gh: GitHub) -> None:
         )
 
 
-def _startup_pull(
-    *,
-    _runner_dir: Callable[[], Path] = _runner_dir,
-    _get_head: Callable[..., str | None] = _get_head,
-    _pull: Callable[..., bool] = _pull_with_backoff,
-    _execvp: Callable[..., None] = os.execvp,
-) -> None:
+def _startup_pull(proc: ProcessRunner, clock: Clock, os_proc: OsProcess) -> None:
     """Sync the runner clone on startup and re-exec if HEAD changed."""
     runner_dir = _runner_dir()
-    head_before = _get_head(runner_dir)
-    if not _pull(runner_dir):
+    head_before = _get_head(runner_dir, proc)
+    if not _pull_with_backoff(runner_dir, proc, clock):
         log.warning("startup: runner sync failed — continuing with current code")
         return
-    head_after = _get_head(runner_dir)
+    head_after = _get_head(runner_dir, proc)
     if head_before and head_after and head_before != head_after:
         log.info(
             "startup: runner updated %s → %s — re-execing",
             head_before[:12],
             head_after[:12],
         )
-        _execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+        os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
     elif head_before and head_after:
         log.info("startup: runner already up to date at %s", head_before[:12])
     else:
@@ -758,13 +737,16 @@ def run(
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_exception
 
+    infra = real_infra()
+    WebhookHandler.infra = infra
+
     gh = _GitHub()
-    _startup_pull()
+    _startup_pull(infra.proc, infra.clock, infra.os_proc)
     try:
-        _preflight_tools()
-        _preflight_sub_dir(config)
+        _preflight_tools(infra.fs)
+        _preflight_sub_dir(config, infra.fs)
         _preflight_gh_auth(gh)
-        _preflight_repo_identity(config.repos)
+        _preflight_repo_identity(config.repos, infra.proc)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 
