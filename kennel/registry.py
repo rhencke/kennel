@@ -89,6 +89,8 @@ class WorkerRegistry:
         self._started_at_lock = threading.Lock()
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
+        self._rescoping: dict[str, bool] = {}
+        self._rescoping_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*.
@@ -302,6 +304,24 @@ class WorkerRegistry:
         """
         thread = self._threads.get(repo_name)
         return thread.session_pid if thread is not None else None
+
+    def set_rescoping(self, repo_name: str, active: bool) -> None:
+        """Set the rescoping-active flag for *repo_name*.
+
+        Called by the background reorder thread when it starts (``active=True``)
+        and when it finishes (``active=False``), so the status display can show
+        uncertain task counts while the task list is being rewritten by Opus.
+        """
+        with self._rescoping_lock:
+            self._rescoping[repo_name] = active
+
+    def is_rescoping(self, repo_name: str) -> bool:
+        """Return True if a background rescope is currently in flight for *repo_name*.
+
+        Returns False for unknown repos (no rescope has ever been registered).
+        """
+        with self._rescoping_lock:
+            return self._rescoping.get(repo_name, False)
 
     def get_session(self, repo_name: str) -> ClaudeSession | None:
         """Return the live :class:`~kennel.claude.ClaudeSession` for *repo_name*.

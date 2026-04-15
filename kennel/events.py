@@ -1264,15 +1264,21 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
-        while True:
-            reorder(work_dir, cs, **kw)
-            with _reorder_coalesce_lock:
-                pending = state[key].get("pending")
-                if pending is None:
-                    state[key]["running"] = False
-                    return
-                state[key]["pending"] = None
-                cs, kw = pending
+        if registry is not None and repo_cfg is not None:
+            registry.set_rescoping(repo_cfg.name, True)
+        try:
+            while True:
+                reorder(work_dir, cs, **kw)
+                with _reorder_coalesce_lock:
+                    pending = state[key].get("pending")
+                    if pending is None:
+                        state[key]["running"] = False
+                        return
+                    state[key]["pending"] = None
+                    cs, kw = pending
+        finally:
+            if registry is not None and repo_cfg is not None:
+                registry.set_rescoping(repo_cfg.name, False)
 
     t = threading.Thread(
         target=run_loop,

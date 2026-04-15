@@ -3039,6 +3039,95 @@ class TestReorderTasksBackground:
         )
         assert len(started) == 2  # each dir gets its own thread
 
+    def test_sets_rescoping_true_before_reorder(self, tmp_path: Path) -> None:
+        """set_rescoping(True) is called on the registry before reorder runs."""
+        started: list = []
+        rescoping_calls: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        registry = MagicMock()
+        registry.set_rescoping.side_effect = lambda repo, active: (
+            rescoping_calls.append(active)
+        )
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        assert rescoping_calls[0] is True
+
+    def test_clears_rescoping_false_after_reorder(self, tmp_path: Path) -> None:
+        """set_rescoping(False) is called on the registry after the loop finishes."""
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        # Last call must clear the flag
+        last_call = registry.set_rescoping.call_args_list[-1]
+        assert last_call[0] == ("owner/repo", False)
+
+    def test_clears_rescoping_on_reorder_exception(self, tmp_path: Path) -> None:
+        """set_rescoping(False) is called even when reorder raises."""
+        started: list = []
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+        def boom(work_dir, commit_summary, **kwargs):
+            raise RuntimeError("reorder exploded")
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=boom,
+            _coalesce_state={},
+        )
+        import pytest as _pytest
+
+        with _pytest.raises(RuntimeError, match="reorder exploded"):
+            self._run_thread(started)
+        last_call = registry.set_rescoping.call_args_list[-1]
+        assert last_call[0] == ("owner/repo", False)
+
+    def test_no_rescoping_calls_when_no_registry(self, tmp_path: Path) -> None:
+        """When registry is None, set_rescoping is not called."""
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        # No registry provided — must not raise and must complete normally
+
 
 class TestNotifyThreadChange:
     def _cfg(self, tmp_path: Path) -> Config:

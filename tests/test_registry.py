@@ -631,3 +631,55 @@ class TestWebhookActivity:
     def test_unknown_repo_returns_empty_list(self) -> None:
         reg = WorkerRegistry(MagicMock())
         assert reg.get_webhook_activities("ghost/repo") == []
+
+
+class TestRescoping:
+    def test_is_rescoping_false_for_unknown_repo(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        assert reg.is_rescoping("unknown/repo") is False
+
+    def test_set_rescoping_true(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        reg.set_rescoping("foo/bar", True)
+        assert reg.is_rescoping("foo/bar") is True
+
+    def test_set_rescoping_false_clears_flag(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        reg.set_rescoping("foo/bar", True)
+        reg.set_rescoping("foo/bar", False)
+        assert reg.is_rescoping("foo/bar") is False
+
+    def test_rescoping_is_per_repo(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        reg.set_rescoping("foo/bar", True)
+        assert reg.is_rescoping("foo/bar") is True
+        assert reg.is_rescoping("foo/baz") is False
+
+    def test_rescoping_is_threadsafe(self) -> None:
+        """Concurrent set_rescoping and is_rescoping calls must not corrupt state."""
+        reg = WorkerRegistry(MagicMock())
+        errors: list[Exception] = []
+
+        def toggler(repo: str) -> None:
+            try:
+                for i in range(200):
+                    reg.set_rescoping(repo, i % 2 == 0)
+            except Exception as exc:
+                errors.append(exc)
+
+        def reader(repo: str) -> None:
+            try:
+                for _ in range(200):
+                    reg.is_rescoping(repo)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=toggler, args=("foo/bar",)),
+            threading.Thread(target=reader, args=("foo/bar",)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert not errors
