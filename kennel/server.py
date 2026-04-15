@@ -815,7 +815,7 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
-    registry = _make_registry(config.repos, gh)
+    registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
     # Route webhook-handler prompt calls through the per-repo persistent
     # ClaudeSession (closes #479 — "one claude per repo" invariant).

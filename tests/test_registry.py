@@ -525,6 +525,8 @@ class TestMakeThread:
             RepoMembership(),
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=cfg,
         )
         assert result is mock_wt_cls.return_value
 
@@ -535,6 +537,30 @@ class TestMakeThread:
         mock_wt_cls = MagicMock()
         _make_thread(cfg, MagicMock(), gh=MagicMock(), _WorkerThread=mock_wt_cls)
         assert mock_wt_cls.call_args[0][0] == work_dir
+
+    def test_config_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
+        from kennel.config import Config
+
+        cfg = _repo("foo/bar", tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"foo/bar": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        mock_wt_cls = MagicMock()
+        _make_thread(
+            cfg, MagicMock(), gh=MagicMock(), config=config, _WorkerThread=mock_wt_cls
+        )
+        assert mock_wt_cls.call_args.kwargs["config"] is config
+
+    def test_repo_cfg_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
+        cfg = _repo("foo/bar", tmp_path)
+        mock_wt_cls = MagicMock()
+        _make_thread(cfg, MagicMock(), gh=MagicMock(), _WorkerThread=mock_wt_cls)
+        assert mock_wt_cls.call_args.kwargs["repo_cfg"] is cfg
 
 
 class TestMakeRegistry:
@@ -576,6 +602,24 @@ class TestMakeRegistry:
             _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert reg.is_alive("foo/bar") is True
+
+    def test_config_forwarded_to_thread_factory(self, tmp_path: Path) -> None:
+        from kennel.config import Config
+
+        cfg = _repo("foo/bar", tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"foo/bar": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        mock_factory = MagicMock(return_value=MagicMock())
+        make_registry(
+            {"foo/bar": cfg}, MagicMock(), config, _thread_factory=mock_factory
+        )
+        assert mock_factory.call_args.kwargs["config"] is config
 
 
 class TestThreadStartedAt:

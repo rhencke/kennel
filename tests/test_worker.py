@@ -299,6 +299,38 @@ class TestWorker:
         gh.get_pr.return_value = {"body": ""}
         return gh
 
+    # --- constructor / config injection ---
+
+    def test_config_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        worker = Worker(tmp_path, MagicMock(), config=config)
+        assert worker._config is config
+
+    def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        worker = Worker(tmp_path, MagicMock(), repo_cfg=cfg)
+        assert worker._repo_cfg is cfg
+
+    def test_config_defaults_to_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._config is None
+
+    def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._repo_cfg is None
+
     # --- discover_repo_context ---
 
     def test_discover_returns_repo_context(self, tmp_path: Path) -> None:
@@ -5194,6 +5226,251 @@ class TestPickNextTask:
         assert result is spec  # returned via fallthrough, not thread path
 
 
+class TestRescopeBeforePick:
+    """Tests for Worker.rescope_before_pick."""
+
+    def _pending(self, title: str = "do something") -> dict:
+        return {"id": "t1", "title": title, "status": "pending", "type": "spec"}
+
+    def _completed(self, title: str = "done") -> dict:
+        return {"id": "t2", "title": title, "status": "completed", "type": "spec"}
+
+    def _make_worker(self, tmp_path: Path, *, with_config: bool = True) -> Worker:
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        if with_config:
+            return Worker(tmp_path, MagicMock(), config=config, repo_cfg=cfg)
+        return Worker(tmp_path, MagicMock())
+
+    def test_skips_when_config_is_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+            worker.rescope_before_pick()
+        mock_reorder.assert_not_called()
+
+    def test_skips_when_repo_cfg_is_none(self, tmp_path: Path) -> None:
+        from kennel.config import Config
+
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        worker = Worker(tmp_path, MagicMock(), config=config)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+            worker.rescope_before_pick()
+        mock_reorder.assert_not_called()
+
+    def test_skips_when_no_pending_tasks(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = []
+        worker._tasks = mock_tasks
+        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+            worker.rescope_before_pick()
+        mock_reorder.assert_not_called()
+
+    def test_skips_when_exactly_one_pending_task(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending()]
+        worker._tasks = mock_tasks
+        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+            worker.rescope_before_pick()
+        mock_reorder.assert_not_called()
+
+    def test_skips_completed_tasks_in_pending_count(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        # one pending, one completed — should skip
+        mock_tasks.list.return_value = [self._pending(), self._completed()]
+        worker._tasks = mock_tasks
+        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+            worker.rescope_before_pick()
+        mock_reorder.assert_not_called()
+
+    def test_calls_reorder_when_two_pending_tasks(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        with (
+            patch("kennel.tasks.reorder_tasks") as mock_reorder,
+            patch("kennel.events._get_commit_summary", return_value="abc def"),
+            patch("kennel.events._make_reorder_kwargs", return_value={}),
+        ):
+            worker.rescope_before_pick()
+        mock_reorder.assert_called_once()
+
+    def test_passes_work_dir_to_reorder(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        with (
+            patch("kennel.tasks.reorder_tasks") as mock_reorder,
+            patch("kennel.events._get_commit_summary", return_value=""),
+            patch("kennel.events._make_reorder_kwargs", return_value={}),
+        ):
+            worker.rescope_before_pick()
+        assert mock_reorder.call_args[0][0] == tmp_path
+
+    def test_passes_commit_summary_to_reorder(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        with (
+            patch("kennel.tasks.reorder_tasks") as mock_reorder,
+            patch(
+                "kennel.events._get_commit_summary", return_value="abc123 first commit"
+            ),
+            patch("kennel.events._make_reorder_kwargs", return_value={}),
+        ):
+            worker.rescope_before_pick()
+        assert mock_reorder.call_args[0][1] == "abc123 first commit"
+
+    def test_no_inprogress_affected_callback(self, tmp_path: Path) -> None:
+        """Registry is passed as None so _on_inprogress_affected is not registered."""
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
+        worker._tasks = mock_tasks
+        captured_registry: list = []
+        with (
+            patch("kennel.tasks.reorder_tasks"),
+            patch("kennel.events._get_commit_summary", return_value=""),
+            patch(
+                "kennel.events._make_reorder_kwargs",
+                side_effect=lambda wd, cfg, repo_cfg, reg, *a, **kw: (
+                    captured_registry.append(reg) or {}
+                ),
+            ),
+        ):
+            worker.rescope_before_pick()
+        assert captured_registry == [None]
+
+    def test_calls_reorder_with_three_or_more_pending_tasks(
+        self, tmp_path: Path
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+        mock_tasks = MagicMock()
+        mock_tasks.list.return_value = [
+            self._pending("a"),
+            self._pending("b"),
+            self._pending("c"),
+        ]
+        worker._tasks = mock_tasks
+        with (
+            patch("kennel.tasks.reorder_tasks") as mock_reorder,
+            patch("kennel.events._get_commit_summary", return_value=""),
+            patch("kennel.events._make_reorder_kwargs", return_value={}),
+        ):
+            worker.rescope_before_pick()
+        mock_reorder.assert_called_once()
+
+
+class TestRunRescopeIntegration:
+    """Tests that Worker.run() calls rescope_before_pick before task selection."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
+        return repo_ctx
+
+    def test_rescope_before_pick_called_from_run(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        mock_rescope = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-it")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "rescope_before_pick", mock_rescope),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+        ):
+            worker.run()
+        mock_rescope.assert_called_once_with()
+
+    def test_rescope_called_before_handle_ci(self, tmp_path: Path) -> None:
+        """rescope_before_pick must execute before handle_ci sees the task list."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        call_order: list[str] = []
+
+        def record_rescope() -> None:
+            call_order.append("rescope")
+
+        def record_ci(*_a: object, **_kw: object) -> bool:
+            call_order.append("handle_ci")
+            return False
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-it")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "rescope_before_pick", record_rescope),
+            patch.object(worker, "handle_ci", record_ci),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+        ):
+            worker.run()
+        assert call_order == ["rescope", "handle_ci"]
+
+
 class TestEnsurePushed:
     """Tests for Worker.ensure_pushed."""
 
@@ -8801,6 +9078,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
@@ -8877,6 +9156,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ) -> None:
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -8925,6 +9206,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ) -> None:
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -9051,3 +9334,89 @@ class TestWorkerThread:
         wt._registry.report_activity.side_effect = claude.ClaudeLeakError("leak")
         wt.run()
         assert exits == [3]
+
+    # ── config / repo_cfg injection ───────────────────────────────────────
+
+    def test_config_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), config=config)
+        assert wt._config is config
+
+    def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=cfg)
+        assert wt._repo_cfg is cfg
+
+    def test_config_defaults_to_none(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._config is None
+
+    def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._repo_cfg is None
+
+    def test_config_and_repo_cfg_passed_to_worker(self, tmp_path: Path) -> None:
+        """WorkerThread.run() forwards config and repo_cfg to every Worker."""
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), config=config, repo_cfg=cfg
+        )
+        wt._wake = MagicMock()
+        received_config: list = []
+        received_repo_cfg: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+            config=None,
+            repo_cfg=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+            received_config.append(config)
+            received_repo_cfg.append(repo_cfg)
+
+        def fake_worker_run(self_w) -> int:
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            wt.run()
+
+        assert received_config == [config]
+        assert received_repo_cfg == [cfg]

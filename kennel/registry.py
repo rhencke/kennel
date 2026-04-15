@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from kennel.claude import ClaudeSession
-from kennel.config import RepoConfig
+from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.worker import WorkerThread
 
@@ -343,6 +343,7 @@ def _make_thread(
     gh: GitHub,
     session: ClaudeSession | None = None,
     session_issue: int | None = None,
+    config: Config | None = None,
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client."""
@@ -354,12 +355,15 @@ def _make_thread(
         repo_cfg.membership,
         session=session,
         session_issue=session_issue,
+        config=config,
+        repo_cfg=repo_cfg,
     )
 
 
 def make_registry(
     repos: dict[str, RepoConfig],
     gh: GitHub,
+    config: Config | None = None,
     *,
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
@@ -377,7 +381,12 @@ def make_registry(
         session_issue: int | None = None,
     ) -> WorkerThread:
         return _thread_factory(
-            cfg, registry, gh=gh, session=session, session_issue=session_issue
+            cfg,
+            registry,
+            gh=gh,
+            session=session,
+            session_issue=session_issue,
+            config=config,
         )
 
     registry = WorkerRegistry(factory)
