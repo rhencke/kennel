@@ -29,35 +29,33 @@ class TestWorkerRegistry:
         reg, factory = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
-        factory.assert_called_once_with(cfg, session=None, session_issue=None)
+        factory.assert_called_once_with(cfg, provider=None, session_issue=None)
 
     def test_start_rescues_session_from_crashed_thread(self, tmp_path: Path) -> None:
-        """Session rescued from a crashed (dead, not _stop) thread and passed to replacement."""
-        mock_session = MagicMock()
+        """Provider rescued from a crashed (dead, not _stop) thread and passed to replacement."""
+        mock_provider = MagicMock()
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reg = WorkerRegistry(factory)
         cfg = _repo("foo/bar", tmp_path)
         # First start — no prior thread
         reg.start(cfg)
-        # Simulate crash: thread died, _stop is False, session is alive
+        # Simulate crash: thread died, _stop is False, provider is still attached
         threads[0].is_alive.return_value = False
         threads[0]._stop = False
-        threads[0]._session = mock_session
+        threads[0].detach_provider.return_value = mock_provider
         threads[0]._session_issue = 42
-        # Second start — should rescue session from crashed thread
+        # Second start — should rescue provider from crashed thread
         reg.start(cfg)
         _, kwargs = factory.call_args_list[1]
-        assert kwargs["session"] is mock_session
+        assert kwargs["provider"] is mock_provider
         assert kwargs["session_issue"] == 42
-        # Old thread's session must be cleared to prevent double-stop
-        assert threads[0]._session is None
+        threads[0].detach_provider.assert_called_once_with()
 
     def test_start_does_not_rescue_session_from_orderly_shutdown_thread(
         self, tmp_path: Path
     ) -> None:
-        """No session rescue when the old thread exited via orderly stop()."""
-        mock_session = MagicMock()
+        """No provider rescue when the old thread exited via orderly stop()."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reg = WorkerRegistry(factory)
@@ -66,11 +64,12 @@ class TestWorkerRegistry:
         # Simulate orderly shutdown: _stop is True (session was already stopped)
         threads[0].is_alive.return_value = False
         threads[0]._stop = True
-        threads[0]._session = mock_session  # shouldn't happen, but test the guard
+        threads[0].detach_provider.return_value = MagicMock()
         reg.start(cfg)
         _, kwargs = factory.call_args_list[1]
-        assert kwargs["session"] is None
+        assert kwargs["provider"] is None
         assert kwargs["session_issue"] is None
+        threads[0].detach_provider.assert_not_called()
 
     def test_start_starts_thread(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
@@ -523,7 +522,7 @@ class TestMakeThread:
             mock_gh,
             mock_registry,
             RepoMembership(),
-            session=None,
+            provider=None,
             session_issue=None,
             config=None,
             repo_cfg=cfg,

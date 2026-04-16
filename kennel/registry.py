@@ -9,9 +9,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from kennel.claude import ClaudeSession
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
+from kennel.provider import PromptSession, Provider
 from kennel.worker import WorkerThread
 
 log = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ class WorkerRegistry:
         orderly), its live session is rescued and handed to the replacement so
         the persistent :class:`~kennel.claude.ClaudeSession` survives the crash.
         """
-        session = None
+        provider = None
         session_issue = None
         old_thread = self._threads.get(repo_cfg.name)
         if (
@@ -107,10 +107,10 @@ class WorkerRegistry:
             and not old_thread.is_alive()
             and not old_thread._stop  # pyright: ignore[reportPrivateUsage]
         ):
-            # Crashed thread — rescue the live session before replacing it
-            session, old_thread._session = old_thread._session, None  # pyright: ignore[reportPrivateUsage]
+            # Crashed thread — rescue the live provider before replacing it
+            provider = old_thread.detach_provider()
             session_issue, old_thread._session_issue = old_thread._session_issue, None  # pyright: ignore[reportPrivateUsage]
-        thread = self._factory(repo_cfg, session=session, session_issue=session_issue)
+        thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         with self._started_at_lock:
             self._started_at[repo_cfg.name] = _utcnow()
@@ -323,8 +323,8 @@ class WorkerRegistry:
         with self._rescoping_lock:
             return self._rescoping.get(repo_name, False)
 
-    def get_session(self, repo_name: str) -> ClaudeSession | None:
-        """Return the live :class:`~kennel.claude.ClaudeSession` for *repo_name*.
+    def get_session(self, repo_name: str) -> PromptSession | None:
+        """Return the live persistent session for *repo_name*.
 
         Used by :func:`kennel.claude.set_session_resolver` so webhook-handler
         prompt calls can route through the per-repo persistent session
@@ -341,7 +341,7 @@ def _make_thread(
     registry: WorkerRegistry,
     *,
     gh: GitHub,
-    session: ClaudeSession | None = None,
+    provider: Provider | None = None,
     session_issue: int | None = None,
     config: Config | None = None,
     _WorkerThread: type[WorkerThread] = WorkerThread,
@@ -353,7 +353,7 @@ def _make_thread(
         gh,
         registry,
         repo_cfg.membership,
-        session=session,
+        provider=provider,
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
@@ -377,14 +377,14 @@ def make_registry(
     def factory(
         cfg: RepoConfig,
         *,
-        session: ClaudeSession | None = None,
+        provider: Provider | None = None,
         session_issue: int | None = None,
     ) -> WorkerThread:
         return _thread_factory(
             cfg,
             registry,
             gh=gh,
-            session=session,
+            provider=provider,
             session_issue=session_issue,
             config=config,
         )

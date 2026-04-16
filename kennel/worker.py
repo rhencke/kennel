@@ -21,6 +21,7 @@ from kennel.claude import ClaudeClient
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
+from kennel.provider import PromptSession, Provider
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -229,8 +230,8 @@ def claude_start(
     model: str = "claude-opus-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
-    session: claude.ClaudeSession | None = None,
-    claude_client: ClaudeClient | None = None,
+    session: PromptSession | None = None,
+    claude_client: Provider | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
@@ -258,7 +259,7 @@ def claude_start(
     return claude.extract_session_id(output)
 
 
-def _run_session_turn(session: claude.ClaudeSession, content: str) -> str:
+def _run_session_turn(session: PromptSession, content: str) -> str:
     """Send *content* through *session* and return the result text.
 
     Retries indefinitely when a webhook handler preempts the turn mid-flight
@@ -310,8 +311,8 @@ def claude_run(
     model: str = "claude-sonnet-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
-    session: claude.ClaudeSession | None = None,
-    claude_client: ClaudeClient | None = None,
+    session: PromptSession | None = None,
+    claude_client: Provider | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
@@ -693,7 +694,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -771,10 +772,11 @@ class Worker:
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
-        session: claude.ClaudeSession | None = None,
+        session: PromptSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
         claude_client: ClaudeClient | None = None,
+        provider: Provider | None = None,
         prompts: Prompts | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
@@ -785,15 +787,32 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
-        self._session: claude.ClaudeSession | None = session
         self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
-        self._claude_client = (
-            claude_client if claude_client is not None else ClaudeClient()
-        )
+        if provider is not None:
+            self._provider = provider
+            if session is not None:
+                self._provider.attach_session(session)
+        elif claude_client is not None:
+            self._provider = claude_client
+            self._provider.attach_session(session)
+        else:
+            self._provider = ClaudeClient(session=session)
+        self._claude_client: Provider = self._provider
+        self.__dict__["_compat_session"] = session
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
+
+    @property
+    def _session(self) -> PromptSession | None:
+        return self.__dict__.get("_compat_session")
+
+    @_session.setter
+    def _session(self, session: PromptSession | None) -> None:
+        self.__dict__["_compat_session"] = session
+        if hasattr(self, "_provider"):
+            self._provider.attach_session(session)
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -2152,17 +2171,20 @@ class WorkerThread(threading.Thread):
 
     **Session persistence**
 
-    ``_session`` and ``_session_issue`` survive individual :class:`Worker`
-    crashes: each new ``Worker`` receives the existing session via the
+    ``_provider`` and ``_session_issue`` survive individual :class:`Worker`
+    crashes: each new ``Worker`` receives the existing provider via the
     constructor and hands it back after ``run()`` returns (even on exception).
+    The provider owns the persistent session object, while ``_session`` remains
+    a compatibility shim over that attached session for existing worker code.
     When this thread itself crashes, :class:`~kennel.registry.WorkerRegistry`
-    rescues the live session from the dead thread and passes it to the
-    replacement thread via the *session* constructor parameter, so the session
-    persists across both Worker-level and WorkerThread-level crashes.
+    rescues the live provider from the dead thread and passes it to the
+    replacement thread via the *provider* constructor parameter, so both the
+    provider instance and its attached session persist across Worker-level and
+    WorkerThread-level crashes.
 
-    Neither ``_session`` nor ``_session_issue`` survive a kennel/home restart
+    Neither ``_provider`` nor ``_session_issue`` survive a kennel/home restart
     — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
-    with both fields set to ``None`` and creates a fresh session on its first
+    with no provider-attached session and creates a fresh session on its first
     iteration.
     """
 
@@ -2173,8 +2195,9 @@ class WorkerThread(threading.Thread):
         gh: GitHub,
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
-        session: claude.ClaudeSession | None = None,
+        session: PromptSession | None = None,
         session_issue: int | None = None,
+        provider: Provider | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
     ) -> None:
@@ -2188,10 +2211,44 @@ class WorkerThread(threading.Thread):
         self._abort_task = threading.Event()
         self._stop = False
         self.crash_error: str | None = None
-        self._session: claude.ClaudeSession | None = session
+        self._provider_lock = threading.Lock()
+        self._provider: Provider | None
+        if provider is not None:
+            self._provider = provider
+            if session is not None:
+                self._provider.attach_session(session)
+        else:
+            self._provider = ClaudeClient(session=session)
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
+
+    @property
+    def _session(self) -> PromptSession | None:
+        with self._provider_lock:
+            provider = self._provider
+        return provider.session if provider is not None else None
+
+    @_session.setter
+    def _session(self, session: PromptSession | None) -> None:
+        with self._provider_lock:
+            provider = self._provider
+            if provider is None:
+                provider = ClaudeClient(session=session)
+                self._provider = provider
+        provider.attach_session(session)
+
+    def detach_provider(self) -> Provider | None:
+        """Detach and return the owned provider for crash rescue."""
+        with self._provider_lock:
+            provider = self._provider
+            self._provider = None
+            return provider
+
+    def current_provider(self) -> Provider | None:
+        """Return the currently attached provider, if any."""
+        with self._provider_lock:
+            return self._provider
 
     @property
     def session_owner(self) -> str | None:
@@ -2201,8 +2258,9 @@ class WorkerThread(threading.Thread):
         session.  Returns ``None`` when no session exists or the lock is free.
         Safe to call from any thread — reads a volatile field for display only.
         """
-        session = self._session
-        return session.owner if session is not None else None
+        with self._provider_lock:
+            provider = self._provider
+        return provider.session_owner if provider is not None else None
 
     @property
     def session_alive(self) -> bool:
@@ -2213,8 +2271,9 @@ class WorkerThread(threading.Thread):
         "session exists, idle" from "no session".  Returns ``False`` when no
         session object exists or its subprocess has exited.
         """
-        session = self._session
-        return session is not None and session.is_alive()
+        with self._provider_lock:
+            provider = self._provider
+        return provider.session_alive if provider is not None else False
 
     @property
     def session_pid(self) -> int | None:
@@ -2225,10 +2284,9 @@ class WorkerThread(threading.Thread):
         ``sub/persona.md`` (outside ``fido_dir``) as its system prompt, which
         the pgrep-based :func:`kennel.status._claude_pid` heuristic can't find.
         """
-        session = self._session
-        if session is None:
-            return None
-        return session.pid
+        with self._provider_lock:
+            provider = self._provider
+        return provider.session_pid if provider is not None else None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -2284,6 +2342,12 @@ class WorkerThread(threading.Thread):
                 # iteration anyway.
                 if self._session is None:
                     self._session = self._create_session()
+                with self._provider_lock:
+                    provider = self._provider
+                if provider is None:
+                    provider = ClaudeClient(session=self._session)
+                    with self._provider_lock:
+                        self._provider = provider
                 worker = Worker(
                     self.work_dir,
                     self._gh,
@@ -2296,10 +2360,13 @@ class WorkerThread(threading.Thread):
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                 )
+                worker._provider = provider  # pyright: ignore[reportPrivateUsage]
+                worker._claude_client = provider  # pyright: ignore[reportPrivateUsage]
                 try:
                     result = worker.run()
                 finally:
-                    self._session = worker._session  # pyright: ignore[reportPrivateUsage]
+                    with self._provider_lock:
+                        self._provider = worker._provider  # pyright: ignore[reportPrivateUsage]
                     self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
 
                 if result == 1:

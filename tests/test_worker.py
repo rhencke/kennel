@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
 
 import pytest
 
@@ -754,6 +754,13 @@ class TestWorker:
         worker = Worker(tmp_path, MagicMock())
         worker.create_session()
         assert worker._session is mock_session
+
+    def test_provider_constructor_path_attaches_session(self, tmp_path: Path) -> None:
+        provider = MagicMock(spec=ClaudeClient)
+        session = MagicMock()
+        worker = Worker(tmp_path, MagicMock(), provider=provider, session=session)
+        provider.attach_session.assert_called_once_with(session)
+        assert worker._session is session
 
     def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
         mock_session = MagicMock()
@@ -9727,6 +9734,80 @@ class TestWorkerThread:
         )
         assert wt._session is mock_session
         assert wt._session_issue == 7
+
+    def test_provider_accepted_via_constructor(self, tmp_path: Path) -> None:
+        provider = MagicMock(spec=ClaudeClient)
+        session = MagicMock()
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            session=session,
+            session_issue=7,
+        )
+        provider.attach_session.assert_called_once_with(session)
+        assert wt.current_provider() is provider
+        assert wt._session is provider.session
+        assert wt._session_issue == 7
+
+    def test_detach_provider_returns_and_clears(self, tmp_path: Path) -> None:
+        provider = MagicMock(spec=ClaudeClient)
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        assert wt.detach_provider() is provider
+        assert wt.current_provider() is None
+
+    def test_session_setter_recreates_provider_when_detached(
+        self, tmp_path: Path
+    ) -> None:
+        wt = self._make_thread(tmp_path)
+        wt.detach_provider()
+        session = MagicMock()
+        wt._session = session
+        assert wt.current_provider() is not None
+        assert wt._session is session
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_run_recreates_provider_when_missing(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        wt.detach_provider()
+        wt._wake = MagicMock()
+        carried_session = MagicMock()
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+            config=None,
+            repo_cfg=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+
+        def fake_worker_run(self_w) -> int:
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(
+                WorkerThread, "_session", new_callable=PropertyMock
+            ) as session_prop,
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            session_prop.return_value = carried_session
+            self._run_thread(wt)
+
+        assert wt.current_provider() is not None
 
     def test_session_owner_returns_none_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)

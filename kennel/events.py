@@ -15,6 +15,7 @@ from kennel.claude import ClaudeClient, set_thread_repo
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
+from kennel.provider import Provider
 from kennel.registry import WorkerRegistry
 from kennel.tasks import Tasks
 from kennel.types import TaskType
@@ -151,7 +152,7 @@ def recover_reply_promises(
     gh: GitHub,
     pr_number: int,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
     registry: WorkerRegistry | None = None,
 ) -> bool:
@@ -479,7 +480,7 @@ def maybe_react(
     config: Config,
     gh: GitHub,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
@@ -517,7 +518,7 @@ def reply_to_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
@@ -717,7 +718,7 @@ def reply_to_review(
 
 
 def needs_more_context(
-    comment_body: str, *, claude_client: ClaudeClient | None = None
+    comment_body: str, *, claude_client: Provider | None = None
 ) -> bool:
     """Ask Haiku whether this comment needs sibling thread context to act on.
 
@@ -744,7 +745,7 @@ _MAX_TITLE_LEN = 80
 
 
 def _summarize_as_action_item(
-    comment_body: str, *, claude_client: ClaudeClient | None = None
+    comment_body: str, *, claude_client: Provider | None = None
 ) -> str:
     """Ask Opus to convert a comment into a short imperative action-item title.
 
@@ -779,7 +780,7 @@ def _triage(
     is_bot: bool,
     context: dict[str, Any] | None = None,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Ask Opus to triage a comment. Returns (category, titles).
@@ -832,7 +833,7 @@ def reply_to_issue_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event).
@@ -1002,7 +1003,7 @@ def _notify_thread_change(
     config: Config,
     gh: GitHub,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
@@ -1090,7 +1091,7 @@ def _rewrite_pr_description(
     work_dir: Path,
     gh: Any,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     _state: Any = None,
     _tasks: Any = None,
     _max_retries: int = 3,
@@ -1175,7 +1176,7 @@ def _make_reorder_kwargs(
     repo_cfg: RepoConfig | None,
     registry: WorkerRegistry | None,
     gh: Any,
-    claude_client: ClaudeClient | None,
+    claude_client: Provider | None,
     prompts: Prompts | None,
     rewrite_fn: Any,
 ) -> dict[str, Any]:
@@ -1218,7 +1219,7 @@ def _reorder_tasks_background(
     registry: WorkerRegistry | None = None,
     *,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
     _rewrite_fn: Callable[..., None] | None = None,
     _reorder_fn: Callable[..., None] | None = None,

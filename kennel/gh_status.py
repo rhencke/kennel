@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kennel.claude import ClaudeClient
 from kennel.github import GitHub
+from kennel.provider import Provider
 
 _SUB_DIR = Path(__file__).resolve().parent.parent / "sub"
 _PERSONA_PATH = _SUB_DIR / "persona.md"
@@ -27,7 +28,7 @@ def generate_persona_status(
     message: str,
     persona: str,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
 ) -> str:
     if claude_client is None:
         claude_client = ClaudeClient()
@@ -46,7 +47,7 @@ def generate_persona_emoji(
     status_text: str,
     persona: str,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
 ) -> str:
     if claude_client is None:
         claude_client = ClaudeClient()
@@ -66,7 +67,7 @@ def set_gh_status(
     message: str,
     *,
     persona_path: Path = _PERSONA_PATH,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     _gh: GitHub,
 ) -> None:
     if claude_client is None:

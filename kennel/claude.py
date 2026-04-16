@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from kennel.provider import PromptSession, Provider, ProviderID, ProviderLimitSnapshot
+
 log = logging.getLogger(__name__)
 
 # Backstop timeout for select.select.  The wakeup pipe (_wakeup_r/_wakeup_w)
@@ -179,7 +181,7 @@ def _talker_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-_session_resolver: Callable[[str], "ClaudeSession | None"] | None = None
+_session_resolver: Callable[[str], PromptSession | None] | None = None
 """Callback the event/webhook layer uses to find its repo's persistent
 :class:`ClaudeSession` — installed once by :mod:`kennel.server` at startup.
 
@@ -190,14 +192,14 @@ resolver install, not a real production path."""
 
 
 def set_session_resolver(
-    resolver: Callable[[str], "ClaudeSession | None"] | None,
+    resolver: Callable[[str], PromptSession | None] | None,
 ) -> None:
     """Install (or clear) the session resolver callback."""
     global _session_resolver
     _session_resolver = resolver
 
 
-def _session_for_current_repo() -> "ClaudeSession":
+def _session_for_current_repo() -> PromptSession:
     """Return the live :class:`ClaudeSession` driving the current thread's repo.
 
     Production always has both a thread-local ``repo_name`` (set by
@@ -1272,7 +1274,7 @@ class ClaudeSession:
 # ── Injectable one-shot collaborator ─────────────────────────────────────────
 
 
-class ClaudeClient:
+class ClaudeClient(Provider):
     """Injectable collaborator for one-shot Claude CLI interactions.
 
     Wraps subprocess-based, session-based, and streaming Claude helpers
@@ -1289,14 +1291,64 @@ class ClaudeClient:
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        session_fn: Callable[[], "ClaudeSession"] = _session_for_current_repo,
+        session_fn: Callable[[], PromptSession] = _session_for_current_repo,
         streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
         sleep_fn: Callable[[float], None] = time.sleep,
+        session: PromptSession | None = None,
     ) -> None:
         self._runner = runner
         self._session_fn = session_fn
         self._streaming_runner = streaming_runner
         self._sleep_fn = sleep_fn
+        self._session_lock = threading.Lock()
+        self._session: PromptSession | None = session
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CLAUDE_CODE
+
+    @property
+    def session(self) -> PromptSession | None:
+        with self._session_lock:
+            return self._session
+
+    def attach_session(self, session: PromptSession | None) -> None:
+        with self._session_lock:
+            self._session = session
+
+    def detach_session(self) -> PromptSession | None:
+        with self._session_lock:
+            session = self._session
+            self._session = None
+            return session
+
+    @property
+    def session_owner(self) -> str | None:
+        with self._session_lock:
+            session = self._session
+        return session.owner if session is not None else None
+
+    @property
+    def session_alive(self) -> bool:
+        with self._session_lock:
+            session = self._session
+        return session is not None and session.is_alive()
+
+    @property
+    def session_pid(self) -> int | None:
+        with self._session_lock:
+            session = self._session
+        return session.pid if session is not None else None
+
+    def get_limit_snapshot(self) -> ProviderLimitSnapshot | None:
+        return None
+
+    def _current_session(self) -> PromptSession:
+        with self._session_lock:
+            session = self._session
+        if session is not None:
+            return session
+        return self._session_fn()
 
     # ── Session-based helpers ────────────────────────────────────────────
 
@@ -1307,7 +1359,7 @@ class ClaudeClient:
         system_prompt: str | None = None,
     ) -> str:
         """Run a prompt turn on the persistent session, returning the result text."""
-        session = self._session_fn()
+        session = self._current_session()
         return session.prompt(prompt, model=model, system_prompt=system_prompt)
 
     def print_prompt_json(

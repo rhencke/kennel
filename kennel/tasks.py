@@ -17,6 +17,7 @@ from typing import IO, Any
 from kennel.claude import ClaudeClient
 from kennel.github import GitHub
 from kennel.prompts import Prompts
+from kennel.provider import Provider
 from kennel.state import (
     JsonFileStore,
     State,
@@ -426,7 +427,7 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
     prompts: Prompts | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[], None] | None = None,

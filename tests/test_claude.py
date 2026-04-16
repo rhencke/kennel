@@ -2230,6 +2230,52 @@ class TestClaudeClientPrintPrompt:
         with pytest.raises(ClaudeStreamError):
             client.print_prompt("q", "claude-opus-4-6")
 
+    def test_uses_attached_session_before_resolver(self) -> None:
+        attached = MagicMock()
+        attached.prompt.return_value = "bound"
+        resolver = MagicMock()
+        client = ClaudeClient(session_fn=resolver, session=attached)
+        assert client.print_prompt("hi", "claude-opus-4-6") == "bound"
+        resolver.assert_not_called()
+
+
+class TestClaudeClientSessionAttachment:
+    def test_attach_session_updates_bound_session(self) -> None:
+        attached = MagicMock()
+        client = ClaudeClient()
+        client.attach_session(attached)
+        assert client.session is attached
+
+    def test_detach_session_returns_and_clears_bound_session(self) -> None:
+        attached = MagicMock()
+        client = ClaudeClient(session=attached)
+        assert client.detach_session() is attached
+        assert client.session is None
+
+    def test_session_owner_reads_from_bound_session(self) -> None:
+        attached = MagicMock(owner="worker-home")
+        client = ClaudeClient(session=attached)
+        assert client.session_owner == "worker-home"
+
+    def test_session_alive_reads_from_bound_session(self) -> None:
+        attached = MagicMock()
+        attached.is_alive.return_value = True
+        client = ClaudeClient(session=attached)
+        assert client.session_alive is True
+
+    def test_session_pid_reads_from_bound_session(self) -> None:
+        attached = MagicMock(pid=1234)
+        client = ClaudeClient(session=attached)
+        assert client.session_pid == 1234
+
+    def test_provider_id_is_claude_code(self) -> None:
+        client = ClaudeClient()
+        assert str(client.provider_id) == "claude-code"
+
+    def test_limit_snapshot_defaults_to_none(self) -> None:
+        client = ClaudeClient()
+        assert client.get_limit_snapshot() is None
+
 
 class TestClaudeClientPrintPromptJson:
     def test_extracts_json_value(self) -> None:
