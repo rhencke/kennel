@@ -68,6 +68,11 @@ def _no_claude_session_spawn(monkeypatch):
 def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
     """Build a mock ClaudeClient with print_prompt configured."""
     client = MagicMock(spec=ClaudeClient)
+    client.session = None
+    client.session_owner = None
+    client.session_alive = False
+    client.session_pid = None
+    client.session_id = None
     if side_effect is not None:
         client.print_prompt.side_effect = side_effect
     else:
@@ -755,10 +760,21 @@ class TestWorker:
         worker.create_session()
         assert worker._session is mock_session
 
+    def test_session_getter_reads_bootstrap_session_before_provider_exists(
+        self,
+    ) -> None:
+        worker = Worker.__new__(Worker)
+        worker.__dict__["_bootstrap_session"] = "boot"
+        assert worker._session == "boot"
+
     def test_provider_constructor_path_attaches_session(self, tmp_path: Path) -> None:
         provider = MagicMock()
         provider.agent = MagicMock(spec=ClaudeClient)
+        provider.agent.session = None
         session = MagicMock()
+        provider.agent.attach_session.side_effect = lambda attached: setattr(
+            provider.agent, "session", attached
+        )
         worker = Worker(tmp_path, MagicMock(), provider=provider, session=session)
         provider.agent.attach_session.assert_called_once_with(session)
         assert worker._session is session
@@ -783,13 +799,13 @@ class TestWorker:
 
     # --- _ensure_session_alive ---
 
-    def test_ensure_session_alive_restarts_dead_session(self, tmp_path: Path) -> None:
+    def test_ensure_session_alive_recovers_dead_session(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
         mock_session = MagicMock()
         mock_session.is_alive.return_value = False
         worker._session = mock_session
         worker._ensure_session_alive(tmp_path)
-        mock_session.restart.assert_called_once()
+        mock_session.recover.assert_called_once()
 
     def test_ensure_session_alive_noop_when_alive(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
@@ -797,14 +813,14 @@ class TestWorker:
         mock_session.is_alive.return_value = True
         worker._session = mock_session
         worker._ensure_session_alive(tmp_path)
-        mock_session.restart.assert_not_called()
+        mock_session.recover.assert_not_called()
 
     def test_ensure_session_alive_noop_when_no_session(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
         assert worker._session is None
         worker._ensure_session_alive(tmp_path)  # must not raise
 
-    def test_ensure_session_alive_logs_warning_on_restart(
+    def test_ensure_session_alive_logs_warning_on_recover(
         self, tmp_path: Path, caplog
     ) -> None:
         import logging
@@ -815,7 +831,7 @@ class TestWorker:
         worker._session = mock_session
         with caplog.at_level(logging.WARNING, logger="kennel.worker"):
             worker._ensure_session_alive(tmp_path)
-        assert any("restart" in r.message.lower() for r in caplog.records)
+        assert any("recover" in r.message.lower() for r in caplog.records)
 
     def test_run_ensures_session_alive_before_handlers(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -975,7 +991,7 @@ class TestWorker:
             worker.run()
         mock_session.switch_model.assert_not_called()
 
-    def test_run_restarts_session_at_issue_boundary(self, tmp_path: Path) -> None:
+    def test_run_resets_session_at_issue_boundary(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
@@ -1002,8 +1018,8 @@ class TestWorker:
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        mock_session.restart.assert_called_once()
-        # opus first (boundary restart), then sonnet (session_fresh path)
+        mock_session.reset.assert_called_once()
+        # opus first (boundary reset), then sonnet (session_fresh path)
         assert mock_session.switch_model.call_args_list == [
             call("claude-opus-4-6"),
             call("claude-sonnet-4-6"),
@@ -9691,6 +9707,18 @@ class TestWorkerThread:
         assert len(issues_received) == 2
         assert issues_received[0] is None  # no carry-over on first iteration
         assert issues_received[1] == 42  # carried forward
+
+    def test_create_session_raises_when_provider_does_not_attach_one(
+        self, tmp_path: Path
+    ) -> None:
+        wt = self._make_thread(tmp_path)
+        provider = MagicMock()
+        provider.agent.session = None
+        wt._provider = provider
+        with pytest.raises(
+            RuntimeError, match="provider.ensure_session\\(\\) returned no session"
+        ):
+            wt._create_session()
 
     def test_session_stopped_when_thread_exits(self, tmp_path: Path) -> None:
         """WorkerThread stops the session when its loop finishes."""

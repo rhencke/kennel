@@ -5,6 +5,7 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -924,18 +925,18 @@ class TestClaudeSessionDrainToBoundary:
         proc.poll = MagicMock(side_effect=lambda: next(poll_results))
         session._drain_to_boundary(deadline=1.0)
         # Loop exits on proc.poll() == 0 (EOF). _in_turn stays True because
-        # we only clear it on type=result/error — restart path would clear
+        # we only clear it on type=result/error — recover path would clear
         # it, but EOF-only exit doesn't.
 
-    def test_restarts_on_deadline(self, tmp_path: Path) -> None:
+    def test_recovers_on_deadline(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session._in_turn = True
         # No pending data, process stays alive → loop just times out
         session._selector = MagicMock(return_value=([], [], []))
-        with patch.object(session, "restart") as mock_restart:
+        with patch.object(session, "recover") as mock_recover:
             session._drain_to_boundary(deadline=0.01)
-        mock_restart.assert_called_once()
+        mock_recover.assert_called_once()
         assert session._in_turn is False
 
     def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
@@ -1231,7 +1232,7 @@ class TestClaudeSessionIterEvents:
             list(session.iter_events())
         assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
         proc.kill.assert_called()
-        # restart() must spawn a replacement process after killing
+        # recover() must spawn a replacement process after killing
         assert fake_popen.call_count == 2
 
     def test_cancel_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
@@ -1528,10 +1529,10 @@ class TestClaudeSessionConsumeUntilResult:
         lines = [_json.dumps({"type": "error", "error": "something broke"}) + "\n"]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "restart") as mock_restart:
+        with patch.object(session, "recover") as mock_recover:
             with pytest.raises(ClaudeProviderError, match="something broke"):
                 session.consume_until_result()
-        mock_restart.assert_called_once_with()
+        mock_recover.assert_called_once_with()
 
     def test_raises_on_provider_error_result(self, tmp_path: Path) -> None:
         import json as _json
@@ -1547,10 +1548,10 @@ class TestClaudeSessionConsumeUntilResult:
         ]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "restart") as mock_restart:
+        with patch.object(session, "recover") as mock_recover:
             with pytest.raises(ClaudeProviderError, match="500"):
                 session.consume_until_result()
-        mock_restart.assert_called_once_with()
+        mock_recover.assert_called_once_with()
 
     def test_returns_empty_when_result_field_not_a_string(self, tmp_path: Path) -> None:
         import json as _json
@@ -1574,7 +1575,11 @@ class TestClaudeSessionConsumeUntilResult:
         assert session.consume_until_result() == "output"
 
 
-class TestClaudeSessionIsAliveAndRestart:
+class TestClaudeSessionIsAliveAndReset:
+    def test_session_id_is_none_when_not_established(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.session_id is None
+
     def test_is_alive_true_when_process_running(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         proc.poll = MagicMock(return_value=None)
@@ -1587,7 +1592,7 @@ class TestClaudeSessionIsAliveAndRestart:
         session = _make_session(tmp_path, proc)
         assert session.is_alive() is False
 
-    def test_restart_spawns_new_process(self, tmp_path: Path) -> None:
+    def test_reset_spawns_new_process(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1597,13 +1602,11 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()
+        session.reset()
         assert session._proc is new_proc
         assert fake_popen.call_count == 2
 
-    def test_restart_registers_new_proc_in_active_children(
-        self, tmp_path: Path
-    ) -> None:
+    def test_reset_registers_new_proc_in_active_children(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1613,13 +1616,13 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()
+        session.reset()
         assert new_proc in _active_children
         assert old_proc not in _active_children
         # cleanup
         session.stop()
 
-    def test_restart_unregisters_old_proc(self, tmp_path: Path) -> None:
+    def test_reset_unregisters_old_proc(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1629,12 +1632,12 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()
+        session.reset()
         assert old_proc not in _active_children
         # cleanup
         session.stop()
 
-    def test_restart_logs_info(self, tmp_path: Path, caplog) -> None:
+    def test_reset_logs_info(self, tmp_path: Path, caplog) -> None:
         import logging as _logging
 
         system_file = tmp_path / "system.md"
@@ -1647,12 +1650,12 @@ class TestClaudeSessionIsAliveAndRestart:
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
         with caplog.at_level(_logging.INFO, logger="kennel.claude"):
-            session.restart()
-        assert any("restart" in r.message.lower() for r in caplog.records)
+            session.reset()
+        assert any("reset" in r.message.lower() for r in caplog.records)
         session.stop()
 
-    def test_restart_clears_session_id(self, tmp_path: Path) -> None:
-        """restart drops session_id so the new spawn starts a fresh
+    def test_reset_clears_session_id(self, tmp_path: Path) -> None:
+        """reset drops session_id so the new spawn starts a fresh
         conversation (opposite of switch_model which preserves it)."""
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
@@ -1666,13 +1669,13 @@ class TestClaudeSessionIsAliveAndRestart:
             selector=MagicMock(return_value=([], [], [])),
         )
         session._session_id = "sid-123"
-        session.restart()
+        session.reset()
         assert session._session_id == ""
         # Second spawn call had no --resume.
         second_cmd = fake_popen.call_args_list[1].args[0]
         assert "--resume" not in second_cmd
 
-    def test_restart_skips_kill_when_process_already_dead(self, tmp_path: Path) -> None:
+    def test_reset_skips_kill_when_process_already_dead(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([], poll_returns=0)  # already dead
@@ -1682,12 +1685,12 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()
+        session.reset()
         old_proc.kill.assert_not_called()
         assert session._proc is new_proc
         session.stop()
 
-    def test_restart_raises_oserror_on_kill(self, tmp_path: Path, caplog) -> None:
+    def test_reset_raises_oserror_on_kill(self, tmp_path: Path, caplog) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1700,10 +1703,10 @@ class TestClaudeSessionIsAliveAndRestart:
         )
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
             with pytest.raises(OSError):
-                session.restart()
+                session.reset()
         assert any("kill/wait failed" in r.message for r in caplog.records)
 
-    def test_restart_raises_timeout_on_wait(self, tmp_path: Path, caplog) -> None:
+    def test_reset_raises_timeout_on_wait(self, tmp_path: Path, caplog) -> None:
         import subprocess as _subprocess
 
         system_file = tmp_path / "system.md"
@@ -1718,10 +1721,10 @@ class TestClaudeSessionIsAliveAndRestart:
         )
         with caplog.at_level(logging.WARNING, logger="kennel.claude"):
             with pytest.raises(_subprocess.TimeoutExpired):
-                session.restart()
+                session.reset()
         assert any("kill/wait failed" in r.message for r in caplog.records)
 
-    def test_stop_after_restart_cleans_up_new_proc(self, tmp_path: Path) -> None:
+    def test_stop_after_reset_cleans_up_new_proc(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1731,7 +1734,7 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()
+        session.reset()
         session.stop()
         assert new_proc not in _active_children
 
@@ -2275,9 +2278,69 @@ class TestClaudeClientSessionAttachment:
         client = ClaudeClient(session=attached)
         assert client.session_pid == 1234
 
+    def test_session_id_is_none_without_bound_session(self) -> None:
+        client = ClaudeClient()
+        assert client.session_id is None
+
+    def test_session_id_is_none_when_bound_session_has_no_session_id(self) -> None:
+        client = ClaudeClient(session=object())
+        assert client.session_id is None
+
+    def test_session_id_is_none_for_non_string_value(self) -> None:
+        attached = SimpleNamespace(session_id=123)
+        client = ClaudeClient(session=attached)
+        assert client.session_id is None
+
+    def test_session_id_reads_string_from_bound_session(self) -> None:
+        attached = SimpleNamespace(session_id="sess-123")
+        client = ClaudeClient(session=attached)
+        assert client.session_id == "sess-123"
+
     def test_provider_id_is_claude_code(self) -> None:
         client = ClaudeClient()
         assert str(client.provider_id) == "claude-code"
+
+    def test_ensure_session_requires_session_system_file_and_work_dir(self) -> None:
+        client = ClaudeClient()
+        with pytest.raises(
+            ValueError,
+            match="ClaudeClient.ensure_session requires session_system_file and work_dir",
+        ):
+            client.ensure_session()
+
+    def test_recover_session_requires_recover_method(self) -> None:
+        client = ClaudeClient(session=object())
+        with pytest.raises(
+            ValueError, match="ClaudeClient.recover_session requires ClaudeSession"
+        ):
+            client.recover_session()
+
+    def test_reset_session_returns_when_session_stays_missing(self) -> None:
+        client = ClaudeClient()
+        with patch.object(client, "ensure_session"):
+            client.reset_session()
+
+    def test_reset_session_requires_reset_method(self) -> None:
+        client = ClaudeClient(session=object())
+        with pytest.raises(
+            ValueError, match="ClaudeClient.reset_session requires ClaudeSession"
+        ):
+            client.reset_session()
+
+    def test_run_turn_retries_after_preempt(self) -> None:
+        session = MagicMock()
+        session.last_turn_cancelled = False
+        prompts = iter(["partial", "done"])
+
+        def prompt(*args: object, **kwargs: object) -> str:
+            result = next(prompts)
+            session.last_turn_cancelled = result == "partial"
+            return result
+
+        session.prompt.side_effect = prompt
+        client = ClaudeClient(session=session)
+        assert client.run_turn("fetch", retry_on_preempt=True) == "done"
+        session.wait_for_pending_preempt.assert_called_once_with()
 
 
 class TestClaudeOAuthState:

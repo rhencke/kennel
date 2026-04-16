@@ -236,8 +236,7 @@ def claude_start(
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
     When *session* is provided the setup prompt is sent through the
-    persistent session (via :meth:`~claude.ClaudeSession.send` +
-    :meth:`~claude.ClaudeSession.consume_until_result`) and an empty string
+    persistent provider agent and an empty string
     is returned — there is no subprocess session_id to track.
 
     When *session* is ``None`` a fresh subprocess is spawned via
@@ -247,7 +246,12 @@ def claude_start(
     worker's crash handler.
     """
     if session is not None:
-        _run_session_turn(session, _session_turn_prompt(fido_dir))
+        if claude_client is None:
+            _run_session_turn(session, _session_turn_prompt(fido_dir))
+            return ""
+        claude_client.run_turn(
+            _session_turn_prompt(fido_dir), model=model, retry_on_preempt=True
+        )
         return ""
     if claude_client is None:
         claude_client = ClaudeClient()
@@ -275,17 +279,8 @@ def _run_session_turn(session: PromptSession, content: str) -> str:
         with session:
             session.send(content)
             result = session.consume_until_result()
-            # ``is True`` rather than truthiness so a MagicMock session in
-            # tests (where the attribute default is a MagicMock, which is
-            # itself truthy) doesn't spin the loop forever.
             if session.last_turn_cancelled is not True:
                 return result
-        # Before racing back into `with session:`, cede to any pending
-        # preempter so they acquire the lock first.  RLock is not FIFO-fair
-        # under contention, so without this hand-off the worker can grab
-        # the lock before the preempter wakes and then iter_events clears
-        # :attr:`_cancel` — starving the preempter for a full worker turn
-        # (observed in #499 comments).
         session.wait_for_pending_preempt()
         attempt += 1
         log.info("session turn preempted mid-flight — retry %d", attempt)
@@ -317,8 +312,7 @@ def claude_run(
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
     When *session* is provided the prompt is sent through the persistent
-    session (via :meth:`~claude.ClaudeSession.send` +
-    :meth:`~claude.ClaudeSession.consume_until_result`) and ``("", "")``
+    provider agent and ``("", "")``
     is returned.
 
     When *session* is ``None`` a new session is started from *fido_dir/system*
@@ -328,7 +322,12 @@ def claude_run(
     worker's crash handler.
     """
     if session is not None:
-        _run_session_turn(session, _session_turn_prompt(fido_dir))
+        if claude_client is None:
+            _run_session_turn(session, _session_turn_prompt(fido_dir))
+            return "", ""
+        claude_client.run_turn(
+            _session_turn_prompt(fido_dir), model=model, retry_on_preempt=True
+        )
         return "", ""
     if claude_client is None:
         claude_client = ClaudeClient()
@@ -789,6 +788,12 @@ class Worker:
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        default_agent = ClaudeClient(
+            session_system_file=_sub_dir() / "persona.md",
+            work_dir=work_dir,
+            repo_name=repo_name or None,
+            session=session,
+        )
         if provider is not None:
             self._provider = provider
             if session is not None:
@@ -796,22 +801,24 @@ class Worker:
         elif claude_client is not None:
             self._provider = ClaudeCode(agent=claude_client, session=session)
         else:
-            self._provider = ClaudeCode(session=session)
+            self._provider = ClaudeCode(agent=default_agent)
         self._claude_client: ProviderAgent = self._provider.agent
-        self.__dict__["_compat_session"] = session
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
 
     @property
     def _session(self) -> PromptSession | None:
-        return self.__dict__.get("_compat_session")
+        if hasattr(self, "_provider"):
+            return self._provider.agent.session
+        return self.__dict__.get("_bootstrap_session")
 
     @_session.setter
     def _session(self, session: PromptSession | None) -> None:
-        self.__dict__["_compat_session"] = session
         if hasattr(self, "_provider"):
             self._provider.agent.attach_session(session)
+            return
+        self.__dict__["_bootstrap_session"] = session
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -868,31 +875,13 @@ class Worker:
         (fido_dir / "compact.sh").unlink(missing_ok=True)
 
     def create_session(self) -> None:
-        """Start a persistent ClaudeSession for this work iteration.
-
-        Uses the fido persona as the session system prompt.  Task-specific
-        instructions are delivered via user messages in later phases.
-        Stores the session on ``self._session`` so worker methods can access it.
-
-        Immediately switches to Opus for the planning phase; the caller is
-        responsible for switching to Sonnet once planning is complete.
-        """
-        persona_file = _sub_dir() / "persona.md"
-        self._session = claude.ClaudeSession(
-            persona_file,
-            work_dir=self.work_dir,
-            repo_name=self._repo_name or None,
-        )
-        self._session.switch_model("claude-opus-4-6")
+        """Ensure the persistent provider session exists and is on Opus."""
+        self._claude_client.ensure_session("claude-opus-4-6")
 
     def stop_session(self) -> None:
-        """Stop the ClaudeSession if one is running, then clear it.
-
-        Safe to call when no session has been created (no-op).
-        """
-        if self._session is not None:
-            self._session.stop()
-            self._session = None
+        """Stop the persistent provider session, if one exists."""
+        self._claude_client.stop_session()
+        self._session = None
 
     def _ensure_session_alive(self, fido_dir: Path) -> None:  # noqa: ARG002
         """Restart the session if the claude process has died unexpectedly.
@@ -904,9 +893,9 @@ class Worker:
         *fido_dir* is accepted for future use (e.g. writing per-phase context
         into the session system file) but is not used at this stage.
         """
-        if self._session is not None and not self._session.is_alive():
-            log.warning("worker: ClaudeSession died — restarting before next phase")
-            self._session.restart()
+        if self._session is not None and not self._claude_client.session_alive:
+            log.warning("worker: provider session died — recovering before next phase")
+            self._claude_client.recover_session()
 
     # ------------------------------------------------------------------
     # Business logic
@@ -990,7 +979,7 @@ class Worker:
                 return
 
             log.info("set_status: nudging session for status + emoji")
-            raw = self._session.prompt(
+            raw = self._claude_client.run_turn(
                 prompts.status_prompt(activities),
                 system_prompt=prompts.status_system_prompt(),
             )
@@ -2084,9 +2073,7 @@ class Worker:
                         "worker: new issue #%s — restarting session at issue boundary",
                         issue,
                     )
-                    assert self._session is not None
-                    self._session.restart()
-                    self._session.switch_model("claude-opus-4-6")
+                    self._claude_client.reset_session("claude-opus-4-6")
                     session_fresh = True
                 self._session_issue = issue
 
@@ -2124,8 +2111,8 @@ class Worker:
                     prompts=self._get_prompts(),
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                if session_fresh and self._session is not None:
-                    self._session.switch_model("claude-sonnet-4-6")
+                if session_fresh:
+                    self._claude_client.ensure_session("claude-sonnet-4-6")
                 self._ensure_session_alive(ctx.fido_dir)
                 if pr_is_fresh:
                     log.info("fresh PR — skipping CI/thread/rescope checks")
@@ -2211,13 +2198,19 @@ class WorkerThread(threading.Thread):
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
+        default_agent = ClaudeClient(
+            session_system_file=_sub_dir() / "persona.md",
+            work_dir=work_dir,
+            repo_name=repo_name or None,
+            session=session,
+        )
         self._provider: Provider | None
         if provider is not None:
             self._provider = provider
             if session is not None:
                 self._provider.agent.attach_session(session)
         else:
-            self._provider = ClaudeCode(session=session)
+            self._provider = ClaudeCode(agent=default_agent)
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
@@ -2233,7 +2226,14 @@ class WorkerThread(threading.Thread):
         with self._provider_lock:
             provider = self._provider
             if provider is None:
-                provider = ClaudeCode(session=session)
+                provider = ClaudeCode(
+                    agent=ClaudeClient(
+                        session_system_file=_sub_dir() / "persona.md",
+                        work_dir=self.work_dir,
+                        repo_name=self._repo_name or None,
+                        session=session,
+                    )
+                )
                 self._provider = provider
         provider.agent.attach_session(session)
 
@@ -2301,23 +2301,28 @@ class WorkerThread(threading.Thread):
         self._stop = True
         self._wake.set()
 
-    def _create_session(self) -> claude.ClaudeSession:
-        """Spawn the per-worker persistent :class:`~kennel.claude.ClaudeSession`.
+    def _ensure_provider(self) -> Provider:
+        """Return the owned provider, creating the default Claude provider if needed."""
+        with self._provider_lock:
+            provider = self._provider
+            if provider is None:
+                provider = ClaudeCode(
+                    agent=ClaudeClient(
+                        session_system_file=_sub_dir() / "persona.md",
+                        work_dir=self.work_dir,
+                        repo_name=self._repo_name or None,
+                    )
+                )
+                self._provider = provider
+            return provider
 
-        Used from :meth:`run` so the thread's ``_session`` attribute is
-        populated before the inner :class:`Worker` begins — that way the
-        registry's resolver (and therefore :func:`claude.print_prompt`)
-        can find the session from any other thread (status updates, webhook
-        handlers) the moment the worker thread starts up, not only after
-        its first full iteration has completed.
-        """
-        persona_file = _sub_dir() / "persona.md"
-        session = claude.ClaudeSession(
-            persona_file,
-            work_dir=self.work_dir,
-            repo_name=self._repo_name or None,
-        )
-        session.switch_model("claude-opus-4-6")
+    def _create_session(self) -> PromptSession:
+        """Eagerly create the persistent provider session for this thread."""
+        provider = self._ensure_provider()
+        provider.agent.ensure_session("claude-opus-4-6")
+        session = provider.agent.session
+        if session is None:
+            raise RuntimeError("provider.ensure_session() returned no session")
         return session
 
     def run(self) -> None:
@@ -2328,25 +2333,12 @@ class WorkerThread(threading.Thread):
             while not self._stop:
                 if self._registry is not None:
                     self._registry.report_activity(self._repo_name, "idle", busy=False)
-                # Create the persistent ClaudeSession eagerly — before the
-                # Worker runs — so it's always reachable via
-                # registry.get_session() for :func:`claude.print_prompt`
-                # callers (e.g. cosmetic set_status on repos with no
-                # eligible issues).  Writing here, on ``self._session``,
-                # rather than inside Worker.create_session, means the
-                # registry's resolver sees the session even while the
-                # Worker is mid-iteration.  Spawning unconditionally is
-                # fine: sessions persist across Worker crashes and idle
-                # between iterations; we'd create one on the first
-                # iteration anyway.
-                if self._session is None:
-                    self._session = self._create_session()
-                with self._provider_lock:
-                    provider = self._provider
-                if provider is None:
-                    provider = ClaudeCode(session=self._session)
-                    with self._provider_lock:
-                        self._provider = provider
+                provider = self._ensure_provider()
+                session = provider.agent.session
+                if session is None:
+                    session = self._create_session()
+                    if provider.agent.session is not session:
+                        provider.agent.attach_session(session)
                 worker = Worker(
                     self.work_dir,
                     self._gh,
@@ -2354,7 +2346,7 @@ class WorkerThread(threading.Thread):
                     self._repo_name,
                     self._registry,
                     self._membership,
-                    session=self._session,
+                    session=session,
                     session_issue=self._session_issue,
                     config=self._config,
                     repo_cfg=self._repo_cfg,
@@ -2392,9 +2384,11 @@ class WorkerThread(threading.Thread):
             claude.set_thread_repo(None)
             # Only stop the session on orderly shutdown — a crashed thread
             # leaves it alive so the registry can hand it to the replacement.
-            if self._stop and self._session is not None:
-                self._session.stop()
-                self._session = None
+            if self._stop:
+                with self._provider_lock:
+                    provider = self._provider
+                if provider is not None:
+                    provider.agent.stop_session()
 
 
 def run(work_dir: Path, *, _GitHub: type[GitHub] = GitHub) -> int:
