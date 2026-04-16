@@ -37,6 +37,10 @@ from kennel.provider import (
     ProviderAgent,
     ProviderAPI,
     ProviderID,
+    ProviderLimitSnapshot,
+    ProviderModel,
+    ReasoningEffort,
+    coerce_provider_model,
 )
 
 log = logging.getLogger(__name__)
@@ -50,9 +54,6 @@ _COPILOT_JSON_BASE_ARGS = (
     "--allow-all",
     "-s",
 )
-_COPILOT_MODEL_OPUS = "gpt-5.4"
-_COPILOT_MODEL_SONNET = "gpt-5.4-mini"
-_COPILOT_MODEL_HAIKU = "gpt-5-mini"
 _COPILOT_LIMITS_UNAVAILABLE = "Copilot CLI does not expose local usage limits."
 
 
@@ -98,17 +99,18 @@ def extract_session_id(output: str) -> str:
     return result
 
 
-def _normalize_model(model: str | None) -> str | None:
+def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
     if model is None:
         return None
-    lowered = model.lower()
+    normalized = coerce_provider_model(model)
+    lowered = normalized.model.lower()
     if lowered.startswith("claude-opus"):
-        return _COPILOT_MODEL_OPUS
+        return ProviderModel("gpt-5.4", normalized.effort)
     if lowered.startswith("claude-sonnet"):
-        return _COPILOT_MODEL_SONNET
+        return ProviderModel("gpt-5.4", normalized.effort)
     if lowered.startswith("claude-haiku"):
-        return _COPILOT_MODEL_HAIKU
-    return model
+        return ProviderModel("gpt-5.4", normalized.effort)
+    return normalized
 
 
 def _combine_prompt(
@@ -419,7 +421,7 @@ class CopilotACPRuntime:
         client_info: Implementation | None = None,
     ) -> None:
         self._work_dir = work_dir
-        self._command = tuple(command)
+        self._command_base = tuple(command)
         self._spawn_agent_process = spawn_agent_process
         self._client_factory = (
             self._default_client_factory if client_factory is None else client_factory
@@ -446,6 +448,7 @@ class CopilotACPRuntime:
         self._process: Any = None
         self._initialize_response: Any = None
         self._attached_session_id: str | None = None
+        self._current_effort: ReasoningEffort | None = None
         self._active_prompt_session_id: str | None = None
         self._prompt_chunks: list[str] = []
         self._thread = threading.Thread(
@@ -461,6 +464,18 @@ class CopilotACPRuntime:
     ) -> _CopilotACPClient:
         return _CopilotACPClient(runtime)
 
+    def _command_for_effort(self, effort: ReasoningEffort | None) -> tuple[str, ...]:
+        if effort is None:
+            return self._command_base
+        return (*self._command_base, "--effort", effort)
+
+    def _preferred_efforts(
+        self, model: ProviderModel | None
+    ) -> tuple[ReasoningEffort | None, ...]:
+        if model is None or not model.efforts:
+            return (None,)
+        return tuple(model.efforts)
+
     @property
     def pid(self) -> int | None:
         process = self._process
@@ -470,17 +485,21 @@ class CopilotACPRuntime:
         process = self._process
         return process is not None and process.returncode is None
 
-    def ensure_session(self, session_id: str | None, model: str | None) -> str:
+    def ensure_session(
+        self, session_id: str | None, model: ProviderModel | str | None
+    ) -> str:
         return self._run_async(self._ensure_session_async(session_id, model))
 
-    def recover_session(self, session_id: str | None, model: str | None) -> str:
+    def recover_session(
+        self, session_id: str | None, model: ProviderModel | str | None
+    ) -> str:
         return self._run_async(self._recover_session_async(session_id, model))
 
-    def reset_session(self, model: str | None) -> str:
+    def reset_session(self, model: ProviderModel | str | None) -> str:
         return self._run_async(self._reset_session_async(model))
 
     def prompt(
-        self, session_id: str, content: str, model: str | None
+        self, session_id: str, content: str, model: ProviderModel | str | None
     ) -> tuple[str, str, str]:
         return self._run_async(self._prompt_async(session_id, content, model))
 
@@ -506,29 +525,31 @@ class CopilotACPRuntime:
             self._prompt_chunks.append(text)
 
     async def _ensure_session_async(
-        self, session_id: str | None, model: str | None
+        self, session_id: str | None, model: ProviderModel | str | None
     ) -> str:
-        await self._ensure_connection_async()
+        normalized = _normalize_model(model)
+        await self._ensure_connection_async(normalized)
         target_session_id = session_id
         if target_session_id is None or self._attached_session_id != target_session_id:
             target_session_id = await self._attach_session_async(target_session_id)
-        await self._set_model_async(target_session_id, model)
+        await self._set_model_async(target_session_id, normalized)
         return target_session_id
 
     async def _recover_session_async(
-        self, session_id: str | None, model: str | None
+        self, session_id: str | None, model: ProviderModel | str | None
     ) -> str:
         await self._close_connection_async()
         return await self._ensure_session_async(session_id, model)
 
-    async def _reset_session_async(self, model: str | None) -> str:
-        await self._ensure_connection_async()
+    async def _reset_session_async(self, model: ProviderModel | str | None) -> str:
+        normalized = _normalize_model(model)
+        await self._ensure_connection_async(normalized)
         target_session_id = await self._attach_session_async(None)
-        await self._set_model_async(target_session_id, model)
+        await self._set_model_async(target_session_id, normalized)
         return target_session_id
 
     async def _prompt_async(
-        self, session_id: str, content: str, model: str | None
+        self, session_id: str, content: str, model: ProviderModel | str | None
     ) -> tuple[str, str, str]:
         target_session_id = await self._ensure_session_async(session_id, model)
         connection = self._connection
@@ -551,36 +572,47 @@ class CopilotACPRuntime:
             return
         await connection.cancel(session_id=session_id)
 
-    async def _ensure_connection_async(self) -> None:
-        if self.is_alive() and self._connection is not None:
+    async def _ensure_connection_async(self, model: ProviderModel | None) -> None:
+        allowed_efforts = self._preferred_efforts(model)
+        if (
+            self.is_alive()
+            and self._connection is not None
+            and self._current_effort in allowed_efforts
+        ):
             return
-        await self._close_connection_async()
-        client = self._client_factory(self)
-        command = self._command[0]
-        args = self._command[1:]
-        agent_cm = self._spawn_agent_process(
-            client,
-            command,
-            *args,
-            cwd=self._work_dir,
-            transport_kwargs={"stderr": subprocess.DEVNULL},
-        )
-        try:
-            connection, process = await agent_cm.__aenter__()
-            initialize_response = await connection.initialize(
-                protocol_version=acp.PROTOCOL_VERSION,
-                client_capabilities=self._client_capabilities,
-                client_info=self._client_info,
+        last_error: Exception | None = None
+        for effort in allowed_efforts:
+            await self._close_connection_async()
+            client = self._client_factory(self)
+            command = self._command_for_effort(effort)
+            agent_cm = self._spawn_agent_process(
+                client,
+                command[0],
+                *command[1:],
+                cwd=self._work_dir,
+                transport_kwargs={"stderr": subprocess.DEVNULL},
             )
-        except Exception:
-            await agent_cm.__aexit__(None, None, None)
-            raise
-        self._agent_cm = agent_cm
-        self._client = client
-        self._connection = connection
-        self._process = process
-        self._initialize_response = initialize_response
-        self._attached_session_id = None
+            try:
+                connection, process = await agent_cm.__aenter__()
+                initialize_response = await connection.initialize(
+                    protocol_version=acp.PROTOCOL_VERSION,
+                    client_capabilities=self._client_capabilities,
+                    client_info=self._client_info,
+                )
+            except Exception as exc:
+                await agent_cm.__aexit__(None, None, None)
+                last_error = exc
+                continue
+            self._agent_cm = agent_cm
+            self._client = client
+            self._connection = connection
+            self._process = process
+            self._initialize_response = initialize_response
+            self._attached_session_id = None
+            self._current_effort = effort
+            return
+        if last_error is not None:
+            raise last_error
 
     async def _attach_session_async(self, session_id: str | None) -> str:
         connection = self._connection
@@ -601,14 +633,18 @@ class CopilotACPRuntime:
         self._attached_session_id = session_id
         return session_id
 
-    async def _set_model_async(self, session_id: str, model: str | None) -> None:
+    async def _set_model_async(
+        self, session_id: str, model: ProviderModel | str | None
+    ) -> None:
         normalized = _normalize_model(model)
         if normalized is None:
             return
         connection = self._connection
         if connection is None:
             raise RuntimeError("Copilot ACP connection is not available")
-        await connection.set_session_model(model_id=normalized, session_id=session_id)
+        await connection.set_session_model(
+            model_id=normalized.model, session_id=session_id
+        )
 
     async def _close_connection_async(self) -> None:
         agent_cm = self._agent_cm
@@ -618,6 +654,7 @@ class CopilotACPRuntime:
         self._process = None
         self._initialize_response = None
         self._attached_session_id = None
+        self._current_effort = None
         self._active_prompt_session_id = None
         self._prompt_chunks = []
         if agent_cm is not None:
@@ -660,7 +697,7 @@ class CopilotCLISession:
         system_file: Path,
         *,
         work_dir: Path | str,
-        model: str,
+        model: ProviderModel | str,
         repo_name: str | None = None,
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
@@ -684,7 +721,7 @@ class CopilotCLISession:
         self._thread_state = threading.local()
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
-        self._model = model
+        self._model = coerce_provider_model(model)
         self._session_id: str | None = self._runtime.ensure_session(None, model)
 
     @property
@@ -717,7 +754,7 @@ class CopilotCLISession:
     def prompt(
         self,
         content: str,
-        model: str | None = None,
+        model: ProviderModel | str | None = None,
         system_prompt: str | None = None,
     ) -> str:
         with self:
@@ -735,18 +772,19 @@ class CopilotCLISession:
             return ""
         return self._prompt_locked(content, model=self._model, system_prompt=None)
 
-    def switch_model(self, model: str) -> None:
-        self._session_id = self._runtime.ensure_session(self._session_id, model)
-        self._model = model
+    def switch_model(self, model: ProviderModel | str) -> None:
+        normalized = coerce_provider_model(model)
+        self._session_id = self._runtime.ensure_session(self._session_id, normalized)
+        self._model = normalized
 
     def recover(self) -> None:
         self._session_id = self._runtime.recover_session(self._session_id, self._model)
 
-    def reset(self, model: str | None = None) -> None:
-        effective_model = self._model if model is None else model
+    def reset(self, model: ProviderModel | str | None = None) -> None:
+        effective_model = self._model if model is None else coerce_provider_model(model)
         self._session_id = self._runtime.reset_session(effective_model)
         if model is not None:
-            self._model = model
+            self._model = coerce_provider_model(model)
         self._pending_content = None
         self._last_turn_cancelled = False
 
@@ -785,10 +823,10 @@ class CopilotCLISession:
         self,
         content: str,
         *,
-        model: str | None,
+        model: ProviderModel | str | None,
         system_prompt: str | None,
     ) -> str:
-        effective_model = self._model if model is None else model
+        effective_model = self._model if model is None else coerce_provider_model(model)
         prompt = _combine_prompt(
             content,
             base_system_prompt=self._base_system_prompt,
@@ -801,7 +839,7 @@ class CopilotCLISession:
         )
         self._session_id = session_id
         if model is not None:
-            self._model = model
+            self._model = coerce_provider_model(model)
         self._last_turn_cancelled = stop_reason == "cancelled"
         return result
 
@@ -813,9 +851,7 @@ class CopilotCLIAPI(ProviderAPI):
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
 
-    def get_limit_snapshot(self) -> Any | None:
-        from kennel.provider import ProviderLimitSnapshot
-
+    def get_limit_snapshot(self) -> ProviderLimitSnapshot:
         return ProviderLimitSnapshot(
             provider=self.provider_id,
             unavailable_reason=_COPILOT_LIMITS_UNAVAILABLE,
@@ -824,6 +860,10 @@ class CopilotCLIAPI(ProviderAPI):
 
 class CopilotCLIClient(ProviderAgent):
     """Injectable collaborator for Copilot CLI interactions."""
+
+    voice_model = ProviderModel("gpt-5.4", ("xhigh", "high"))
+    work_model = ProviderModel("gpt-5.4", "medium")
+    brief_model = ProviderModel("gpt-5.4", "low")
 
     def __init__(
         self,
@@ -896,7 +936,7 @@ class CopilotCLIClient(ProviderAgent):
         session_id = getattr(session, "session_id")
         return session_id if isinstance(session_id, str) and session_id else None
 
-    def _spawn_owned_session(self, model: str) -> PromptSession:
+    def _spawn_owned_session(self, model: ProviderModel | str) -> PromptSession:
         system_file = self._session_system_file
         work_dir = self._work_dir
         assert system_file is not None
@@ -904,11 +944,11 @@ class CopilotCLIClient(ProviderAgent):
         return self._session_factory(
             system_file,
             work_dir=work_dir,
-            model=model,
+            model=coerce_provider_model(model),
             repo_name=self._repo_name,
         )
 
-    def ensure_session(self, model: str | None = None) -> None:
+    def ensure_session(self, model: ProviderModel | str | None = None) -> None:
         with self._session_lock:
             session = self._session
             if session is None:
@@ -926,32 +966,6 @@ class CopilotCLIClient(ProviderAgent):
         if model is not None:
             session.switch_model(model)
 
-    def recover_session(self) -> None:
-        with self._session_lock:
-            session = self._session
-        if session is not None:
-            recover = getattr(session, "recover", None)
-            if not callable(recover):
-                raise ValueError(
-                    "CopilotCLIClient.recover_session requires CopilotCLISession"
-                )
-            recover()
-
-    def reset_session(self, model: str | None = None) -> None:
-        if model is None:
-            raise ValueError("CopilotCLIClient.reset_session requires model")
-        with self._session_lock:
-            session = self._session
-            if session is None:
-                self._session = self._spawn_owned_session(model)
-                return
-        reset = getattr(session, "reset", None)
-        if not callable(reset):
-            raise ValueError(
-                "CopilotCLIClient.reset_session requires CopilotCLISession"
-            )
-        reset(model)
-
     def stop_session(self) -> None:
         with self._session_lock:
             session = self._session
@@ -959,20 +973,119 @@ class CopilotCLIClient(ProviderAgent):
         if session is not None:
             session.stop()
 
+    def _can_spawn_owned_session(self) -> bool:
+        return self._session_system_file is not None and self._work_dir is not None
+
+    def _resolve_turn_session(
+        self,
+        *,
+        model: ProviderModel | str | None,
+        fresh_session: bool,
+    ) -> PromptSession:
+        with self._session_lock:
+            session = self._session
+            if session is None and self._can_spawn_owned_session():
+                if model is None:
+                    raise ValueError(
+                        "CopilotCLIClient.run_turn requires model when creating a session"
+                    )
+                session = self._spawn_owned_session(model)
+                self._session = session
+                return session
+        if session is None:
+            session = self._session_fn()
+        if not fresh_session:
+            return session
+        reset = getattr(session, "reset", None)
+        if not callable(reset):
+            raise ValueError(
+                "CopilotCLIClient.run_turn fresh_session requires resettable session"
+            )
+        reset(model)
+        return session
+
+    def _session_is_dead(self, session: PromptSession) -> bool:
+        is_alive = getattr(session, "is_alive", None)
+        return callable(is_alive) and is_alive() is False
+
+    def _recover_prompt_session(self, session: PromptSession) -> bool:
+        recover = getattr(session, "recover", None)
+        if not callable(recover):
+            return False
+        recover()
+        return True
+
+    def _prompt_with_recovery(
+        self,
+        session: PromptSession,
+        content: str,
+        *,
+        model: ProviderModel | str | None,
+        system_prompt: str | None,
+    ) -> str:
+        recovered = False
+        while True:
+            try:
+                result = session.prompt(
+                    content, model=model, system_prompt=system_prompt
+                )
+            except Exception as exc:
+                message = str(exc)
+                should_retry = (
+                    isinstance(exc, (BrokenPipeError, OSError))
+                    or message == "Copilot ACP connection is not available"
+                    or (
+                        message != "Copilot ACP runtime is stopped"
+                        and self._session_is_dead(session)
+                    )
+                )
+                if (
+                    recovered
+                    or not should_retry
+                    or not self._recover_prompt_session(session)
+                ):
+                    raise
+                recovered = True
+                log.warning(
+                    "CopilotCLIClient: recovered session after prompt failure: %s", exc
+                )
+                continue
+            if (
+                result
+                or getattr(session, "last_turn_cancelled", False) is True
+                or not self._session_is_dead(session)
+            ):
+                return result
+            if recovered or not self._recover_prompt_session(session):
+                raise RuntimeError("Copilot CLI session died during prompt")
+            recovered = True
+            log.warning("CopilotCLIClient: recovered session after empty dead prompt")
+
     def run_turn(
         self,
         content: str,
         *,
-        model: str | None = None,
+        model: ProviderModel | str | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
+        fresh_session: bool = False,
     ) -> str:
-        self.ensure_session(model=model)
-        session = self._current_session()
+        session = self._resolve_turn_session(
+            model=model,
+            fresh_session=fresh_session,
+        )
         attempt = 0
         while True:
-            result = session.prompt(content, model=model, system_prompt=system_prompt)
-            if not retry_on_preempt or session.last_turn_cancelled is not True:
+            result = self._prompt_with_recovery(
+                session,
+                content,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            if (
+                not retry_on_preempt
+                or getattr(session, "last_turn_cancelled", False) is not True
+            ):
                 return result
             session.wait_for_pending_preempt()
             attempt += 1
@@ -980,27 +1093,11 @@ class CopilotCLIClient(ProviderAgent):
                 "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt
             )
 
-    def _current_session(self) -> PromptSession:
-        with self._session_lock:
-            session = self._session
-        if session is not None:
-            return session
-        return self._session_fn()
-
-    def print_prompt(
-        self,
-        prompt: str,
-        model: str,
-        system_prompt: str | None = None,
-    ) -> str:
-        session = self._current_session()
-        return session.prompt(prompt, model=model, system_prompt=system_prompt)
-
     def print_prompt_json(
         self,
         prompt: str,
         key: str,
-        model: str,
+        model: ProviderModel | str,
         system_prompt: str | None = None,
     ) -> str:
         json_instruction = (
@@ -1012,7 +1109,7 @@ class CopilotCLIClient(ProviderAgent):
             if system_prompt
             else json_instruction
         )
-        raw = self.print_prompt(prompt, model, system_prompt=full_system)
+        raw = self.run_turn(prompt, model=model, system_prompt=full_system)
         if not raw:
             return ""
         candidates = [raw]
@@ -1029,27 +1126,31 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         system_prompt: str,
-        model: str = "claude-opus-4-6",
+        model: ProviderModel | str | None = None,
     ) -> str:
-        return self.print_prompt(
-            prompt=prompt, model=model, system_prompt=system_prompt
+        return self.run_turn(
+            prompt,
+            model=self.voice_model if model is None else model,
+            system_prompt=system_prompt,
         )
 
     def generate_status_emoji(
         self,
         prompt: str,
         system_prompt: str,
-        model: str = "claude-opus-4-6",
+        model: ProviderModel | str | None = None,
     ) -> str:
-        return self.print_prompt(
-            prompt=prompt, model=model, system_prompt=system_prompt
+        return self.run_turn(
+            prompt,
+            model=self.voice_model if model is None else model,
+            system_prompt=system_prompt,
         )
 
     def print_prompt_from_file(
         self,
         system_file: Path,
         prompt_file: Path,
-        model: str,
+        model: ProviderModel | str,
         timeout: int = 30,
         idle_timeout: float = 1800.0,
         cwd: Path | str | None = None,
@@ -1065,7 +1166,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         session_id: str,
         prompt_file: Path,
-        model: str,
+        model: ProviderModel | str,
         timeout: int = 300,
         idle_timeout: float = 1800.0,
         cwd: Path | str | None = None,
@@ -1082,11 +1183,14 @@ class CopilotCLIClient(ProviderAgent):
     def generate_reply(
         self,
         prompt: str,
-        model: str = "claude-opus-4-6",
+        model: ProviderModel | str | None = None,
         timeout: int = 30,
     ) -> str:
+        effective_model = self.voice_model if model is None else model
         try:
-            output = self._run_cli_prompt(prompt, model=model, timeout=timeout)
+            output = self._run_cli_prompt(
+                prompt, model=effective_model, timeout=timeout
+            )
             return extract_result_text(output).strip()
         except subprocess.TimeoutExpired, FileNotFoundError:
             return ""
@@ -1094,11 +1198,14 @@ class CopilotCLIClient(ProviderAgent):
     def generate_branch_name(
         self,
         prompt: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: ProviderModel | str | None = None,
         timeout: int = 15,
     ) -> str:
+        effective_model = self.brief_model if model is None else model
         try:
-            output = self._run_cli_prompt(prompt, model=model, timeout=timeout)
+            output = self._run_cli_prompt(
+                prompt, model=effective_model, timeout=timeout
+            )
             text = extract_result_text(output).strip()
             return text.splitlines()[0] if text else ""
         except subprocess.TimeoutExpired, FileNotFoundError:
@@ -1108,13 +1215,14 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         system_prompt: str,
-        model: str = "claude-opus-4-6",
+        model: ProviderModel | str | None = None,
         timeout: int = 15,
     ) -> tuple[str, str]:
+        effective_model = self.voice_model if model is None else model
         try:
             output = self._run_cli_prompt(
                 _combine_prompt(prompt, system_prompt=system_prompt),
-                model=model,
+                model=effective_model,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired, FileNotFoundError:
@@ -1125,13 +1233,14 @@ class CopilotCLIClient(ProviderAgent):
         self,
         session_id: str,
         prompt: str,
-        model: str = "claude-opus-4-6",
+        model: ProviderModel | str | None = None,
         timeout: int = 15,
     ) -> str:
+        effective_model = self.voice_model if model is None else model
         try:
             output = self._run_cli_prompt(
                 prompt,
-                model=model,
+                model=effective_model,
                 timeout=timeout,
                 session_id=session_id,
             )
@@ -1143,27 +1252,31 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         *,
-        model: str,
+        model: ProviderModel | str,
         timeout: int,
         cwd: Path | str | None = None,
         session_id: str | None = None,
     ) -> str:
         normalized = _normalize_model(model)
-        cmd = [
-            "--model",
-            normalized or _COPILOT_MODEL_SONNET,
-            *_COPILOT_JSON_BASE_ARGS,
-        ]
-        if session_id is not None:
-            cmd.append(f"--resume={session_id}")
-        cmd += ["-p", prompt]
-        result = _copilot(
-            *cmd,
-            timeout=timeout,
-            cwd=self._work_dir if cwd is None else cwd,
-            runner=self._runner,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
+        assert normalized is not None
+        efforts = normalized.efforts or (None,)
+        for effort in efforts:
+            cmd = ["--model", normalized.model]
+            if effort is not None:
+                cmd += ["--effort", effort]
+            cmd += [*_COPILOT_JSON_BASE_ARGS]
+            if session_id is not None:
+                cmd.append(f"--resume={session_id}")
+            cmd += ["-p", prompt]
+            result = _copilot(
+                *cmd,
+                timeout=timeout,
+                cwd=self._work_dir if cwd is None else cwd,
+                runner=self._runner,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        return ""
 
 
 class CopilotCLI(Provider):

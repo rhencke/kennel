@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kennel.color import _CODES
-from kennel.config import RepoConfig
+from kennel.config import RepoConfig as _RepoConfig
+from kennel.provider import ProviderID
 from kennel.status import (
     ClaudeTalkerInfo,
     KennelStatus,
@@ -31,6 +32,11 @@ from kennel.status import (
     format_status,
     repo_status,
 )
+
+
+class RepoConfig(_RepoConfig):
+    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+        super().__init__(*args, provider=provider, **kwargs)
 
 
 class TestFormatUptime:

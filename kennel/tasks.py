@@ -470,7 +470,7 @@ def reorder_tasks(
 
     original_ids = frozenset(t["id"] for t in task_list)
     prompt = prompts.rescope_prompt(task_list, commit_summary)
-    raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
+    raw = claude_client.run_turn(prompt, model=claude_client.voice_model)
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return

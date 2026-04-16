@@ -23,11 +23,12 @@ from kennel.copilotcli import (
     CopilotCLISession,
     _combine_prompt,
     _CopilotACPClient,
+    _normalize_model,
     _TerminalManager,
     extract_result_text,
     extract_session_id,
 )
-from kennel.provider import ProviderID, ProviderLimitSnapshot
+from kennel.provider import ProviderID, ProviderLimitSnapshot, ProviderModel
 
 
 def _completed(
@@ -51,6 +52,11 @@ def _copilot_output(text: str = "OK", session_id: str = "sess-123") -> str:
             ),
         ]
     )
+
+
+class TestNormalizeModel:
+    def test_maps_claude_haiku_to_gpt54(self) -> None:
+        assert _normalize_model("claude-haiku-4-5-20251001") == ProviderModel("gpt-5.4")
 
 
 class FakeProcess:
@@ -432,6 +438,41 @@ class TestCopilotACPClient:
 
 
 class TestCopilotACPRuntime:
+    def test_command_for_none_effort_uses_base_command(self, tmp_path: Path) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            assert runtime._command_for_effort(None) == runtime._command_base
+        finally:
+            runtime.stop()
+
+    def test_command_for_effort_appends_flag(self, tmp_path: Path) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            assert runtime._command_for_effort("high") == (
+                *runtime._command_base,
+                "--effort",
+                "high",
+            )
+        finally:
+            runtime.stop()
+
+    def test_preferred_efforts_preserves_order(self, tmp_path: Path) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            model = ProviderModel("gpt-5.4", ("xhigh", "high"))
+            assert runtime._preferred_efforts(model) == ("xhigh", "high")
+        finally:
+            runtime.stop()
+
     def test_ensure_prompt_and_stop(self, tmp_path: Path) -> None:
         connection = FakeConnection(load_supported=True)
         runtime = CopilotACPRuntime(
@@ -468,7 +509,7 @@ class TestCopilotACPRuntime:
                 runtime.recover_session("persisted", "claude-sonnet-4-6") == "persisted"
             )
             assert second.resume_session_calls == [(str(tmp_path), "persisted")]
-            assert second.set_session_model_calls == [("gpt-5.4-mini", "persisted")]
+            assert second.set_session_model_calls == [("gpt-5.4", "persisted")]
             assert runtime.reset_session(None) == "sess-1"
         finally:
             runtime.stop()
@@ -576,20 +617,22 @@ class TestCopilotCLISession:
         session = CopilotCLISession(
             system_file,
             work_dir=tmp_path,
-            model="claude-sonnet-4-6",
+            model=CopilotCLIClient.work_model,
             runtime=runtime,
         )
 
         assert session.session_id == "sess-created"
         assert (
-            session.prompt("task", model="claude-opus-4-6", system_prompt="system")
+            session.prompt(
+                "task", model=CopilotCLIClient.voice_model, system_prompt="system"
+            )
             == "result"
         )
         assert runtime.prompt_calls == [
             (
                 "sess-created",
                 "persona\n\n---\n\nsystem\n\n---\n\ntask",
-                "claude-opus-4-6",
+                CopilotCLIClient.voice_model,
             )
         ]
         assert session.last_turn_cancelled is True
@@ -597,9 +640,9 @@ class TestCopilotCLISession:
         runtime.next_prompt = ("queued-result", "end_turn", "sess-3")
         assert session.consume_until_result() == "queued-result"
         assert session.consume_until_result() == ""
-        session.switch_model("claude-haiku-4-5")
+        session.switch_model(CopilotCLIClient.brief_model)
         session.recover()
-        session.reset("claude-opus-4-6")
+        session.reset(CopilotCLIClient.voice_model)
         assert session.session_id == "sess-reset"
         assert session.pid == 111
         assert session.is_alive() is True
@@ -613,7 +656,7 @@ class TestCopilotCLISession:
         session = CopilotCLISession(
             system_file,
             work_dir=tmp_path,
-            model="claude-sonnet-4-6",
+            model=CopilotCLIClient.work_model,
             runtime=runtime,
         )
         acquired = threading.Event()
@@ -648,7 +691,7 @@ class TestCopilotCLISession:
         session = CopilotCLISession(
             tmp_path / "missing.md",
             work_dir=tmp_path,
-            model="claude-sonnet-4-6",
+            model=CopilotCLIClient.work_model,
             runtime_factory=lambda **kwargs: runtime,
         )
         assert session.owner is None
@@ -660,7 +703,7 @@ class TestCopilotCLISession:
         session = CopilotCLISession(
             tmp_path / "missing.md",
             work_dir=tmp_path,
-            model="claude-sonnet-4-6",
+            model=CopilotCLIClient.work_model,
             runtime=runtime,
         )
         acquired = threading.Event()
@@ -696,7 +739,7 @@ class TestCopilotCLIClient:
         claude.set_thread_repo("owner/repo")
         try:
             client = CopilotCLIClient()
-            assert client.print_prompt("hi", "claude-opus-4-6") == "ok"
+            assert client.run_turn("hi", model=client.voice_model) == "ok"
         finally:
             claude.set_thread_repo(None)
             claude.set_session_resolver(None)
@@ -748,25 +791,28 @@ class TestCopilotCLIClient:
         ):
             client.ensure_session()
 
-    def test_recover_and_reset_require_session_methods(self) -> None:
+    def test_run_turn_requires_model_when_spawning_owned_session(
+        self, tmp_path: Path
+    ) -> None:
+        client = CopilotCLIClient(
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        with pytest.raises(
+            ValueError,
+            match="CopilotCLIClient.run_turn requires model when creating a session",
+        ):
+            client.run_turn("fetch")
+
+    def test_fresh_session_requires_reset_method(self) -> None:
         client = CopilotCLIClient(session=object())
         with pytest.raises(
             ValueError,
-            match="CopilotCLIClient.recover_session requires CopilotCLISession",
+            match="CopilotCLIClient.run_turn fresh_session requires resettable session",
         ):
-            client.recover_session()
-        with pytest.raises(
-            ValueError,
-            match="CopilotCLIClient.reset_session requires model",
-        ):
-            client.reset_session()
-        with pytest.raises(
-            ValueError,
-            match="CopilotCLIClient.reset_session requires CopilotCLISession",
-        ):
-            client.reset_session("claude-opus-4-6")
+            client.run_turn("fetch", model=client.voice_model, fresh_session=True)
 
-    def test_ensure_reset_stop_and_recover_noop_branches(self, tmp_path: Path) -> None:
+    def test_ensure_fresh_stop_noop_branches(self, tmp_path: Path) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
         client = CopilotCLIClient(
@@ -774,36 +820,30 @@ class TestCopilotCLIClient:
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
-        client.ensure_session("claude-opus-4-6")
-        client.recover_session()
-        client.reset_session("claude-sonnet-4-6")
+        client.ensure_session(client.voice_model)
+        session.prompt.return_value = "ok"
+        assert (
+            client.run_turn("fetch", model=client.work_model, fresh_session=True)
+            == "ok"
+        )
         client.stop_session()
         session_factory.assert_called_once_with(
             tmp_path / "persona.md",
             work_dir=tmp_path,
-            model="claude-opus-4-6",
+            model=client.voice_model,
             repo_name=None,
         )
-        session.reset.assert_called_once_with("claude-sonnet-4-6")
+        session.reset.assert_called_once_with(client.work_model)
         session.switch_model.assert_not_called()
         session.stop.assert_called_once_with()
-        CopilotCLIClient().recover_session()
 
     def test_ensure_session_switches_model_when_session_exists(self) -> None:
         session = MagicMock()
         client = CopilotCLIClient(session=session)
-        client.ensure_session("claude-opus-4-6")
-        session.switch_model.assert_called_once_with("claude-opus-4-6")
+        client.ensure_session(client.voice_model)
+        session.switch_model.assert_called_once_with(client.voice_model)
 
-    def test_reset_session_requires_model(self) -> None:
-        client = CopilotCLIClient()
-        with pytest.raises(
-            ValueError,
-            match="CopilotCLIClient.reset_session requires model",
-        ):
-            client.reset_session()
-
-    def test_reset_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+    def test_fresh_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
         client = CopilotCLIClient(
@@ -811,13 +851,18 @@ class TestCopilotCLIClient:
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
-        client.reset_session("claude-opus-4-6")
+        session.prompt.return_value = "ok"
+        assert (
+            client.run_turn("fetch", model=client.voice_model, fresh_session=True)
+            == "ok"
+        )
         session_factory.assert_called_once_with(
             tmp_path / "persona.md",
             work_dir=tmp_path,
-            model="claude-opus-4-6",
+            model=client.voice_model,
             repo_name=None,
         )
+        session.reset.assert_not_called()
 
     def test_run_turn_retries_after_preempt(self) -> None:
         session = MagicMock()
@@ -834,6 +879,57 @@ class TestCopilotCLIClient:
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
         session.wait_for_pending_preempt.assert_called_once_with()
 
+    def test_run_turn_recovers_and_retries_after_connection_loss(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [
+            RuntimeError("Copilot ACP connection is not available"),
+            "done",
+        ]
+        client = CopilotCLIClient(session=session)
+        assert client.run_turn("fetch", model=client.voice_model) == "done"
+        assert session.prompt.call_count == 2
+        session.recover.assert_called_once_with()
+
+    def test_run_turn_recovers_after_empty_result_from_dead_session(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ["", "done"]
+        session.last_turn_cancelled = False
+        session.is_alive.side_effect = [False, True]
+        client = CopilotCLIClient(session=session)
+        assert client.run_turn("fetch", model=client.voice_model) == "done"
+        session.recover.assert_called_once_with()
+
+    def test_run_turn_runtime_stopped_still_raises(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = RuntimeError("Copilot ACP runtime is stopped")
+        client = CopilotCLIClient(session=session)
+        with pytest.raises(RuntimeError, match="runtime is stopped"):
+            client.run_turn("fetch", model=client.voice_model)
+        session.recover.assert_not_called()
+
+    def test_run_turn_connection_loss_raises_when_session_cannot_recover(
+        self,
+    ) -> None:
+        session = SimpleNamespace(
+            prompt=MagicMock(
+                side_effect=RuntimeError("Copilot ACP connection is not available")
+            ),
+            is_alive=lambda: False,
+        )
+        client = CopilotCLIClient(session=session)
+        with pytest.raises(RuntimeError, match="connection is not available"):
+            client.run_turn("fetch", model=client.voice_model)
+
+    def test_run_turn_dead_empty_result_raises_after_one_recovery(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ["", ""]
+        session.last_turn_cancelled = False
+        session.is_alive.side_effect = [False, False]
+        client = CopilotCLIClient(session=session)
+        with pytest.raises(RuntimeError, match="session died during prompt"):
+            client.run_turn("fetch", model=client.voice_model)
+        session.recover.assert_called_once_with()
+
     def test_json_and_one_shot_helpers(self, tmp_path: Path) -> None:
         runner = MagicMock(return_value=_completed(_copilot_output("line1\nline2")))
         system_file = tmp_path / "system"
@@ -849,47 +945,56 @@ class TestCopilotCLIClient:
             work_dir=tmp_path,
         )
 
-        assert client.print_prompt_json("q", "emoji", "claude-opus-4-6") == "rocket"
+        assert client.print_prompt_json("q", "emoji", client.voice_model) == "rocket"
         assert client.print_prompt_from_file(
-            system_file, prompt_file, "claude-sonnet-4-6"
+            system_file, prompt_file, client.work_model
         ) == _copilot_output("line1\nline2")
-        assert client.resume_session("sess-1", prompt_file, "claude-haiku-4-5")
-        assert client.generate_reply("reply") == "line1\nline2"
-        assert client.generate_branch_name("branch") == "line1"
-        assert client.generate_status_with_session("status", "system") == (
+        assert client.resume_session("sess-1", prompt_file, client.brief_model)
+        assert client.generate_reply("reply", client.voice_model) == "line1\nline2"
+        assert client.generate_branch_name("branch", client.brief_model) == "line1"
+        assert client.generate_status_with_session(
+            "status", "system", client.voice_model
+        ) == (
             "line1\nline2",
             "sess-123",
         )
-        assert client.resume_status("sess-1", "status") == "line1\nline2"
+        assert (
+            client.resume_status("sess-1", "status", client.voice_model)
+            == "line1\nline2"
+        )
         cmd = runner.call_args.args[0]
         assert "--model" in cmd
         assert "gpt-5.4" in cmd
 
-    def test_status_helpers_delegate_to_print_prompt(self) -> None:
+    def test_status_helpers_delegate_to_run_turn(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "ok"
         client = CopilotCLIClient(session=session)
-        assert client.generate_status("status", "system") == "ok"
-        assert client.generate_status_emoji("emoji", "system") == "ok"
+        assert client.generate_status("status", "system", client.voice_model) == "ok"
+        assert (
+            client.generate_status_emoji("emoji", "system", client.voice_model) == "ok"
+        )
 
     def test_generate_reply_handles_failures(self) -> None:
         client = CopilotCLIClient(
             runner=MagicMock(side_effect=subprocess.TimeoutExpired("copilot", 1))
         )
-        assert client.generate_reply("reply") == ""
+        assert client.generate_reply("reply", client.voice_model) == ""
 
     def test_empty_or_malformed_json_and_other_failures(self, tmp_path: Path) -> None:
         session = MagicMock()
         session.prompt.side_effect = ["", "not json"]
         client = CopilotCLIClient(session=session)
-        assert client.print_prompt_json("q", "emoji", "claude-opus-4-6") == ""
-        assert client.print_prompt_json("q", "emoji", "claude-opus-4-6") == ""
+        assert client.print_prompt_json("q", "emoji", client.voice_model) == ""
+        assert client.print_prompt_json("q", "emoji", client.voice_model) == ""
 
         runner = MagicMock(side_effect=FileNotFoundError("missing"))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
-        assert client.generate_branch_name("branch") == ""
-        assert client.generate_status_with_session("status", "system") == ("", "")
-        assert client.resume_status("sess", "status") == ""
+        assert client.generate_branch_name("branch", client.brief_model) == ""
+        assert client.generate_status_with_session(
+            "status", "system", client.voice_model
+        ) == ("", "")
+        assert client.resume_status("sess", "status", client.voice_model) == ""
 
         runner = MagicMock(return_value=_completed("", returncode=1))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)

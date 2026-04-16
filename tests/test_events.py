@@ -6,7 +6,8 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel.claude import ClaudeClient
-from kennel.config import Config, RepoConfig
+from kennel.config import Config
+from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
@@ -32,6 +33,11 @@ from kennel.events import (
 )
 from kennel.provider import ProviderID
 from kennel.reply_promises import add_reply_promise
+
+
+class RepoConfig(_RepoConfig):
+    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+        super().__init__(*args, provider=provider, **kwargs)
 
 
 def _config(tmp_path: Path) -> Config:
@@ -65,12 +71,15 @@ def _payload(repo_owner: str = "owner") -> dict:
 
 
 def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
-    """Build a mock ClaudeClient with print_prompt configured."""
+    """Build a mock ClaudeClient with run_turn configured."""
     client = MagicMock(spec=ClaudeClient)
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
     if side_effect is not None:
-        client.print_prompt.side_effect = side_effect
+        client.run_turn.side_effect = side_effect
     else:
-        client.print_prompt.return_value = return_value
+        client.run_turn.return_value = return_value
     return client
 
 
@@ -105,14 +114,13 @@ class TestNeedsMoreContext:
     def test_uses_haiku_model(self) -> None:
         client = _client("YES")
         needs_more_context("same", claude_client=client)
-        assert client.print_prompt.call_args.args[1] == "claude-haiku-4-5"
+        assert client.run_turn.call_args.kwargs["model"] == "claude-haiku-4-5"
 
-    def test_defaults_to_claude_client(self) -> None:
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = "NO"
-            result = needs_more_context("some comment")
-        MockCls.assert_called_once_with()
-        assert result is False
+    def test_requires_claude_client(self) -> None:
+        with pytest.raises(
+            ValueError, match="needs_more_context requires claude_client"
+        ):
+            needs_more_context("some comment")
 
     def test_configured_agent_uses_provider_factory(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -904,19 +912,18 @@ class TestSummarizeAsActionItem:
         result = _summarize_as_action_item("add tests please", claude_client=client)
         assert result == "add tests"
 
-    def test_defaults_to_claude_client(self) -> None:
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = "add tests"
-            result = _summarize_as_action_item("add some tests")
-        MockCls.assert_called_once_with()
-        assert result == "add tests"
+    def test_requires_claude_client(self) -> None:
+        with pytest.raises(
+            ValueError, match="_summarize_as_action_item requires claude_client"
+        ):
+            _summarize_as_action_item("add some tests")
 
     def test_short_result_returned_without_retry(self) -> None:
         short_title = "add unit tests"
         client = _client(short_title)
         result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == short_title
-        client.print_prompt.assert_called_once()  # no retry needed
+        client.run_turn.assert_called_once()  # no retry needed
 
     def test_retries_when_result_too_long(self) -> None:
         long_title = "a" * 81
@@ -924,21 +931,21 @@ class TestSummarizeAsActionItem:
         client = _client(side_effect=[long_title, short_title])
         result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == short_title
-        assert client.print_prompt.call_count == 2
+        assert client.run_turn.call_count == 2
 
     def test_retries_up_to_three_times_then_truncates(self) -> None:
         long_title = "a" * 81
         client = _client(long_title)
         result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == long_title[:80]
-        assert client.print_prompt.call_count == 4  # 1 initial + 3 retries
+        assert client.run_turn.call_count == 4  # 1 initial + 3 retries
 
     def test_stops_retrying_once_short_enough(self) -> None:
         titles = ["a" * 81, "b" * 81, "short title"]
         client = _client(side_effect=titles)
         result = _summarize_as_action_item("add some tests", claude_client=client)
         assert result == "short title"
-        assert client.print_prompt.call_count == 3  # 1 initial + 2 retries
+        assert client.run_turn.call_count == 3  # 1 initial + 2 retries
 
 
 class TestTriage:
@@ -1006,12 +1013,9 @@ class TestTriage:
         assert "DO" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
 
-    def test_defaults_to_claude_client(self) -> None:
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = "ACT: do it"
-            cat, titles = _triage("do it", is_bot=False)
-        MockCls.assert_called_once_with()
-        assert cat == "ACT"
+    def test_requires_claude_client(self) -> None:
+        with pytest.raises(ValueError, match="_triage requires claude_client"):
+            _triage("do it", is_bot=False)
 
     def test_multiple_act_lines_returns_all_titles(self) -> None:
         response = "ACT: add unit tests\nACT: update documentation"

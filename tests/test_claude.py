@@ -167,7 +167,7 @@ class TestClaudeHelper:
 @pytest.fixture
 def session_resolver():
     """Install a session resolver that returns a MagicMock session for any
-    repo, and wire the thread-local repo so ``print_prompt`` can find it.
+    repo, and wire the thread-local repo so ``run_turn`` can find it.
     Yields the fake session so tests can assert on ``session.prompt.*``.
     """
     from kennel import claude as claude_module
@@ -2217,12 +2217,12 @@ class TestClaudeSessionInterrupt:
 # ── ClaudeClient ─────────────────────────────────────────────────────────────
 
 
-class TestClaudeClientPrintPrompt:
+class TestClaudeClientRunTurn:
     def test_delegates_to_session_prompt(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "hello"
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt("hi", "claude-opus-4-6") == "hello"
+        assert client.run_turn("hi", model="claude-opus-4-6") == "hello"
         session.prompt.assert_called_once_with(
             "hi", model="claude-opus-4-6", system_prompt=None
         )
@@ -2231,7 +2231,7 @@ class TestClaudeClientPrintPrompt:
         session = MagicMock()
         session.prompt.return_value = "ok"
         client = ClaudeClient(session_fn=lambda: session)
-        client.print_prompt("q", "claude-opus-4-6", system_prompt="be fido")
+        client.run_turn("q", model="claude-opus-4-6", system_prompt="be fido")
         assert session.prompt.call_args.kwargs["system_prompt"] == "be fido"
 
     def test_session_errors_propagate(self) -> None:
@@ -2239,14 +2239,58 @@ class TestClaudeClientPrintPrompt:
         session.prompt.side_effect = ClaudeStreamError(1)
         client = ClaudeClient(session_fn=lambda: session)
         with pytest.raises(ClaudeStreamError):
-            client.print_prompt("q", "claude-opus-4-6")
+            client.run_turn("q", model="claude-opus-4-6")
+
+    def test_recovers_and_retries_after_stream_error(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [ClaudeStreamError(1), "hello"]
+        client = ClaudeClient(session=session)
+        assert client.run_turn("q", model="claude-opus-4-6") == "hello"
+        assert session.prompt.call_count == 2
+        session.recover.assert_called_once_with()
+
+    def test_provider_errors_do_not_retry(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ClaudeProviderError(message="nope")
+        client = ClaudeClient(session=session)
+        with pytest.raises(ClaudeProviderError, match="nope"):
+            client.run_turn("q", model="claude-opus-4-6")
+        session.recover.assert_not_called()
+
+    def test_recovers_after_empty_result_from_dead_session(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ["", "hello"]
+        session.last_turn_cancelled = False
+        session.is_alive.side_effect = [False, True]
+        client = ClaudeClient(session=session)
+        assert client.run_turn("q", model="claude-opus-4-6") == "hello"
+        session.recover.assert_called_once_with()
+
+    def test_transport_errors_still_raise_when_session_cannot_recover(self) -> None:
+        session = SimpleNamespace(
+            prompt=MagicMock(side_effect=ClaudeStreamError(1)),
+            is_alive=lambda: False,
+        )
+        client = ClaudeClient(session=session)
+        with pytest.raises(ClaudeStreamError):
+            client.run_turn("q", model="claude-opus-4-6")
+
+    def test_dead_empty_prompt_raises_after_one_recovery(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ["", ""]
+        session.last_turn_cancelled = False
+        session.is_alive.side_effect = [False, False]
+        client = ClaudeClient(session=session)
+        with pytest.raises(RuntimeError, match="session died during prompt"):
+            client.run_turn("q", model="claude-opus-4-6")
+        session.recover.assert_called_once_with()
 
     def test_uses_attached_session_before_resolver(self) -> None:
         attached = MagicMock()
         attached.prompt.return_value = "bound"
         resolver = MagicMock()
         client = ClaudeClient(session_fn=resolver, session=attached)
-        assert client.print_prompt("hi", "claude-opus-4-6") == "bound"
+        assert client.run_turn("hi", model="claude-opus-4-6") == "bound"
         resolver.assert_not_called()
 
 
@@ -2322,28 +2366,34 @@ class TestClaudeClientSessionAttachment:
         ):
             client.ensure_session()
 
-    def test_recover_session_requires_recover_method(self) -> None:
+    def test_ensure_session_switches_model_when_session_exists(self) -> None:
+        session = MagicMock()
+        client = ClaudeClient(session=session)
+        client.ensure_session("claude-opus-4-6")
+        session.switch_model.assert_called_once_with("claude-opus-4-6")
+
+    def test_run_turn_requires_model_when_spawning_owned_session(
+        self, tmp_path: Path
+    ) -> None:
+        client = ClaudeClient(
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        with pytest.raises(
+            ValueError,
+            match="ClaudeClient.run_turn requires model when creating a session",
+        ):
+            client.run_turn("fetch")
+
+    def test_fresh_session_requires_reset_method(self) -> None:
         client = ClaudeClient(session=object())
         with pytest.raises(
-            ValueError, match="ClaudeClient.recover_session requires ClaudeSession"
+            ValueError,
+            match="ClaudeClient.run_turn fresh_session requires resettable session",
         ):
-            client.recover_session()
+            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
 
-    def test_reset_session_requires_model(self) -> None:
-        client = ClaudeClient()
-        with pytest.raises(
-            ValueError, match="ClaudeClient.reset_session requires model"
-        ):
-            client.reset_session()
-
-    def test_reset_session_requires_reset_method(self) -> None:
-        client = ClaudeClient(session=object())
-        with pytest.raises(
-            ValueError, match="ClaudeClient.reset_session requires ClaudeSession"
-        ):
-            client.reset_session("claude-opus-4-6")
-
-    def test_reset_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+    def test_fresh_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
         client = ClaudeClient(
@@ -2351,13 +2401,28 @@ class TestClaudeClientSessionAttachment:
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
-        client.reset_session("claude-opus-4-6")
+        session.prompt.return_value = "ok"
+        assert (
+            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
+            == "ok"
+        )
         session_factory.assert_called_once_with(
             tmp_path / "persona.md",
             work_dir=tmp_path,
             repo_name=None,
             model="claude-opus-4-6",
         )
+        session.reset.assert_not_called()
+
+    def test_fresh_session_resets_existing_session(self) -> None:
+        session = MagicMock()
+        session.prompt.return_value = "ok"
+        client = ClaudeClient(session=session)
+        assert (
+            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
+            == "ok"
+        )
+        session.reset.assert_called_once_with("claude-opus-4-6")
 
     def test_run_turn_retries_after_preempt(self) -> None:
         session = MagicMock()
@@ -2672,7 +2737,7 @@ class TestClaudeClientPrintPromptJson:
 
 
 class TestClaudeClientGenerateStatus:
-    def test_delegates_to_print_prompt(self) -> None:
+    def test_delegates_to_run_turn(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "🐶\ncoding up a storm"
         client = ClaudeClient(session_fn=lambda: session)
@@ -2693,7 +2758,7 @@ class TestClaudeClientGenerateStatus:
 
 
 class TestClaudeClientGenerateStatusEmoji:
-    def test_delegates_to_print_prompt(self) -> None:
+    def test_delegates_to_run_turn(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "🐕"
         client = ClaudeClient(session_fn=lambda: session)

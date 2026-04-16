@@ -19,32 +19,33 @@ class DefaultProviderFactory:
 
     def create_provider(
         self,
-        repo_cfg: RepoConfig | None,
+        repo_cfg: RepoConfig,
         *,
         work_dir: Path,
         repo_name: str,
-        session: PromptSession | None = None,
+        session: PromptSession | None,
     ) -> Provider:
-        provider_id = ProviderID.CLAUDE_CODE if repo_cfg is None else repo_cfg.provider
-        if provider_id == ProviderID.CLAUDE_CODE:
-            return ClaudeCode(
-                agent=ClaudeClient(
-                    session_system_file=self._session_system_file,
-                    work_dir=work_dir,
-                    repo_name=repo_name or None,
-                    session=session,
+        match repo_cfg.provider:
+            case ProviderID.CLAUDE_CODE:
+                return ClaudeCode(
+                    agent=ClaudeClient(
+                        session_system_file=self._session_system_file,
+                        work_dir=work_dir,
+                        repo_name=repo_name or None,
+                        session=session,
+                    )
                 )
-            )
-        if provider_id == ProviderID.COPILOT_CLI:
-            return CopilotCLI(
-                agent=CopilotCLIClient(
-                    session_system_file=self._session_system_file,
-                    work_dir=work_dir,
-                    repo_name=repo_name or None,
-                    session=session,
+            case ProviderID.COPILOT_CLI:
+                return CopilotCLI(
+                    agent=CopilotCLIClient(
+                        session_system_file=self._session_system_file,
+                        work_dir=work_dir,
+                        repo_name=repo_name or None,
+                        session=session,
+                    )
                 )
-            )
-        raise ValueError(f"unsupported provider: {provider_id}")
+            case _:
+                raise ValueError(f"unsupported provider: {repo_cfg.provider}")
 
     def create_agent(
         self,
@@ -57,6 +58,7 @@ class DefaultProviderFactory:
             repo_cfg,
             work_dir=work_dir,
             repo_name=repo_name,
+            session=None,
         ).agent
 
 

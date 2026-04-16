@@ -24,10 +24,13 @@ from kennel.tasks import (
 from kennel.types import TaskStatus, TaskType
 
 
-def _client(print_prompt_return: str = "") -> MagicMock:
-    """Create a mock ClaudeClient with a configurable print_prompt return."""
+def _client(run_turn_return: str = "") -> MagicMock:
+    """Create a mock ClaudeClient with a configurable run_turn return."""
     client = MagicMock(spec=ClaudeClient)
-    client.print_prompt.return_value = print_prompt_return
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
+    client.run_turn.return_value = run_turn_return
     return client
 
 
@@ -504,7 +507,7 @@ class TestReorderTasks:
     def test_skips_when_no_tasks(self, tmp_path: Path) -> None:
         client = _client("")
         reorder_tasks(tmp_path, "", claude_client=client)
-        client.print_prompt.assert_not_called()
+        client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
         from unittest.mock import patch
@@ -592,7 +595,7 @@ class TestReorderTasks:
         t1 = self._add(tmp_path, "Original task")
         new_task_id: list[str] = []
 
-        def slow_print_prompt(prompt, model, **kw):
+        def slow_run_turn(prompt, *, model=None, **kw):
             # Simulate a new task arriving while Opus is running
             t2 = add_task(
                 tmp_path, title="Arrived mid-reorder", task_type=TaskType.SPEC
@@ -607,7 +610,7 @@ class TestReorderTasks:
             )
 
         client = _client()
-        client.print_prompt.side_effect = slow_print_prompt
+        client.run_turn.side_effect = slow_run_turn
         reorder_tasks(tmp_path, "", claude_client=client)
         result = list_tasks(tmp_path)
         ids = [t["id"] for t in result]

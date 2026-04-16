@@ -17,11 +17,16 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
-from kennel.claude import ClaudeClient, ClaudeCode
+from kennel.claude import ClaudeCode
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
-from kennel.provider import PromptSession, Provider, ProviderAgent, ProviderID
+from kennel.provider import (
+    PromptSession,
+    Provider,
+    ProviderAgent,
+    ProviderModel,
+)
 from kennel.provider_factory import DefaultProviderFactory, extract_provider_session_id
 from kennel.state import (
     State,
@@ -228,11 +233,12 @@ def _sanitize_slug(raw: str, fallback: str) -> str:
 
 def claude_start(
     fido_dir: Path,
-    model: str = "claude-opus-4-6",
+    model: ProviderModel | None = None,
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: PromptSession | None = None,
     claude_client: ProviderAgent | None = None,
+    fresh_session: bool = False,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
@@ -250,16 +256,23 @@ def claude_start(
         if claude_client is None:
             _run_session_turn(session, _session_turn_prompt(fido_dir))
             return ""
+        effective_model = claude_client.voice_model if model is None else model
         claude_client.run_turn(
-            _session_turn_prompt(fido_dir), model=model, retry_on_preempt=True
+            _session_turn_prompt(fido_dir),
+            model=effective_model,
+            retry_on_preempt=True,
+            fresh_session=fresh_session,
         )
         return ""
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError(
+            "claude_start requires claude_client when session is not supplied"
+        )
+    effective_model = claude_client.voice_model if model is None else model
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = claude_client.print_prompt_from_file(
-        system_file, prompt_file, model, timeout, cwd=cwd
+        system_file, prompt_file, effective_model, timeout, cwd=cwd
     )
     return extract_provider_session_id(claude_client, output)
 
@@ -304,11 +317,12 @@ def _session_turn_prompt(fido_dir: Path) -> str:
 
 def claude_run(
     fido_dir: Path,
-    model: str = "claude-sonnet-4-6",
+    model: ProviderModel | None = None,
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: PromptSession | None = None,
     claude_client: ProviderAgent | None = None,
+    fresh_session: bool = False,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
@@ -326,16 +340,23 @@ def claude_run(
         if claude_client is None:
             _run_session_turn(session, _session_turn_prompt(fido_dir))
             return "", ""
+        effective_model = claude_client.work_model if model is None else model
         claude_client.run_turn(
-            _session_turn_prompt(fido_dir), model=model, retry_on_preempt=True
+            _session_turn_prompt(fido_dir),
+            model=effective_model,
+            retry_on_preempt=True,
+            fresh_session=fresh_session,
         )
         return "", ""
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError(
+            "claude_run requires claude_client when session is not supplied"
+        )
+    effective_model = claude_client.work_model if model is None else model
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = claude_client.print_prompt_from_file(
-        system_file, prompt_file, model, timeout, cwd=cwd
+        system_file, prompt_file, effective_model, timeout, cwd=cwd
     )
     new_session_id = extract_provider_session_id(claude_client, output)
     return new_session_id, output
@@ -709,7 +730,7 @@ def _write_pr_description(
     ``<body>``-tagged content.
     """
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError("_write_pr_description requires claude_client")
 
     divider = "\n\n---\n\n"
 
@@ -738,7 +759,7 @@ def _write_pr_description(
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
     prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
-    raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
+    raw = claude_client.run_turn(prompt, model=claude_client.voice_model)
     new_desc = _extract_body(raw)
     if not new_desc:
         raise ValueError(
@@ -789,42 +810,75 @@ class Worker:
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
+        self._fresh_session_pending = False
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        self._prompts = prompts
+        self._config = config
+        self._repo_cfg = repo_cfg
         self._provider_factory = (
             DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
             if provider_factory is None
             else provider_factory
         )
+        self.__dict__["_bootstrap_session"] = session
         if provider is not None:
             self._provider = provider
             if session is not None:
                 self._provider.agent.attach_session(session)
         elif claude_client is not None:
             self._provider = ClaudeCode(agent=claude_client, session=session)
-        else:
+        elif repo_cfg is not None:
             self._provider = self._provider_factory.create_provider(
                 repo_cfg,
                 work_dir=work_dir,
                 repo_name=repo_name,
                 session=session,
             )
-        self._claude_client: ProviderAgent = self._provider.agent
-        self._prompts = prompts
-        self._config = config
-        self._repo_cfg = repo_cfg
+        else:
+            self._provider = None
+        if self._provider is not None:
+            self.__dict__["_bootstrap_session"] = self._provider.agent.session
 
     @property
     def _session(self) -> PromptSession | None:
-        if hasattr(self, "_provider"):
+        if hasattr(self, "_provider") and self._provider is not None:
             return self._provider.agent.session
         return self.__dict__.get("_bootstrap_session")
 
     @_session.setter
     def _session(self, session: PromptSession | None) -> None:
-        if hasattr(self, "_provider"):
+        if hasattr(self, "_provider") and self._provider is not None:
             self._provider.agent.attach_session(session)
             return
         self.__dict__["_bootstrap_session"] = session
+
+    def _ensure_provider(self) -> Provider:
+        """Return the owned provider, creating the configured provider if needed."""
+        provider = self._provider
+        if provider is None:
+            if self._repo_cfg is None:
+                raise RuntimeError("worker provider requires explicit repo_cfg")
+            provider = self._provider_factory.create_provider(
+                self._repo_cfg,
+                work_dir=self.work_dir,
+                repo_name=self._repo_name,
+                session=self._session,
+            )
+            self._provider = provider
+        return provider
+
+    @property
+    def _claude_client(self) -> ProviderAgent:
+        provider = self._provider
+        if provider is not None:
+            return provider.agent
+        return self._ensure_provider().agent
+
+    @_claude_client.setter
+    def _claude_client(self, agent: ProviderAgent) -> None:
+        provider = self._provider
+        if provider is not None:
+            provider.agent.attach_session(agent.session)
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -882,26 +936,17 @@ class Worker:
 
     def create_session(self) -> None:
         """Ensure the persistent provider session exists and is on Opus."""
-        self._claude_client.ensure_session("claude-opus-4-6")
+        self._claude_client.ensure_session(self._claude_client.voice_model)
 
     def stop_session(self) -> None:
         """Stop the persistent provider session, if one exists."""
         self._claude_client.stop_session()
         self._session = None
 
-    def _ensure_session_alive(self, fido_dir: Path) -> None:  # noqa: ARG002
-        """Restart the session if the claude process has died unexpectedly.
-
-        Called before each work phase (CI, threads, task execution) so tasks
-        are never lost because the session died between iterations.  No-op
-        when the session is healthy or not yet created.
-
-        *fido_dir* is accepted for future use (e.g. writing per-phase context
-        into the session system file) but is not used at this stage.
-        """
-        if self._session is not None and not self._claude_client.session_alive:
-            log.warning("worker: provider session died — recovering before next phase")
-            self._claude_client.recover_session()
+    def _consume_fresh_session(self) -> bool:
+        fresh_session = self._fresh_session_pending
+        self._fresh_session_pending = False
+        return fresh_session
 
     # ------------------------------------------------------------------
     # Business logic
@@ -1144,9 +1189,11 @@ class Worker:
                 build_prompt(fido_dir, "setup", context)
                 claude_start(
                     fido_dir,
+                    model=self._claude_client.voice_model,
                     cwd=self.work_dir,
                     session=self._session,
                     claude_client=self._claude_client,
+                    fresh_session=self._consume_fresh_session(),
                 )
                 if not self._tasks.list():
                     raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
@@ -1163,7 +1210,8 @@ class Worker:
             "Output ONLY a git branch name: 2-4 lowercase words separated by"
             " hyphens, no issue numbers, summarising this request."
             " No explanation, no punctuation, just the branch name."
-            f"\n\nRequest: {request}"
+            f"\n\nRequest: {request}",
+            self._claude_client.brief_model,
         )
         slug = _sanitize_slug(raw_slug, request)
         log.info("new branch: %s", slug)
@@ -1191,9 +1239,11 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         claude_start(
             fido_dir,
+            model=self._claude_client.voice_model,
             cwd=self.work_dir,
             session=self._session,
             claude_client=self._claude_client,
+            fresh_session=self._consume_fresh_session(),
         )
 
         if not self._tasks.list():
@@ -1268,9 +1318,11 @@ class Worker:
         build_prompt(fido_dir, "merge", context)
         session_id, _ = claude_run(
             fido_dir,
+            model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=self._session,
             claude_client=self._claude_client,
+            fresh_session=self._consume_fresh_session(),
         )
         log.info("merge conflict resolution done (session=%s)", session_id)
         return True
@@ -1397,9 +1449,11 @@ class Worker:
         build_prompt(fido_dir, "ci", context)
         session_id, _ = claude_run(
             fido_dir,
+            model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=self._session,
             claude_client=self._claude_client,
+            fresh_session=self._consume_fresh_session(),
         )
         log.info("CI fix done (session=%s)", session_id)
 
@@ -1526,9 +1580,11 @@ class Worker:
         build_prompt(fido_dir, "comments", context)
         session_id, _ = claude_run(
             fido_dir,
+            model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=self._session,
             claude_client=self._claude_client,
+            fresh_session=self._consume_fresh_session(),
         )
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
@@ -1673,9 +1729,11 @@ class Worker:
             state["current_task_id"] = task["id"]
         session_id, _output = claude_run(
             fido_dir,
+            model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=self._session,
             claude_client=self._claude_client,
+            fresh_session=self._consume_fresh_session(),
         )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1710,9 +1768,11 @@ class Worker:
             )
             session_id, _output = claude_run(
                 fido_dir,
+                model=self._claude_client.work_model,
                 cwd=self.work_dir,
                 session=self._session,
                 claude_client=self._claude_client,
+                fresh_session=self._consume_fresh_session(),
             )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1809,7 +1869,9 @@ class Worker:
 
         prompts = self._get_prompts()
         prompt = prompts.pickup_comment_prompt(issue_title)
-        msg = self._claude_client.generate_reply(prompt)
+        msg = self._claude_client.generate_reply(
+            prompt, self._claude_client.voice_model
+        )
         if not msg:
             msg = f"Picking up issue: {issue_title}"
 
@@ -2074,13 +2136,13 @@ class Worker:
                 if issue is None:
                     return 0
 
+                self._fresh_session_pending = False
                 if not session_fresh and issue != self._session_issue:
                     log.info(
                         "worker: new issue #%s — restarting session at issue boundary",
                         issue,
                     )
-                    self._claude_client.reset_session("claude-opus-4-6")
-                    session_fresh = True
+                    self._fresh_session_pending = True
                 self._session_issue = issue
 
                 issue_data = self.gh.view_issue(repo_ctx.repo, issue)
@@ -2092,14 +2154,15 @@ class Worker:
                 pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
+                recovery_provider = (
+                    self._ensure_provider().provider_id
+                    if self._repo_cfg is None
+                    else self._repo_cfg.provider
+                )
                 recovery_repo_cfg = RepoConfig(
                     name=repo_ctx.repo,
                     work_dir=self.work_dir,
-                    provider=(
-                        ProviderID.CLAUDE_CODE
-                        if self._repo_cfg is None
-                        else self._repo_cfg.provider
-                    ),
+                    provider=recovery_provider,
                     membership=repo_ctx.membership,
                 )
                 recovery_config = Config(
@@ -2122,9 +2185,6 @@ class Worker:
                     prompts=self._get_prompts(),
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                if session_fresh:
-                    self._claude_client.ensure_session("claude-sonnet-4-6")
-                self._ensure_session_alive(ctx.fido_dir)
                 if pr_is_fresh:
                     log.info("fresh PR — skipping CI/thread/rescope checks")
                 else:
@@ -2220,28 +2280,36 @@ class WorkerThread(threading.Thread):
             self._provider = provider
             if session is not None:
                 self._provider.agent.attach_session(session)
-        else:
+        elif repo_cfg is not None:
             self._provider = self._provider_factory.create_provider(
                 repo_cfg,
                 work_dir=work_dir,
                 repo_name=repo_name,
                 session=session,
             )
+        else:
+            self._provider = None
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
+        self.__dict__["_bootstrap_session"] = session
 
     @property
     def _session(self) -> PromptSession | None:
         with self._provider_lock:
             provider = self._provider
-        return provider.agent.session if provider is not None else None
+        if provider is not None:
+            return provider.agent.session
+        return self.__dict__.get("_bootstrap_session")
 
     @_session.setter
     def _session(self, session: PromptSession | None) -> None:
         with self._provider_lock:
             provider = self._provider
             if provider is None:
+                if self._repo_cfg is None:
+                    self.__dict__["_bootstrap_session"] = session
+                    return
                 provider = self._provider_factory.create_provider(
                     self._repo_cfg,
                     work_dir=self.work_dir,
@@ -2316,14 +2384,19 @@ class WorkerThread(threading.Thread):
         self._wake.set()
 
     def _ensure_provider(self) -> Provider:
-        """Return the owned provider, creating the default Claude provider if needed."""
+        """Return the owned provider, creating the configured provider if needed."""
         with self._provider_lock:
             provider = self._provider
             if provider is None:
+                if self._repo_cfg is None:
+                    raise RuntimeError(
+                        "worker thread provider requires explicit repo_cfg"
+                    )
                 provider = self._provider_factory.create_provider(
                     self._repo_cfg,
                     work_dir=self.work_dir,
                     repo_name=self._repo_name,
+                    session=self._session,
                 )
                 self._provider = provider
             return provider
@@ -2331,7 +2404,7 @@ class WorkerThread(threading.Thread):
     def _create_session(self) -> PromptSession:
         """Eagerly create the persistent provider session for this thread."""
         provider = self._ensure_provider()
-        provider.agent.ensure_session("claude-opus-4-6")
+        provider.agent.ensure_session(provider.agent.voice_model)
         session = provider.agent.session
         if session is None:
             raise RuntimeError("provider.ensure_session() returned no session")

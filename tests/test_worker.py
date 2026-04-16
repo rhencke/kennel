@@ -8,12 +8,13 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import pytest
 
+import kennel.worker as worker_module
 from kennel.claude import ClaudeClient
-from kennel.config import RepoMembership
+from kennel.config import RepoConfig, RepoMembership
 from kennel.prompts import Prompts
 from kennel.provider import ProviderID
 from kennel.state import (
@@ -32,9 +33,7 @@ from kennel.worker import (
     RepoContext,
     RepoContextFilter,
     RepoNameFilter,
-    Worker,
     WorkerContext,
-    WorkerThread,
     _pick_next_task,
     _sanitize_slug,
     _sanitize_status_text,
@@ -50,6 +49,62 @@ from kennel.worker import (
     run,
     should_rerequest_review,
 )
+from kennel.worker import (
+    Worker as _WorkerBase,
+)
+from kennel.worker import (
+    WorkerThread as _WorkerThreadBase,
+)
+
+_MISSING = object()
+
+
+def _default_repo_cfg(
+    work_dir: Path,
+    *,
+    repo_name: str = "",
+    membership: RepoMembership | None = None,
+) -> RepoConfig:
+    return RepoConfig(
+        name=repo_name or "owner/repo",
+        work_dir=work_dir,
+        provider=ProviderID.CLAUDE_CODE,
+        membership=membership if membership is not None else RepoMembership(),
+    )
+
+
+class Worker(_WorkerBase):
+    def __init__(self, work_dir: Path, gh, *args, **kwargs) -> None:
+        repo_cfg = kwargs.get("repo_cfg", _MISSING)
+        if (
+            repo_cfg is _MISSING
+            and kwargs.get("provider") is None
+            and kwargs.get("claude_client") is None
+        ):
+            kwargs["repo_cfg"] = _default_repo_cfg(
+                work_dir,
+                repo_name=kwargs.get("repo_name", ""),
+                membership=kwargs.get("membership"),
+            )
+        super().__init__(work_dir, gh, *args, **kwargs)
+
+
+class WorkerThread(_WorkerThreadBase):
+    def __init__(self, work_dir: Path, repo_name: str, gh, *args, **kwargs) -> None:
+        repo_cfg = kwargs.get("repo_cfg", _MISSING)
+        if repo_cfg is _MISSING and kwargs.get("provider") is None:
+            kwargs["repo_cfg"] = _default_repo_cfg(
+                work_dir,
+                repo_name=repo_name,
+                membership=kwargs.get("membership"),
+            )
+        super().__init__(work_dir, repo_name, gh, *args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_worker_classes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_module, "Worker", Worker)
+    monkeypatch.setattr(worker_module, "WorkerThread", WorkerThread)
 
 
 @pytest.fixture(autouse=True)
@@ -67,18 +122,21 @@ def _no_claude_session_spawn(monkeypatch):
 
 
 def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
-    """Build a mock ClaudeClient with print_prompt configured."""
+    """Build a mock ClaudeClient with run_turn configured."""
     client = MagicMock(spec=ClaudeClient)
     client.provider_id = ProviderID.CLAUDE_CODE
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
     client.session = None
     client.session_owner = None
     client.session_alive = False
     client.session_pid = None
     client.session_id = None
     if side_effect is not None:
-        client.print_prompt.side_effect = side_effect
+        client.run_turn.side_effect = side_effect
     else:
-        client.print_prompt.return_value = return_value
+        client.run_turn.return_value = return_value
     return client
 
 
@@ -311,7 +369,9 @@ class TestWorker:
     def test_config_stored_when_passed(self, tmp_path: Path) -> None:
         from kennel.config import Config, RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         config = Config(
             port=9000,
             secret=b"s",
@@ -320,13 +380,15 @@ class TestWorker:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        worker = Worker(tmp_path, MagicMock(), config=config)
+        worker = Worker(tmp_path, MagicMock(), config=config, repo_cfg=None)
         assert worker._config is config
 
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
         from kennel.config import RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         worker = Worker(tmp_path, MagicMock(), repo_cfg=cfg)
         assert worker._repo_cfg is cfg
 
@@ -349,7 +411,7 @@ class TestWorker:
         assert worker._config is None
 
     def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(tmp_path, MagicMock(), repo_cfg=None, provider=MagicMock())
         assert worker._repo_cfg is None
 
     # --- discover_repo_context ---
@@ -785,6 +847,26 @@ class TestWorker:
         worker.__dict__["_bootstrap_session"] = "boot"
         assert worker._session == "boot"
 
+    def test_ensure_provider_creates_provider_from_repo_cfg(
+        self, tmp_path: Path
+    ) -> None:
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=_default_repo_cfg(tmp_path, repo_name="owner/repo"),
+        )
+        worker._provider = None  # pyright: ignore[reportPrivateUsage]
+        agent = worker._claude_client
+        assert worker._provider is not None  # pyright: ignore[reportPrivateUsage]
+        assert agent is worker._provider.agent  # pyright: ignore[reportPrivateUsage]
+
+    def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock(), repo_cfg=None)
+        with pytest.raises(
+            RuntimeError, match="worker provider requires explicit repo_cfg"
+        ):
+            worker._ensure_provider()  # pyright: ignore[reportPrivateUsage]
+
     def test_provider_constructor_path_attaches_session(self, tmp_path: Path) -> None:
         provider = MagicMock()
         provider.agent = MagicMock(spec=ClaudeClient)
@@ -814,72 +896,6 @@ class TestWorker:
         worker = Worker(tmp_path, MagicMock())
         assert worker._session is None
         worker.stop_session()  # must not raise
-
-    # --- _ensure_session_alive ---
-
-    def test_ensure_session_alive_recovers_dead_session(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        mock_session = MagicMock()
-        mock_session.is_alive.return_value = False
-        worker._session = mock_session
-        worker._ensure_session_alive(tmp_path)
-        mock_session.recover.assert_called_once()
-
-    def test_ensure_session_alive_noop_when_alive(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        mock_session = MagicMock()
-        mock_session.is_alive.return_value = True
-        worker._session = mock_session
-        worker._ensure_session_alive(tmp_path)
-        mock_session.recover.assert_not_called()
-
-    def test_ensure_session_alive_noop_when_no_session(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        assert worker._session is None
-        worker._ensure_session_alive(tmp_path)  # must not raise
-
-    def test_ensure_session_alive_logs_warning_on_recover(
-        self, tmp_path: Path, caplog
-    ) -> None:
-        import logging
-
-        worker = Worker(tmp_path, MagicMock())
-        mock_session = MagicMock()
-        mock_session.is_alive.return_value = False
-        worker._session = mock_session
-        with caplog.at_level(logging.WARNING, logger="kennel.worker"):
-            worker._ensure_session_alive(tmp_path)
-        assert any("recover" in r.message.lower() for r in caplog.records)
-
-    def test_run_ensures_session_alive_before_handlers(self, tmp_path: Path) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        gh = self._make_gh()
-        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
-        mock_ensure = MagicMock()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive", mock_ensure),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
-        mock_ensure.assert_called_once_with(mock_ctx.fido_dir)
 
     def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -933,7 +949,6 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch("kennel.events.recover_reply_promises", side_effect=mark_recover),
             patch.object(worker, "handle_ci", side_effect=mark_ci),
             patch.object(worker, "handle_threads", return_value=False),
@@ -942,41 +957,6 @@ class TestWorker:
         ):
             worker.run()
         assert order[:2] == ["recover", "ci"]
-
-    def test_run_switches_to_sonnet_after_setup_for_fresh_session(
-        self, tmp_path: Path
-    ) -> None:
-        mock_ctx = self._make_mock_ctx(tmp_path)
-        gh = self._make_gh()
-        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)  # no session — fresh
-        mock_session = MagicMock()
-
-        def set_session(*args, **kwargs):
-            worker._session = mock_session
-
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session", side_effect=set_session),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
-        mock_session.switch_model.assert_called_once_with("claude-sonnet-4-6")
 
     def test_run_does_not_switch_model_for_carry_over_session(
         self, tmp_path: Path
@@ -1000,16 +980,17 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        mock_session.switch_model.assert_not_called()
+        assert worker._fresh_session_pending is False
 
-    def test_run_resets_session_at_issue_boundary(self, tmp_path: Path) -> None:
+    def test_run_marks_fresh_session_pending_at_issue_boundary(
+        self, tmp_path: Path
+    ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
@@ -1029,15 +1010,13 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        mock_session.reset.assert_called_once_with("claude-opus-4-6")
-        assert mock_session.switch_model.call_args_list == [call("claude-sonnet-4-6")]
+        assert worker._fresh_session_pending is True
 
     def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -1058,7 +1037,6 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
@@ -1409,7 +1387,6 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "new-thing", True)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "rescope_before_pick", mock_rescope),
             patch.object(worker, "handle_ci", mock_ci),
             patch.object(worker, "handle_threads", mock_threads),
@@ -1444,7 +1421,6 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "old-thing", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "rescope_before_pick", mock_rescope),
             patch.object(worker, "handle_ci", mock_ci),
             patch.object(worker, "handle_threads", mock_threads),
@@ -1518,7 +1494,6 @@ class TestWorker:
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", side_effect=focp_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "rescope_before_pick"),
             patch.object(worker, "handle_ci", side_effect=ci_side_effect),
             patch.object(worker, "handle_threads", return_value=False),
@@ -2669,16 +2644,13 @@ class TestClaudeStart:
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()
 
-    def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
+    def test_requires_client_when_no_session(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with patch(
-            "kennel.worker.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.print_prompt_from_file.return_value = ""
-            with patch("kennel.claude.extract_session_id", return_value=""):
-                claude_start(fido_dir)
-            mock_cls.assert_called_once_with()
+        with pytest.raises(
+            ValueError,
+            match="claude_start requires claude_client when session is not supplied",
+        ):
+            claude_start(fido_dir)
 
 
 class TestClaudeRun:
@@ -2736,6 +2708,14 @@ class TestClaudeRun:
         with patch("kennel.claude.extract_session_id", return_value=""):
             session_id, _ = claude_run(fido_dir, claude_client=mock_client)
         assert session_id == ""
+
+    def test_passes_custom_model(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        mock_client = _client()
+        mock_client.print_prompt_from_file.return_value = ""
+        with patch("kennel.claude.extract_session_id", return_value=""):
+            claude_run(fido_dir, model="claude-opus-4-6", claude_client=mock_client)
+        assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-opus-4-6"
 
     def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -2798,16 +2778,13 @@ class TestClaudeRun:
         session.__enter__.assert_called_once()
         session.__exit__.assert_called_once()
 
-    def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
+    def test_requires_client_when_no_session(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        with patch(
-            "kennel.worker.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.print_prompt_from_file.return_value = ""
-            with patch("kennel.claude.extract_session_id", return_value=""):
-                claude_run(fido_dir)
-            mock_cls.assert_called_once_with()
+        with pytest.raises(
+            ValueError,
+            match="claude_run requires claude_client when session is not supplied",
+        ):
+            claude_run(fido_dir)
 
 
 class TestSanitizeSlug:
@@ -3268,14 +3245,12 @@ class TestWritePrDescription:
             self._call(gh, existing_body="no divider here")
         gh.edit_pr_body.assert_not_called()
 
-    def test_defaults_to_claude_client(self) -> None:
+    def test_requires_claude_client(self) -> None:
         gh = MagicMock()
-        with patch("kennel.worker.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = (
-                "<body>Desc.\n\nFixes #42.</body>"
-            )
+        with pytest.raises(
+            ValueError, match="_write_pr_description requires claude_client"
+        ):
             _write_pr_description(gh, "owner/repo", 99, 42, [])
-        MockCls.assert_called_once_with()
 
 
 class TestFindOrCreatePr:
@@ -3361,7 +3336,12 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
         mock_start.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=mock_client
+            fido_dir,
+            model=mock_client.voice_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=mock_client,
+            fresh_session=False,
         )
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
@@ -3588,7 +3568,12 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
         mock_start.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=mock_client
+            fido_dir,
+            model=mock_client.voice_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=mock_client,
+            fresh_session=False,
         )
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
@@ -4362,7 +4347,12 @@ class TestHandleMergeConflict:
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+            fido_dir,
+            model=ClaudeClient.work_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=ANY,
+            fresh_session=False,
         )
 
     def test_does_not_call_claude_when_not_dirty(self, tmp_path: Path) -> None:
@@ -4727,7 +4717,12 @@ class TestHandleCi:
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+            fido_dir,
+            model=ClaudeClient.work_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=ANY,
+            fresh_session=False,
         )
 
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
@@ -5473,7 +5468,12 @@ class TestHandleThreads:
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+            fido_dir,
+            model=ClaudeClient.work_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=ANY,
+            fresh_session=False,
         )
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
@@ -5705,7 +5705,9 @@ class TestRescopeBeforePick:
     def _make_worker(self, tmp_path: Path, *, with_config: bool = True) -> Worker:
         from kennel.config import Config, RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         config = Config(
             port=9000,
             secret=b"s",
@@ -5738,7 +5740,7 @@ class TestRescopeBeforePick:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        worker = Worker(tmp_path, MagicMock(), config=config)
+        worker = Worker(tmp_path, MagicMock(), config=config, repo_cfg=None)
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
@@ -6493,7 +6495,12 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(
-            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+            fido_dir,
+            model=ClaudeClient.work_model,
+            cwd=tmp_path,
+            session=None,
+            claude_client=ANY,
+            fresh_session=False,
         )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
@@ -9922,7 +9929,9 @@ class TestWorkerThread:
     def test_config_stored_when_passed(self, tmp_path: Path) -> None:
         from kennel.config import Config, RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         config = Config(
             port=9000,
             secret=b"s",
@@ -9937,7 +9946,9 @@ class TestWorkerThread:
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
         from kennel.config import RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=cfg)
         assert wt._repo_cfg is cfg
 
@@ -9962,14 +9973,51 @@ class TestWorkerThread:
         assert wt._config is None
 
     def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
-        wt = self._make_thread(tmp_path)
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), repo_cfg=None, provider=MagicMock()
+        )
         assert wt._repo_cfg is None
+
+    def test_provider_defaults_to_none_when_repo_cfg_is_none(
+        self, tmp_path: Path
+    ) -> None:
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
+        assert wt.current_provider() is None
+        assert wt._session is None
+
+    def test_session_getter_reads_bootstrap_session_when_provider_missing(
+        self, tmp_path: Path
+    ) -> None:
+        session = MagicMock()
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), repo_cfg=None, session=session
+        )
+        assert wt.current_provider() is None
+        assert wt._session is session
+
+    def test_session_setter_stores_bootstrap_session_when_repo_cfg_none(
+        self, tmp_path: Path
+    ) -> None:
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
+        session = MagicMock()
+        wt._session = session
+        assert wt.current_provider() is None
+        assert wt._session is session
+
+    def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
+        with pytest.raises(
+            RuntimeError, match="worker thread provider requires explicit repo_cfg"
+        ):
+            wt._ensure_provider()  # pyright: ignore[reportPrivateUsage]
 
     def test_config_and_repo_cfg_passed_to_worker(self, tmp_path: Path) -> None:
         """WorkerThread.run() forwards config and repo_cfg to every Worker."""
         from kennel.config import Config, RepoConfig
 
-        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        cfg = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
+        )
         config = Config(
             port=9000,
             secret=b"s",

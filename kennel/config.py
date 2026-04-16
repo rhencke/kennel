@@ -31,7 +31,7 @@ class RepoMembership:
 class RepoConfig:
     name: str  # "rhencke/confusio"
     work_dir: Path  # /home/rhencke/workspace/confusio
-    provider: ProviderID = ProviderID.CLAUDE_CODE
+    provider: ProviderID
     membership: RepoMembership = field(default_factory=RepoMembership)
 
 

@@ -15,10 +15,18 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from kennel.config import Config, RepoConfig
+from kennel.config import Config
+from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import Action, recover_reply_promises
 from kennel.infra import Infra
+from kennel.provider import ProviderID
 from kennel.server import PreflightError, WebhookHandler, _repo_status
+
+
+class RepoConfig(_RepoConfig):
+    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+        super().__init__(*args, provider=provider, **kwargs)
+
 
 # Thread-capture and do_POST synchronisation helpers ---------------------------
 #

@@ -11,10 +11,19 @@ from kennel.provider_factory import DefaultProviderFactory, extract_provider_ses
 
 
 class TestDefaultProviderFactory:
-    def test_create_provider_defaults_to_claude(self, tmp_path: Path) -> None:
-        factory = DefaultProviderFactory(session_system_file=tmp_path / "persona.md")
+    def test_create_provider_builds_claude(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
         provider = factory.create_provider(
-            None, work_dir=tmp_path, repo_name="owner/repo"
+            RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.CLAUDE_CODE,
+            ),
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+            session=None,
         )
         assert provider.provider_id == ProviderID.CLAUDE_CODE
 
@@ -30,6 +39,7 @@ class TestDefaultProviderFactory:
             ),
             work_dir=tmp_path,
             repo_name="owner/repo",
+            session=None,
         )
         assert provider.provider_id == ProviderID.COPILOT_CLI
         assert provider.agent.provider_id == ProviderID.COPILOT_CLI
@@ -59,7 +69,12 @@ class TestDefaultProviderFactory:
             provider=ProviderID.GEMINI,
         )
         with pytest.raises(ValueError, match="unsupported provider"):
-            factory.create_provider(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")
+            factory.create_provider(
+                repo_cfg,
+                work_dir=tmp_path,
+                repo_name="owner/repo",
+                session=None,
+            )
 
 
 class TestExtractProviderSessionId:

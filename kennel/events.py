@@ -503,8 +503,8 @@ def maybe_react(
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     reaction = (
-        claude_client.print_prompt(
-            prompts.react_prompt(comment_body), "claude-opus-4-6"
+        claude_client.run_turn(
+            prompts.react_prompt(comment_body), model=claude_client.voice_model
         )
         .lower()
         .split("\n")[0]
@@ -630,14 +630,14 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = claude_client.print_prompt(
+    body = claude_client.run_turn(
         prompts.persona_wrap(instr),
-        "claude-opus-4-6",
+        model=claude_client.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
+            f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
         )
 
     # Edit the last Fido reply only if it is the most recent comment in the thread
@@ -738,7 +738,7 @@ def needs_more_context(
     Falls back to False on any error.
     """
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError("needs_more_context requires claude_client")
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
@@ -748,7 +748,7 @@ def needs_more_context(
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = claude_client.print_prompt(prompt, "claude-haiku-4-5").upper()
+    answer = claude_client.run_turn(prompt, model=claude_client.brief_model).upper()
     return answer.startswith("YES")
 
 
@@ -764,25 +764,25 @@ def _summarize_as_action_item(
     falling back to hard truncation.
     """
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError("_summarize_as_action_item requires claude_client")
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
-    result = claude_client.print_prompt(prompt, "claude-opus-4-6").strip()
+    result = claude_client.run_turn(prompt, model=claude_client.voice_model).strip()
     for _ in range(3):
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
-        result = claude_client.print_prompt(
+        result = claude_client.run_turn(
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
-            "claude-opus-4-6",
+            model=claude_client.voice_model,
         ).strip()
     if not result:
-        raise ValueError("_summarize_as_action_item: print_prompt returned empty")
+        raise ValueError("_summarize_as_action_item: run_turn returned empty")
     return result[:_MAX_TITLE_LEN]
 
 
@@ -801,12 +801,12 @@ def _triage(
     for ACT/DO (each becomes a separate work-queue task).
     """
     if claude_client is None:
-        claude_client = ClaudeClient()
+        raise ValueError("_triage requires claude_client")
     if prompts is None:
         prompts = Prompts("")
     prompt = prompts.triage_prompt(comment_body, is_bot, context)
     log.info("triage classifier: requesting category from opus")
-    text = claude_client.print_prompt(prompt, "claude-opus-4-6")
+    text = claude_client.run_turn(prompt, model=claude_client.voice_model)
     log.info(
         "triage classifier: returned %d chars (preview=%r)",
         len(text or ""),
@@ -906,14 +906,14 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = claude_client.print_prompt(
+    body = claude_client.run_turn(
         prompts.persona_wrap(instr),
-        "claude-opus-4-6",
+        model=claude_client.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"issue-comment reply: print_prompt returned empty for PR #{number}"
+            f"issue-comment reply: run_turn returned empty for PR #{number}"
         )
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
@@ -1071,14 +1071,14 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    body = claude_client.print_prompt(
+    body = claude_client.run_turn(
         prompts.persona_wrap(instruction),
-        "claude-opus-4-6",
+        model=claude_client.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"_notify_thread_change: print_prompt returned empty for comment {comment_id}"
+            f"_notify_thread_change: run_turn returned empty for comment {comment_id}"
         )
 
     try:

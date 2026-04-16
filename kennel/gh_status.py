@@ -157,13 +157,13 @@ def generate_persona_status(
     if provider is None:
         provider = ClaudeClient()
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
-    result = provider.print_prompt(
-        prompt=f"Rewrite this status in Fido's voice: {message}",
-        model="claude-opus-4-6",
+    result = provider.run_turn(
+        f"Rewrite this status in Fido's voice: {message}",
+        model=provider.voice_model,
         system_prompt=system,
     )
     if not result:
-        raise ValueError("humanify_status: print_prompt returned empty")
+        raise ValueError("humanify_status: run_turn returned empty")
     return result
 
 
@@ -179,7 +179,7 @@ def generate_persona_emoji(
     result = provider.print_prompt_json(
         prompt=f"Pick an emoji for this status: {status_text}",
         key="emoji",
-        model="claude-opus-4-6",
+        model=provider.voice_model,
         system_prompt=system,
     )
     if not result:
