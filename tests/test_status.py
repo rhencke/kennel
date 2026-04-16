@@ -524,7 +524,9 @@ class TestFetchActivities:
     def test_calls_correct_url(self) -> None:
         mock_urlopen = self._make_urlopen(b"[]")
         _fetch_activities(8888, _urlopen=mock_urlopen)
-        mock_urlopen.assert_called_once_with("http://localhost:8888/status", timeout=2)
+        mock_urlopen.assert_called_once_with(
+            "http://localhost:8888/status.json", timeout=2
+        )
 
 
 class TestClaudePid:
