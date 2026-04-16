@@ -30,6 +30,7 @@ from kennel.provider import (
     ProviderModel,
     model_name,
 )
+from kennel.session_agent import SessionBackedAgent
 
 log = logging.getLogger(__name__)
 
@@ -352,6 +353,9 @@ def _claude(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+_TEST_EXPORTS = (_Trunc, _claude)
 
 
 _RETURNCODE_IDLE_TIMEOUT = -1
@@ -1443,7 +1447,7 @@ class ClaudeAPI(ProviderAPI):
             return snapshot
 
 
-class ClaudeClient(ProviderAgent):
+class ClaudeClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for one-shot Claude CLI interactions.
 
     Wraps subprocess-based, session-based, and streaming Claude helpers
@@ -1474,63 +1478,22 @@ class ClaudeClient(ProviderAgent):
         session: PromptSession | None = None,
     ) -> None:
         self._runner = runner
-        self._session_fn = session_fn
         self._streaming_runner = streaming_runner
         self._sleep_fn = sleep_fn
         self._session_factory = (
             ClaudeSession if session_factory is None else session_factory
         )
-        self._session_system_file = session_system_file
-        self._work_dir = work_dir
-        self._repo_name = repo_name
-        self._session_lock = threading.Lock()
-        self._session: PromptSession | None = session
+        super().__init__(
+            session_fn=session_fn,
+            session_system_file=session_system_file,
+            work_dir=work_dir,
+            repo_name=repo_name,
+            session=session,
+        )
 
     @property
     def provider_id(self) -> ProviderID:
         return ProviderID.CLAUDE_CODE
-
-    @property
-    def session(self) -> PromptSession | None:
-        with self._session_lock:
-            return self._session
-
-    def attach_session(self, session: PromptSession | None) -> None:
-        with self._session_lock:
-            self._session = session
-
-    def detach_session(self) -> PromptSession | None:
-        with self._session_lock:
-            session = self._session
-            self._session = None
-            return session
-
-    @property
-    def session_owner(self) -> str | None:
-        with self._session_lock:
-            session = self._session
-        return session.owner if session is not None else None
-
-    @property
-    def session_alive(self) -> bool:
-        with self._session_lock:
-            session = self._session
-        return session is not None and session.is_alive()
-
-    @property
-    def session_pid(self) -> int | None:
-        with self._session_lock:
-            session = self._session
-        return session.pid if session is not None else None
-
-    @property
-    def session_id(self) -> str | None:
-        with self._session_lock:
-            session = self._session
-        if session is None or not hasattr(session, "session_id"):
-            return None
-        session_id = getattr(session, "session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
 
     def _spawn_owned_session(self, model: ProviderModel | None = None) -> PromptSession:
         system_file = self._session_system_file
@@ -1563,43 +1526,6 @@ class ClaudeClient(ProviderAgent):
         if model is None or (created and model == self.voice_model):
             return
         session.switch_model(model)
-
-    def stop_session(self) -> None:
-        with self._session_lock:
-            session = self._session
-            self._session = None
-        if session is not None:
-            session.stop()
-
-    def _can_spawn_owned_session(self) -> bool:
-        return self._session_system_file is not None and self._work_dir is not None
-
-    def _resolve_turn_session(
-        self,
-        *,
-        model: ProviderModel | None,
-        fresh_session: bool,
-    ) -> PromptSession:
-        with self._session_lock:
-            session = self._session
-            if session is None and self._can_spawn_owned_session():
-                if model is None:
-                    raise ValueError(
-                        "ClaudeClient.run_turn requires model when creating a session"
-                    )
-                session = self._spawn_owned_session(model)
-                self._session = session
-                return session
-        if session is None:
-            session = self._session_fn()
-        if fresh_session:
-            reset = getattr(session, "reset", None)
-            if not callable(reset):
-                raise ValueError(
-                    "ClaudeClient.run_turn fresh_session requires resettable session"
-                )
-            reset(model)
-        return session
 
     def _session_is_dead(self, session: PromptSession) -> bool:
         return session.is_alive() is False
@@ -1799,147 +1725,6 @@ class ClaudeClient(ProviderAgent):
         ).strip()
         raise_for_provider_error_output(output)
         return output
-
-    # ── Subprocess one-shot helpers ──────────────────────────────────────
-
-    def generate_reply(
-        self,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 30,
-    ) -> str:
-        """Ask claude to generate a short reply. Returns stripped output or empty string."""
-        effective_model = self.voice_model if model is None else model
-        try:
-            result = _claude(
-                "--model",
-                model_name(effective_model),
-                "--print",
-                "-p",
-                prompt,
-                timeout=timeout,
-                runner=self._runner,
-            )
-            return result.stdout.strip() if result.returncode == 0 else ""
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
-
-    def generate_branch_name(
-        self,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> str:
-        """Ask claude to generate a git branch name slug. Returns first line of output."""
-        effective_model = self.brief_model if model is None else model
-        try:
-            result = _claude(
-                "--model",
-                model_name(effective_model),
-                "--print",
-                "-p",
-                prompt,
-                timeout=timeout,
-                runner=self._runner,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip().splitlines()[0]
-            return ""
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
-
-    def generate_status_with_session(
-        self,
-        prompt: str,
-        system_prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> tuple[str, str]:
-        """Generate a GitHub status, returning (status_text, session_id)."""
-        effective_model = self.voice_model if model is None else model
-        for attempt in range(_EMPTY_RETRY_COUNT + 1):
-            try:
-                result = _claude(
-                    "--model",
-                    model_name(effective_model),
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--dangerously-skip-permissions",
-                    "--system-prompt",
-                    system_prompt,
-                    "--print",
-                    "-p",
-                    prompt,
-                    timeout=timeout,
-                    runner=self._runner,
-                )
-                if result.returncode != 0:
-                    log.warning(
-                        "generate_status_with_session: claude exited %d",
-                        result.returncode,
-                    )
-                    return "", ""
-                raw = result.stdout.strip()
-                text = extract_result_text(raw)
-                sid = extract_session_id(raw)
-                if text:
-                    return text, sid
-                if result.stderr:
-                    log.warning(
-                        "generate_status_with_session: stderr=%r",
-                        _Trunc(result.stderr),
-                    )
-                log.debug(
-                    "generate_status_with_session: stdout=%r",
-                    _Trunc(result.stdout),
-                )
-                if attempt < _EMPTY_RETRY_COUNT:
-                    log.warning(
-                        "generate_status_with_session: empty output on attempt %d"
-                        " — retrying",
-                        attempt + 1,
-                    )
-                    self._sleep_fn(_EMPTY_RETRY_DELAY)
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                log.warning("generate_status_with_session: %s", exc)
-                return "", ""
-        log.warning(
-            "generate_status_with_session: empty output after %d attempts",
-            _EMPTY_RETRY_COUNT + 1,
-        )
-        return "", ""
-
-    def resume_status(
-        self,
-        session_id: str,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> str:
-        """Resume an existing claude session to refine a status response."""
-        effective_model = self.voice_model if model is None else model
-        try:
-            result = _claude(
-                "--model",
-                model_name(effective_model),
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--resume",
-                session_id,
-                "--print",
-                "-p",
-                prompt,
-                timeout=timeout,
-                runner=self._runner,
-            )
-            if result.returncode != 0:
-                return ""
-            return extract_result_text(result.stdout.strip())
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
 
     def extract_session_id(self, output: str) -> str:
         return extract_session_id(output)

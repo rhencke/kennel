@@ -2983,257 +2983,27 @@ class TestClaudeClientResumeSession:
         assert mock_stream.call_args[0][2] == 600.0
 
 
-class TestClaudeClientGenerateReply:
-    def test_returns_stripped_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed("  woof!  \n"))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_reply("write a reply") == "woof!"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed("err", returncode=1))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_reply("write") == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 30))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_reply("write") == ""
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_reply("write") == ""
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_reply("write a reply")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 30
-
-    def test_custom_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ok"))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_reply("write", model="claude-sonnet-4-6", timeout=10)
-        cmd = mock_run.call_args.args[0]
-        assert "claude-sonnet-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 10
-
-
-class TestClaudeClientGenerateBranchName:
-    def test_returns_first_line(self) -> None:
-        mock_run = MagicMock(return_value=_completed("fix-the-bug\nextra"))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_branch_name("name this") == "fix-the-bug"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed("slug", returncode=1))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_branch_name("name this") == ""
-
-    def test_returns_empty_on_empty_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_branch_name("name this") == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_branch_name("name") == ""
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run)
-        assert client.generate_branch_name("name") == ""
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("slug"))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_branch_name("name this")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-haiku-4-5-20251001" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_custom_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("slug"))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_branch_name("name", model="claude-opus-4-6", timeout=5)
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 5
-
-
-class TestClaudeClientGenerateStatusWithSession:
-    _RESULT_LINE = '{"type":"result","result":"🐶\\ncoding","session_id":"sess-42"}'
-
-    def test_returns_text_and_session_id_on_success(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        text, sid = client.generate_status_with_session("doing stuff", "be fido")
-        assert text == "🐶\ncoding"
-        assert sid == "sess-42"
-
-    def test_returns_empty_pair_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        assert client.generate_status_with_session("doing stuff", "sys") == ("", "")
-        mock_run.assert_called_once()
-
-    def test_returns_empty_pair_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        assert client.generate_status_with_session("doing stuff", "sys") == ("", "")
-        mock_run.assert_called_once()
-
-    def test_returns_empty_pair_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        assert client.generate_status_with_session("doing stuff", "sys") == ("", "")
-        mock_run.assert_called_once()
-
-    def test_passes_correct_flags(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_status_with_session(
-            "working on #42", "be a dog", model="claude-sonnet-4-6", timeout=10
+class TestClaudeClientSharedHelpers:
+    def test_helpers_delegate_through_live_session(self) -> None:
+        session = MagicMock()
+        session.session_id = "sess-42"
+        session.prompt.side_effect = [
+            "reply text",
+            "branch-name\nextra",
+            "status text",
+            "resumed status",
+        ]
+        client = ClaudeClient(session=session)
+        assert client.generate_reply("write a reply") == "reply text"
+        assert client.generate_branch_name("name this") == "branch-name"
+        assert client.generate_status_with_session("doing stuff", "be fido") == (
+            "status text",
+            "sess-42",
         )
-        cmd = mock_run.call_args.args[0]
-        assert "--model" in cmd
-        assert "claude-sonnet-4-6" in cmd
-        assert "--output-format" in cmd
-        assert "stream-json" in cmd
-        assert "--verbose" in cmd
-        assert "--dangerously-skip-permissions" in cmd
-        assert "--system-prompt" in cmd
-        assert "be a dog" in cmd
-        assert "--print" in cmd
-        assert "-p" in cmd
-        assert "working on #42" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 10
+        assert client.resume_status("sess-42", "please shorten") == "resumed status"
 
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        client.generate_status_with_session("working", "sys")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_retries_on_empty_output_then_succeeds(self) -> None:
-        empty_line = '{"type":"result","session_id":"s1"}'
-        mock_run = MagicMock(
-            side_effect=[
-                _completed(empty_line),
-                _completed(empty_line),
-                _completed(self._RESULT_LINE),
-            ]
-        )
-        mock_sleep = MagicMock()
-        client = ClaudeClient(runner=mock_run, sleep_fn=mock_sleep)
-        text, sid = client.generate_status_with_session("working", "sys")
-        assert text == "🐶\ncoding"
-        assert sid == "sess-42"
-        assert mock_run.call_count == 3
-        assert mock_sleep.call_count == 2
-
-    def test_returns_empty_pair_after_all_retries_exhausted(self) -> None:
-        empty_line = '{"type":"result","session_id":"s1"}'
-        mock_run = MagicMock(return_value=_completed(empty_line))
-        mock_sleep = MagicMock()
-        client = ClaudeClient(runner=mock_run, sleep_fn=mock_sleep)
-        assert client.generate_status_with_session("working", "sys") == ("", "")
-        assert mock_run.call_count == 3
-        assert mock_sleep.call_count == 2
-
-    def test_returns_empty_session_when_no_session_id(self) -> None:
-        no_sid = '{"type":"result","result":"🐶\\nwoof"}'
-        mock_run = MagicMock(return_value=_completed(no_sid))
-        client = ClaudeClient(runner=mock_run)
-        text, sid = client.generate_status_with_session("working", "sys")
-        assert text == "🐶\nwoof"
-        assert sid == ""
-
-    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
-        empty_line = '{"type":"result","session_id":"s1"}'
-        mock_run = MagicMock(
-            return_value=_completed(empty_line, stderr="Rate limit exceeded")
-        )
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            client.generate_status_with_session("working", "sys")
-        assert "Rate limit exceeded" in caplog.text
-
-    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
-        empty_line = '{"type":"result","session_id":"s1"}'
-        mock_run = MagicMock(return_value=_completed(empty_line))
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
-            client.generate_status_with_session("working", "sys")
-        assert "stdout=" in caplog.text
-
-    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
-        empty_line = '{"type":"result","session_id":"s1"}'
-        mock_run = MagicMock(return_value=_completed(empty_line))
-        client = ClaudeClient(runner=mock_run, sleep_fn=MagicMock())
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
-            client.generate_status_with_session("working", "sys")
-        assert "stderr=" not in caplog.text
-
-
-class TestClaudeClientResumeStatus:
-    _RESULT_LINE = '{"type":"result","result":"🐕\\nfetching","session_id":"s-1"}'
-
-    def test_returns_text_on_success(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        assert client.resume_status("s-1", "please shorten") == "🐕\nfetching"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE, returncode=1))
-        client = ClaudeClient(runner=mock_run)
-        assert client.resume_status("s-1", "shorten") == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        client = ClaudeClient(runner=mock_run)
-        assert client.resume_status("s-1", "shorten") == ""
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run)
-        assert client.resume_status("s-1", "shorten") == ""
-
-    def test_passes_correct_flags(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        client.resume_status(
-            "my-session", "shorten to 80 chars", model="claude-sonnet-4-6", timeout=20
-        )
-        cmd = mock_run.call_args.args[0]
-        assert "--model" in cmd
-        assert "claude-sonnet-4-6" in cmd
-        assert "--output-format" in cmd
-        assert "stream-json" in cmd
-        assert "--verbose" in cmd
-        assert "--dangerously-skip-permissions" in cmd
-        assert "--resume" in cmd
-        assert "my-session" in cmd
-        assert "--print" in cmd
-        assert "-p" in cmd
-        assert "shorten to 80 chars" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 20
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed(self._RESULT_LINE))
-        client = ClaudeClient(runner=mock_run)
-        client.resume_status("s-1", "shorten")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_returns_empty_when_no_result_field(self) -> None:
-        no_result = '{"type":"result","session_id":"s-1"}'
-        mock_run = MagicMock(return_value=_completed(no_result))
-        client = ClaudeClient(runner=mock_run)
-        assert client.resume_status("s-1", "shorten") == ""
+    def test_resume_status_requires_matching_live_session(self) -> None:
+        session = MagicMock(session_id="other")
+        client = ClaudeClient(session=session)
+        with pytest.raises(RuntimeError, match="matching live session"):
+            client.resume_status("sess-42", "please shorten")

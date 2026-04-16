@@ -936,11 +936,8 @@ class TestCopilotCLIClient:
         prompt_file = tmp_path / "prompt"
         system_file.write_text("system")
         prompt_file.write_text("prompt")
-        session = MagicMock()
-        session.prompt.return_value = '{"emoji": "rocket"}'
         client = CopilotCLIClient(
             runner=runner,
-            session=session,
             session_system_file=system_file,
             work_dir=tmp_path,
         )
@@ -949,36 +946,37 @@ class TestCopilotCLIClient:
             system_file, prompt_file, client.work_model
         ) == _copilot_output("line1\nline2")
         assert client.resume_session("sess-1", prompt_file, client.brief_model)
-        assert client.generate_reply("reply", client.voice_model) == "line1\nline2"
-        assert client.generate_branch_name("branch", client.brief_model) == "line1"
-        assert client.generate_status_with_session(
-            "status", "system", client.voice_model
-        ) == (
-            "line1\nline2",
-            "sess-123",
-        )
-        assert (
-            client.resume_status("sess-1", "status", client.voice_model)
-            == "line1\nline2"
-        )
         cmd = runner.call_args.args[0]
         assert "--model" in cmd
         assert "gpt-5.4" in cmd
 
-    def test_status_helpers_delegate_to_run_turn(self) -> None:
+    def test_shared_helpers_delegate_to_run_turn(self) -> None:
         session = MagicMock()
-        session.prompt.side_effect = ["ok", '{"emoji": "ok"}']
+        session.session_id = "sess-1"
+        session.prompt.side_effect = [
+            "reply text",
+            "branch-name\nextra",
+            "ok",
+            '{"emoji": "ok"}',
+            "status text",
+            "resumed text",
+        ]
         client = CopilotCLIClient(session=session)
+        assert client.generate_reply("reply", client.voice_model) == "reply text"
+        assert (
+            client.generate_branch_name("branch", client.brief_model) == "branch-name"
+        )
         assert client.generate_status("status", "system", client.voice_model) == "ok"
         assert (
             client.generate_status_emoji("emoji", "system", client.voice_model) == "ok"
         )
-
-    def test_generate_reply_handles_failures(self) -> None:
-        client = CopilotCLIClient(
-            runner=MagicMock(side_effect=subprocess.TimeoutExpired("copilot", 1))
+        assert client.generate_status_with_session(
+            "status", "system", client.voice_model
+        ) == ("status text", "sess-1")
+        assert (
+            client.resume_status("sess-1", "status", client.voice_model)
+            == "resumed text"
         )
-        assert client.generate_reply("reply", client.voice_model) == ""
 
     def test_generate_status_emoji_handles_empty_or_malformed_json(
         self, tmp_path: Path
@@ -989,13 +987,10 @@ class TestCopilotCLIClient:
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
 
-        runner = MagicMock(side_effect=FileNotFoundError("missing"))
-        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
-        assert client.generate_branch_name("branch", client.brief_model) == ""
-        assert client.generate_status_with_session(
-            "status", "system", client.voice_model
-        ) == ("", "")
-        assert client.resume_status("sess", "status", client.voice_model) == ""
+        bad_session = MagicMock(session_id="other")
+        client = CopilotCLIClient(session=bad_session)
+        with pytest.raises(RuntimeError, match="matching live session"):
+            client.resume_status("sess", "status", client.voice_model)
 
         runner = MagicMock(return_value=_completed("", returncode=1))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
