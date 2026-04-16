@@ -826,7 +826,9 @@ class TestWorker:
             patch.object(worker, "stop_session"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive", mock_ensure),
             patch.object(worker, "handle_ci", return_value=False),
@@ -885,7 +887,9 @@ class TestWorker:
             patch.object(worker, "stop_session"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive"),
             patch("kennel.events.recover_reply_promises", side_effect=mark_recover),
@@ -919,7 +923,9 @@ class TestWorker:
             patch.object(worker, "create_session", side_effect=set_session),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
@@ -948,7 +954,9 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
@@ -975,7 +983,9 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
@@ -1006,7 +1016,9 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_ensure_session_alive"),
             patch.object(worker, "handle_ci", return_value=False),
@@ -1228,7 +1240,9 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "find_next_issue", mock_find),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
+            ),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -1271,7 +1285,9 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=5),
             patch.object(worker, "post_pickup_comment", mock_pickup),
-            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
+            ),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -1296,7 +1312,9 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
+            ),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -1312,7 +1330,7 @@ class TestWorker:
             "state": "OPEN",
         }
         worker = Worker(tmp_path, gh)
-        mock_focp = MagicMock(return_value=(42, "my-branch"))
+        mock_focp = MagicMock(return_value=(42, "my-branch", False))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -1329,6 +1347,76 @@ class TestWorker:
         mock_focp.assert_called_once_with(
             mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text"
         )
+
+    def test_run_skips_ci_thread_rescope_for_fresh_pr(self, tmp_path: Path) -> None:
+        """When find_or_create_pr returns is_fresh=True, skip rescope/CI/threads."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "New thing", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_rescope = MagicMock()
+        mock_ci = MagicMock(return_value=False)
+        mock_threads = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "new-thing", True)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "rescope_before_pick", mock_rescope),
+            patch.object(worker, "handle_ci", mock_ci),
+            patch.object(worker, "handle_threads", mock_threads),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_rescope.assert_not_called()
+        mock_ci.assert_not_called()
+        mock_threads.assert_not_called()
+
+    def test_run_calls_ci_thread_rescope_for_existing_pr(self, tmp_path: Path) -> None:
+        """When find_or_create_pr returns is_fresh=False, rescope/CI/threads run."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Old thing", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_rescope = MagicMock()
+        mock_ci = MagicMock(return_value=False)
+        mock_threads = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "old-thing", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "rescope_before_pick", mock_rescope),
+            patch.object(worker, "handle_ci", mock_ci),
+            patch.object(worker, "handle_threads", mock_threads),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_rescope.assert_called_once()
+        mock_ci.assert_called_once()
+        mock_threads.assert_called_once()
 
 
 class TestWorkerFindNextIssue:
@@ -3127,7 +3215,7 @@ class TestFindOrCreatePr:
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "title"
             )
-        assert result == (20, "my-branch")
+        assert result == (20, "my-branch", False)
 
     def test_open_pr_logs_resuming(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -3241,7 +3329,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert result == (20, "my-br")
+        assert result == (20, "my-br", False)
         assert "seed" in call_order
         assert "setup" not in call_order
 
@@ -3264,7 +3352,7 @@ class TestFindOrCreatePr:
             patch("kennel.worker.claude_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        assert result == (20, "my-br")
+        assert result == (20, "my-br", False)
 
     def test_open_pr_skips_setup_when_tasks_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3342,9 +3430,10 @@ class TestFindOrCreatePr:
                 fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
             )
         assert result is not None
-        pr_number, slug = result
+        pr_number, slug, is_fresh = result
         assert pr_number == 55
         assert slug == "fix-bug"
+        assert is_fresh is True
 
     def test_no_pr_logs_new_branch(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -3516,9 +3605,10 @@ class TestFindOrCreatePr:
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is not None
-        _, slug = result
+        _, slug, is_fresh = result
         assert slug == slug.lower()
         assert "!" not in slug
+        assert is_fresh is True
 
     def test_no_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
         """New-PR path: setup produces no tasks → raises RuntimeError, skips PR creation."""
@@ -3825,7 +3915,9 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -4438,7 +4530,9 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", mock_handle_ci),
             patch.object(worker, "handle_threads", return_value=False),
@@ -4461,7 +4555,9 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=True),
         ):
@@ -4481,7 +4577,9 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -5086,7 +5184,9 @@ class TestRunThreadsIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", mock_threads),
@@ -5107,7 +5207,9 @@ class TestRunThreadsIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=True),
@@ -5128,7 +5230,9 @@ class TestRunThreadsIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -5427,7 +5531,9 @@ class TestRunRescopeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-it")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-it", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "rescope_before_pick", mock_rescope),
             patch.object(worker, "handle_ci", return_value=False),
@@ -5460,7 +5566,9 @@ class TestRunRescopeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-it")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-it", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "rescope_before_pick", record_rescope),
             patch.object(worker, "handle_ci", record_ci),
@@ -6651,7 +6759,9 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -6673,7 +6783,9 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -6697,7 +6809,9 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=True),
@@ -8333,7 +8447,9 @@ class TestRunPromoteMergeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -8358,7 +8474,9 @@ class TestRunPromoteMergeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -8383,7 +8501,9 @@ class TestRunPromoteMergeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
@@ -8409,7 +8529,9 @@ class TestRunPromoteMergeIntegration:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),

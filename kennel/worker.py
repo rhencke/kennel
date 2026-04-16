@@ -1078,10 +1078,11 @@ class Worker:
         issue: int,
         issue_title: str,
         issue_body: str = "",
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, bool]:
         """Find or create the branch and draft PR for *issue*.
 
-        Returns ``(pr_number, slug)`` for an open or freshly-created PR.
+        Returns ``(pr_number, slug, is_fresh)`` where *is_fresh* is ``True``
+        for a newly-created PR and ``False`` for an existing/resumed one.
         Raises ``RuntimeError`` if setup produces no tasks.
 
         Workflow:
@@ -1142,7 +1143,7 @@ class Worker:
                 repo_ctx.repo,
                 pr_number,
             )
-            return pr_number, slug
+            return pr_number, slug, False
 
         # Generate branch slug via Haiku
         raw_slug = self._claude_client.generate_branch_name(
@@ -1212,7 +1213,7 @@ class Worker:
         log.info("PR: #%s opened with %d tasks", pr_number, task_count)
         log.info("PR: #%s  %s", pr_number, url)
 
-        return pr_number, slug
+        return pr_number, slug, True
 
     # ------------------------------------------------------------------
     # CI failure handling
@@ -2030,7 +2031,7 @@ class Worker:
                 self.post_pickup_comment(
                     repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
                 )
-                pr_number, slug = self.find_or_create_pr(
+                pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
                 recovery_repo_cfg = RepoConfig(
@@ -2061,11 +2062,14 @@ class Worker:
                 if session_fresh and self._session is not None:
                     self._session.switch_model("claude-sonnet-4-6")
                 self._ensure_session_alive(ctx.fido_dir)
-                self.rescope_before_pick()
-                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
-                    return 1
-                if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
-                    return 1
+                if pr_is_fresh:
+                    log.info("fresh PR — skipping CI/thread/rescope checks")
+                else:
+                    self.rescope_before_pick()
+                    if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                        return 1
+                    if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
+                        return 1
                 if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
                     self.resolve_addressed_threads(repo_ctx, pr_number)
                     return 1
