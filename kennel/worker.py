@@ -1216,6 +1216,53 @@ class Worker:
         return pr_number, slug, True
 
     # ------------------------------------------------------------------
+    # Merge conflict handling
+    # ------------------------------------------------------------------
+
+    def handle_merge_conflict(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Detect and remediate a merge conflict on the branch.
+
+        Returns ``True`` if the branch had merge conflicts and sub-Claude was
+        invoked to resolve them (the caller should re-run the work loop
+        immediately).  Returns ``False`` when there are no conflicts.
+        """
+        log.info("checking: merge conflicts")
+        pr_info = self.gh.get_pr(repo_ctx.repo, pr_number)
+        merge_state = pr_info.get("mergeStateStatus", "")
+        if merge_state != "DIRTY":
+            log.info(
+                "merge conflict check skipped — mergeStateStatus=%s",
+                merge_state,
+            )
+            return False
+
+        log.info("merge conflict detected on PR #%s (branch=%s)", pr_number, slug)
+        self.set_status(f"Resolving merge conflicts on PR #{pr_number}")
+
+        context = (
+            f"PR: {pr_number}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Branch: {slug}\n"
+            f"Upstream: origin/{repo_ctx.default_branch}\n"
+            f"Work dir: {self.work_dir}\n"
+        )
+        build_prompt(fido_dir, "merge", context)
+        session_id, _ = claude_run(
+            fido_dir,
+            cwd=self.work_dir,
+            session=self._session,
+            claude_client=self._claude_client,
+        )
+        log.info("merge conflict resolution done (session=%s)", session_id)
+        return True
+
+    # ------------------------------------------------------------------
     # CI failure handling
     # ------------------------------------------------------------------
 
@@ -2066,6 +2113,10 @@ class Worker:
                     log.info("fresh PR — skipping CI/thread/rescope checks")
                 else:
                     self.rescope_before_pick()
+                    if self.handle_merge_conflict(
+                        ctx.fido_dir, repo_ctx, pr_number, slug
+                    ):
+                        return 1
                     if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                         return 1
                     if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
