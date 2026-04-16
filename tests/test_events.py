@@ -10,6 +10,7 @@ from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
+    _default_agent,
     _get_commit_summary,
     _is_allowed,
     _notify_thread_change,
@@ -29,6 +30,7 @@ from kennel.events import (
     reply_to_issue_comment,
     reply_to_review,
 )
+from kennel.provider import ProviderID
 from kennel.reply_promises import add_reply_promise
 
 
@@ -111,6 +113,20 @@ class TestNeedsMoreContext:
             result = needs_more_context("some comment")
         MockCls.assert_called_once_with()
         assert result is False
+
+    def test_default_agent_uses_provider_factory_for_non_claude_repo(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _config(tmp_path)
+        cfg.repos["owner/repo"] = RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            provider=ProviderID.COPILOT_CLI,
+        )
+        sentinel = MagicMock()
+        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+            factory_cls.return_value.create_agent.return_value = sentinel
+            assert _default_agent(cfg, repo_name="owner/repo") is sentinel
 
 
 class TestRecoverReplyPromises:

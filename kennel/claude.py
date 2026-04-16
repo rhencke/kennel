@@ -250,6 +250,11 @@ def _session_for_current_repo() -> PromptSession:
     return session
 
 
+def current_repo_session() -> PromptSession:
+    """Return the current thread's resolved persistent prompt session."""
+    return _session_for_current_repo()
+
+
 def _thread_name_for_id(thread_id: int) -> str | None:
     """Return the human-readable name of the live thread with *thread_id*,
     or ``None`` if that thread has exited.

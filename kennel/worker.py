@@ -21,7 +21,8 @@ from kennel.claude import ClaudeClient, ClaudeCode
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
-from kennel.provider import PromptSession, Provider, ProviderAgent
+from kennel.provider import PromptSession, Provider, ProviderAgent, ProviderID
+from kennel.provider_factory import DefaultProviderFactory, extract_provider_session_id
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -260,7 +261,7 @@ def claude_start(
     output = claude_client.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
-    return claude.extract_session_id(output)
+    return extract_provider_session_id(claude_client, output)
 
 
 def _run_session_turn(session: PromptSession, content: str) -> str:
@@ -336,7 +337,7 @@ def claude_run(
     output = claude_client.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
-    new_session_id = claude.extract_session_id(output)
+    new_session_id = extract_provider_session_id(claude_client, output)
     return new_session_id, output
 
 
@@ -779,6 +780,7 @@ class Worker:
         prompts: Prompts | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
+        provider_factory: DefaultProviderFactory | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -788,11 +790,10 @@ class Worker:
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
-        default_agent = ClaudeClient(
-            session_system_file=_sub_dir() / "persona.md",
-            work_dir=work_dir,
-            repo_name=repo_name or None,
-            session=session,
+        self._provider_factory = (
+            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
+            if provider_factory is None
+            else provider_factory
         )
         if provider is not None:
             self._provider = provider
@@ -801,7 +802,12 @@ class Worker:
         elif claude_client is not None:
             self._provider = ClaudeCode(agent=claude_client, session=session)
         else:
-            self._provider = ClaudeCode(agent=default_agent)
+            self._provider = self._provider_factory.create_provider(
+                repo_cfg,
+                work_dir=work_dir,
+                repo_name=repo_name,
+                session=session,
+            )
         self._claude_client: ProviderAgent = self._provider.agent
         self._prompts = prompts
         self._config = config
@@ -2089,6 +2095,11 @@ class Worker:
                 recovery_repo_cfg = RepoConfig(
                     name=repo_ctx.repo,
                     work_dir=self.work_dir,
+                    provider=(
+                        ProviderID.CLAUDE_CODE
+                        if self._repo_cfg is None
+                        else self._repo_cfg.provider
+                    ),
                     membership=repo_ctx.membership,
                 )
                 recovery_config = Config(
@@ -2186,6 +2197,7 @@ class WorkerThread(threading.Thread):
         provider: Provider | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
+        provider_factory: DefaultProviderFactory | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -2198,11 +2210,10 @@ class WorkerThread(threading.Thread):
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
-        default_agent = ClaudeClient(
-            session_system_file=_sub_dir() / "persona.md",
-            work_dir=work_dir,
-            repo_name=repo_name or None,
-            session=session,
+        self._provider_factory = (
+            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
+            if provider_factory is None
+            else provider_factory
         )
         self._provider: Provider | None
         if provider is not None:
@@ -2210,7 +2221,12 @@ class WorkerThread(threading.Thread):
             if session is not None:
                 self._provider.agent.attach_session(session)
         else:
-            self._provider = ClaudeCode(agent=default_agent)
+            self._provider = self._provider_factory.create_provider(
+                repo_cfg,
+                work_dir=work_dir,
+                repo_name=repo_name,
+                session=session,
+            )
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
@@ -2226,13 +2242,11 @@ class WorkerThread(threading.Thread):
         with self._provider_lock:
             provider = self._provider
             if provider is None:
-                provider = ClaudeCode(
-                    agent=ClaudeClient(
-                        session_system_file=_sub_dir() / "persona.md",
-                        work_dir=self.work_dir,
-                        repo_name=self._repo_name or None,
-                        session=session,
-                    )
+                provider = self._provider_factory.create_provider(
+                    self._repo_cfg,
+                    work_dir=self.work_dir,
+                    repo_name=self._repo_name,
+                    session=session,
                 )
                 self._provider = provider
         provider.agent.attach_session(session)
@@ -2306,12 +2320,10 @@ class WorkerThread(threading.Thread):
         with self._provider_lock:
             provider = self._provider
             if provider is None:
-                provider = ClaudeCode(
-                    agent=ClaudeClient(
-                        session_system_file=_sub_dir() / "persona.md",
-                        work_dir=self.work_dir,
-                        repo_name=self._repo_name or None,
-                    )
+                provider = self._provider_factory.create_provider(
+                    self._repo_cfg,
+                    work_dir=self.work_dir,
+                    repo_name=self._repo_name,
                 )
                 self._provider = provider
             return provider
@@ -2350,6 +2362,7 @@ class WorkerThread(threading.Thread):
                     session_issue=self._session_issue,
                     config=self._config,
                     repo_cfg=self._repo_cfg,
+                    provider_factory=self._provider_factory,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._claude_client = provider.agent  # pyright: ignore[reportPrivateUsage]

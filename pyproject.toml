@@ -3,7 +3,10 @@ name = "kennel"
 version = "0.1.0"
 description = "GitHub webhook listener for Fido"
 requires-python = ">=3.14"
-dependencies = ["requests"]
+dependencies = [
+    "agent-client-protocol>=0.9.0",
+    "requests",
+]
 
 [dependency-groups]
 dev = ["pyright", "ruff", "pytest", "pytest-cov", "pytest-xdist"]

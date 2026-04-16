@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kennel.config import Config
+from kennel.provider import ProviderID
 
 
 class TestFromArgs:
@@ -140,3 +141,31 @@ class TestFromArgs:
             ]
         )
         assert cfg.sub_dir.name == "sub"
+
+    def test_repo_provider_parses_from_args(self, tmp_path: Path) -> None:
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        cfg = Config.from_args(
+            [
+                "--secret-file",
+                str(secret_file),
+                f"owner/repo=copilot-cli:{repo_dir}",
+            ]
+        )
+        assert cfg.repos["owner/repo"].provider == ProviderID.COPILOT_CLI
+
+    def test_invalid_provider_raises(self, tmp_path: Path) -> None:
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        with pytest.raises(SystemExit, match="invalid provider"):
+            Config.from_args(
+                [
+                    "--secret-file",
+                    str(secret_file),
+                    f"owner/repo=wat:{repo_dir}",
+                ]
+            )

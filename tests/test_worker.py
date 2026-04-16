@@ -15,6 +15,7 @@ import pytest
 from kennel.claude import ClaudeClient
 from kennel.config import RepoMembership
 from kennel.prompts import Prompts
+from kennel.provider import ProviderID
 from kennel.state import (
     State,
     _resolve_git_dir,
@@ -68,6 +69,7 @@ def _no_claude_session_spawn(monkeypatch):
 def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
     """Build a mock ClaudeClient with print_prompt configured."""
     client = MagicMock(spec=ClaudeClient)
+    client.provider_id = ProviderID.CLAUDE_CODE
     client.session = None
     client.session_owner = None
     client.session_alive = False
@@ -327,6 +329,20 @@ class TestWorker:
         cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         worker = Worker(tmp_path, MagicMock(), repo_cfg=cfg)
         assert worker._repo_cfg is cfg
+
+    def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.COPILOT_CLI,
+            ),
+        )
+        assert worker._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
 
     def test_config_defaults_to_none(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
@@ -9551,7 +9567,9 @@ class TestWorkerThread:
             session_issue=None,
             config=None,
             repo_cfg=None,
+            provider_factory=None,
         ):
+            del provider_factory
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -9629,7 +9647,9 @@ class TestWorkerThread:
             session_issue=None,
             config=None,
             repo_cfg=None,
+            provider_factory=None,
         ) -> None:
+            del provider_factory
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -9679,7 +9699,9 @@ class TestWorkerThread:
             session_issue=None,
             config=None,
             repo_cfg=None,
+            provider_factory=None,
         ) -> None:
+            del provider_factory
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -9818,7 +9840,9 @@ class TestWorkerThread:
             session_issue=None,
             config=None,
             repo_cfg=None,
+            provider_factory=None,
         ) -> None:
+            del provider_factory
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -9919,6 +9943,22 @@ class TestWorkerThread:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=cfg)
         assert wt._repo_cfg is cfg
 
+    def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.COPILOT_CLI,
+            ),
+        )
+        assert wt._provider is not None  # pyright: ignore[reportPrivateUsage]
+        assert wt._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
+
     def test_config_defaults_to_none(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         assert wt._config is None
@@ -9959,7 +9999,9 @@ class TestWorkerThread:
             session_issue=None,
             config=None,
             repo_cfg=None,
+            provider_factory=None,
         ) -> None:
+            del provider_factory
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
