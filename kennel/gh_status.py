@@ -53,12 +53,7 @@ def _default_provider_factories(
 
     repo_cfgs = _running_repo_configs_fn()
     if not repo_cfgs:
-        return (
-            lambda: ClaudeClient(
-                session_system_file=_PERSONA_PATH,
-                work_dir=Path.cwd(),
-            ),
-        )
+        return ()
 
     provider_factory = DefaultProviderFactory(session_system_file=_PERSONA_PATH)
     factories: list[Callable[[], ProviderAgent]] = []

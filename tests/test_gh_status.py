@@ -10,7 +10,6 @@ import pytest
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig
 from kennel.gh_status import (
-    _PERSONA_PATH,
     _default_provider_factories,
     generate_persona_emoji,
     generate_persona_status,
@@ -194,29 +193,27 @@ class TestSetGhStatus:
 
 
 class TestDefaultProviderFactories:
-    def test_falls_back_to_owned_claude_when_no_live_kennel(self) -> None:
-        sentinel = _client()
-        with (
-            patch("kennel.gh_status.Path.cwd", return_value=Path("/tmp/here")),
-            patch("kennel.gh_status.ClaudeClient", return_value=sentinel) as mock_cls,
-        ):
-            factories = _default_provider_factories(_running_repo_configs_fn=lambda: [])
-            assert [factory() for factory in factories] == [sentinel]
-        mock_cls.assert_called_once_with(
-            session_system_file=_PERSONA_PATH,
-            work_dir=Path("/tmp/here"),
+    def test_returns_no_factories_when_no_live_kennel(self) -> None:
+        assert _default_provider_factories(_running_repo_configs_fn=lambda: []) == ()
+
+    def test_uses_generic_fallback_when_no_live_kennel(self, tmp_path: Path) -> None:
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+
+        set_gh_status(
+            "test",
+            persona_path=persona_file,
+            _gh=mock_gh,
+            _provider_factories=(),
+            _choice=lambda options: options[0],
         )
 
-    def test_falls_back_to_owned_claude_when_running_kennel_has_no_repo_specs(
-        self,
-    ) -> None:
-        sentinel = _client()
-        with (
-            patch("kennel.gh_status.Path.cwd", return_value=Path("/tmp/here")),
-            patch("kennel.gh_status.ClaudeClient", return_value=sentinel),
-        ):
-            factories = _default_provider_factories(_running_repo_configs_fn=lambda: [])
-            assert [factory() for factory in factories] == [sentinel]
+        mock_gh.set_user_status.assert_called_once_with(
+            "Having a quiet think. Back soon.",
+            ":sleeping:",
+            busy=True,
+        )
 
     def test_uses_each_configured_provider_once(self, tmp_path: Path) -> None:
         claude_cfg = RepoConfig(
