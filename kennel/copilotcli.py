@@ -40,6 +40,7 @@ from kennel.provider import (
     ProviderLimitSnapshot,
     ProviderModel,
     ReasoningEffort,
+    TurnSessionMode,
     coerce_provider_model,
 )
 from kennel.session_agent import SessionBackedAgent
@@ -971,11 +972,11 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
-        fresh_session: bool = False,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
         session = self._resolve_turn_session(
             model=model,
-            fresh_session=fresh_session,
+            session_mode=session_mode,
         )
         attempt = 0
         while True:

@@ -27,6 +27,7 @@ from kennel.provider import (
     ProviderAgent,
     ProviderModel,
     ProviderPressureStatus,
+    TurnSessionMode,
 )
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import (
@@ -258,7 +259,7 @@ def provider_start(
     session: str | None = None,
     timeout: int = 300,
     cwd: Path | str = ".",
-    fresh_session: bool = False,
+    session_mode: TurnSessionMode = TurnSessionMode.REUSE,
 ) -> str:
     """Start a new provider session from fido_dir/system and fido_dir/prompt.
 
@@ -279,7 +280,7 @@ def provider_start(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=True,
-            fresh_session=fresh_session,
+            session_mode=session_mode,
         )
         return ""
     system_file = fido_dir / "system"
@@ -314,7 +315,7 @@ def provider_run(
     session: str | None = None,
     timeout: int = 300,
     cwd: Path | str = ".",
-    fresh_session: bool = False,
+    session_mode: TurnSessionMode = TurnSessionMode.REUSE,
 ) -> tuple[str, str]:
     """Continue or start a provider session, streaming progress as raw text.
 
@@ -335,7 +336,7 @@ def provider_run(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=True,
-            fresh_session=fresh_session,
+            session_mode=session_mode,
         )
         return "", ""
     system_file = fido_dir / "system"
@@ -786,7 +787,7 @@ class Worker:
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
-        self._fresh_session_pending = False
+        self._next_turn_session_mode = TurnSessionMode.REUSE
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
         self._prompts = prompts
         self._config = config
@@ -919,10 +920,10 @@ class Worker:
         self._claude_client.stop_session()
         self._session = None
 
-    def _consume_fresh_session(self) -> bool:
-        fresh_session = self._fresh_session_pending
-        self._fresh_session_pending = False
-        return fresh_session
+    def _consume_turn_session_mode(self) -> TurnSessionMode:
+        session_mode = self._next_turn_session_mode
+        self._next_turn_session_mode = TurnSessionMode.REUSE
+        return session_mode
 
     # ------------------------------------------------------------------
     # Business logic
@@ -1202,7 +1203,7 @@ class Worker:
                     model=self._claude_client.voice_model,
                     cwd=self.work_dir,
                     session=None,
-                    fresh_session=self._consume_fresh_session(),
+                    session_mode=self._consume_turn_session_mode(),
                 )
                 if not self._tasks.list():
                     raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
@@ -1252,7 +1253,7 @@ class Worker:
             model=self._claude_client.voice_model,
             cwd=self.work_dir,
             session=None,
-            fresh_session=self._consume_fresh_session(),
+            session_mode=self._consume_turn_session_mode(),
         )
 
         if not self._tasks.list():
@@ -1331,7 +1332,7 @@ class Worker:
             model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=None,
-            fresh_session=self._consume_fresh_session(),
+            session_mode=self._consume_turn_session_mode(),
         )
         log.info("merge conflict resolution done (session=%s)", session_id)
         return True
@@ -1462,7 +1463,7 @@ class Worker:
             model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=None,
-            fresh_session=self._consume_fresh_session(),
+            session_mode=self._consume_turn_session_mode(),
         )
         log.info("CI fix done (session=%s)", session_id)
 
@@ -1593,7 +1594,7 @@ class Worker:
             model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=None,
-            fresh_session=self._consume_fresh_session(),
+            session_mode=self._consume_turn_session_mode(),
         )
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
@@ -1757,7 +1758,7 @@ class Worker:
             model=self._claude_client.work_model,
             cwd=self.work_dir,
             session=None,
-            fresh_session=self._consume_fresh_session(),
+            session_mode=self._consume_turn_session_mode(),
         )
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1820,14 +1821,19 @@ class Worker:
                     "task produced no commits — nudging session (attempt %d)",
                     attempt,
                 )
-            fresh_session = self._consume_fresh_session() or use_fresh_session
+            pending_session_mode = self._consume_turn_session_mode()
+            session_mode = (
+                TurnSessionMode.FRESH
+                if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
+                else TurnSessionMode.REUSE
+            )
             session_id, _output = claude_run(
                 fido_dir,
                 claude_client=self._claude_client,
                 model=self._claude_client.work_model,
                 cwd=self.work_dir,
                 session=session_id or None,
-                fresh_session=fresh_session,
+                session_mode=session_mode,
             )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -2191,13 +2197,13 @@ class Worker:
                 if issue is None:
                     return 0
 
-                self._fresh_session_pending = False
+                self._next_turn_session_mode = TurnSessionMode.REUSE
                 if not session_fresh and issue != self._session_issue:
                     log.info(
                         "worker: new issue #%s — restarting session at issue boundary",
                         issue,
                     )
-                    self._fresh_session_pending = True
+                    self._next_turn_session_mode = TurnSessionMode.FRESH
                 self._session_issue = issue
 
                 issue_data = self.gh.view_issue(repo_ctx.repo, issue)

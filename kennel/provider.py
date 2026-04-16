@@ -18,6 +18,13 @@ class ProviderID(StrEnum):
     GEMINI = "gemini"
 
 
+class TurnSessionMode(StrEnum):
+    """How a provider turn should treat existing conversation state."""
+
+    REUSE = "reuse"
+    FRESH = "fresh"
+
+
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high"]
 ReasoningEffortSpec: TypeAlias = ReasoningEffort | tuple[ReasoningEffort, ...] | None
 
@@ -288,7 +295,7 @@ class ProviderAgent(Protocol):
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
-        fresh_session: bool = False,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
         """Run one interactive turn through the persistent session and return text."""
         ...

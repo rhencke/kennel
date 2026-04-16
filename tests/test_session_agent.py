@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel.provider import ProviderModel
+from kennel.provider import ProviderModel, TurnSessionMode
 from kennel.session_agent import SessionBackedAgent
 
 
@@ -44,10 +44,10 @@ class _FakeAgent(SessionBackedAgent):
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
-        fresh_session: bool = False,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
         del retry_on_preempt
-        session = self._resolve_turn_session(model=model, fresh_session=fresh_session)
+        session = self._resolve_turn_session(model=model, session_mode=session_mode)
         return session.prompt(content, model=model, system_prompt=system_prompt)
 
 
@@ -159,13 +159,17 @@ class TestSessionBackedAgent:
         ):
             _FakeAgent(session_fn=lambda: None).generate_reply("hi")
 
-    def test_fresh_session_requires_resettable_session(self) -> None:
+    def test_fresh_session_mode_requires_resettable_session(self) -> None:
         agent = _FakeAgent(session=object())
         with pytest.raises(
             ValueError,
-            match="_FakeAgent.run_turn fresh_session requires resettable session",
+            match="_FakeAgent.run_turn session_mode=fresh requires resettable session",
         ):
-            agent.run_turn("hi", model=agent.voice_model, fresh_session=True)
+            agent.run_turn(
+                "hi",
+                model=agent.voice_model,
+                session_mode=TurnSessionMode.FRESH,
+            )
 
     def test_shared_helper_methods_and_json_parsing(self) -> None:
         session = MagicMock(session_id="sess-1")

@@ -32,7 +32,12 @@ from kennel.claude import (
     kill_active_children,
     raise_for_provider_error_output,
 )
-from kennel.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from kennel.provider import (
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderLimitWindow,
+    TurnSessionMode,
+)
 
 
 def _completed(
@@ -2385,15 +2390,21 @@ class TestClaudeClientSessionAttachment:
         ):
             client.run_turn("fetch")
 
-    def test_fresh_session_requires_reset_method(self) -> None:
+    def test_fresh_session_mode_requires_reset_method(self) -> None:
         client = ClaudeClient(session=object())
         with pytest.raises(
             ValueError,
-            match="ClaudeClient.run_turn fresh_session requires resettable session",
+            match="ClaudeClient.run_turn session_mode=fresh requires resettable session",
         ):
-            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model="claude-opus-4-6",
+                session_mode=TurnSessionMode.FRESH,
+            )
 
-    def test_fresh_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+    def test_fresh_session_mode_spawns_when_session_missing(
+        self, tmp_path: Path
+    ) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
         client = ClaudeClient(
@@ -2403,7 +2414,11 @@ class TestClaudeClientSessionAttachment:
         )
         session.prompt.return_value = "ok"
         assert (
-            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model="claude-opus-4-6",
+                session_mode=TurnSessionMode.FRESH,
+            )
             == "ok"
         )
         session_factory.assert_called_once_with(
@@ -2414,12 +2429,16 @@ class TestClaudeClientSessionAttachment:
         )
         session.reset.assert_not_called()
 
-    def test_fresh_session_resets_existing_session(self) -> None:
+    def test_fresh_session_mode_resets_existing_session(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "ok"
         client = ClaudeClient(session=session)
         assert (
-            client.run_turn("fetch", model="claude-opus-4-6", fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model="claude-opus-4-6",
+                session_mode=TurnSessionMode.FRESH,
+            )
             == "ok"
         )
         session.reset.assert_called_once_with("claude-opus-4-6")

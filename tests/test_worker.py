@@ -22,6 +22,7 @@ from kennel.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
+    TurnSessionMode,
 )
 from kennel.state import (
     State,
@@ -993,9 +994,9 @@ class TestWorker:
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        assert worker._fresh_session_pending is False
+        assert worker._next_turn_session_mode == TurnSessionMode.REUSE
 
-    def test_run_marks_fresh_session_pending_at_issue_boundary(
+    def test_run_marks_fresh_session_mode_at_issue_boundary(
         self, tmp_path: Path
     ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -1023,7 +1024,7 @@ class TestWorker:
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        assert worker._fresh_session_pending is True
+        assert worker._next_turn_session_mode == TurnSessionMode.FRESH
 
     def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -2751,7 +2752,7 @@ class TestClaudeStart:
             "setup instructions\n\n---\n\nthe task prompt",
             model=client.voice_model,
             retry_on_preempt=True,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_session_path_calls_agent_once(self, tmp_path: Path) -> None:
@@ -2913,7 +2914,7 @@ class TestClaudeRun:
             "task instructions\n\n---\n\nrun this task",
             model=client.work_model,
             retry_on_preempt=True,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_session_path_calls_agent_once(self, tmp_path: Path) -> None:
@@ -3494,7 +3495,7 @@ class TestFindOrCreatePr:
             cwd=tmp_path,
             session=None,
             claude_client=mock_client,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
@@ -3726,7 +3727,7 @@ class TestFindOrCreatePr:
             cwd=tmp_path,
             session=None,
             claude_client=mock_client,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
@@ -4505,7 +4506,7 @@ class TestHandleMergeConflict:
             cwd=tmp_path,
             session=None,
             claude_client=ANY,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_does_not_call_claude_when_not_dirty(self, tmp_path: Path) -> None:
@@ -4875,7 +4876,7 @@ class TestHandleCi:
             cwd=tmp_path,
             session=None,
             claude_client=ANY,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
@@ -5626,7 +5627,7 @@ class TestHandleThreads:
             cwd=tmp_path,
             session=None,
             claude_client=ANY,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
@@ -6653,7 +6654,7 @@ class TestExecuteTask:
             cwd=tmp_path,
             session=None,
             claude_client=ANY,
-            fresh_session=False,
+            session_mode=TurnSessionMode.REUSE,
         )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
@@ -6988,7 +6989,7 @@ class TestExecuteTask:
         # complete_by_id still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(task["id"])
 
-    def test_uses_fresh_session_once_after_repeated_no_commit_nudges(
+    def test_uses_fresh_session_mode_once_after_repeated_no_commit_nudges(
         self, tmp_path: Path
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -7025,8 +7026,17 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br-42")
 
-        fresh_flags = [call.kwargs["fresh_session"] for call in mock_run.call_args_list]
-        assert fresh_flags == [False, False, False, False, True, False]
+        session_modes = [
+            call.kwargs["session_mode"] for call in mock_run.call_args_list
+        ]
+        assert session_modes == [
+            TurnSessionMode.REUSE,
+            TurnSessionMode.REUSE,
+            TurnSessionMode.REUSE,
+            TurnSessionMode.REUSE,
+            TurnSessionMode.FRESH,
+            TurnSessionMode.REUSE,
+        ]
         assert "session context was intentionally wiped" in prompt_snapshots[4]
         assert "Task title: Fix widget" in prompt_snapshots[4]
         assert "Branch: br-42" in prompt_snapshots[4]

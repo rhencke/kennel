@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from kennel.provider import PromptSession, ProviderModel
+from kennel.provider import PromptSession, ProviderModel, TurnSessionMode
 
 
 class SessionBackedAgent:
@@ -105,7 +105,7 @@ class SessionBackedAgent:
         self,
         *,
         model: ProviderModel | None,
-        fresh_session: bool,
+        session_mode: TurnSessionMode,
     ) -> PromptSession:
         resolver_error: RuntimeError | None = None
         with self._session_lock:
@@ -131,11 +131,11 @@ class SessionBackedAgent:
             raise RuntimeError(
                 f"{type(self).__name__}.run_turn could not resolve a session"
             )
-        if fresh_session:
+        if session_mode == TurnSessionMode.FRESH:
             reset = getattr(session, "reset", None)
             if not callable(reset):
                 raise ValueError(
-                    f"{type(self).__name__}.run_turn fresh_session requires resettable session"
+                    f"{type(self).__name__}.run_turn session_mode=fresh requires resettable session"
                 )
             reset(model)
         return session
@@ -147,9 +147,9 @@ class SessionBackedAgent:
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
-        fresh_session: bool = False,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
-        del content, model, system_prompt, retry_on_preempt, fresh_session
+        del content, model, system_prompt, retry_on_preempt, session_mode
         raise NotImplementedError
 
     def _spawn_owned_session(self, model: ProviderModel) -> PromptSession:
@@ -189,7 +189,10 @@ class SessionBackedAgent:
         model: ProviderModel,
         system_prompt: str | None = None,
     ) -> tuple[str, str]:
-        session = self._resolve_turn_session(model=model, fresh_session=False)
+        session = self._resolve_turn_session(
+            model=model,
+            session_mode=TurnSessionMode.REUSE,
+        )
         text = session.prompt(content, model=model, system_prompt=system_prompt)
         session_id = getattr(session, "session_id", None)
         return text, session_id if isinstance(session_id, str) else ""

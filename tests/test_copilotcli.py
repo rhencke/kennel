@@ -28,7 +28,12 @@ from kennel.copilotcli import (
     extract_result_text,
     extract_session_id,
 )
-from kennel.provider import ProviderID, ProviderLimitSnapshot, ProviderModel
+from kennel.provider import (
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderModel,
+    TurnSessionMode,
+)
 
 
 def _completed(
@@ -804,13 +809,17 @@ class TestCopilotCLIClient:
         ):
             client.run_turn("fetch")
 
-    def test_fresh_session_requires_reset_method(self) -> None:
+    def test_fresh_session_mode_requires_reset_method(self) -> None:
         client = CopilotCLIClient(session=object())
         with pytest.raises(
             ValueError,
-            match="CopilotCLIClient.run_turn fresh_session requires resettable session",
+            match="CopilotCLIClient.run_turn session_mode=fresh requires resettable session",
         ):
-            client.run_turn("fetch", model=client.voice_model, fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model=client.voice_model,
+                session_mode=TurnSessionMode.FRESH,
+            )
 
     def test_ensure_fresh_stop_noop_branches(self, tmp_path: Path) -> None:
         session = MagicMock()
@@ -823,7 +832,11 @@ class TestCopilotCLIClient:
         client.ensure_session(client.voice_model)
         session.prompt.return_value = "ok"
         assert (
-            client.run_turn("fetch", model=client.work_model, fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model=client.work_model,
+                session_mode=TurnSessionMode.FRESH,
+            )
             == "ok"
         )
         client.stop_session()
@@ -843,7 +856,9 @@ class TestCopilotCLIClient:
         client.ensure_session(client.voice_model)
         session.switch_model.assert_called_once_with(client.voice_model)
 
-    def test_fresh_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+    def test_fresh_session_mode_spawns_when_session_missing(
+        self, tmp_path: Path
+    ) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
         client = CopilotCLIClient(
@@ -853,7 +868,11 @@ class TestCopilotCLIClient:
         )
         session.prompt.return_value = "ok"
         assert (
-            client.run_turn("fetch", model=client.voice_model, fresh_session=True)
+            client.run_turn(
+                "fetch",
+                model=client.voice_model,
+                session_mode=TurnSessionMode.FRESH,
+            )
             == "ok"
         )
         session_factory.assert_called_once_with(
