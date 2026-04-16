@@ -201,6 +201,18 @@ def _kennel_pid() -> int | None:
     return pids[0] if pids else None
 
 
+def running_repo_configs(
+    *,
+    _kennel_pid_fn: Callable[[], int | None] = _kennel_pid,
+    _repos_from_pid_fn: Callable[[int], list[RepoConfig]] = _repos_from_pid,
+) -> list[RepoConfig]:
+    """Return the repo configs for the currently running kennel, or []."""
+    pid = _kennel_pid_fn()
+    if pid is None:
+        return []
+    return _repos_from_pid_fn(pid)
+
+
 def _port_from_pid(pid: int) -> int | None:
     """Extract the --port value from kennel's /proc/<pid>/cmdline, or None."""
     try:

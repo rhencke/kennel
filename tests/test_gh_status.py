@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from kennel.claude import ClaudeClient
+from kennel.config import RepoConfig
 from kennel.gh_status import (
+    _candidate_providers,
+    _default_provider_factories,
     generate_persona_emoji,
     generate_persona_status,
     main,
     set_gh_status,
 )
+from kennel.provider import ProviderID
 
 
 def _client(**overrides: object) -> MagicMock:
@@ -134,14 +139,15 @@ class TestSetGhStatus:
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
+        mock_client = _client()
+        mock_client.run_turn.return_value = "woof"
+        mock_client.generate_status_emoji.return_value = ":dog:"
         with patch(
-            "kennel.gh_status.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.run_turn.return_value = "woof"
-            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
+            "kennel.gh_status._default_provider_factories",
+            return_value=(lambda: mock_client,),
+        ):
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
-            mock_cls.assert_called_once_with()
+        mock_gh.set_user_status.assert_called_once_with("woof", ":dog:", busy=True)
 
     def test_tries_next_provider_when_first_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
@@ -162,7 +168,9 @@ class TestSetGhStatus:
 
         mock_gh.set_user_status.assert_called_once_with("back soon", ":dog:", busy=True)
 
-    def test_falls_back_to_nap_message_when_all_providers_fail(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_falls_back_to_generic_message_when_all_providers_fail(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
@@ -170,7 +178,6 @@ class TestSetGhStatus:
         first.run_turn.side_effect = RuntimeError("boom")
         second = _client()
         second.run_turn.side_effect = RuntimeError("still boom")
-
         set_gh_status(
             "test",
             persona_path=persona_file,
@@ -180,10 +187,90 @@ class TestSetGhStatus:
         )
 
         mock_gh.set_user_status.assert_called_once_with(
-            "Sleeping off a big debugging session.",
+            "A little scrambled right now. I will be back soon.",
             ":sleeping:",
             busy=True,
         )
+
+
+class TestCandidateProviders:
+    def test_returns_explicit_provider_without_building_factories(self) -> None:
+        provider = _client()
+        factory = MagicMock()
+
+        assert _candidate_providers(provider, (factory,)) == (provider,)
+        factory.assert_not_called()
+
+
+class TestDefaultProviderFactories:
+    def test_raises_when_no_live_kennel(self) -> None:
+        with pytest.raises(RuntimeError, match="No running kennel repo configs found"):
+            _default_provider_factories(_running_repo_configs_fn=lambda: [])
+
+    def test_set_gh_status_propagates_when_no_live_kennel(self, tmp_path: Path) -> None:
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+
+        with (
+            patch(
+                "kennel.gh_status._default_provider_factories",
+                side_effect=RuntimeError("No running kennel repo configs found"),
+            ),
+            pytest.raises(RuntimeError, match="No running kennel repo configs found"),
+        ):
+            set_gh_status(
+                "test",
+                persona_path=persona_file,
+                _gh=mock_gh,
+            )
+
+        mock_gh.set_user_status.assert_not_called()
+
+    def test_uses_each_configured_provider_once(self, tmp_path: Path) -> None:
+        claude_cfg = RepoConfig(
+            name="owner/repo-a",
+            work_dir=tmp_path / "a",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        copilot_cfg = RepoConfig(
+            name="owner/repo-b",
+            work_dir=tmp_path / "b",
+            provider=ProviderID.COPILOT_CLI,
+        )
+        duplicate_claude_cfg = RepoConfig(
+            name="owner/repo-c",
+            work_dir=tmp_path / "c",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        for cfg in (claude_cfg, copilot_cfg, duplicate_claude_cfg):
+            cfg.work_dir.mkdir()
+        factory = MagicMock()
+        first = _client()
+        second = _client()
+        factory.create_agent.side_effect = [first, second]
+        with (
+            patch("kennel.gh_status.DefaultProviderFactory", return_value=factory),
+        ):
+            factories = _default_provider_factories(
+                _running_repo_configs_fn=lambda: [
+                    claude_cfg,
+                    copilot_cfg,
+                    duplicate_claude_cfg,
+                ],
+            )
+            assert [build() for build in factories] == [first, second]
+        factory.create_agent.assert_any_call(
+            claude_cfg,
+            work_dir=claude_cfg.work_dir,
+            repo_name=claude_cfg.name,
+        )
+        factory.create_agent.assert_any_call(
+            copilot_cfg,
+            work_dir=copilot_cfg.work_dir,
+            repo_name=copilot_cfg.name,
+        )
+        assert factory.create_agent.call_count == 2
 
 
 class TestMain:

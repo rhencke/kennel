@@ -31,6 +31,7 @@ from kennel.status import (
     collect,
     format_status,
     repo_status,
+    running_repo_configs,
 )
 
 
@@ -125,6 +126,18 @@ class TestPgrep:
             capture_output=True,
             text=True,
         )
+
+
+class TestRunningRepoConfigs:
+    def test_returns_empty_when_kennel_not_running(self) -> None:
+        assert running_repo_configs(_kennel_pid_fn=lambda: None) == []
+
+    def test_reads_repos_from_running_kennel(self, tmp_path: Path) -> None:
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        assert running_repo_configs(
+            _kennel_pid_fn=lambda: 123,
+            _repos_from_pid_fn=lambda pid: [repo_cfg],
+        ) == [repo_cfg]
 
 
 class TestProcessUptimeSeconds:

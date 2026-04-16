@@ -9,8 +9,11 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kennel.claude import ClaudeClient
+from kennel.config import RepoConfig
 from kennel.github import GitHub
 from kennel.provider import ProviderAgent
+from kennel.provider_factory import DefaultProviderFactory
+from kennel.status import running_repo_configs
 
 log = logging.getLogger(__name__)
 
@@ -28,115 +31,45 @@ _EMOJI_SYSTEM = (
     " the status message. Output ONLY the emoji shortcode, nothing else."
 )
 
-_NAP_MESSAGES = (
-    "Taking a little nap. Back soon.",
-    "Curled up for a quick nap.",
-    "Dozing by the keyboard for a bit.",
-    "Snoring softly under the desk.",
-    "Resting my paws and rebooting my brain.",
-    "Power nap time. Woof soon.",
-    "Taking a breather in the sunbeam.",
-    "Sleeping off a big debugging session.",
-    "Paws up. Eyes closed. Back later.",
-    "Nap mode engaged.",
-    "Catching a quick snooze between bugs.",
-    "Tucked in for a tiny dog nap.",
-    "Dreaming about clean test runs.",
-    "Resting my little programmer paws.",
-    "Sleeping until the next good idea arrives.",
-    "Having a cozy floor nap.",
-    "Dozing while the thoughts settle.",
-    "Taking five in a warm patch of sun.",
-    "Sniffed too many logs. Need a nap.",
-    "Recharging with a small sleepy woof.",
-    "Out for a brief nap walk in dreamland.",
-    "Napping now. Back when my tail reboots.",
-    "Having a quiet nap and a slower heartbeat.",
-    "Resting after a long code chase.",
-    "Snoozing with one ear on the build.",
-    "Paused for a gentle nap.",
-    "Sleeping through the noisy part.",
-    "Just me, a blanket, and a quick nap.",
-    "Settled in for some quality dozing.",
-    "Nap first. Clever fix later.",
-    "Letting my brain fetch a little rest.",
-    "Tiny nap. Big comeback.",
-    "Taking a sleepy lap around dreamland.",
-    "Tail still. Nose tucked. Napping.",
-    "Having a soft little reset nap.",
-    "Camping out in nap mode.",
-    "Do not disturb. Dreaming of green checks.",
-    "Sleeping on the next move for a minute.",
-    "Back soon. Currently very snoozy.",
-    "Stepping away for a nap and a stretch.",
-    "Quiet paws. Closed eyes. Gentle nap.",
-    "Snoozing until the next bark-worthy task.",
-    "Taking a warm, lazy nap.",
-    "Letting the zoomies cool off.",
-    "Having a thoughtful nap about architecture.",
-    "Paused for a pillow-level refactor.",
-    "Napping with extreme professionalism.",
-    "Resting before the next fetch.",
-    "Low-power dog mode for a minute.",
-    "Sleeping like a very tired code hound.",
-    "Tuning out for a tiny nap.",
-    "Stashed my paws and took a nap.",
-    "Having a hallway nap and a nice dream.",
-    "Short snooze. Long wag later.",
-    "Listening to the hum of a nap.",
-    "Taking a calm little timeout nap.",
-    "All tucked in with my thoughts.",
-    "Gone to fetch some rest.",
-    "Sleeping through the lint in my dreams.",
-    "Resting until the ideas line back up.",
-    "A nap is in progress.",
-    "Having a low-noise, high-comfort nap.",
-    "Snoozing near the charging cable.",
-    "Taking a reset break with a blanket.",
-    "Paws folded. Brain idling. Napping.",
-    "On a tiny nap detour.",
-    "Resting up for the next round of fixes.",
-    "Closed my laptop. Opened my nap.",
-    "Having a code hound catnap.",
-    "Dreaming in tidy little commits.",
-    "Nap vibes only right now.",
-    "Took my thoughts to bed for a bit.",
-    "Sleeping off some stack traces.",
-    "A short nap should do the trick.",
-    "Letting the brain cache cool down.",
-    "Snuggled into a productive nap.",
-    "Dozing until the next tail wag.",
-    "Resting in a very responsible way.",
-    "Nap break. Nothing dramatic.",
-    "Laying low and sleeping lightly.",
-    "Having a peaceful puppy pause.",
-    "Sleeping until the code smells fresher.",
-    "Quietly recharging in nap mode.",
-    "A comfy nap is currently deployed.",
-    "Flat on the rug. Out for a bit.",
-    "Taking a soft reboot nap.",
-    "Pacing stopped. Napping started.",
-    "Resting with excellent blanket coverage.",
-    "Nose tucked, tail still, brain rebooting.",
-    "Just a good old-fashioned nap.",
-    "Borrowing a little rest from the afternoon.",
-    "Snoozing where the light is nicest.",
-    "Nap in progress. Bark later.",
-    "On break with a sleepy sigh.",
-    "Dreaming about elegant diffs.",
-    "Having a paws-off minute.",
-    "Settling into a strategic snooze.",
-    "Resting the snout and the neurons.",
-    "Taking the kind of nap that fixes everything.",
-    "Sleeping now. Will wag again soon.",
-    "One small nap for dog. One big reset for brain.",
-    "Curled up and temporarily unavailable.",
+_FALLBACK_MESSAGES = (
+    "Having a quiet think. Back soon.",
+    "Paws tangled in the status wires for a minute.",
+    "Snout in the logs. Words later.",
+    "Taking a beat and wagging back soon.",
+    "Brain buffering. Tail still works though.",
+    "Having a small dog moment. Back in a sec.",
+    "Status machine made a funny noise. Woof later.",
+    "A little scrambled right now. I will be back soon.",
+    "Stepping away to sniff out the right words.",
+    "Temporarily unavailable, but still a very good dog.",
 )
 
 
-def _default_provider_factories() -> tuple[Callable[[], ProviderAgent], ...]:
-    """Return the currently available provider constructors for gh-status."""
-    return (ClaudeClient,)
+def _default_provider_factories(
+    *,
+    _running_repo_configs_fn: Callable[[], list[RepoConfig]] = running_repo_configs,
+) -> tuple[Callable[[], ProviderAgent], ...]:
+    """Return provider factories for the providers configured on the live kennel."""
+
+    repo_cfgs = _running_repo_configs_fn()
+    if not repo_cfgs:
+        raise RuntimeError("No running kennel repo configs found")
+
+    provider_factory = DefaultProviderFactory(session_system_file=_PERSONA_PATH)
+    factories: list[Callable[[], ProviderAgent]] = []
+    seen_providers: set[object] = set()
+    for repo_cfg in repo_cfgs:
+        if repo_cfg.provider in seen_providers:
+            continue
+        seen_providers.add(repo_cfg.provider)
+        factories.append(
+            lambda cfg=repo_cfg: provider_factory.create_agent(
+                cfg,
+                work_dir=cfg.work_dir,
+                repo_name=cfg.name,
+            )
+        )
+    return tuple(factories)
 
 
 def _candidate_providers(
@@ -199,12 +132,15 @@ def set_gh_status(
         persona = persona_path.read_text()
     except FileNotFoundError:
         persona = ""
-    providers = _candidate_providers(
-        provider,
-        _default_provider_factories()
-        if _provider_factories is None
-        else tuple(_provider_factories),
-    )
+    if provider is not None:
+        providers = (provider,)
+    else:
+        provider_factories = (
+            _default_provider_factories()
+            if _provider_factories is None
+            else tuple(_provider_factories)
+        )
+        providers = _candidate_providers(None, provider_factories)
     for current_provider in providers:
         try:
             text = generate_persona_status(message, persona, provider=current_provider)
@@ -218,7 +154,7 @@ def set_gh_status(
             continue
         _gh.set_user_status(text, emoji, busy=True)
         return
-    _gh.set_user_status(_choice(_NAP_MESSAGES), ":sleeping:", busy=True)
+    _gh.set_user_status(_choice(_FALLBACK_MESSAGES), ":sleeping:", busy=True)
 
 
 def main(argv: list[str], *, _GitHub: type[GitHub] = GitHub) -> None:
