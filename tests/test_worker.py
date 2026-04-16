@@ -4224,6 +4224,257 @@ class TestFilterCiThreads:
         assert w._filter_ci_threads([node], "fido-bot", "check") == []
 
 
+class TestHandleMergeConflict:
+    """Tests for Worker.handle_merge_conflict."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "DIRTY"}
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_returns_false_when_not_dirty(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_blocked(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_missing_merge_state(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"body": ""}
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_true_when_dirty(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+        ):
+            result = worker.handle_merge_conflict(
+                fido_dir, self._repo_ctx(), 1, "branch"
+            )
+        assert result is True
+
+    def test_calls_set_status_with_pr_number(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status") as mock_status,
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+        ):
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 42, "my-branch")
+        mock_status.assert_called_once_with("Resolving merge conflicts on PR #42")
+
+    def test_builds_merge_prompt(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+        ):
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 5, "fix-branch")
+        mock_bp.assert_called_once()
+        _, subskill, context = mock_bp.call_args[0]
+        assert subskill == "merge"
+        assert "fix-branch" in context
+        assert "PR: 5" in context
+        assert "origin/main" in context
+
+    def test_runs_claude(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+        ):
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_cr.assert_called_once_with(
+            fido_dir, cwd=tmp_path, session=None, claude_client=ANY
+        )
+
+    def test_does_not_call_claude_when_not_dirty(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        fido_dir = self._fido_dir(tmp_path)
+        with patch("kennel.worker.claude_run") as mock_cr:
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_cr.assert_not_called()
+
+    def test_checks_pr_merge_state(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+        ):
+            worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 7, "branch")
+        gh.get_pr.assert_called_once_with("owner/repo", 7)
+
+
+class TestRunHandleMergeConflictIntegration:
+    """Tests that Worker.run() calls handle_merge_conflict before handle_ci."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        repo_ctx.membership = RepoMembership()
+        return repo_ctx
+
+    def test_handle_merge_conflict_called_with_pr_and_slug(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_handle_mc = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_merge_conflict", mock_handle_mc),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+        ):
+            worker.run()
+        mock_handle_mc.assert_called_once_with(
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+        )
+
+    def test_returns_1_when_merge_conflict_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_merge_conflict", return_value=True),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_handle_ci_not_called_when_merge_conflict_handled(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        mock_ci = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_merge_conflict", return_value=True),
+            patch.object(worker, "handle_ci", mock_ci),
+        ):
+            worker.run()
+        mock_ci.assert_not_called()
+
+    def test_handle_merge_conflict_not_called_on_fresh_pr(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        mock_mc = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_merge_conflict", mock_mc),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+        mock_mc.assert_not_called()
+
+
 class TestHandleCi:
     """Tests for Worker.handle_ci."""
 
