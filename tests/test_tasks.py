@@ -24,10 +24,13 @@ from kennel.tasks import (
 from kennel.types import TaskStatus, TaskType
 
 
-def _client(print_prompt_return: str = "") -> MagicMock:
-    """Create a mock ClaudeClient with a configurable print_prompt return."""
+def _client(run_turn_return: str = "") -> MagicMock:
+    """Create a mock ClaudeClient with a configurable run_turn return."""
     client = MagicMock(spec=ClaudeClient)
-    client.print_prompt.return_value = print_prompt_return
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
+    client.run_turn.return_value = run_turn_return
     return client
 
 
@@ -503,8 +506,8 @@ class TestReorderTasks:
 
     def test_skips_when_no_tasks(self, tmp_path: Path) -> None:
         client = _client("")
-        reorder_tasks(tmp_path, "", claude_client=client)
-        client.print_prompt.assert_not_called()
+        reorder_tasks(tmp_path, "", agent=client)
+        client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
         from unittest.mock import patch
@@ -520,13 +523,13 @@ class TestReorderTasks:
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = list_tasks(tmp_path)
-        reorder_tasks(tmp_path, "", claude_client=_client(""))
+        reorder_tasks(tmp_path, "", agent=_client(""))
         assert list_tasks(tmp_path) == result_before
 
     def test_skips_on_unparseable_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = list_tasks(tmp_path)
-        reorder_tasks(tmp_path, "", claude_client=_client("not json"))
+        reorder_tasks(tmp_path, "", agent=_client("not json"))
         assert list_tasks(tmp_path) == result_before
 
     def test_reorders_tasks(self, tmp_path: Path) -> None:
@@ -539,7 +542,7 @@ class TestReorderTasks:
                 {"id": t1["id"], "title": "First", "description": ""},
             ]
         )
-        reorder_tasks(tmp_path, "", claude_client=_client(raw))
+        reorder_tasks(tmp_path, "", agent=_client(raw))
         result = list_tasks(tmp_path)
         assert result[0]["id"] == t2["id"]
         assert result[1]["id"] == t1["id"]
@@ -549,14 +552,14 @@ class TestReorderTasks:
         raw = self._response(
             [{"id": t1["id"], "title": "New title", "description": ""}]
         )
-        reorder_tasks(tmp_path, "", claude_client=_client(raw))
+        reorder_tasks(tmp_path, "", agent=_client(raw))
         assert list_tasks(tmp_path)[0]["title"] == "New title"
 
     def test_marks_completed_task_opus_excludes(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Keep")
         t2 = self._add(tmp_path, "No longer needed")
         raw = self._response([{"id": t1["id"], "title": "Keep", "description": ""}])
-        reorder_tasks(tmp_path, "", claude_client=_client(raw))
+        reorder_tasks(tmp_path, "", agent=_client(raw))
         result = list_tasks(tmp_path)
         task2 = next(t for t in result if t["id"] == t2["id"])
         assert task2["status"] == "completed"
@@ -566,7 +569,7 @@ class TestReorderTasks:
         complete_by_id(tmp_path, t1["id"])
         t2 = self._add(tmp_path, "Pending")
         raw = self._response([{"id": t2["id"], "title": "Pending", "description": ""}])
-        reorder_tasks(tmp_path, "", claude_client=_client(raw))
+        reorder_tasks(tmp_path, "", agent=_client(raw))
         result = list_tasks(tmp_path)
         statuses = {t["id"]: t["status"] for t in result}
         assert statuses[t1["id"]] == "completed"
@@ -580,7 +583,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "feat: added thing",
-            claude_client=_client(""),
+            agent=_client(""),
             prompts=mock_prompts,
         )
         mock_prompts.rescope_prompt.assert_called_once()
@@ -592,7 +595,7 @@ class TestReorderTasks:
         t1 = self._add(tmp_path, "Original task")
         new_task_id: list[str] = []
 
-        def slow_print_prompt(prompt, model, **kw):
+        def slow_run_turn(prompt, *, model=None, **kw):
             # Simulate a new task arriving while Opus is running
             t2 = add_task(
                 tmp_path, title="Arrived mid-reorder", task_type=TaskType.SPEC
@@ -607,8 +610,8 @@ class TestReorderTasks:
             )
 
         client = _client()
-        client.print_prompt.side_effect = slow_print_prompt
-        reorder_tasks(tmp_path, "", claude_client=client)
+        client.run_turn.side_effect = slow_run_turn
+        reorder_tasks(tmp_path, "", agent=client)
         result = list_tasks(tmp_path)
         ids = [t["id"] for t in result]
         assert new_task_id[0] in ids  # not silently dropped
@@ -633,7 +636,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
         )
         assert len(received) == 1
@@ -657,7 +660,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
         )
         assert len(received) == 1
@@ -675,7 +678,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
         )
         assert received == []
@@ -688,7 +691,7 @@ class TestReorderTasks:
         t2 = self._add(tmp_path, "Keep")
         raw = self._response([{"id": t2["id"], "title": "Keep", "description": ""}])
         # Should not raise even though t1 is completed and _on_changes is None
-        reorder_tasks(tmp_path, "", claude_client=_client(raw), _on_changes=None)
+        reorder_tasks(tmp_path, "", agent=_client(raw), _on_changes=None)
         # t1 should be marked completed
         task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
         assert task1["status"] == "completed"
@@ -706,7 +709,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == [1]
@@ -726,7 +729,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == [1]
@@ -747,7 +750,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == []
@@ -767,7 +770,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == []
@@ -783,7 +786,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_inprogress_affected=None,
         )
         task1 = next(t for t in list_tasks(tmp_path) if t["id"] == t1["id"])
@@ -796,7 +799,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(raw),
+            agent=_client(raw),
             _on_done=lambda: done_calls.append(1),
         )
         assert done_calls == [1]
@@ -806,7 +809,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client("{}"),
+            agent=_client("{}"),
             _on_done=lambda: done_calls.append(1),
         )
         assert done_calls == []
@@ -817,7 +820,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client(""),
+            agent=_client(""),
             _on_done=lambda: done_calls.append(1),
         )
         assert done_calls == []
@@ -828,7 +831,7 @@ class TestReorderTasks:
         reorder_tasks(
             tmp_path,
             "",
-            claude_client=_client("not json at all"),
+            agent=_client("not json at all"),
             _on_done=lambda: done_calls.append(1),
         )
         assert done_calls == []

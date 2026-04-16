@@ -232,6 +232,101 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def task_resume_nudge(
+        self,
+        *,
+        attempt: int,
+        task_title: str,
+        task_id: str,
+        work_dir: str,
+        pr_number: int | None,
+    ) -> str:
+        """Build an escalating nudge for the no-commit resume loop."""
+        complete_cmd = f"kennel task complete {work_dir} {task_id}"
+        pr_comment_cmd = (
+            f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
+            if pr_number is not None
+            else "gh pr comment <pr> --body 'BLOCKED: ...'"
+        )
+        if attempt <= 2:
+            return (
+                f"You're working on: {task_title}\n\n"
+                "I don't see any commits yet. Continue the task. If you already "
+                "have changes, commit them now. If the task is already fully "
+                f"complete in a previous commit, run:\n  {complete_cmd}\n"
+            )
+        return (
+            f"You're working on: {task_title}\n\n"
+            f"This is attempt {attempt} and there are still no commits on the "
+            "branch. Take exactly one of these actions:\n"
+            "1. Commit the changes you have (`git add -A && git commit`)\n"
+            f"2. Mark this task complete: `{complete_cmd}`\n"
+            f"3. If something outside your control is blocking you, run "
+            f"`{pr_comment_cmd}` with a real explanation of what's blocking you "
+            "and why — so a human can unblock you. Do not just describe the "
+            "situation internally; post the comment.\n\n"
+            "Do not respond with a plan — just act."
+        )
+
+    def fresh_session_retry_prompt(
+        self,
+        *,
+        task_title: str,
+        task_id: str,
+        work_dir: str,
+        pr_number: int | None,
+        branch: str,
+        issue_number: int | None = None,
+        issue_title: str = "",
+        issue_body: str = "",
+        pr_title: str = "",
+        pr_body: str = "",
+    ) -> str:
+        """Build the self-contained recovery prompt for a fresh-session retry."""
+        complete_cmd = f"kennel task complete {work_dir} {task_id}"
+        pr_comment_cmd = (
+            f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
+            if pr_number is not None
+            else "gh pr comment <pr> --body 'BLOCKED: ...'"
+        )
+        context_lines = [
+            f"- Branch: {branch}",
+            f"- Task title: {task_title}",
+            f"- Task id: {task_id}",
+            f"- PR: {pr_number if pr_number is not None else '<pr>'}",
+        ]
+        if issue_number is not None:
+            issue_line = f"- Issue: #{issue_number}"
+            if issue_title:
+                issue_line += f" {issue_title}"
+            context_lines.append(issue_line)
+        if pr_title:
+            context_lines.append(f"- PR title: {pr_title}")
+
+        details: list[str] = []
+        if issue_body:
+            details.append(f"Issue description:\n{issue_body}")
+        if pr_body:
+            details.append(f"PR description:\n{pr_body}")
+        detail_block = "\n\n" + "\n\n".join(details) if details else ""
+
+        return (
+            "Fresh-session recovery: the previous attempts failed repeatedly, so "
+            "the session context was intentionally wiped before this retry.\n\n"
+            "Current work:\n"
+            f"{'\n'.join(context_lines)}"
+            f"{detail_block}\n\n"
+            "What to do now:\n"
+            "1. Re-establish context from the repo and current branch state.\n"
+            "2. Continue this task immediately.\n"
+            "3. Take exactly one concrete action before stopping:\n"
+            "   - commit the changes you made (`git add -A && git commit`)\n"
+            f"   - mark the task complete: `{complete_cmd}`\n"
+            f"   - if blocked by something outside your control, post a real "
+            f"blocking comment with `{pr_comment_cmd}`\n\n"
+            "Do not answer with a summary or plan. Act on the task."
+        )
+
     def react_prompt(self, comment_body: str) -> str:
         """Build the reaction-decision prompt for Fido.
 

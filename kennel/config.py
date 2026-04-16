@@ -5,6 +5,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kennel.provider import ProviderID
+
 log = logging.getLogger(__name__)
 
 
@@ -29,6 +31,7 @@ class RepoMembership:
 class RepoConfig:
     name: str  # "rhencke/confusio"
     work_dir: Path  # /home/rhencke/workspace/confusio
+    provider: ProviderID
     membership: RepoMembership = field(default_factory=RepoMembership)
 
 
@@ -68,8 +71,8 @@ class Config:
         parser.add_argument(
             "repos",
             nargs="+",
-            metavar="owner/repo:/path",
-            help="Repos to manage (name:work_dir)",
+            metavar="owner/repo:/path:provider",
+            help="Repos to manage (name:work_dir:provider)",
         )
 
         args = parser.parse_args(argv)
@@ -82,12 +85,25 @@ class Config:
         repos: dict[str, RepoConfig] = {}
         for spec in args.repos:
             if ":" not in spec:
-                raise SystemExit(f"invalid repo spec (expected name:path): {spec}")
-            name, path_str = spec.split(":", 1)
+                raise SystemExit(
+                    f"invalid repo spec (expected name:path:provider): {spec}"
+                )
+            name, remainder = spec.split(":", 1)
+            if ":" not in remainder:
+                raise SystemExit(
+                    f"invalid repo spec (expected name:path:provider): {spec}"
+                )
+            path_str, provider_str = remainder.rsplit(":", 1)
+            try:
+                provider = ProviderID(provider_str)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"invalid provider {provider_str!r} for {name}"
+                ) from exc
             work_dir = Path(path_str).expanduser().resolve()
             if not work_dir.is_dir():
                 raise SystemExit(f"work_dir not found: {work_dir} (for {name})")
-            repos[name] = RepoConfig(name=name, work_dir=work_dir)
+            repos[name] = RepoConfig(name=name, work_dir=work_dir, provider=provider)
 
         return cls(
             port=args.port,

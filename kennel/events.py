@@ -16,7 +16,9 @@ from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
 from kennel.provider import ProviderAgent
+from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WorkerRegistry
+from kennel.state import State
 from kennel.tasks import Tasks
 from kennel.types import TaskType
 
@@ -26,6 +28,16 @@ log = logging.getLogger(__name__)
 # Ensures at most one Opus call in-flight + one pending per repo.
 _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
+
+
+def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
+    return DefaultProviderFactory(
+        session_system_file=config.sub_dir / "persona.md"
+    ).create_agent(
+        repo_cfg,
+        work_dir=repo_cfg.work_dir,
+        repo_name=repo_cfg.name,
+    )
 
 
 @dataclass
@@ -152,7 +164,7 @@ def recover_reply_promises(
     gh: GitHub,
     pr_number: int,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     registry: WorkerRegistry | None = None,
 ) -> bool:
@@ -214,7 +226,7 @@ def recover_reply_promises(
                 config,
                 repo_cfg,
                 gh,
-                claude_client=claude_client,
+                agent=agent,
                 prompts=prompts,
             )
             reply_promises.remove_reply_promise(
@@ -268,7 +280,7 @@ def recover_reply_promises(
             config,
             repo_cfg,
             gh,
-            claude_client=claude_client,
+            agent=agent,
             prompts=prompts,
         )
         for group_promise, _ in group:
@@ -480,21 +492,19 @@ def maybe_react(
     config: Config,
     gh: GitHub,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        agent = _configured_agent(config, config.repos[repo])
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     reaction = (
-        claude_client.print_prompt(
-            prompts.react_prompt(comment_body), "claude-opus-4-6"
-        )
+        agent.run_turn(prompts.react_prompt(comment_body), model=agent.voice_model)
         .lower()
         .split("\n")[0]
         .strip()
@@ -518,7 +528,7 @@ def reply_to_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
@@ -529,8 +539,8 @@ def reply_to_comment(
     Uses a per-comment lockfile to prevent concurrent replies.
     Raises on reply-post failure so callers fail closed.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        agent = _configured_agent(config, repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     info = action.reply_to
@@ -573,11 +583,7 @@ def reply_to_comment(
     root_body = thread_comments[0].get("body", comment) if thread_comments else comment
 
     # Enrich context with sibling threads when the comment needs more context
-    if (
-        needs_more_context(comment, claude_client=claude_client)
-        and info.get("repo")
-        and info.get("pr")
-    ):
+    if needs_more_context(comment, agent=agent) and info.get("repo") and info.get("pr"):
         siblings = gh.fetch_sibling_threads(info["repo"], info["pr"])
         if siblings:
             context["sibling_threads"] = siblings
@@ -588,7 +594,7 @@ def reply_to_comment(
 
     # Step 1: Haiku triage (on the triggering comment to determine category)
     category, titles = _triage(
-        comment, action.is_bot, context, claude_client=claude_client, prompts=prompts
+        comment, action.is_bot, context, agent=agent, prompts=prompts
     )
     log.info("triage: %s — %s", category, titles)
 
@@ -599,7 +605,7 @@ def reply_to_comment(
     # reflects what the reviewer originally asked.
     if category in ("ACT", "DO"):
         log.info("deriving task title from root comment")
-        titles = [_summarize_as_action_item(root_body, claude_client=claude_client)]
+        titles = [_summarize_as_action_item(root_body, agent=agent)]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
@@ -619,14 +625,14 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = claude_client.print_prompt(
+    body = agent.run_turn(
         prompts.persona_wrap(instr),
-        "claude-opus-4-6",
+        model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
+            f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
         )
 
     # Edit the last Fido reply only if it is the most recent comment in the thread
@@ -661,7 +667,7 @@ def reply_to_comment(
         info.get("repo", ""),
         config,
         gh,
-        claude_client=claude_client,
+        agent=agent,
         prompts=prompts,
     )
 
@@ -689,7 +695,7 @@ def reply_to_review(
     gh: GitHub,
     already_replied: set[int] | None = None,
     *,
-    claude_client: ClaudeClient | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> None:
     """No-op for inline comments — they are handled per-comment.
@@ -711,14 +717,14 @@ def reply_to_review(
     \"Submit review\") still arrives only through this event and is not
     yet handled.  Tracked separately — out of scope for the dedup fix.
     """
-    _ = (action, config, repo_cfg, gh, already_replied, claude_client, prompts)
+    _ = (action, config, repo_cfg, gh, already_replied, agent, prompts)
     log.debug(
         "reply_to_review: skipping inline comments — handled per-comment (closes #518)"
     )
 
 
 def needs_more_context(
-    comment_body: str, *, claude_client: ProviderAgent | None = None
+    comment_body: str, *, agent: ProviderAgent | None = None
 ) -> bool:
     """Ask Haiku whether this comment needs sibling thread context to act on.
 
@@ -726,8 +732,8 @@ def needs_more_context(
     to act on alone (e.g. "same", "ditto", "^"), False otherwise.
     Falls back to False on any error.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        raise ValueError("needs_more_context requires agent")
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
@@ -737,7 +743,7 @@ def needs_more_context(
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    answer = claude_client.print_prompt(prompt, "claude-haiku-4-5").upper()
+    answer = agent.run_turn(prompt, model=agent.brief_model).upper()
     return answer.startswith("YES")
 
 
@@ -745,33 +751,33 @@ _MAX_TITLE_LEN = 80
 
 
 def _summarize_as_action_item(
-    comment_body: str, *, claude_client: ProviderAgent | None = None
+    comment_body: str, *, agent: ProviderAgent | None = None
 ) -> str:
     """Ask Opus to convert a comment into a short imperative action-item title.
 
-    If the result is too long, asks Claude to shorten it up to 3 times before
+    If the result is too long, asks the provider agent to shorten it up to 3 times before
     falling back to hard truncation.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        raise ValueError("_summarize_as_action_item requires agent")
     prompt = (
         f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
-    result = claude_client.print_prompt(prompt, "claude-opus-4-6").strip()
+    result = agent.run_turn(prompt, model=agent.voice_model).strip()
     for _ in range(3):
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
-        result = claude_client.print_prompt(
+        result = agent.run_turn(
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
-            "claude-opus-4-6",
+            model=agent.voice_model,
         ).strip()
     if not result:
-        raise ValueError("_summarize_as_action_item: print_prompt returned empty")
+        raise ValueError("_summarize_as_action_item: run_turn returned empty")
     return result[:_MAX_TITLE_LEN]
 
 
@@ -780,7 +786,7 @@ def _triage(
     is_bot: bool,
     context: dict[str, Any] | None = None,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Ask Opus to triage a comment. Returns (category, titles).
@@ -789,13 +795,13 @@ def _triage(
     for ANSWER/ASK/DEFER/DUMP (used as reply context), or one or more entries
     for ACT/DO (each becomes a separate work-queue task).
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        raise ValueError("_triage requires agent")
     if prompts is None:
         prompts = Prompts("")
     prompt = prompts.triage_prompt(comment_body, is_bot, context)
     log.info("triage classifier: requesting category from opus")
-    text = claude_client.print_prompt(prompt, "claude-opus-4-6")
+    text = agent.run_turn(prompt, model=agent.voice_model)
     log.info(
         "triage classifier: returned %d chars (preview=%r)",
         len(text or ""),
@@ -823,7 +829,7 @@ def _triage(
     )
     # Fallback: ACT for humans, DO for bots; summarize comment into action item
     category = "DO" if is_bot else "ACT"
-    title = _summarize_as_action_item(comment_body, claude_client=claude_client)
+    title = _summarize_as_action_item(comment_body, agent=agent)
     return category, [title]
 
 
@@ -833,15 +839,15 @@ def reply_to_issue_comment(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event).
 
     Raises on reply-post failure so callers fail closed.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        agent = _configured_agent(config, repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
@@ -878,7 +884,7 @@ def reply_to_issue_comment(
         comment,
         action.is_bot,
         context or None,
-        claude_client=claude_client,
+        agent=agent,
         prompts=prompts,
     )
     log.info("issue comment triage: %s — %s", category, titles)
@@ -895,14 +901,14 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = claude_client.print_prompt(
+    body = agent.run_turn(
         prompts.persona_wrap(instr),
-        "claude-opus-4-6",
+        model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"issue-comment reply: print_prompt returned empty for PR #{number}"
+            f"issue-comment reply: run_turn returned empty for PR #{number}"
         )
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
@@ -919,7 +925,7 @@ def reply_to_issue_comment(
             repo_full,
             config,
             gh,
-            claude_client=claude_client,
+            agent=agent,
             prompts=prompts,
         )
 
@@ -1003,7 +1009,7 @@ def _notify_thread_change(
     config: Config,
     gh: GitHub,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
@@ -1016,8 +1022,10 @@ def _notify_thread_change(
     review comment API; for issue comments (comment_type='issues') posts via
     the issue comments API.
     """
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        agent = _configured_agent(
+            config, config.repos[change["task"]["thread"]["repo"]]
+        )
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 
@@ -1058,14 +1066,14 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    body = claude_client.print_prompt(
+    body = agent.run_turn(
         prompts.persona_wrap(instruction),
-        "claude-opus-4-6",
+        model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
     if not body:
         raise ValueError(
-            f"_notify_thread_change: print_prompt returned empty for comment {comment_id}"
+            f"_notify_thread_change: run_turn returned empty for comment {comment_id}"
         )
 
     try:
@@ -1091,7 +1099,7 @@ def _rewrite_pr_description(
     work_dir: Path,
     gh: Any,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     _state: Any = None,
     _tasks: Any = None,
     _max_retries: int = 3,
@@ -1110,16 +1118,18 @@ def _rewrite_pr_description(
     the state of the task list at the moment Opus returned.  The PR body is
     re-fetched on each retry so the work-queue section stays current.
     """
-    from kennel.state import State
-    from kennel.tasks import Tasks
     from kennel.worker import (
         _write_pr_description,  # pyright: ignore[reportPrivateUsage]
     )
 
-    if _state is None:
-        _state = State(work_dir / ".git" / "fido")
-    if _tasks is None:
-        _tasks = Tasks(work_dir)
+    if _state is None or _tasks is None:
+        from kennel.state import State as StateStore
+        from kennel.tasks import Tasks as TaskStore
+
+        if _state is None:
+            _state = StateStore(work_dir / ".git" / "fido")
+        if _tasks is None:
+            _tasks = TaskStore(work_dir)
 
     state = _state.load()
     issue = state.get("issue")
@@ -1149,7 +1159,7 @@ def _rewrite_pr_description(
             issue,
             task_list,
             body,
-            claude_client=claude_client,
+            agent=agent,
         )
 
         snapshot_after = _task_snapshot(_tasks.list())
@@ -1176,25 +1186,29 @@ def _make_reorder_kwargs(
     repo_cfg: RepoConfig | None,
     registry: WorkerRegistry | None,
     gh: Any,
-    claude_client: ProviderAgent | None,
-    prompts: Prompts | None,
-    rewrite_fn: Any,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    rewrite_fn: Callable[..., None],
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
-            _notify_thread_change(
-                change, config, gh, claude_client=claude_client, prompts=prompts
-            )
+            _notify_thread_change(change, config, gh, agent=None, prompts=None)
 
     def on_done() -> None:
-        rewrite_fn(work_dir, gh, claude_client=claude_client)
+        rewrite_fn(
+            work_dir,
+            gh,
+            agent=agent,
+            _state=State(work_dir / ".git" / "fido"),
+            _tasks=Tasks(work_dir),
+        )
 
     kwargs: dict[str, Any] = {
         "_on_changes": on_changes,
         "_on_done": on_done,
-        "claude_client": claude_client,
+        "agent": agent,
         "prompts": prompts,
     }
     if registry is not None and repo_cfg is not None:
@@ -1219,7 +1233,7 @@ def _reorder_tasks_background(
     registry: WorkerRegistry | None = None,
     *,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     _rewrite_fn: Callable[..., None] | None = None,
     _reorder_fn: Callable[..., None] | None = None,
@@ -1251,10 +1265,18 @@ def _reorder_tasks_background(
     reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
+    if agent is None:
+        agent = (
+            _configured_agent(config, repo_cfg)
+            if repo_cfg is not None
+            else ClaudeClient()
+        )
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(
-        work_dir, config, repo_cfg, registry, gh, claude_client, prompts, rewrite_fn
+        work_dir, config, repo_cfg, registry, gh, agent, prompts, rewrite_fn
     )
 
     with _reorder_coalesce_lock:

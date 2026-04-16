@@ -215,6 +215,24 @@ class TestTriagePrompt:
         assert "Refactor" in result
 
 
+class TestFreshSessionRetryPrompt:
+    def test_includes_issue_context_details(self) -> None:
+        result = Prompts("").fresh_session_retry_prompt(
+            task_title="Fix parser",
+            task_id="task-1",
+            work_dir="/repo",
+            pr_number=42,
+            branch="fix-parser",
+            issue_number=271,
+            issue_title="Parser crash",
+            issue_body="It blows up on empty input.",
+            pr_title="Fix parser crash",
+            pr_body="Implements the parser fix.",
+        )
+        assert "- Issue: #271 Parser crash" in result
+        assert "Issue description:\nIt blows up on empty input." in result
+
+
 # ── reply_context_block ───────────────────────────────────────────────────────
 
 

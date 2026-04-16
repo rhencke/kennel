@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from kennel.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from kennel.provider import (
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderLimitWindow,
+    ProviderModel,
+)
 
 
 class TestProviderLimitWindow:
@@ -47,3 +52,21 @@ class TestProviderLimitSnapshot:
     def test_closest_to_exhaustion_returns_none_for_empty_snapshot(self) -> None:
         snapshot = ProviderLimitSnapshot(provider=ProviderID.GEMINI)
         assert snapshot.closest_to_exhaustion() is None
+
+
+class TestProviderModel:
+    def test_formats_and_compares_to_string(self) -> None:
+        model = ProviderModel("gpt-5.4", "high")
+        assert str(model) == "gpt-5.4"
+        assert model == "gpt-5.4"
+
+    def test_hash_and_model_equality_include_effort(self) -> None:
+        model = ProviderModel("gpt-5.4", "high")
+        same = ProviderModel("gpt-5.4", "high")
+        different = ProviderModel("gpt-5.4", "medium")
+        assert model == same
+        assert hash(model) == hash(same)
+        assert model != different
+
+    def test_comparison_to_unrelated_type_is_false(self) -> None:
+        assert ProviderModel("gpt-5.4") != object()

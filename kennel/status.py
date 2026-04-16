@@ -14,6 +14,7 @@ from typing import Any
 
 from kennel.color import BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RED_BOLD, YELLOW, color
 from kennel.config import RepoConfig
+from kennel.provider import ProviderID
 from kennel.state import State
 from kennel.tasks import Tasks
 
@@ -174,10 +175,23 @@ def _repos_from_pid(pid: int) -> list[RepoConfig]:
             continue
         if ":" not in spec:
             continue
-        name, path_str = spec.split(":", 1)
+        name, remainder = spec.split(":", 1)
+        if ":" not in remainder:
+            continue
+        path_str, provider_str = remainder.rsplit(":", 1)
+        try:
+            provider = ProviderID(provider_str)
+        except ValueError:
+            continue
         if "/" not in name:
             continue
-        repos.append(RepoConfig(name=name, work_dir=Path(path_str).expanduser()))
+        repos.append(
+            RepoConfig(
+                name=name,
+                work_dir=Path(path_str).expanduser(),
+                provider=provider,
+            )
+        )
     return repos
 
 

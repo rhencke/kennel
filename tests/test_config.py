@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kennel.config import Config
+from kennel.provider import ProviderID
 
 
 class TestFromArgs:
@@ -17,7 +18,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.secret == b"my-secret"
@@ -34,7 +35,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.port == 9000
@@ -52,7 +53,7 @@ class TestFromArgs:
                 "8080",
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.port == 8080
@@ -68,7 +69,7 @@ class TestFromArgs:
                 "bot1[bot],bot2[bot]",
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.allowed_bots == frozenset({"bot1[bot]", "bot2[bot]"})
@@ -81,7 +82,7 @@ class TestFromArgs:
                 [
                     "--secret-file",
                     str(tmp_path / "nonexistent"),
-                    f"owner/repo:{repo_dir}",
+                    f"owner/repo:{repo_dir}:claude-code",
                 ]
             )
 
@@ -105,7 +106,7 @@ class TestFromArgs:
                 [
                     "--secret-file",
                     str(secret_file),
-                    f"owner/repo:{tmp_path / 'nonexistent'}",
+                    f"owner/repo:{tmp_path / 'nonexistent'}:claude-code",
                 ]
             )
 
@@ -120,8 +121,8 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo1:{dir1}",
-                f"owner/repo2:{dir2}",
+                f"owner/repo1:{dir1}:claude-code",
+                f"owner/repo2:{dir2}:copilot-cli",
             ]
         )
         assert "owner/repo1" in cfg.repos
@@ -136,7 +137,49 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.sub_dir.name == "sub"
+
+    def test_repo_provider_parses_from_args(self, tmp_path: Path) -> None:
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        cfg = Config.from_args(
+            [
+                "--secret-file",
+                str(secret_file),
+                f"owner/repo:{repo_dir}:copilot-cli",
+            ]
+        )
+        assert cfg.repos["owner/repo"].provider == ProviderID.COPILOT_CLI
+
+    def test_invalid_provider_raises(self, tmp_path: Path) -> None:
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        with pytest.raises(SystemExit, match="invalid provider"):
+            Config.from_args(
+                [
+                    "--secret-file",
+                    str(secret_file),
+                    f"owner/repo:{repo_dir}:wat",
+                ]
+            )
+
+    def test_missing_provider_raises(self, tmp_path: Path) -> None:
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        with pytest.raises(SystemExit, match="expected name:path:provider"):
+            Config.from_args(
+                [
+                    "--secret-file",
+                    str(secret_file),
+                    f"owner/repo:{repo_dir}",
+                ]
+            )

@@ -18,6 +18,9 @@ from kennel.gh_status import (
 def _client(**overrides: object) -> MagicMock:
     """Create a mock provider with optional attribute overrides."""
     client = MagicMock(spec=ClaudeClient)
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
     for k, v in overrides.items():
         setattr(client, k, v)
     return client
@@ -26,7 +29,7 @@ def _client(**overrides: object) -> MagicMock:
 class TestGeneratePersonaStatus:
     def test_happy_path(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt.return_value = "sniffing out a bug *tail wag*"
+        mock_client.run_turn.return_value = "sniffing out a bug *tail wag*"
         result = generate_persona_status(
             "fixing a bug",
             "You are Fido",
@@ -36,13 +39,13 @@ class TestGeneratePersonaStatus:
 
     def test_empty_response_raises(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt.return_value = ""
+        mock_client.run_turn.return_value = ""
         with pytest.raises(ValueError, match="humanify_status"):
             generate_persona_status("at the vet", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt.return_value = "woof"
+        mock_client.run_turn.return_value = "woof"
         result = generate_persona_status("test", "", provider=mock_client)
         assert result == "woof"
 
@@ -51,7 +54,7 @@ class TestGeneratePersonaStatus:
             "kennel.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
-            mock_cls.return_value.print_prompt.return_value = "woof"
+            mock_cls.return_value.run_turn.return_value = "woof"
             generate_persona_status("test", "persona")
             mock_cls.assert_called_once_with()
 
@@ -59,7 +62,7 @@ class TestGeneratePersonaStatus:
 class TestGeneratePersonaEmoji:
     def test_happy_path(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ":wrench:"
+        mock_client.generate_status_emoji.return_value = ":wrench:"
         result = generate_persona_emoji(
             "fixing bugs",
             "persona",
@@ -69,13 +72,13 @@ class TestGeneratePersonaEmoji:
 
     def test_empty_response_raises(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ""
+        mock_client.generate_status_emoji.return_value = ""
         with pytest.raises(ValueError, match="generate_persona_emoji"):
             generate_persona_emoji("test", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ":rocket:"
+        mock_client.generate_status_emoji.return_value = ":rocket:"
         result = generate_persona_emoji("test", "", provider=mock_client)
         assert result == ":rocket:"
 
@@ -84,7 +87,7 @@ class TestGeneratePersonaEmoji:
             "kennel.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
-            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
             generate_persona_emoji("test", "persona")
             mock_cls.assert_called_once_with()
 
@@ -95,8 +98,8 @@ class TestSetGhStatus:
         persona_file.write_text("You are Fido")
         mock_gh = MagicMock()
         mock_client = _client()
-        mock_client.print_prompt.return_value = "sniffing around"
-        mock_client.print_prompt_json.return_value = ":dog2:"
+        mock_client.run_turn.return_value = "sniffing around"
+        mock_client.generate_status_emoji.return_value = ":dog2:"
 
         set_gh_status(
             "diagnosing issue",
@@ -111,8 +114,8 @@ class TestSetGhStatus:
     def test_missing_persona_file(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         mock_gh = MagicMock()
         mock_client = _client()
-        mock_client.print_prompt.return_value = "woof"
-        mock_client.print_prompt_json.return_value = ":dog:"
+        mock_client.run_turn.return_value = "woof"
+        mock_client.generate_status_emoji.return_value = ":dog:"
 
         set_gh_status(
             "test",
@@ -121,7 +124,7 @@ class TestSetGhStatus:
             _gh=mock_gh,
         )
         # Verify empty persona was passed through
-        call_kwargs = mock_client.print_prompt.call_args
+        call_kwargs = mock_client.run_turn.call_args
         assert call_kwargs is not None
         system = call_kwargs.kwargs.get("system_prompt", "")
         assert system.startswith("\n\n") or "rewriting a status" in system
@@ -135,8 +138,8 @@ class TestSetGhStatus:
             "kennel.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
-            mock_cls.return_value.print_prompt.return_value = "woof"
-            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            mock_cls.return_value.run_turn.return_value = "woof"
+            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
             mock_cls.assert_called_once_with()
 
@@ -145,10 +148,10 @@ class TestSetGhStatus:
         persona_file.write_text("persona")
         mock_gh = MagicMock()
         first = _client()
-        first.print_prompt.side_effect = RuntimeError("nope")
+        first.run_turn.side_effect = RuntimeError("nope")
         second = _client()
-        second.print_prompt.return_value = "back soon"
-        second.print_prompt_json.return_value = ":dog:"
+        second.run_turn.return_value = "back soon"
+        second.generate_status_emoji.return_value = ":dog:"
 
         set_gh_status(
             "test",
@@ -164,9 +167,9 @@ class TestSetGhStatus:
         persona_file.write_text("persona")
         mock_gh = MagicMock()
         first = _client()
-        first.print_prompt.side_effect = RuntimeError("boom")
+        first.run_turn.side_effect = RuntimeError("boom")
         second = _client()
-        second.print_prompt.side_effect = RuntimeError("still boom")
+        second.run_turn.side_effect = RuntimeError("still boom")
 
         set_gh_status(
             "test",

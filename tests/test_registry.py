@@ -7,13 +7,19 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.config import RepoConfig
+from kennel.config import RepoConfig as _RepoConfig
+from kennel.provider import ProviderID
 from kennel.registry import (
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
     make_registry,
 )
+
+
+class RepoConfig(_RepoConfig):
+    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+        super().__init__(*args, provider=provider, **kwargs)
 
 
 def _repo(name: str, work_dir: Path) -> RepoConfig:

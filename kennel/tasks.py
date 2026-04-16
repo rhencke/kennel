@@ -427,7 +427,7 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[], None] | None = None,
@@ -463,14 +463,14 @@ def reorder_tasks(
         log.info("reorder_tasks: no tasks — skipping")
         return
 
-    if claude_client is None:
-        claude_client = ClaudeClient()
+    if agent is None:
+        agent = ClaudeClient()
     if prompts is None:
         prompts = Prompts("")
 
     original_ids = frozenset(t["id"] for t in task_list)
     prompt = prompts.rescope_prompt(task_list, commit_summary)
-    raw = claude_client.print_prompt(prompt, "claude-opus-4-6")
+    raw = agent.run_turn(prompt, model=agent.voice_model)
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return

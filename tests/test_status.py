@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kennel.color import _CODES
-from kennel.config import RepoConfig
+from kennel.config import RepoConfig as _RepoConfig
+from kennel.provider import ProviderID
 from kennel.status import (
     ClaudeTalkerInfo,
     KennelStatus,
@@ -31,6 +32,11 @@ from kennel.status import (
     format_status,
     repo_status,
 )
+
+
+class RepoConfig(_RepoConfig):
+    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+        super().__init__(*args, provider=provider, **kwargs)
 
 
 class TestFormatUptime:
@@ -150,9 +156,7 @@ class TestProcessUptimeSeconds:
 
 class TestReposFromPid:
     def test_parses_single_repo(self) -> None:
-        cmdline = (
-            b"kennel\x00--port\x009000\x00rhencke/confusio:/workspace/confusio\x00"
-        )
+        cmdline = b"kennel\x00--port\x009000\x00rhencke/confusio:/workspace/confusio:claude-code\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert len(result) == 1
@@ -160,7 +164,10 @@ class TestReposFromPid:
         assert result[0].work_dir == Path("/workspace/confusio")
 
     def test_parses_multiple_repos(self) -> None:
-        cmdline = b"kennel\x00rhencke/a:/path/a\x00rhencke/b:/path/b\x00"
+        cmdline = (
+            b"kennel\x00rhencke/a:/path/a:claude-code\x00"
+            b"rhencke/b:/path/b:copilot-cli\x00"
+        )
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert len(result) == 2
@@ -179,7 +186,7 @@ class TestReposFromPid:
         assert result == []
 
     def test_skips_colon_args_without_slash_in_name(self) -> None:
-        cmdline = b"something:value\x00"
+        cmdline = b"something:value:claude-code\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert result == []
@@ -196,7 +203,7 @@ class TestReposFromPid:
         assert paths_read == [Path("/proc/789/cmdline")]
 
     def test_expands_tilde_in_path(self) -> None:
-        cmdline = b"rhencke/repo:~/workspace/repo\x00"
+        cmdline = b"rhencke/repo:~/workspace/repo:claude-code\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(1)
         assert result[0].work_dir == Path("~/workspace/repo").expanduser()
@@ -208,7 +215,7 @@ class TestReposFromPid:
         assert result == []
 
     def test_skips_non_utf8_args(self) -> None:
-        cmdline = b"\xff\xfe\x00rhencke/repo:/path\x00"
+        cmdline = b"\xff\xfe\x00rhencke/repo:/path:claude-code\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(1)
         assert len(result) == 1
