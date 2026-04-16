@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
+from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
 from kennel import claude, reply_promises
 from kennel.claude import kill_active_children
@@ -39,6 +40,7 @@ from kennel.infra import (
     real_infra,
 )
 from kennel.registry import WorkerRegistry, make_registry
+from kennel.static_files import StaticFiles
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     Watchdog,
@@ -55,6 +57,15 @@ _replied_comments: set[int] = set()
 # exceeds _PULL_BUDGET_SECONDS, even if a retry window remains.
 _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
+
+# XML namespace URIs for the /status endpoint structural XML.
+_NS_KENNEL = "https://fidocancode.dog/kennel"
+_NS_DOG = "https://fidocancode.dog/woof"
+
+# Register namespace prefixes for clean XML serialization.  Idempotent —
+# safe to call at module scope before any threads start.
+register_namespace("", _NS_KENNEL)
+register_namespace("dog", _NS_DOG)
 
 
 class PreflightError(RuntimeError):
@@ -85,6 +96,73 @@ def _serialize_talker(talker: claude.ClaudeTalker | None) -> dict[str, Any] | No
         "claude_pid": talker.claude_pid,
         "started_at": talker.started_at.isoformat(),
     }
+
+
+def _xml_text(value: object) -> str | None:
+    """Convert a Python value to XML element text.
+
+    Booleans become ``"true"`` / ``"false"``, ``None`` becomes ``None``
+    (empty element), everything else becomes its ``str()`` representation.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _repo_status(act: dict[str, Any]) -> str:
+    """Derive a single status word from activity flags.
+
+    Priority: stuck > crashed > busy > idle.  Used as the ``dog:status``
+    attribute on ``<repo>`` elements so XSLT and CSS can style by state.
+    """
+    if act.get("is_stuck"):
+        return "stuck"
+    if act.get("crash_count", 0) > 0:
+        return "crashed"
+    if act.get("busy"):
+        return "busy"
+    return "idle"
+
+
+def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
+    """Serialize activity dicts to namespaced structural XML with an XSLT PI.
+
+    Pure function — transforms data, no I/O.  The server emits this structural
+    XML in the ``https://fidocancode.dog/kennel`` namespace.  The browser
+    fetches ``status.xsl`` (via the XSLT processing instruction), which
+    transforms it into display-oriented XML in a separate namespace, which
+    is then styled by ``status.css`` via a CSS processing instruction.
+
+    Three-layer pipeline: structural XML → XSLT → display XML → CSS.
+    """
+    root = Element(f"{{{_NS_KENNEL}}}kennel")
+    for act in activities:
+        repo = SubElement(root, f"{{{_NS_KENNEL}}}repo")
+        repo.set(f"{{{_NS_DOG}}}status", _repo_status(act))
+        for key, value in act.items():
+            if key == "webhook_activities":
+                wa_el = SubElement(repo, f"{{{_NS_KENNEL}}}webhook_activities")
+                for wh in value:
+                    webhook_el = SubElement(wa_el, f"{{{_NS_KENNEL}}}webhook")
+                    for wk, wv in wh.items():
+                        el = SubElement(webhook_el, f"{{{_NS_KENNEL}}}{wk}")
+                        el.text = _xml_text(wv)
+            elif key == "claude_talker":
+                ct_el = SubElement(repo, f"{{{_NS_KENNEL}}}claude_talker")
+                if value is not None:
+                    for ck, cv in value.items():
+                        el = SubElement(ct_el, f"{{{_NS_KENNEL}}}{ck}")
+                        el.text = _xml_text(cv)
+            else:
+                el = SubElement(repo, f"{{{_NS_KENNEL}}}{key}")
+                el.text = _xml_text(value)
+    xml_body = tostring(root, encoding="unicode")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>\n' + xml_body
+    ).encode("utf-8")
 
 
 def _parse_repo_from_url(url: str) -> str | None:
@@ -316,6 +394,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     gh: GitHub | None = None
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
+    static_files: StaticFiles | None = None
     _fn_dispatch = staticmethod(dispatch)
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
@@ -627,53 +706,79 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/status":
-            now = datetime.now(tz=timezone.utc)
-            activities = []
-            for a in self.registry.get_all_activities():
-                crash = self.registry.get_crash_info(a.repo_name)
-                started_at = self.registry.thread_started_at(a.repo_name)
-                worker_uptime = (
-                    (now - started_at).total_seconds()
-                    if started_at is not None
-                    else None
-                )
-                webhooks = [
-                    {
-                        "description": w.description,
-                        "elapsed_seconds": (now - w.started_at).total_seconds(),
-                        "thread_id": w.thread_id,
-                    }
-                    for w in self.registry.get_webhook_activities(a.repo_name)
-                ]
-                activities.append(
-                    {
-                        "repo_name": a.repo_name,
-                        "what": a.what,
-                        "busy": a.busy,
-                        "crash_count": crash.death_count if crash else 0,
-                        "last_crash_error": crash.last_error if crash else None,
-                        "is_stuck": self.registry.is_stale(
-                            a.repo_name, _STALE_THRESHOLD
-                        ),
-                        "worker_uptime_seconds": worker_uptime,
-                        "webhook_activities": webhooks,
-                        "session_owner": self.registry.get_session_owner(a.repo_name),
-                        "session_alive": self.registry.get_session_alive(a.repo_name),
-                        "session_pid": self.registry.get_session_pid(a.repo_name),
-                        "claude_talker": _serialize_talker(
-                            claude.get_talker(a.repo_name)
-                        ),
-                        "rescoping": self.registry.is_rescoping(a.repo_name),
-                    }
-                )
-            body = json.dumps(activities).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            body = _activities_to_xml(self._collect_activities())
+            self._respond_body("application/xml; charset=utf-8", body)
+        elif self.path == "/status.json":
+            body = json.dumps(self._collect_activities()).encode()
+            self._respond_body("application/json", body)
+        elif self.path.startswith("/static/"):
+            self._serve_static()
         else:
             self._respond(200, "kennel is running")
+
+    def _collect_activities(self) -> list[dict[str, Any]]:
+        """Build the activity snapshot for all registered repos."""
+        now = datetime.now(tz=timezone.utc)
+        activities: list[dict[str, Any]] = []
+        for a in self.registry.get_all_activities():
+            crash = self.registry.get_crash_info(a.repo_name)
+            started_at = self.registry.thread_started_at(a.repo_name)
+            worker_uptime = (
+                (now - started_at).total_seconds() if started_at is not None else None
+            )
+            webhooks = [
+                {
+                    "description": w.description,
+                    "elapsed_seconds": (now - w.started_at).total_seconds(),
+                    "thread_id": w.thread_id,
+                }
+                for w in self.registry.get_webhook_activities(a.repo_name)
+            ]
+            activities.append(
+                {
+                    "repo_name": a.repo_name,
+                    "what": a.what,
+                    "busy": a.busy,
+                    "crash_count": crash.death_count if crash else 0,
+                    "last_crash_error": crash.last_error if crash else None,
+                    "is_stuck": self.registry.is_stale(a.repo_name, _STALE_THRESHOLD),
+                    "worker_uptime_seconds": worker_uptime,
+                    "webhook_activities": webhooks,
+                    "session_owner": self.registry.get_session_owner(a.repo_name),
+                    "session_alive": self.registry.get_session_alive(a.repo_name),
+                    "session_pid": self.registry.get_session_pid(a.repo_name),
+                    "claude_talker": _serialize_talker(claude.get_talker(a.repo_name)),
+                    "rescoping": self.registry.is_rescoping(a.repo_name),
+                }
+            )
+        return activities
+
+    def _respond_body(self, content_type: str, body: bytes) -> None:
+        """Send a 200 response with the given content type and body."""
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_static(self) -> None:
+        if self.static_files is None:
+            self._respond(404, "not found")
+            return
+        response = self.static_files.serve(
+            self.path,
+            self.headers.get("If-None-Match"),
+            self.headers.get("If-Modified-Since"),
+        )
+        if response is None:
+            self._respond(404, "not found")
+            return
+        self.send_response(response.status)
+        for name, value in response.headers:
+            self.send_header(name, value)
+        self.end_headers()
+        if response.body:
+            self.wfile.write(response.body)
 
     def _verify_signature(self, body: bytes) -> bool:
         header = self.headers.get("X-Hub-Signature-256", "")
@@ -815,6 +920,9 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
+    WebhookHandler.static_files = StaticFiles(
+        Path(__file__).resolve().parent / "static"
+    )
     registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
     # Route webhook-handler prompt calls through the per-repo persistent

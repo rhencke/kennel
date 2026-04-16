@@ -18,7 +18,7 @@ import pytest
 from kennel.config import Config, RepoConfig
 from kennel.events import Action, recover_reply_promises
 from kennel.infra import Infra
-from kennel.server import PreflightError, WebhookHandler
+from kennel.server import PreflightError, WebhookHandler, _repo_status
 
 # Thread-capture and do_POST synchronisation helpers ---------------------------
 #
@@ -89,6 +89,7 @@ def _restore_handler_fns():
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "infra": WebhookHandler.infra,
+        "static_files": WebhookHandler.static_files,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -203,7 +204,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
         data = json.loads(resp.read())
         assert len(data) == 1
@@ -240,7 +241,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["session_owner"] == "worker-home"
 
@@ -266,7 +267,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["session_alive"] is True
         assert data[0]["session_owner"] is None
@@ -297,7 +298,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["crash_count"] == 3
         assert data[0]["last_crash_error"] == "RuntimeError: boom"
@@ -305,14 +306,14 @@ class TestGetEndpoint:
     def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
         assert json.loads(resp.read()) == []
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.headers.get("Content-Type") == "application/json"
 
     def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
@@ -337,7 +338,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["is_stuck"] is True
 
@@ -363,7 +364,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = True
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["rescoping"] is True
 
@@ -389,9 +390,218 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
+        resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["rescoping"] is False
+
+
+class TestRepoStatus:
+    @pytest.mark.parametrize(
+        ("act", "expected"),
+        [
+            ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
+            ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
+            ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
+            ({"is_stuck": False, "crash_count": 0, "busy": False}, "idle"),
+        ],
+        ids=["stuck", "crashed", "busy", "idle"],
+    )
+    def test_repo_status_priority(self, act: dict, expected: str) -> None:
+        assert _repo_status(act) == expected
+
+
+class TestStatusXml:
+    def test_status_returns_namespaced_xml_with_xslt_pi(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert resp.headers.get("Content-Type") == "application/xml; charset=utf-8"
+        assert '<?xml version="1.0" encoding="UTF-8"?>' in body
+        assert '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>' in body
+        assert "<kennel" in body
+        assert 'xmlns="https://fidocancode.dog/kennel"' in body
+
+    def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<repo_name>owner/repo</repo_name>" in body
+        assert "<what>Working on: #1</what>" in body
+        assert "<busy>true</busy>" in body
+        assert 'dog:status="busy"' in body
+
+    def test_status_xml_empty_kennel(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert 'xmlns="https://fidocancode.dog/kennel"' in body
+        # Empty kennel — self-closing root element (with namespace attrs)
+        assert "/>" in body
+
+    def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.claude import ClaudeTalker
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        talker = ClaudeTalker(
+            repo_name="owner/repo",
+            thread_id=42,
+            kind="worker",
+            description="implementing task",
+            claude_pid=9999,
+            started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
+        )
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="working",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        with patch("kennel.claude.get_talker", return_value=talker):
+            resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<kind>worker</kind>" in body
+        assert "<claude_pid>9999</claude_pid>" in body
+
+    def test_status_xml_includes_webhooks(self, server: tuple) -> None:
+        from datetime import datetime, timezone
+
+        from kennel.registry import WebhookActivity, WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="working",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = [
+            WebhookActivity(
+                handle_id=1,
+                description="replying to review",
+                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                thread_id=789,
+            ),
+        ]
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<description>replying to review</description>" in body
+        assert "<thread_id>789</thread_id>" in body
+
+
+class TestStaticFileServing:
+    def test_serves_static_css(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        (static_dir / "style.css").write_text("body { color: red; }")
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        resp = urllib.request.urlopen(f"{url}/static/style.css")
+        assert resp.status == 200
+        assert resp.read() == b"body { color: red; }"
+        assert resp.headers["Content-Type"] == "text/css; charset=utf-8"
+
+    def test_static_includes_caching_headers(
+        self, server: tuple, tmp_path: Path
+    ) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        (static_dir / "style.css").write_text("x")
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        resp = urllib.request.urlopen(f"{url}/static/style.css")
+        assert resp.headers["ETag"] is not None
+        assert resp.headers["Last-Modified"] is not None
+        assert resp.headers["Cache-Control"] == "public, max-age=3600"
+
+    def test_static_304_on_etag_match(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        content = b"body { color: blue; }"
+        (static_dir / "style.css").write_bytes(content)
+
+        import hashlib
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        etag = '"' + hashlib.sha256(content).hexdigest()[:16] + '"'
+        req = urllib.request.Request(
+            f"{url}/static/style.css",
+            headers={"If-None-Match": etag},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        assert exc_info.value.code == 304
+
+    def test_static_404_when_no_static_files(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.static_files = None
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"{url}/static/style.css")
+        assert exc_info.value.code == 404
+
+    def test_static_404_for_missing_file(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"{url}/static/nope.css")
+        assert exc_info.value.code == 404
 
 
 class TestEmptyBody:
@@ -1176,7 +1386,7 @@ class TestProcessAction:
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch("kennel.claude.get_talker", return_value=talker):
-            resp = urllib.request.urlopen(f"{url}/status")
+            resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         talker_data = data[0]["claude_talker"]
         assert talker_data["repo_name"] == "owner/repo"

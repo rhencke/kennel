@@ -206,9 +206,9 @@ def _port_from_pid(pid: int) -> int | None:
 def _fetch_activities(
     port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
 ) -> dict[str, dict[str, Any]]:
-    """Query GET /status, returning {repo_name: {what, crash_count, last_crash_error, is_stuck}}."""
+    """Query GET /status.json, returning {repo_name: {what, crash_count, last_crash_error, is_stuck}}."""
     try:
-        with _urlopen(f"http://localhost:{port}/status", timeout=2) as resp:
+        with _urlopen(f"http://localhost:{port}/status.json", timeout=2) as resp:
             data = json.loads(resp.read())
         return {
             item["repo_name"]: {
