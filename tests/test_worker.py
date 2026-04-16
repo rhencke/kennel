@@ -756,10 +756,11 @@ class TestWorker:
         assert worker._session is mock_session
 
     def test_provider_constructor_path_attaches_session(self, tmp_path: Path) -> None:
-        provider = MagicMock(spec=ClaudeClient)
+        provider = MagicMock()
+        provider.agent = MagicMock(spec=ClaudeClient)
         session = MagicMock()
         worker = Worker(tmp_path, MagicMock(), provider=provider, session=session)
-        provider.attach_session.assert_called_once_with(session)
+        provider.agent.attach_session.assert_called_once_with(session)
         assert worker._session is session
 
     def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
@@ -9736,7 +9737,9 @@ class TestWorkerThread:
         assert wt._session_issue == 7
 
     def test_provider_accepted_via_constructor(self, tmp_path: Path) -> None:
-        provider = MagicMock(spec=ClaudeClient)
+        provider = MagicMock()
+        provider.agent = MagicMock(spec=ClaudeClient)
+        provider.agent.session = MagicMock()
         session = MagicMock()
         wt = WorkerThread(
             tmp_path,
@@ -9746,13 +9749,14 @@ class TestWorkerThread:
             session=session,
             session_issue=7,
         )
-        provider.attach_session.assert_called_once_with(session)
+        provider.agent.attach_session.assert_called_once_with(session)
         assert wt.current_provider() is provider
-        assert wt._session is provider.session
+        assert wt._session is provider.agent.session
         assert wt._session_issue == 7
 
     def test_detach_provider_returns_and_clears(self, tmp_path: Path) -> None:
-        provider = MagicMock(spec=ClaudeClient)
+        provider = MagicMock()
+        provider.agent = MagicMock(spec=ClaudeClient)
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
         assert wt.detach_provider() is provider
         assert wt.current_provider() is None

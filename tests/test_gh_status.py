@@ -16,7 +16,7 @@ from kennel.gh_status import (
 
 
 def _client(**overrides: object) -> MagicMock:
-    """Create a mock ClaudeClient with optional attribute overrides."""
+    """Create a mock provider with optional attribute overrides."""
     client = MagicMock(spec=ClaudeClient)
     for k, v in overrides.items():
         setattr(client, k, v)
@@ -30,7 +30,7 @@ class TestGeneratePersonaStatus:
         result = generate_persona_status(
             "fixing a bug",
             "You are Fido",
-            claude_client=mock_client,
+            provider=mock_client,
         )
         assert result == "sniffing out a bug *tail wag*"
 
@@ -38,12 +38,12 @@ class TestGeneratePersonaStatus:
         mock_client = _client()
         mock_client.print_prompt.return_value = ""
         with pytest.raises(ValueError, match="humanify_status"):
-            generate_persona_status("at the vet", "persona", claude_client=mock_client)
+            generate_persona_status("at the vet", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
         mock_client = _client()
         mock_client.print_prompt.return_value = "woof"
-        result = generate_persona_status("test", "", claude_client=mock_client)
+        result = generate_persona_status("test", "", provider=mock_client)
         assert result == "woof"
 
     def test_creates_default_client_when_none(self) -> None:
@@ -63,7 +63,7 @@ class TestGeneratePersonaEmoji:
         result = generate_persona_emoji(
             "fixing bugs",
             "persona",
-            claude_client=mock_client,
+            provider=mock_client,
         )
         assert result == ":wrench:"
 
@@ -71,12 +71,12 @@ class TestGeneratePersonaEmoji:
         mock_client = _client()
         mock_client.print_prompt_json.return_value = ""
         with pytest.raises(ValueError, match="generate_persona_emoji"):
-            generate_persona_emoji("test", "persona", claude_client=mock_client)
+            generate_persona_emoji("test", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
         mock_client = _client()
         mock_client.print_prompt_json.return_value = ":rocket:"
-        result = generate_persona_emoji("test", "", claude_client=mock_client)
+        result = generate_persona_emoji("test", "", provider=mock_client)
         assert result == ":rocket:"
 
     def test_creates_default_client_when_none(self) -> None:
@@ -101,7 +101,7 @@ class TestSetGhStatus:
         set_gh_status(
             "diagnosing issue",
             persona_path=persona_file,
-            claude_client=mock_client,
+            provider=mock_client,
             _gh=mock_gh,
         )
         mock_gh.set_user_status.assert_called_once_with(
@@ -117,7 +117,7 @@ class TestSetGhStatus:
         set_gh_status(
             "test",
             persona_path=tmp_path / "nonexistent.md",
-            claude_client=mock_client,
+            provider=mock_client,
             _gh=mock_gh,
         )
         # Verify empty persona was passed through
@@ -139,6 +139,48 @@ class TestSetGhStatus:
             mock_cls.return_value.print_prompt_json.return_value = ":dog:"
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
             mock_cls.assert_called_once_with()
+
+    def test_tries_next_provider_when_first_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+        first = _client()
+        first.print_prompt.side_effect = RuntimeError("nope")
+        second = _client()
+        second.print_prompt.return_value = "back soon"
+        second.print_prompt_json.return_value = ":dog:"
+
+        set_gh_status(
+            "test",
+            persona_path=persona_file,
+            _gh=mock_gh,
+            _provider_factories=(lambda: first, lambda: second),
+        )
+
+        mock_gh.set_user_status.assert_called_once_with("back soon", ":dog:", busy=True)
+
+    def test_falls_back_to_nap_message_when_all_providers_fail(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+        first = _client()
+        first.print_prompt.side_effect = RuntimeError("boom")
+        second = _client()
+        second.print_prompt.side_effect = RuntimeError("still boom")
+
+        set_gh_status(
+            "test",
+            persona_path=persona_file,
+            _gh=mock_gh,
+            _provider_factories=(lambda: first, lambda: second),
+            _choice=lambda options: options[7],
+        )
+
+        mock_gh.set_user_status.assert_called_once_with(
+            "Sleeping off a big debugging session.",
+            ":sleeping:",
+            busy=True,
+        )
 
 
 class TestMain:

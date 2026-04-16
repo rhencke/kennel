@@ -90,8 +90,8 @@ class PromptSession(Protocol):
     def __exit__(self, *args: object) -> None: ...
 
 
-class Provider(Protocol):
-    """Shared provider boundary for runner LLM operations."""
+class ProviderAgent(Protocol):
+    """Runtime/session boundary for a provider's interactive agent."""
 
     @property
     def provider_id(self) -> ProviderID: ...
@@ -111,8 +111,6 @@ class Provider(Protocol):
     def attach_session(self, session: PromptSession | None) -> None: ...
 
     def detach_session(self) -> PromptSession | None: ...
-
-    def get_limit_snapshot(self) -> ProviderLimitSnapshot | None: ...
 
     def print_prompt(
         self,
@@ -192,3 +190,25 @@ class Provider(Protocol):
         model: str = "claude-opus-4-6",
         timeout: int = 15,
     ) -> str: ...
+
+
+class ProviderAPI(Protocol):
+    """Read-only account/service API surface for a provider."""
+
+    @property
+    def provider_id(self) -> ProviderID: ...
+
+    def get_limit_snapshot(self) -> ProviderLimitSnapshot | None: ...
+
+
+class Provider(Protocol):
+    """Composite provider with separate API and agent collaborators."""
+
+    @property
+    def provider_id(self) -> ProviderID: ...
+
+    @property
+    def api(self) -> ProviderAPI: ...
+
+    @property
+    def agent(self) -> ProviderAgent: ...

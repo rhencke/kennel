@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,20 +12,26 @@ import pytest
 from kennel.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
+    ClaudeAPI,
     ClaudeClient,
+    ClaudeCode,
     ClaudeProviderError,
     ClaudeSession,
     ClaudeStreamError,
     _active_children,
     _claude,
+    _default_claude_credentials_path,
+    _load_claude_oauth_state,
     _register_child,
     _Trunc,
     _unregister_child,
+    _usage_window,
     extract_result_text,
     extract_session_id,
     kill_active_children,
     raise_for_provider_error_output,
 )
+from kennel.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
 
 
 def _completed(
@@ -2272,9 +2279,246 @@ class TestClaudeClientSessionAttachment:
         client = ClaudeClient()
         assert str(client.provider_id) == "claude-code"
 
-    def test_limit_snapshot_defaults_to_none(self) -> None:
-        client = ClaudeClient()
-        assert client.get_limit_snapshot() is None
+
+class TestClaudeOAuthState:
+    def test_default_credentials_path_points_at_claude_dir(self) -> None:
+        path = _default_claude_credentials_path()
+        assert path.name == ".credentials.json"
+        assert path.parent.name == ".claude"
+
+    def test_load_oauth_state_returns_none_when_file_missing(
+        self, tmp_path: Path
+    ) -> None:
+        assert _load_claude_oauth_state(tmp_path / "missing.json") is None
+
+    def test_load_oauth_state_reads_access_token(self, tmp_path: Path) -> None:
+        path = tmp_path / "creds.json"
+        path.write_text('{"claudeAiOauth": {"accessToken": "tok-123"}}')
+        state = _load_claude_oauth_state(path)
+        assert state is not None
+        assert state.access_token == "tok-123"
+
+    def test_load_oauth_state_rejects_blank_access_token(self, tmp_path: Path) -> None:
+        path = tmp_path / "creds.json"
+        path.write_text('{"claudeAiOauth": {"accessToken": ""}}')
+        with pytest.raises(ValueError, match="missing accessToken"):
+            _load_claude_oauth_state(path)
+
+
+class TestClaudeUsageWindow:
+    def test_returns_none_for_missing_window(self) -> None:
+        assert _usage_window("five_hour", None) is None
+
+    def test_returns_none_for_null_utilization(self) -> None:
+        assert (
+            _usage_window(
+                "five_hour",
+                {"utilization": None, "resets_at": "2026-04-16T07:00:00+00:00"},
+            )
+            is None
+        )
+
+    def test_rejects_non_object_window(self) -> None:
+        with pytest.raises(ValueError, match="must be an object or null"):
+            _usage_window("five_hour", "nope")
+
+    def test_rejects_non_numeric_utilization(self) -> None:
+        with pytest.raises(ValueError, match="utilization must be numeric or null"):
+            _usage_window("five_hour", {"utilization": "bad", "resets_at": None})
+
+    def test_rejects_non_string_reset(self) -> None:
+        with pytest.raises(ValueError, match="reset time must be a string or null"):
+            _usage_window("five_hour", {"utilization": 37.2, "resets_at": 123})
+
+    def test_parses_window(self) -> None:
+        assert _usage_window(
+            "five_hour",
+            {
+                "utilization": 37.2,
+                "resets_at": "2026-04-16T07:00:00+00:00",
+            },
+        ) == ProviderLimitWindow(
+            name="five_hour",
+            used=37,
+            limit=100,
+            resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+            unit="%",
+        )
+
+    def test_parses_window_with_null_reset(self) -> None:
+        assert _usage_window(
+            "seven_day",
+            {
+                "utilization": 12.5,
+                "resets_at": None,
+            },
+        ) == ProviderLimitWindow(
+            name="seven_day",
+            used=12,
+            limit=100,
+            resets_at=None,
+            unit="%",
+        )
+
+
+class TestClaudeAPI:
+    def test_provider_id_is_claude_code(self) -> None:
+        assert (
+            ClaudeAPI(oauth_state_fn=lambda: None).provider_id == ProviderID.CLAUDE_CODE
+        )
+
+    def test_limit_snapshot_marks_logged_out_accounts_unavailable(self) -> None:
+        api = ClaudeAPI(oauth_state_fn=lambda: None)
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            unavailable_reason="Claude Code is not logged in.",
+        )
+
+    def test_limit_snapshot_parses_usage_windows(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "five_hour": {
+                "utilization": 37.0,
+                "resets_at": "2026-04-16T07:00:00+00:00",
+            },
+            "seven_day": {
+                "utilization": 98.0,
+                "resets_at": "2026-04-20T12:00:00+00:00",
+            },
+            "seven_day_sonnet": {
+                "utilization": 65.0,
+                "resets_at": "2026-04-20T13:00:00+00:00",
+            },
+            "extra_usage": {
+                "is_enabled": True,
+                "monthly_limit": 2000,
+                "used_credits": 2163.0,
+                "utilization": 100.0,
+            },
+        }
+        session = MagicMock()
+        session.get.return_value = response
+        api = ClaudeAPI(
+            session=session,
+            oauth_state_fn=lambda: type(
+                "OAuthState", (), {"access_token": "tok-123"}
+            )(),
+        )
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            windows=(
+                ProviderLimitWindow(
+                    name="five_hour",
+                    used=37,
+                    limit=100,
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+                    unit="%",
+                ),
+                ProviderLimitWindow(
+                    name="seven_day",
+                    used=98,
+                    limit=100,
+                    resets_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+                    unit="%",
+                ),
+                ProviderLimitWindow(
+                    name="seven_day_sonnet",
+                    used=65,
+                    limit=100,
+                    resets_at=datetime(2026, 4, 20, 13, 0, tzinfo=UTC),
+                    unit="%",
+                ),
+            ),
+        )
+        session.get.assert_called_once_with(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": "Bearer tok-123",
+                "anthropic-beta": "oauth-2025-04-20",
+                "Content-Type": "application/json",
+                "User-Agent": "claude-code/2.1.110",
+            },
+            timeout=20,
+        )
+
+    def test_limit_snapshot_marks_non_subscription_accounts_unavailable(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "five_hour": None,
+            "seven_day": None,
+            "seven_day_sonnet": None,
+        }
+        session = MagicMock()
+        session.get.return_value = response
+        api = ClaudeAPI(
+            session=session,
+            oauth_state_fn=lambda: type(
+                "OAuthState", (), {"access_token": "tok-123"}
+            )(),
+        )
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            unavailable_reason="Claude usage is only available for subscription plans.",
+        )
+
+    def test_limit_snapshot_logs_and_raises_when_fetch_fails(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        response = MagicMock()
+        response.raise_for_status.side_effect = RuntimeError("boom")
+        session = MagicMock()
+        session.get.return_value = response
+        api = ClaudeAPI(
+            session=session,
+            oauth_state_fn=lambda: type(
+                "OAuthState", (), {"access_token": "tok-123"}
+            )(),
+        )
+        with caplog.at_level(logging.ERROR, logger="kennel.claude"):
+            with pytest.raises(RuntimeError, match="boom"):
+                api.get_limit_snapshot()
+        assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
+
+    def test_limit_snapshot_logs_and_raises_when_payload_is_not_an_object(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        response = MagicMock()
+        response.json.return_value = []
+        session = MagicMock()
+        session.get.return_value = response
+        api = ClaudeAPI(
+            session=session,
+            oauth_state_fn=lambda: type(
+                "OAuthState", (), {"access_token": "tok-123"}
+            )(),
+        )
+        with caplog.at_level(logging.ERROR, logger="kennel.claude"):
+            with pytest.raises(ValueError, match="must be a JSON object"):
+                api.get_limit_snapshot()
+        assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
+
+
+class TestClaudeCode:
+    def test_provider_id_is_claude_code(self) -> None:
+        assert ClaudeCode().provider_id == ProviderID.CLAUDE_CODE
+
+    def test_exposes_injected_api_and_agent(self) -> None:
+        api = MagicMock()
+        agent = MagicMock()
+        provider = ClaudeCode(api=api, agent=agent)
+        assert provider.api is api
+        assert provider.agent is agent
+
+    def test_default_agent_receives_session(self) -> None:
+        session = MagicMock()
+        provider = ClaudeCode(session=session)
+        assert provider.agent.session is session
+
+    def test_attaches_session_to_injected_agent(self) -> None:
+        agent = MagicMock()
+        session = MagicMock()
+        ClaudeCode(agent=agent, session=session)
+        agent.attach_session.assert_called_once_with(session)
 
 
 class TestClaudeClientPrintPromptJson:

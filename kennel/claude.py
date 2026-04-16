@@ -17,7 +17,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from kennel.provider import PromptSession, Provider, ProviderID, ProviderLimitSnapshot
+import requests as _requests
+
+from kennel.provider import (
+    PromptSession,
+    Provider,
+    ProviderAgent,
+    ProviderAPI,
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderLimitWindow,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +40,10 @@ _SELECT_POLL_INTERVAL = 1.0
 # Maximum number of characters included when logging a raw line from the
 # claude subprocess, to keep log records readable.
 _LOG_LINE_TRUNCATE = 200
+_CLAUDE_API_TIMEOUT = 20
+_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_USAGE_BETA = "oauth-2025-04-20"
+_CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 
 
 class _Trunc:
@@ -1271,10 +1285,129 @@ class ClaudeSession:
             _unregister_child(self._proc)
 
 
-# ── Injectable one-shot collaborator ─────────────────────────────────────────
+# ── Claude provider collaborators ────────────────────────────────────────────
 
 
-class ClaudeClient(Provider):
+@dataclass(frozen=True)
+class _ClaudeOAuthState:
+    access_token: str
+
+
+def _default_claude_credentials_path() -> Path:
+    return Path.home() / ".claude" / ".credentials.json"
+
+
+def _load_claude_oauth_state(
+    credentials_path: Path | None = None,
+) -> _ClaudeOAuthState | None:
+    path = (
+        _default_claude_credentials_path()
+        if credentials_path is None
+        else credentials_path
+    )
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    oauth = raw["claudeAiOauth"]
+    access_token = oauth["accessToken"]
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("Claude OAuth credentials missing accessToken")
+    return _ClaudeOAuthState(access_token=access_token)
+
+
+def _parse_usage_reset(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Claude usage reset time must be a string or null, got {value!r}"
+        )
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _usage_window(name: str, value: object) -> ProviderLimitWindow | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"Claude usage window {name} must be an object or null")
+    utilization = value.get("utilization")
+    if utilization is None:
+        return None
+    if not isinstance(utilization, int | float):
+        raise ValueError(
+            f"Claude usage window {name} utilization must be numeric or null"
+        )
+    return ProviderLimitWindow(
+        name=name,
+        used=int(round(float(utilization))),
+        limit=100,
+        resets_at=_parse_usage_reset(value.get("resets_at")),
+        unit="%",
+    )
+
+
+class ClaudeAPI(ProviderAPI):
+    """Read-only account API for Claude Code usage and limits."""
+
+    def __init__(
+        self,
+        *,
+        session: _requests.Session | None = None,
+        oauth_state_fn: Callable[
+            [], _ClaudeOAuthState | None
+        ] = _load_claude_oauth_state,
+    ) -> None:
+        self._session = session if session is not None else _requests.Session()
+        self._oauth_state_fn = oauth_state_fn
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CLAUDE_CODE
+
+    def get_limit_snapshot(self) -> ProviderLimitSnapshot | None:
+        oauth_state = self._oauth_state_fn()
+        if oauth_state is None:
+            return ProviderLimitSnapshot(
+                provider=self.provider_id,
+                unavailable_reason="Claude Code is not logged in.",
+            )
+        try:
+            response = self._session.get(
+                _CLAUDE_USAGE_URL,
+                headers={
+                    "Authorization": f"Bearer {oauth_state.access_token}",
+                    "anthropic-beta": _CLAUDE_USAGE_BETA,
+                    "Content-Type": "application/json",
+                    "User-Agent": _CLAUDE_USAGE_USER_AGENT,
+                },
+                timeout=_CLAUDE_API_TIMEOUT,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Claude usage response must be a JSON object")
+            windows = tuple(
+                window
+                for window in (
+                    _usage_window("five_hour", payload.get("five_hour")),
+                    _usage_window("seven_day", payload.get("seven_day")),
+                    _usage_window("seven_day_sonnet", payload.get("seven_day_sonnet")),
+                )
+                if window is not None
+            )
+            if windows:
+                return ProviderLimitSnapshot(provider=self.provider_id, windows=windows)
+            return ProviderLimitSnapshot(
+                provider=self.provider_id,
+                unavailable_reason="Claude usage is only available for subscription plans.",
+            )
+        except Exception:
+            log.exception("ClaudeAPI: failed to fetch usage snapshot")
+            raise
+
+
+class ClaudeClient(ProviderAgent):
     """Injectable collaborator for one-shot Claude CLI interactions.
 
     Wraps subprocess-based, session-based, and streaming Claude helpers
@@ -1339,9 +1472,6 @@ class ClaudeClient(Provider):
         with self._session_lock:
             session = self._session
         return session.pid if session is not None else None
-
-    def get_limit_snapshot(self) -> ProviderLimitSnapshot | None:
-        return None
 
     def _current_session(self) -> PromptSession:
         with self._session_lock:
@@ -1610,3 +1740,33 @@ class ClaudeClient(Provider):
             return extract_result_text(result.stdout.strip())
         except subprocess.TimeoutExpired, FileNotFoundError:
             return ""
+
+
+class ClaudeCode(Provider):
+    """Composite Claude provider with separate account API and runtime agent."""
+
+    def __init__(
+        self,
+        *,
+        api: ProviderAPI | None = None,
+        agent: ProviderAgent | None = None,
+        session: PromptSession | None = None,
+    ) -> None:
+        if agent is None:
+            agent = ClaudeClient(session=session)
+        elif session is not None:
+            agent.attach_session(session)
+        self._api = ClaudeAPI() if api is None else api
+        self._agent = agent
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CLAUDE_CODE
+
+    @property
+    def api(self) -> ProviderAPI:
+        return self._api
+
+    @property
+    def agent(self) -> ProviderAgent:
+        return self._agent

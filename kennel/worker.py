@@ -17,11 +17,11 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
-from kennel.claude import ClaudeClient
+from kennel.claude import ClaudeClient, ClaudeCode
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
-from kennel.provider import PromptSession, Provider
+from kennel.provider import PromptSession, Provider, ProviderAgent
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -231,7 +231,7 @@ def claude_start(
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: PromptSession | None = None,
-    claude_client: Provider | None = None,
+    claude_client: ProviderAgent | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
@@ -312,7 +312,7 @@ def claude_run(
     timeout: int = 300,
     cwd: Path | str | None = None,
     session: PromptSession | None = None,
-    claude_client: Provider | None = None,
+    claude_client: ProviderAgent | None = None,
 ) -> tuple[str, str]:
     """Continue or start a sub-Claude session, streaming progress as JSON.
 
@@ -694,7 +694,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    claude_client: Provider | None = None,
+    claude_client: ProviderAgent | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -775,7 +775,7 @@ class Worker:
         session: PromptSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
-        claude_client: ClaudeClient | None = None,
+        claude_client: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
         config: Config | None = None,
@@ -792,13 +792,12 @@ class Worker:
         if provider is not None:
             self._provider = provider
             if session is not None:
-                self._provider.attach_session(session)
+                self._provider.agent.attach_session(session)
         elif claude_client is not None:
-            self._provider = claude_client
-            self._provider.attach_session(session)
+            self._provider = ClaudeCode(agent=claude_client, session=session)
         else:
-            self._provider = ClaudeClient(session=session)
-        self._claude_client: Provider = self._provider
+            self._provider = ClaudeCode(session=session)
+        self._claude_client: ProviderAgent = self._provider.agent
         self.__dict__["_compat_session"] = session
         self._prompts = prompts
         self._config = config
@@ -812,7 +811,7 @@ class Worker:
     def _session(self, session: PromptSession | None) -> None:
         self.__dict__["_compat_session"] = session
         if hasattr(self, "_provider"):
-            self._provider.attach_session(session)
+            self._provider.agent.attach_session(session)
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -2216,9 +2215,9 @@ class WorkerThread(threading.Thread):
         if provider is not None:
             self._provider = provider
             if session is not None:
-                self._provider.attach_session(session)
+                self._provider.agent.attach_session(session)
         else:
-            self._provider = ClaudeClient(session=session)
+            self._provider = ClaudeCode(session=session)
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
@@ -2227,16 +2226,16 @@ class WorkerThread(threading.Thread):
     def _session(self) -> PromptSession | None:
         with self._provider_lock:
             provider = self._provider
-        return provider.session if provider is not None else None
+        return provider.agent.session if provider is not None else None
 
     @_session.setter
     def _session(self, session: PromptSession | None) -> None:
         with self._provider_lock:
             provider = self._provider
             if provider is None:
-                provider = ClaudeClient(session=session)
+                provider = ClaudeCode(session=session)
                 self._provider = provider
-        provider.attach_session(session)
+        provider.agent.attach_session(session)
 
     def detach_provider(self) -> Provider | None:
         """Detach and return the owned provider for crash rescue."""
@@ -2260,7 +2259,7 @@ class WorkerThread(threading.Thread):
         """
         with self._provider_lock:
             provider = self._provider
-        return provider.session_owner if provider is not None else None
+        return provider.agent.session_owner if provider is not None else None
 
     @property
     def session_alive(self) -> bool:
@@ -2273,7 +2272,7 @@ class WorkerThread(threading.Thread):
         """
         with self._provider_lock:
             provider = self._provider
-        return provider.session_alive if provider is not None else False
+        return provider.agent.session_alive if provider is not None else False
 
     @property
     def session_pid(self) -> int | None:
@@ -2286,7 +2285,7 @@ class WorkerThread(threading.Thread):
         """
         with self._provider_lock:
             provider = self._provider
-        return provider.session_pid if provider is not None else None
+        return provider.agent.session_pid if provider is not None else None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -2345,7 +2344,7 @@ class WorkerThread(threading.Thread):
                 with self._provider_lock:
                     provider = self._provider
                 if provider is None:
-                    provider = ClaudeClient(session=self._session)
+                    provider = ClaudeCode(session=self._session)
                     with self._provider_lock:
                         self._provider = provider
                 worker = Worker(
@@ -2361,7 +2360,7 @@ class WorkerThread(threading.Thread):
                     repo_cfg=self._repo_cfg,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
-                worker._claude_client = provider  # pyright: ignore[reportPrivateUsage]
+                worker._claude_client = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:
                     result = worker.run()
                 finally:
