@@ -167,14 +167,14 @@ def create_compact_script(fido_dir: Path) -> Path:
 
 
 def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
-    """Write system and prompt files for a sub-Claude session.
+    """Write system and prompt files for a sub-agent session.
 
     The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
     blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``) —
     used by the one-shot ``print_prompt_from_file`` path.
 
     The skill file contains only ``<subskill>.md`` — used by the persistent
-    :class:`~kennel.claude.ClaudeSession` path where the session already has
+    :class:`~kennel.provider.PromptSession` path where the session already has
     ``persona.md`` loaded as system prompt and each turn just needs the
     sub-skill instructions as a user-message preamble.
 
@@ -254,7 +254,6 @@ def provider_start(
     fido_dir: Path,
     *,
     agent: ProviderAgent | None = None,
-    claude_client: ProviderAgent | None = None,
     model: ProviderModel,
     session: str | None = None,
     timeout: int = 300,
@@ -272,11 +271,10 @@ def provider_start(
     is extracted from its raw output.
     """
     del session
-    provider_agent = claude_client if claude_client is not None else agent
-    if provider_agent is None:
+    if agent is None:
         raise ValueError("provider_start requires agent")
-    if provider_agent.session is not None:
-        provider_agent.run_turn(
+    if agent.session is not None:
+        agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=True,
@@ -285,20 +283,20 @@ def provider_start(
         return ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = provider_agent.print_prompt_from_file(
+    output = agent.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
-    return provider_agent.extract_session_id(output)
+    return agent.extract_session_id(output)
 
 
 def _session_turn_prompt(fido_dir: Path) -> str:
-    """Build the user-message body for a persistent :class:`ClaudeSession` turn.
+    """Build the user-message body for a persistent provider-session turn.
 
     The persistent session is constructed with ``sub/persona.md`` as its
     system prompt, so we only need to deliver the sub-skill instructions
     (``fido_dir/skill``) as a user-message preamble — not the full
     ``fido_dir/system`` which would duplicate the persona.  Without this,
-    claude saw only the bare context and produced empty output (observed
+    the provider agent saw only the bare context and produced empty output (observed
     as ``setup produced no tasks``).
     """
     skill = (fido_dir / "skill").read_text()
@@ -310,7 +308,6 @@ def provider_run(
     fido_dir: Path,
     *,
     agent: ProviderAgent | None = None,
-    claude_client: ProviderAgent | None = None,
     model: ProviderModel,
     session: str | None = None,
     timeout: int = 300,
@@ -328,11 +325,10 @@ def provider_run(
     raw_output)`` where *raw_output* is the full provider output.
     """
     del session
-    provider_agent = claude_client if claude_client is not None else agent
-    if provider_agent is None:
+    if agent is None:
         raise ValueError("provider_run requires agent")
-    if provider_agent.session is not None:
-        provider_agent.run_turn(
+    if agent.session is not None:
+        agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=True,
@@ -341,15 +337,11 @@ def provider_run(
         return "", ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = provider_agent.print_prompt_from_file(
+    output = agent.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
-    new_session_id = provider_agent.extract_session_id(output)
+    new_session_id = agent.extract_session_id(output)
     return new_session_id, output
-
-
-claude_start = provider_start
-claude_run = provider_run
 
 
 @dataclass(frozen=True)
@@ -668,11 +660,11 @@ _BODY_TAG_RE = re.compile(r"<body>\s*(.*?)\s*</body>", re.DOTALL | re.IGNORECASE
 
 
 def _extract_body(raw: str | None) -> str:
-    """Extract content between <body>...</body> tags from Opus output.
+    """Extract content between <body>...</body> tags from provider output.
 
     Returns the extracted content stripped of whitespace, or "" if no body
     tags were found or the raw input was empty.  This enforces the output
-    contract in :func:`kennel.prompts.rewrite_description_prompt` — Opus is
+    contract in :func:`kennel.prompts.rewrite_description_prompt` — the agent is
     told to wrap its output in body tags so we can strip any preamble or
     trailing commentary.
     """
@@ -701,9 +693,9 @@ def _write_pr_description(
     contains the current body; preserves the rest section after the ``---``
     divider).
 
-    Generates the description via Opus and writes it back via
+    Generates the description via the provider agent and writes it back via
     ``gh.edit_pr_body``.  Raises ``ValueError`` when the existing body has no
-    ``---`` divider (rewrite precondition) or when Opus returns no
+    ``---`` divider (rewrite precondition) or when the agent returns no
     ``<body>``-tagged content.
     """
     if agent is None:
@@ -740,11 +732,11 @@ def _write_pr_description(
     new_desc = _extract_body(raw)
     if not new_desc:
         raise ValueError(
-            f"_write_pr_description: Opus returned no <body> content for PR #{pr_number}"
+            f"_write_pr_description: provider returned no <body> content for PR #{pr_number}"
             f" (raw={str(raw or '')[:200]!r})"
         )
 
-    # Ensure "Fixes #N" is always present (Opus preserves it for rewrites via
+    # Ensure "Fixes #N" is always present (the agent preserves it for rewrites via
     # prompt rules; for initial writes we append it here).
     if f"Fixes #{issue}" not in new_desc:
         new_desc = f"{new_desc.rstrip()}\n\nFixes #{issue}."
@@ -773,7 +765,7 @@ class Worker:
         session: PromptSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
-        claude_client: ProviderAgent | None = None,
+        provider_agent: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
         config: Config | None = None,
@@ -802,8 +794,8 @@ class Worker:
             self._provider = provider
             if session is not None:
                 self._provider.agent.attach_session(session)
-        elif claude_client is not None:
-            self._provider = ClaudeCode(agent=claude_client, session=session)
+        elif provider_agent is not None:
+            self._provider = ClaudeCode(agent=provider_agent, session=session)
         elif repo_cfg is not None:
             self._provider = self._provider_factory.create_provider(
                 repo_cfg,
@@ -845,14 +837,14 @@ class Worker:
         return provider
 
     @property
-    def _claude_client(self) -> ProviderAgent:
+    def _provider_agent(self) -> ProviderAgent:
         provider = self._provider
         if provider is not None:
             return provider.agent
         return self._ensure_provider().agent
 
-    @_claude_client.setter
-    def _claude_client(self, agent: ProviderAgent) -> None:
+    @_provider_agent.setter
+    def _provider_agent(self, agent: ProviderAgent) -> None:
         provider = self._provider
         if provider is not None:
             provider.agent.attach_session(agent.session)
@@ -912,12 +904,12 @@ class Worker:
         (fido_dir / "compact.sh").unlink(missing_ok=True)
 
     def create_session(self) -> None:
-        """Ensure the persistent provider session exists and is on Opus."""
-        self._claude_client.ensure_session(self._claude_client.voice_model)
+        """Ensure the persistent provider session exists and is on the voice model."""
+        self._provider_agent.ensure_session(self._provider_agent.voice_model)
 
     def stop_session(self) -> None:
         """Stop the persistent provider session, if one exists."""
-        self._claude_client.stop_session()
+        self._provider_agent.stop_session()
         self._session = None
 
     def _consume_turn_session_mode(self) -> TurnSessionMode:
@@ -973,12 +965,12 @@ class Worker:
         *,
         _sub_dir_fn: Callable[..., Path] = _sub_dir,
     ) -> None:
-        """Set the authenticated user's GitHub status using Claude-generated text.
+        """Set the authenticated user's GitHub status using provider-generated text.
 
-        Fires a single nudge into the worker's persistent :class:`ClaudeSession`
-        asking for a JSON object with both ``status`` and ``emoji`` fields.  One
+        Fires a single nudge into the worker's persistent provider session asking
+        for a JSON object with both ``status`` and ``emoji`` fields. One
         round-trip instead of the earlier three-to-five one-shot subprocesses
-        (closes #505) — no claude spawn overhead, no hang class, and the
+        (closes #505) — no provider spawn overhead, no hang class, and the
         preempt/cancel plumbing handles webhook interleaving cleanly.
 
         When ``self._session`` is ``None`` (worker has not yet created a
@@ -1007,15 +999,15 @@ class Worker:
                 return
 
             log.info("set_status: nudging session for status + emoji")
-            raw = self._claude_client.run_turn(
+            raw = self._provider_agent.run_turn(
                 prompts.status_prompt(activities),
-                model=self._claude_client.voice_model,
+                model=self._provider_agent.voice_model,
                 system_prompt=prompts.status_system_prompt(),
             )
             text, emoji = _parse_status_nudge(raw)
             if not text:
                 log.warning(
-                    "set_status: claude returned no status text — falling back to %r",
+                    "set_status: provider returned no status text — falling back to %r",
                     what[:80],
                 )
                 text = what[:80]
@@ -1155,10 +1147,11 @@ class Worker:
 
         Workflow:
         - **Existing closed PR**: ignore it and create a fresh PR.
-        - **Existing open PR**: check out the branch; run the setup sub-Claude
+        - **Existing open PR**: check out the branch; run the setup sub-agent
           if tasks.json is empty (planning not yet done).
-        - **No PR**: generate a slug via Claude Haiku, create branch, push,
-          run setup sub-Claude, build the PR body (description + work queue),
+        - **No PR**: generate a slug via the provider brief model, create branch,
+          push,
+          run setup sub-agent, build the PR body (description + work queue),
           then create the draft PR.
         """
         remote = "origin"
@@ -1197,10 +1190,10 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                claude_start(
+                provider_start(
                     fido_dir,
-                    claude_client=self._claude_client,
-                    model=self._claude_client.voice_model,
+                    agent=self._provider_agent,
+                    model=self._provider_agent.voice_model,
                     cwd=self.work_dir,
                     session=None,
                     session_mode=self._consume_turn_session_mode(),
@@ -1215,13 +1208,13 @@ class Worker:
             )
             return pr_number, slug, False
 
-        # Generate branch slug via Haiku
-        raw_slug = self._claude_client.generate_branch_name(
+        # Generate branch slug via the provider brief model
+        raw_slug = self._provider_agent.generate_branch_name(
             "Output ONLY a git branch name: 2-4 lowercase words separated by"
             " hyphens, no issue numbers, summarising this request."
             " No explanation, no punctuation, just the branch name."
             f"\n\nRequest: {request}",
-            self._claude_client.brief_model,
+            self._provider_agent.brief_model,
         )
         slug = _sanitize_slug(raw_slug, request)
         log.info("new branch: %s", slug)
@@ -1236,7 +1229,7 @@ class Worker:
         self._git(["commit", "--allow-empty", "-m", "wip: start"])
         self._git(["push", "-u", remote, slug])
 
-        # Run setup sub-Claude (plans tasks before PR is created)
+        # Run setup sub-agent (plans tasks before PR is created)
         log.info("running setup (pre-PR)")
         context = (
             f"Request: {request}\n"
@@ -1247,10 +1240,10 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        claude_start(
+        provider_start(
             fido_dir,
-            claude_client=self._claude_client,
-            model=self._claude_client.voice_model,
+            agent=self._provider_agent,
+            model=self._provider_agent.voice_model,
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
@@ -1278,7 +1271,7 @@ class Worker:
             pr_number,
             issue,
             self._tasks.list(),
-            agent=self._claude_client,
+            agent=self._provider_agent,
         )
         task_count = len(
             [t for t in self._tasks.list() if t.get("status") == "pending"]
@@ -1301,7 +1294,7 @@ class Worker:
     ) -> bool:
         """Detect and remediate a merge conflict on the branch.
 
-        Returns ``True`` if the branch had merge conflicts and sub-Claude was
+        Returns ``True`` if the branch had merge conflicts and sub-agent was
         invoked to resolve them (the caller should re-run the work loop
         immediately).  Returns ``False`` when there are no conflicts.
         """
@@ -1326,10 +1319,10 @@ class Worker:
             f"Work dir: {self.work_dir}\n"
         )
         build_prompt(fido_dir, "merge", context)
-        session_id, _ = claude_run(
+        session_id, _ = provider_run(
             fido_dir,
-            claude_client=self._claude_client,
-            model=self._claude_client.work_model,
+            agent=self._provider_agent,
+            model=self._provider_agent.work_model,
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
@@ -1396,7 +1389,7 @@ class Worker:
         pr_number: int,
         slug: str,
     ) -> bool:
-        """Check for failing CI checks and run the ci sub-Claude to fix them.
+        """Check for failing CI checks and run the ci sub-agent to fix them.
 
         Returns ``True`` if a CI failure was detected and handled (the caller
         should re-run the work loop immediately).  Returns ``False`` when all
@@ -1406,7 +1399,7 @@ class Worker:
         1. Sets the GitHub user status.
         2. Fetches the run failure log (last ``_CI_LOG_TAIL`` lines).
         3. Collects CI-related unresolved review threads.
-        4. Builds the ``ci`` sub-Claude prompt and runs Claude.
+        4. Builds the ``ci`` sub-agent prompt and runs the provider agent.
         5. Marks the ``CI failure: <check>`` task complete.
         6. Triggers a background sync of the work queue.
         """
@@ -1457,10 +1450,10 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
-        session_id, _ = claude_run(
+        session_id, _ = provider_run(
             fido_dir,
-            claude_client=self._claude_client,
-            model=self._claude_client.work_model,
+            agent=self._provider_agent,
+            model=self._provider_agent.work_model,
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
@@ -1477,7 +1470,7 @@ class Worker:
         gh_user: str,
         collaborators: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """Return unresolved review threads for the comments sub-Claude.
+        """Return unresolved review threads for the comments sub-agent.
 
         A thread is included when:
         - it is not resolved,
@@ -1562,7 +1555,7 @@ class Worker:
         pr_number: int,
         slug: str,
     ) -> bool:
-        """Check for unresolved review threads and run the comments sub-Claude.
+        """Check for unresolved review threads and run the comments sub-agent.
 
         Returns ``True`` if unresolved threads were found and handled.  Returns
         ``False`` if there are no actionable threads.
@@ -1588,10 +1581,10 @@ class Worker:
             f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = claude_run(
+        session_id, _ = provider_run(
             fido_dir,
-            claude_client=self._claude_client,
-            model=self._claude_client.work_model,
+            agent=self._provider_agent,
+            model=self._provider_agent.work_model,
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
@@ -1699,7 +1692,7 @@ class Worker:
         pr_number: int,
         slug: str,
     ) -> bool:
-        """Pick and execute the next pending task via the task sub-Claude.
+        """Pick and execute the next pending task via the task sub-agent.
 
         Priority order: CI-failure tasks first, then thread-originated tasks,
         then all others.  Skips tasks whose titles begin with ``ask:`` or
@@ -1752,10 +1745,10 @@ class Worker:
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
-        session_id, _output = claude_run(
+        session_id, _output = provider_run(
             fido_dir,
-            claude_client=self._claude_client,
-            model=self._claude_client.work_model,
+            agent=self._provider_agent,
+            model=self._provider_agent.work_model,
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
@@ -1767,7 +1760,7 @@ class Worker:
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
 
-        # Resume loop: let Claude cook until commits appear
+        # Resume loop: let the provider agent cook until commits appear
         attempt = 0
         fresh_session_retry_used = False
         while head_before == head_after:
@@ -1827,10 +1820,10 @@ class Worker:
                 if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
                 else TurnSessionMode.REUSE
             )
-            session_id, _output = claude_run(
+            session_id, _output = provider_run(
                 fido_dir,
-                claude_client=self._claude_client,
-                model=self._claude_client.work_model,
+                agent=self._provider_agent,
+                model=self._provider_agent.work_model,
                 cwd=self.work_dir,
                 session=session_id or None,
                 session_mode=session_mode,
@@ -1905,9 +1898,9 @@ class Worker:
         """Post a Fido-flavoured pickup comment on the issue if not already posted.
 
         Checks whether gh_user has commented since the issue was last opened
-        (handles reopened issues).  Otherwise generates the comment via Claude
-        (Opus, using the Fido persona) and posts it.
-        Falls back to a plain-text comment if Claude returns nothing.
+        (handles reopened issues). Otherwise generates the comment via the
+        provider agent (using the Fido persona) and posts it. Falls back to a
+        plain-text comment if the provider returns nothing.
         """
         issue_data = self.gh.view_issue(repo, issue)
         issue_created = issue_data.get("created_at", "")
@@ -1930,8 +1923,8 @@ class Worker:
 
         prompts = self._get_prompts()
         prompt = prompts.pickup_comment_prompt(issue_title)
-        msg = self._claude_client.generate_reply(
-            prompt, self._claude_client.voice_model
+        msg = self._provider_agent.generate_reply(
+            prompt, self._provider_agent.voice_model
         )
         if not msg:
             msg = f"Picking up issue: {issue_title}"
@@ -2113,7 +2106,7 @@ class Worker:
         return 0
 
     def rescope_before_pick(self) -> None:
-        """Run a synchronous Opus rescope before picking the next task.
+        """Run a synchronous provider-agent rescope before picking the next task.
 
         Called at the start of every worker iteration so the PR task list
         stays fresh.  Skips when :attr:`_config` or :attr:`_repo_cfg` are not
@@ -2154,7 +2147,7 @@ class Worker:
             self._repo_cfg,
             None,  # no _on_inprogress_affected: no running task to abort at pick time
             self.gh,
-            self._claude_client,
+            self._provider_agent,
             self._get_prompts(),
             _rewrite_pr_description,
         )
@@ -2242,7 +2235,7 @@ class Worker:
                     recovery_repo_cfg,
                     self.gh,
                     pr_number,
-                    agent=self._claude_client,
+                    agent=self._provider_agent,
                     prompts=self._get_prompts(),
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
@@ -2394,11 +2387,11 @@ class WorkerThread(threading.Thread):
 
     @property
     def session_owner(self) -> str | None:
-        """Name of the thread currently holding the ClaudeSession lock, or ``None``.
+        """Name of the thread currently holding the provider session lock, or ``None``.
 
-        Delegates to :attr:`~kennel.claude.ClaudeSession.owner` on the active
-        session.  Returns ``None`` when no session exists or the lock is free.
-        Safe to call from any thread — reads a volatile field for display only.
+        Delegates to the active session's ``owner`` field. Returns ``None`` when
+        no session exists or the lock is free. Safe to call from any thread —
+        reads a volatile field for display only.
         """
         with self._provider_lock:
             provider = self._provider
@@ -2406,7 +2399,7 @@ class WorkerThread(threading.Thread):
 
     @property
     def session_alive(self) -> bool:
-        """True if the persistent ClaudeSession subprocess is alive.
+        """True if the persistent provider session subprocess is alive.
 
         Distinct from :attr:`session_owner` — a session that nobody currently
         holds still reports alive so status display can distinguish
@@ -2419,12 +2412,12 @@ class WorkerThread(threading.Thread):
 
     @property
     def session_pid(self) -> int | None:
-        """PID of the persistent ClaudeSession subprocess, or ``None``.
+        """PID of the persistent provider session subprocess, or ``None``.
 
         Reads directly from the tracked session rather than relying on
-        pgrep — the :class:`~kennel.claude.ClaudeSession` uses
-        ``sub/persona.md`` (outside ``fido_dir``) as its system prompt, which
-        the pgrep-based :func:`kennel.status._claude_pid` heuristic can't find.
+        pgrep — the tracked session uses ``sub/persona.md`` (outside
+        ``fido_dir``) as its system prompt, which
+        the pgrep-based status heuristic can't find.
         """
         with self._provider_lock:
             provider = self._provider
@@ -2435,7 +2428,7 @@ class WorkerThread(threading.Thread):
         self._wake.set()
 
     def abort_task(self) -> None:
-        """Signal the worker to abort the current task after claude_run returns."""
+        """Signal the worker to abort the current task after provider_run returns."""
         self._abort_task.set()
         self._wake.set()
 
@@ -2499,7 +2492,7 @@ class WorkerThread(threading.Thread):
                     provider_factory=self._provider_factory,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
-                worker._claude_client = provider.agent  # pyright: ignore[reportPrivateUsage]
+                worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:
                     result = worker.run()
                 finally:

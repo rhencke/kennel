@@ -86,7 +86,7 @@ class Worker(_WorkerBase):
         if (
             repo_cfg is _MISSING
             and kwargs.get("provider") is None
-            and kwargs.get("claude_client") is None
+            and kwargs.get("provider_agent") is None
         ):
             kwargs["repo_cfg"] = _default_repo_cfg(
                 work_dir,
@@ -864,7 +864,7 @@ class TestWorker:
             repo_cfg=_default_repo_cfg(tmp_path, repo_name="owner/repo"),
         )
         worker._provider = None  # pyright: ignore[reportPrivateUsage]
-        agent = worker._claude_client
+        agent = worker._provider_agent
         assert worker._provider is not None  # pyright: ignore[reportPrivateUsage]
         assert agent is worker._provider.agent  # pyright: ignore[reportPrivateUsage]
 
@@ -2122,12 +2122,12 @@ class TestWorkerPostPickupComment:
     """Tests for Worker.post_pickup_comment."""
 
     def _make_worker(
-        self, tmp_path: Path, claude_client: MagicMock | None = None
+        self, tmp_path: Path, provider_agent: MagicMock | None = None
     ) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
         gh.view_issue.return_value = {"created_at": "2024-01-01T00:00:00Z"}
         gh.get_issue_events.return_value = []
-        return Worker(tmp_path, gh, claude_client=claude_client), gh
+        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
     def test_skips_when_already_commented(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2144,7 +2144,7 @@ class TestWorkerPostPickupComment:
     def test_posts_comment_when_no_previous_comment(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "Woof! On it!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = [
             {"user": {"login": "other-user"}, "body": "Hi"}
@@ -2155,7 +2155,7 @@ class TestWorkerPostPickupComment:
     def test_posts_comment_when_no_existing_comments(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "I am on it!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 3, "Some task", "fido-bot")
@@ -2166,7 +2166,7 @@ class TestWorkerPostPickupComment:
     ) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = ""
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("I am Fido.")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
@@ -2177,7 +2177,7 @@ class TestWorkerPostPickupComment:
     def test_uses_persona_from_sub_dir(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "Fetched!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("I am a very good dog.")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 2, "Some work", "fido-bot")
@@ -2187,7 +2187,7 @@ class TestWorkerPostPickupComment:
     def test_falls_back_to_empty_persona_on_oserror(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "On it!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 2, "Work item", "fido-bot")
@@ -2197,7 +2197,7 @@ class TestWorkerPostPickupComment:
     def test_prompt_includes_issue_title(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "On it!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 4, "Refactor auth", "fido-bot")
@@ -2207,7 +2207,7 @@ class TestWorkerPostPickupComment:
     def test_checks_comments_for_correct_repo_and_issue(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_reply.return_value = "Arf!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         worker._prompts = Prompts("")
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("org/myrepo", 99, "Title", "fido-bot")
@@ -2218,7 +2218,7 @@ class TestWorkerPostPickupComment:
 
         mock_client = _client()
         mock_client.generate_reply.return_value = "Woof!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.get_issue_comments.return_value = [
             {
                 "user": {"login": "fido-bot"},
@@ -2234,7 +2234,7 @@ class TestWorkerPostPickupComment:
         """Old comment predates reopen, so a new pickup comment is posted."""
         mock_client = _client()
         mock_client.generate_reply.return_value = "Back on it!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.get_issue_events.return_value = [
             {"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}
         ]
@@ -2597,8 +2597,8 @@ class TestBuildPrompt:
         assert not content.startswith("Persona text\n\n\n\n")
 
 
-class TestClaudeStart:
-    """Tests for claude_start."""
+class TestProviderStart:
+    """Tests for provider_start."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
         fido_dir = tmp_path / "fido"
@@ -2781,8 +2781,8 @@ class TestClaudeStart:
         session.__exit__.assert_not_called()
 
 
-class TestClaudeRun:
-    """Tests for claude_run."""
+class TestProviderRun:
+    """Tests for provider_run."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
         fido_dir = tmp_path / "fido"
@@ -3411,10 +3411,10 @@ class TestFindOrCreatePr:
     """Tests for Worker.find_or_create_pr."""
 
     def _make_worker(
-        self, tmp_path: Path, claude_client: MagicMock | None = None
+        self, tmp_path: Path, provider_agent: MagicMock | None = None
     ) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh, claude_client=claude_client), gh
+        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
     def _make_repo_ctx(
         self,
@@ -3474,7 +3474,7 @@ class TestFindOrCreatePr:
 
     def test_open_pr_runs_setup_when_no_tasks(self, tmp_path: Path) -> None:
         mock_client = _client()
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
@@ -3484,7 +3484,7 @@ class TestFindOrCreatePr:
             patch("kennel.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.claude_start", mock_start),
+            patch("kennel.worker.provider_start", mock_start),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -3494,7 +3494,7 @@ class TestFindOrCreatePr:
             model=mock_client.voice_model,
             cwd=tmp_path,
             session=None,
-            claude_client=mock_client,
+            agent=mock_client,
             session_mode=TurnSessionMode.REUSE,
         )
 
@@ -3508,7 +3508,7 @@ class TestFindOrCreatePr:
             patch("kennel.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -3524,7 +3524,7 @@ class TestFindOrCreatePr:
             patch("kennel.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
             pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
@@ -3547,7 +3547,7 @@ class TestFindOrCreatePr:
             patch("kennel.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
@@ -3572,7 +3572,7 @@ class TestFindOrCreatePr:
                 "kennel.worker.build_prompt",
                 side_effect=lambda *a: call_order.append("setup"),
             ),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -3595,7 +3595,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch("kennel.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -3658,14 +3658,14 @@ class TestFindOrCreatePr:
     def test_no_pr_returns_pr_number_and_slug(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "fix-bug"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/55"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
             patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.tasks.Tasks.list",
@@ -3686,14 +3686,14 @@ class TestFindOrCreatePr:
 
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "do-work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -3705,7 +3705,7 @@ class TestFindOrCreatePr:
     def test_no_pr_calls_setup(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "do-work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3714,7 +3714,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.claude_start", mock_start),
+            patch("kennel.worker.provider_start", mock_start),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
@@ -3726,14 +3726,14 @@ class TestFindOrCreatePr:
             model=mock_client.voice_model,
             cwd=tmp_path,
             session=None,
-            claude_client=mock_client,
+            agent=mock_client,
             session_mode=TurnSessionMode.REUSE,
         )
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "do-work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3741,7 +3741,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.claude_start", return_value="s"),
+            patch("kennel.worker.provider_start", return_value="s"),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
@@ -3753,7 +3753,7 @@ class TestFindOrCreatePr:
     def test_no_pr_creates_pr_with_correct_params(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "do-work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/99"
         fido_dir = self._fido_dir(tmp_path)
@@ -3761,7 +3761,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.tasks.Tasks.list",
@@ -3780,7 +3780,7 @@ class TestFindOrCreatePr:
     def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "do-work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3793,7 +3793,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
@@ -3809,7 +3809,7 @@ class TestFindOrCreatePr:
         """Always start fresh — delete existing branch before checkout -b."""
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "slug"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3822,7 +3822,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
@@ -3834,7 +3834,7 @@ class TestFindOrCreatePr:
     def test_no_pr_slug_sanitized(self, tmp_path: Path) -> None:
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "Add New Feature!"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
@@ -3847,7 +3847,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.tasks.Tasks.list",
@@ -3865,13 +3865,13 @@ class TestFindOrCreatePr:
         """New-PR path: setup produces no tasks → raises RuntimeError, skips PR creation."""
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "fix-bug"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value="sess"),
+            patch("kennel.worker.provider_start", return_value="sess"),
             patch("kennel.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
@@ -3883,14 +3883,14 @@ class TestFindOrCreatePr:
 
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "work"
-        worker, gh = self._make_worker(tmp_path, claude_client=mock_client)
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/42"
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_start", return_value=""),
+            patch("kennel.worker.provider_start", return_value=""),
             patch("kennel.worker._write_pr_description"),
             patch(
                 "kennel.tasks.Tasks.list",
@@ -4457,7 +4457,7 @@ class TestHandleMergeConflict:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
         ):
             result = worker.handle_merge_conflict(
                 fido_dir, self._repo_ctx(), 1, "branch"
@@ -4470,7 +4470,7 @@ class TestHandleMergeConflict:
         with (
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 42, "my-branch")
         mock_status.assert_called_once_with("Resolving merge conflicts on PR #42")
@@ -4481,7 +4481,7 @@ class TestHandleMergeConflict:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 5, "fix-branch")
         mock_bp.assert_called_once()
@@ -4497,7 +4497,7 @@ class TestHandleMergeConflict:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
@@ -4505,7 +4505,7 @@ class TestHandleMergeConflict:
             model=ClaudeClient.work_model,
             cwd=tmp_path,
             session=None,
-            claude_client=ANY,
+            agent=ANY,
             session_mode=TurnSessionMode.REUSE,
         )
 
@@ -4513,7 +4513,7 @@ class TestHandleMergeConflict:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         fido_dir = self._fido_dir(tmp_path)
-        with patch("kennel.worker.claude_run") as mock_cr:
+        with patch("kennel.worker.provider_run") as mock_cr:
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_not_called()
 
@@ -4523,7 +4523,7 @@ class TestHandleMergeConflict:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 7, "branch")
         gh.get_pr.assert_called_once_with("owner/repo", 7)
@@ -4706,7 +4706,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4724,7 +4724,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4742,7 +4742,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4764,7 +4764,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4781,7 +4781,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4804,7 +4804,7 @@ class TestHandleCi:
                 "kennel.worker.build_prompt",
                 side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
             ),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4824,7 +4824,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4842,7 +4842,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4865,7 +4865,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4875,7 +4875,7 @@ class TestHandleCi:
             model=ClaudeClient.work_model,
             cwd=tmp_path,
             session=None,
-            claude_client=ANY,
+            agent=ANY,
             session_mode=TurnSessionMode.REUSE,
         )
 
@@ -4891,7 +4891,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4909,7 +4909,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
@@ -4929,7 +4929,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -4950,7 +4950,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -4986,7 +4986,7 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch("kennel.tasks.Tasks.complete_by_id"),
             patch("kennel.tasks.sync_tasks"),
         ):
@@ -5580,7 +5580,7 @@ class TestHandleThreads:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch("kennel.tasks.sync_tasks_background"),
         ):
             result = worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5600,7 +5600,7 @@ class TestHandleThreads:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch("kennel.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 5, "my-branch")
@@ -5617,7 +5617,7 @@ class TestHandleThreads:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
             patch("kennel.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5626,7 +5626,7 @@ class TestHandleThreads:
             model=ClaudeClient.work_model,
             cwd=tmp_path,
             session=None,
-            claude_client=ANY,
+            agent=ANY,
             session_mode=TurnSessionMode.REUSE,
         )
 
@@ -5637,7 +5637,7 @@ class TestHandleThreads:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.sync_tasks_background") as mock_sync,
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5652,7 +5652,7 @@ class TestHandleThreads:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch("kennel.tasks.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
@@ -6501,7 +6501,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6518,7 +6518,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6535,7 +6535,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6553,7 +6553,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6574,7 +6574,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6602,7 +6602,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6622,7 +6622,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6633,7 +6633,7 @@ class TestExecuteTask:
         assert "comment_id" not in context
         assert "review comment" not in context
 
-    def test_calls_claude_run(self, tmp_path: Path) -> None:
+    def test_calls_provider_run(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
@@ -6641,7 +6641,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess", "")) as mock_run,
+            patch("kennel.worker.provider_run", return_value=("sess", "")) as mock_run,
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6653,7 +6653,7 @@ class TestExecuteTask:
             model=ClaudeClient.work_model,
             cwd=tmp_path,
             session=None,
-            claude_client=ANY,
+            agent=ANY,
             session_mode=TurnSessionMode.REUSE,
         )
 
@@ -6665,7 +6665,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6682,7 +6682,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
@@ -6699,7 +6699,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
@@ -6716,7 +6716,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6733,7 +6733,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6750,7 +6750,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
@@ -6767,7 +6767,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6784,7 +6784,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6801,7 +6801,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6820,7 +6820,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6840,7 +6840,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("my-session", "")),
+            patch("kennel.worker.provider_run", return_value=("my-session", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -6868,7 +6868,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch(
-                "kennel.worker.claude_run",
+                "kennel.worker.provider_run",
                 side_effect=[("sess-1", "output1"), ("sess-1", "output2")],
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
@@ -6898,7 +6898,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch(
-                "kennel.worker.claude_run",
+                "kennel.worker.provider_run",
                 side_effect=[("", "output"), ("sess-2", "output2")],
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
@@ -6932,7 +6932,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch(
-                "kennel.worker.claude_run",
+                "kennel.worker.provider_run",
                 side_effect=[
                     ("sess-1", "o1"),
                     ("sess-1", "o2"),
@@ -6954,7 +6954,7 @@ class TestExecuteTask:
     ) -> None:
         # Task is pending on first list_tasks call (execute_task picks it up),
         # then externally completed before the retry loop re-checks — loop
-        # should break without calling claude_run a second time.
+        # should break without calling provider_run a second time.
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Already done task")
@@ -6976,7 +6976,7 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch(
-                "kennel.worker.claude_run", return_value=("sess-1", "output")
+                "kennel.worker.provider_run", return_value=("sess-1", "output")
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
@@ -6984,7 +6984,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        # claude_run called exactly once (initial dispatch), not again after break
+        # provider_run called exactly once (initial dispatch), not again after break
         mock_run.assert_called_once()
         # complete_by_id still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(task["id"])
@@ -7018,7 +7018,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=fake_run) as mock_run,
+            patch("kennel.worker.provider_run", side_effect=fake_run) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -7041,7 +7041,7 @@ class TestExecuteTask:
         assert "Task title: Fix widget" in prompt_snapshots[4]
         assert "Branch: br-42" in prompt_snapshots[4]
 
-    def test_saves_current_task_id_to_state_before_claude_run(
+    def test_saves_current_task_id_to_state_before_provider_run(
         self, tmp_path: Path
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -7058,7 +7058,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=capture),
+            patch("kennel.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -7076,7 +7076,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch("kennel.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -7102,7 +7102,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=capture),
+            patch("kennel.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -7121,7 +7121,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch("kennel.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.tasks.Tasks.complete_by_id"),
@@ -7157,7 +7157,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
             patch("kennel.tasks.Tasks.remove") as mock_remove,
@@ -7191,7 +7191,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", side_effect=set_abort_on_second),
+            patch("kennel.worker.provider_run", side_effect=set_abort_on_second),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
             patch("kennel.tasks.Tasks.remove") as mock_remove,
@@ -7215,7 +7215,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean"),
             patch("kennel.tasks.Tasks.remove"),
@@ -7233,7 +7233,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(
                 worker, "_squash_wip_commit", return_value=False
@@ -7256,7 +7256,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(
                 worker,
@@ -7282,7 +7282,7 @@ class TestExecuteTask:
             patch("kennel.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "_squash_wip_commit", return_value=True),
             patch.object(worker, "ensure_pushed", return_value=None),
