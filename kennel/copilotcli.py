@@ -42,6 +42,7 @@ from kennel.provider import (
     ReasoningEffort,
     coerce_provider_model,
 )
+from kennel.session_agent import SessionBackedAgent
 
 log = logging.getLogger(__name__)
 
@@ -858,7 +859,7 @@ class CopilotCLIAPI(ProviderAPI):
         )
 
 
-class CopilotCLIClient(ProviderAgent):
+class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for Copilot CLI interactions."""
 
     voice_model = ProviderModel("gpt-5.4", "high")
@@ -877,64 +878,23 @@ class CopilotCLIClient(ProviderAgent):
         session: PromptSession | None = None,
     ) -> None:
         self._runner = runner
-        self._session_fn = (
-            claude.current_repo_session if session_fn is None else session_fn
-        )
         self._sleep_fn = sleep_fn
         self._session_factory = (
             CopilotCLISession if session_factory is None else session_factory
         )
-        self._session_system_file = session_system_file
-        self._work_dir = work_dir
-        self._repo_name = repo_name
-        self._session_lock = threading.Lock()
-        self._session: PromptSession | None = session
+        super().__init__(
+            session_fn=claude.current_repo_session
+            if session_fn is None
+            else session_fn,
+            session_system_file=session_system_file,
+            work_dir=work_dir,
+            repo_name=repo_name,
+            session=session,
+        )
 
     @property
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
-
-    @property
-    def session(self) -> PromptSession | None:
-        with self._session_lock:
-            return self._session
-
-    def attach_session(self, session: PromptSession | None) -> None:
-        with self._session_lock:
-            self._session = session
-
-    def detach_session(self) -> PromptSession | None:
-        with self._session_lock:
-            session = self._session
-            self._session = None
-            return session
-
-    @property
-    def session_owner(self) -> str | None:
-        with self._session_lock:
-            session = self._session
-        return session.owner if session is not None else None
-
-    @property
-    def session_alive(self) -> bool:
-        with self._session_lock:
-            session = self._session
-        return session is not None and session.is_alive()
-
-    @property
-    def session_pid(self) -> int | None:
-        with self._session_lock:
-            session = self._session
-        return session.pid if session is not None else None
-
-    @property
-    def session_id(self) -> str | None:
-        with self._session_lock:
-            session = self._session
-        if session is None or not hasattr(session, "session_id"):
-            return None
-        session_id = getattr(session, "session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
 
     def _spawn_owned_session(self, model: ProviderModel) -> PromptSession:
         system_file = self._session_system_file
@@ -947,61 +907,6 @@ class CopilotCLIClient(ProviderAgent):
             model=model,
             repo_name=self._repo_name,
         )
-
-    def ensure_session(self, model: ProviderModel | None = None) -> None:
-        with self._session_lock:
-            session = self._session
-            if session is None:
-                if self._session_system_file is None or self._work_dir is None:
-                    raise ValueError(
-                        "CopilotCLIClient.ensure_session requires session_system_file and work_dir"
-                    )
-                if model is None:
-                    raise ValueError(
-                        "CopilotCLIClient.ensure_session requires model when creating a session"
-                    )
-                session = self._spawn_owned_session(model)
-                self._session = session
-                return
-        if model is not None:
-            session.switch_model(model)
-
-    def stop_session(self) -> None:
-        with self._session_lock:
-            session = self._session
-            self._session = None
-        if session is not None:
-            session.stop()
-
-    def _can_spawn_owned_session(self) -> bool:
-        return self._session_system_file is not None and self._work_dir is not None
-
-    def _resolve_turn_session(
-        self,
-        *,
-        model: ProviderModel | None,
-        fresh_session: bool,
-    ) -> PromptSession:
-        with self._session_lock:
-            session = self._session
-            if session is None and self._can_spawn_owned_session():
-                if model is None:
-                    raise ValueError(
-                        "CopilotCLIClient.run_turn requires model when creating a session"
-                    )
-                session = self._spawn_owned_session(model)
-                self._session = session
-                return session
-        if session is None:
-            session = self._session_fn()
-        if fresh_session:
-            reset = getattr(session, "reset", None)
-            if not callable(reset):
-                raise ValueError(
-                    "CopilotCLIClient.run_turn fresh_session requires resettable session"
-                )
-            reset(model)
-        return session
 
     def _session_is_dead(self, session: PromptSession) -> bool:
         return session.is_alive() is False
@@ -1120,31 +1025,6 @@ class CopilotCLIClient(ProviderAgent):
                 return obj[key]
         return ""
 
-    def generate_status(
-        self,
-        prompt: str,
-        system_prompt: str,
-        model: ProviderModel | None = None,
-    ) -> str:
-        return self.run_turn(
-            prompt,
-            model=self.voice_model if model is None else model,
-            system_prompt=system_prompt,
-        )
-
-    def generate_status_emoji(
-        self,
-        prompt: str,
-        system_prompt: str,
-        model: ProviderModel | None = None,
-    ) -> str:
-        return self._run_turn_json_value(
-            prompt,
-            "emoji",
-            self.voice_model if model is None else model,
-            system_prompt=system_prompt,
-        )
-
     def print_prompt_from_file(
         self,
         system_file: Path,
@@ -1178,74 +1058,6 @@ class CopilotCLIClient(ProviderAgent):
             cwd=cwd,
             session_id=session_id,
         )
-
-    def generate_reply(
-        self,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 30,
-    ) -> str:
-        effective_model = self.voice_model if model is None else model
-        try:
-            output = self._run_cli_prompt(
-                prompt, model=effective_model, timeout=timeout
-            )
-            return extract_result_text(output).strip()
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
-
-    def generate_branch_name(
-        self,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> str:
-        effective_model = self.brief_model if model is None else model
-        try:
-            output = self._run_cli_prompt(
-                prompt, model=effective_model, timeout=timeout
-            )
-            text = extract_result_text(output).strip()
-            return text.splitlines()[0] if text else ""
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
-
-    def generate_status_with_session(
-        self,
-        prompt: str,
-        system_prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> tuple[str, str]:
-        effective_model = self.voice_model if model is None else model
-        try:
-            output = self._run_cli_prompt(
-                _combine_prompt(prompt, system_prompt=system_prompt),
-                model=effective_model,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return "", ""
-        return extract_result_text(output).strip(), extract_session_id(output)
-
-    def resume_status(
-        self,
-        session_id: str,
-        prompt: str,
-        model: ProviderModel | None = None,
-        timeout: int = 15,
-    ) -> str:
-        effective_model = self.voice_model if model is None else model
-        try:
-            output = self._run_cli_prompt(
-                prompt,
-                model=effective_model,
-                timeout=timeout,
-                session_id=session_id,
-            )
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
-        return extract_result_text(output).strip()
 
     def extract_session_id(self, output: str) -> str:
         return extract_session_id(output)
