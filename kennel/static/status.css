@@ -72,7 +72,7 @@ card[dog|status="busy"] {
   border-left: 3px solid #1a7f37;
 }
 
-card[dog|status="idle"] {
+card[dog|status="waiting"] {
   border-left: 3px solid #d8dee4;
 }
 

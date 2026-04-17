@@ -710,7 +710,7 @@ def _format_repo_header(repo: RepoStatus) -> str:
     line when crash_count > 0.  If nobody is currently talking to the agent,
     the generic pid/uptime suffix appears on this line.
     """
-    state_word = "running" if repo.fido_running else "idle"
+    state_word = "running" if repo.fido_running else "waiting"
     state_style = GREEN if repo.fido_running else DIM
     stats: list[str] = [_styled_repo_provider(repo)]
     if repo.crash_count > 0:
@@ -784,7 +784,8 @@ def _worker_thread_state(repo: RepoStatus) -> str:
     """Compact string describing what the worker thread itself is doing.
 
     Prefers the richest descriptor available: current task (with position
-    and title) > PR-but-no-task > the live ``worker_what`` field > ``idle``.
+    and title) > PR-but-no-task > the live ``worker_what`` field >
+    ``waiting for work``.
     Never shows webhook-thread activity — that's surfaced separately.
     """
     provider_status = repo.provider_status
@@ -805,9 +806,9 @@ def _worker_thread_state(repo: RepoStatus) -> str:
     if repo.current_task is not None:
         return f"task: {repo.current_task}"
     what = (repo.worker_what or "").strip()
-    if what and what.lower() != "idle":
+    if what:
         return what
-    return "idle"
+    return "waiting for work"
 
 
 def _format_webhook_lines(repo: RepoStatus) -> list[str]:

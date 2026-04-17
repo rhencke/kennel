@@ -474,9 +474,9 @@ class TestRepoStatus:
             ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
             ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
             ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
-            ({"is_stuck": False, "crash_count": 0, "busy": False}, "idle"),
+            ({"is_stuck": False, "crash_count": 0, "busy": False}, "waiting"),
         ],
-        ids=["paused", "stuck", "crashed", "busy", "idle"],
+        ids=["paused", "stuck", "crashed", "busy", "waiting"],
     )
     def test_repo_status_priority(self, act: dict, expected: str) -> None:
         assert _repo_status(act) == expected
