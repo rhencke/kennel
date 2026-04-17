@@ -248,6 +248,18 @@ class TestSessionBackedAgent:
         # no attached session → uses _run_one_shot_text fallback path
         assert agent.generate_branch_name("name a branch") == "fix-bug-123"
 
+    def test_generate_reply_no_session_uses_one_shot_fallback(self) -> None:
+        """generate_reply falls through to _run_one_shot_text when no session attached.
+
+        This mirrors the branch-name fallback: both voice ops avoid creating a
+        persistent session and instead rely on a transient one-shot call.
+        """
+        session = MagicMock(session_id="sess")
+        session.prompt.return_value = "woof, on it!"
+        agent = _FakeAgent(session_fn=lambda: session)
+        # no attached session → uses _run_one_shot_text fallback path
+        assert agent.generate_reply("write a pickup reply") == "woof, on it!"
+
     def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = [BrokenPipeError("boom"), "done"]

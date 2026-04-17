@@ -1020,6 +1020,47 @@ class TestWorker:
             "find_or_create_pr",
         ]
 
+    def test_provider_agent_session_is_none_during_post_pickup_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """_provider_agent.session is None when post_pickup_comment is invoked.
+
+        create_session() hasn't been called yet at that point, so the pickup
+        comment is generated via the one-shot fallback path rather than a live
+        persistent session.  Any code path that eagerly creates a session before
+        the pickup comment would cause this assertion to fail.
+        """
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        session_during_pickup: list = []
+
+        def record_session(*_a: object) -> None:
+            session_during_pickup.append(worker._provider_agent.session)
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment", side_effect=record_session),
+            patch.object(worker, "create_session"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+
+        assert len(session_during_pickup) == 1
+        assert session_during_pickup[0] is None
+
     def test_run_recovers_reply_promises_before_normal_handlers(
         self, tmp_path: Path
     ) -> None:
