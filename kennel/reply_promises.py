@@ -53,9 +53,14 @@ def add_reply_promise(fido_dir: Path, comment_type: str, comment_id: int) -> Pat
 
 
 def remove_reply_promise(fido_dir: Path, comment_type: str, comment_id: int) -> None:
-    """Delete the durable promise file."""
+    """Delete the durable promise file if present.
+
+    The worker's recovery path and the webhook reply path can both race to
+    remove the same promise (see #665).  The caller's intent is "make sure
+    this promise is gone", so a missing file is success, not an error.
+    """
     _validate_comment_type(comment_type)
-    _promise_path(fido_dir, comment_type, comment_id).unlink()
+    _promise_path(fido_dir, comment_type, comment_id).unlink(missing_ok=True)
 
 
 def list_reply_promises(fido_dir: Path) -> list[ReplyPromise]:

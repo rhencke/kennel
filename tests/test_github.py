@@ -522,6 +522,100 @@ class TestGitHubClass:
         assert mock_s.get.call_count == 2
         assert mock_s.get.call_args_list[1].args[0] == next_url
 
+    def _transient_resp(self, status: int) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.reason = "Server Error"
+        return resp
+
+    def _ok_resp(self, body: list[dict], link: str = "") -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = body
+        resp.headers = {"Link": link} if link else {}
+        return resp
+
+    def test_retryable_get_retries_on_5xx_then_succeeds(self) -> None:
+        # Regression for #664: transient 5xx on a read-only GET must be
+        # retried, not propagated as an uncaught worker-thread crash.
+        import requests as _requests
+
+        sleeper = MagicMock()
+        mock_s = MagicMock()
+        mock_s.get.side_effect = [
+            self._transient_resp(500),
+            self._transient_resp(503),
+            self._ok_resp([{"id": 7}]),
+        ]
+        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        assert gh._get("/anything") == [{"id": 7}]
+        assert mock_s.get.call_count == 3
+        # Two failures → two sleeps from the retry schedule.
+        assert sleeper.call_count == 2
+        assert sleeper.call_args_list[0].args[0] == 1.0
+        assert sleeper.call_args_list[1].args[0] == 3.0
+        # Sanity: no real network-error import drift.
+        assert issubclass(_requests.ConnectionError, Exception)
+
+    def test_retryable_get_gives_up_after_budget(self) -> None:
+        import requests as _requests
+
+        sleeper = MagicMock()
+        mock_s = MagicMock()
+        mock_s.get.return_value = self._transient_resp(502)
+        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        with pytest.raises(_requests.HTTPError, match="502"):
+            gh._get("/always-bad")
+        # Initial attempt + len(_GET_RETRY_DELAYS) retries.
+        assert mock_s.get.call_count == 4
+        assert sleeper.call_count == 3
+
+    def test_retryable_get_retries_on_connection_error(self) -> None:
+        import requests as _requests
+
+        sleeper = MagicMock()
+        mock_s = MagicMock()
+        mock_s.get.side_effect = [
+            _requests.ConnectionError("boom"),
+            self._ok_resp([{"ok": True}]),
+        ]
+        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        assert gh._get("/flaky") == [{"ok": True}]
+        assert mock_s.get.call_count == 2
+        assert sleeper.call_count == 1
+
+    def test_retryable_get_non_retryable_4xx_propagates_immediately(self) -> None:
+        import requests as _requests
+
+        sleeper = MagicMock()
+        mock_s = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.raise_for_status.side_effect = _requests.HTTPError("404")
+        mock_s.get.return_value = resp
+        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        with pytest.raises(_requests.HTTPError, match="404"):
+            gh._get("/nope")
+        # No retry on 4xx — single GET, no sleep.
+        assert mock_s.get.call_count == 1
+        sleeper.assert_not_called()
+
+    def test_paginate_retries_on_5xx_mid_stream(self) -> None:
+        # Multi-page pagination: a 5xx on page 2 must not abort the
+        # whole walk — it retries just that page.
+        sleeper = MagicMock()
+        mock_s = MagicMock()
+        next_url = "https://api.github.com/repos/o/r/items?page=2"
+        page1 = self._ok_resp([{"id": 1}], link=f'<{next_url}>; rel="next"')
+        bad = self._transient_resp(502)
+        page2 = self._ok_resp([{"id": 2}])
+        mock_s.get.side_effect = [page1, bad, page2]
+        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
+        assert result == [{"id": 1}, {"id": 2}]
+        assert mock_s.get.call_count == 3
+        assert sleeper.call_count == 1
+
     def _gql_pr(
         self, number: int, ref: str, state: str, user: str, body: str = ""
     ) -> dict:

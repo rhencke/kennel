@@ -73,6 +73,28 @@ def _is_line_limit_overrun_error(exc: Exception) -> bool:
     return "Separator is found, but chunk is longer than limit" in str(exc)
 
 
+# #666: Copilot CLI emits this exact string as its final assistant content
+# when a turn is cancelled mid-flight.  We translate it to "no result" at
+# the talker boundary so consumers can't accidentally post it as a reply
+# body or a PR description.
+_COPILOT_CANCEL_SENTINEL = "Info: Operation cancelled by user"
+
+
+def _is_cancel_sentinel(text: str) -> bool:
+    """Return True when *text* is Copilot's cancellation sentinel.
+
+    Matches both the bare sentinel and cases where it trails a block of
+    real narration (seen in logs where Copilot streams progress and then
+    appends the cancel notice as its final line).
+    """
+    if not text:
+        return False
+    stripped = text.rstrip()
+    return stripped == _COPILOT_CANCEL_SENTINEL or stripped.endswith(
+        "\n" + _COPILOT_CANCEL_SENTINEL
+    )
+
+
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for line in output.splitlines():
@@ -1099,13 +1121,22 @@ class CopilotCLISession(OwnedSession):
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)
-        self._last_turn_cancelled = stop_reason == "cancelled"
+        cancelled = stop_reason == "cancelled" or _is_cancel_sentinel(result)
+        self._last_turn_cancelled = cancelled
         _log_for_repo(
             logging.INFO,
             self._repo_name,
             "%s",
             _transcript_block("copilot result", result),
         )
+        # #666: Copilot CLI emits "Info: Operation cancelled by user" as its
+        # final assistant content when a turn is cancelled mid-flight.  If a
+        # caller (e.g. events.post reply paths) forwards that string as a
+        # generated body, it ends up posted on a PR as if it were real text.
+        # Normalize to empty at the talker boundary so every consumer's
+        # existing ``if not body`` guard treats it correctly.
+        if cancelled:
+            return ""
         return result
 
 

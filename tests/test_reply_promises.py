@@ -39,9 +39,11 @@ def test_remove_reply_promise_deletes_file(tmp_path: Path) -> None:
     assert not path.exists()
 
 
-def test_remove_reply_promise_missing_file_raises(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError):
-        remove_reply_promise(tmp_path / "fido", "pulls", 999)
+def test_remove_reply_promise_missing_file_is_noop(tmp_path: Path) -> None:
+    # Regression for #665: the worker recovery path and the webhook reply
+    # path can both try to remove the same promise.  Missing file means the
+    # intent ("make sure it's gone") is already satisfied.
+    remove_reply_promise(tmp_path / "fido", "pulls", 999)
 
 
 def test_list_reply_promises_returns_empty_when_dir_missing(tmp_path: Path) -> None:

@@ -6,7 +6,8 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,13 @@ import requests as _requests
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
+
+# Retry schedule for transient GitHub failures on idempotent GETs (#664).
+# Delays in seconds between successive attempts.  Total retry budget is
+# ~14s of wall clock on top of the per-request _HTTP_TIMEOUT.  Only applied
+# to read-only paths (GET); mutations stay fail-fast.
+_GET_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0, 10.0)
+_RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 
 
 class _TimeoutSession(_requests.Session):
@@ -87,7 +95,10 @@ class GitHub:
     BASE = "https://api.github.com"
 
     def __init__(
-        self, token: str | None = None, session: _requests.Session | None = None
+        self,
+        token: str | None = None,
+        session: _requests.Session | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._s = session if session is not None else _TimeoutSession()
         self._s.headers.update(
@@ -97,11 +108,43 @@ class GitHub:
                 "X-GitHub-Api-Version": "2022-11-28",
             }
         )
+        self._sleep = sleeper
+
+    def _retryable_get(self, url: str) -> _requests.Response:
+        """GET *url* with retry on transient upstream failures (#664).
+
+        Retries idempotent GETs on 5xx status codes and on
+        ``ConnectionError`` / ``Timeout`` from ``requests``.  Mutation paths
+        (POST/PATCH/PUT) never call this — they stay fail-fast.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(len(_GET_RETRY_DELAYS) + 1):
+            try:
+                resp = self._s.get(url)
+                if resp.status_code in _RETRYABLE_STATUS:
+                    last_exc = _requests.HTTPError(
+                        f"{resp.status_code} {resp.reason} for url: {url}",
+                        response=resp,
+                    )
+                else:
+                    resp.raise_for_status()
+                    return resp
+            except (_requests.ConnectionError, _requests.Timeout) as exc:
+                last_exc = exc
+            if attempt < len(_GET_RETRY_DELAYS):
+                delay = _GET_RETRY_DELAYS[attempt]
+                log.warning(
+                    "GitHub GET %s failed (%s) — retrying in %.1fs",
+                    url,
+                    last_exc,
+                    delay,
+                )
+                self._sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     def _get(self, path: str) -> Any:
-        resp = self._s.get(f"{self.BASE}{path}")
-        resp.raise_for_status()
-        return resp.json()
+        return self._retryable_get(f"{self.BASE}{path}").json()
 
     def _post(self, path: str, **payload: Any) -> None:
         resp = self._s.post(f"{self.BASE}{path}", json=payload)
@@ -275,11 +318,15 @@ class GitHub:
         return [(c["id"], c.get("body", "")) for c in self._paginate(url)]
 
     def _paginate(self, url: str) -> Iterator[Any]:
-        """Yield each item from all pages of a paginated GitHub API endpoint."""
+        """Yield each item from all pages of a paginated GitHub API endpoint.
+
+        Each page request is retried on transient 5xx / network failures
+        (see ``_retryable_get``).  Pagination is a read-only operation so
+        retry is always safe.
+        """
         current: str | None = url
         while current:
-            resp = self._s.get(current)
-            resp.raise_for_status()
+            resp = self._retryable_get(current)
             yield from resp.json()
             link = resp.headers.get("Link", "")
             current = next(

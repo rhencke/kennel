@@ -19,6 +19,7 @@ from acp.exceptions import RequestError
 from kennel import provider
 from kennel.copilotcli import (
     _ACP_STREAM_LIMIT,
+    _COPILOT_CANCEL_SENTINEL,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
@@ -26,6 +27,7 @@ from kennel.copilotcli import (
     CopilotCLISession,
     _combine_prompt,
     _CopilotACPClient,
+    _is_cancel_sentinel,
     _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
@@ -295,6 +297,26 @@ class TestHelpers:
             ValueError("Separator is found, but chunk is longer than limit")
         )
         assert not _is_line_limit_overrun_error(ValueError("boom"))
+
+    def test_is_cancel_sentinel_matches_bare_string(self) -> None:
+        # #666: bare sentinel that leaked onto
+        # rhencke/orly#52 comment 4269109566.
+        assert _is_cancel_sentinel(_COPILOT_CANCEL_SENTINEL)
+
+    def test_is_cancel_sentinel_matches_trailing_sentinel(self) -> None:
+        # #666: some cancelled turns stream narration then append the
+        # sentinel as the final line.  Both shapes must be recognised.
+        narration = (
+            "Sniffing the panel layout and current branch state first...\n"
+            "I found the clean seam...\n"
+            "Info: Operation cancelled by user"
+        )
+        assert _is_cancel_sentinel(narration)
+
+    def test_is_cancel_sentinel_rejects_real_reply(self) -> None:
+        assert not _is_cancel_sentinel("")
+        assert not _is_cancel_sentinel("Info: Operation completed successfully")
+        assert not _is_cancel_sentinel("Info: Operation cancelled by user internally")
 
     def test_combine_prompt_joins_sections(self) -> None:
         assert (
@@ -891,11 +913,14 @@ class TestCopilotCLISession:
         )
 
         assert session.session_id == "sess-created"
+        # #666: a cancelled turn now returns "" so consumers' ``if not body``
+        # guards fire consistently — the raw runtime result string is only
+        # returned when the turn completed normally.
         assert (
             session.prompt(
                 "task", model=CopilotCLIClient.voice_model, system_prompt="system"
             )
-            == "result"
+            == ""
         )
         assert runtime.prompt_calls == [
             (
@@ -918,6 +943,28 @@ class TestCopilotCLISession:
         assert session.is_alive() is True
         session.stop()
         assert runtime.stop_called is True
+
+    def test_prompt_blanks_cancel_sentinel_even_without_cancelled_stop_reason(
+        self, tmp_path: Path
+    ) -> None:
+        # #666: the runtime sometimes returns Copilot's cancellation
+        # sentinel as the assistant-message content while reporting a
+        # non-"cancelled" stop_reason (e.g. "end_turn" after the cancel
+        # propagated late).  The talker boundary must still treat this as
+        # a cancelled turn so consumer ``if not body`` guards fire and
+        # the retry-on-preempt loop retries.
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        runtime.next_prompt = (_COPILOT_CANCEL_SENTINEL, "end_turn", "sess-x")
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        assert session.prompt("task") == ""
+        assert session.last_turn_cancelled is True
 
     def test_webhook_preempts_worker_cancels_runtime(self, tmp_path: Path) -> None:
         """Worker holds the session; webhook contender fires the runtime
