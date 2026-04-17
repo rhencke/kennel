@@ -2647,7 +2647,9 @@ class WorkerThread(threading.Thread):
         try:
             while not self._stop:
                 if self._registry is not None:
-                    self._registry.report_activity(self._repo_name, "idle", busy=False)
+                    self._registry.report_activity(
+                        self._repo_name, "scanning for work", busy=False
+                    )
                 provider = self._ensure_provider()
                 session = provider.agent.session
                 if session is None:
@@ -2681,6 +2683,15 @@ class WorkerThread(threading.Thread):
                     # Did work — loop immediately without waiting.
                     continue
 
+                if self._registry is not None:
+                    waiting_what = (
+                        "waiting: lock held"
+                        if result == 2
+                        else "waiting: no issues found"
+                    )
+                    self._registry.report_activity(
+                        self._repo_name, waiting_what, busy=False
+                    )
                 timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
                 self._wake.wait(timeout=timeout)
                 self._wake.clear()

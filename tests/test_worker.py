@@ -10064,7 +10064,8 @@ class TestWorkerThread:
         assert captured[0] is wt._abort_task
 
     def test_heartbeat_emitted_each_iteration(self, tmp_path: Path) -> None:
-        """report_activity is called at the top of each loop iteration."""
+        """report_activity is called twice per loop iteration: 'scanning for work'
+        at the top, and 'waiting: no issues found' before the wake wait."""
         mock_registry = MagicMock()
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
         wt._wake = MagicMock()
@@ -10081,10 +10082,34 @@ class TestWorkerThread:
             self._run_thread(wt)
 
         assert call_count == 2
-        assert mock_registry.report_activity.call_count == 2
-        for c in mock_registry.report_activity.call_args_list:
+        # Two calls per iteration: "scanning for work" then "waiting: no issues found"
+        calls = mock_registry.report_activity.call_args_list
+        assert len(calls) == 4
+        for c in calls:
             assert c.args[0] == "owner/repo"
             assert c.kwargs.get("busy") is False or c.args[2] is False
+        assert calls[0].args[1] == "scanning for work"
+        assert calls[1].args[1] == "waiting: no issues found"
+        assert calls[2].args[1] == "scanning for work"
+        assert calls[3].args[1] == "waiting: no issues found"
+
+    def test_waiting_lock_held_reported_on_result_2(self, tmp_path: Path) -> None:
+        """Return 2 (lock held) reports 'waiting: lock held' before the wake wait."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored=None) -> int:
+            wt._stop = True
+            return 2
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        calls = mock_registry.report_activity.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[1] == "scanning for work"
+        assert calls[1].args[1] == "waiting: lock held"
 
     def test_heartbeat_not_emitted_when_no_registry(self, tmp_path: Path) -> None:
         """WorkerThread without a registry must not crash on the heartbeat path."""
