@@ -773,10 +773,26 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
 
 
 def _format_worker_thread_line(repo: RepoStatus) -> str:
-    """Worker-thread state line, background-highlighted when it has the agent."""
+    """Worker-thread state line, background-highlighted whenever the worker
+    is assigned to a task.
+
+    The previous rule ("highlight iff the worker currently owns the
+    session lock") flickered to off during the Python-only gaps between
+    turns — the worker finishes a ``session.prompt`` (talker
+    unregisters), processes the result (git ops, task bookkeeping), then
+    calls ``session.prompt`` again.  Those gaps are still active work but
+    read as idle in the old semantics.
+
+    Use ``current_task`` as the stable \"worker is on a task\" signal —
+    set whenever the engine is inside ``execute_task``, cleared only when
+    the worker is napping / picking up / paused.  OR it with the classic
+    talker check so webhook-preemption snapshots (where current_task may
+    briefly be None during task rescopes) still read as busy when the
+    worker lock is held.
+    """
     state = _worker_thread_state(repo)
-    is_talker = _worker_is_agent_talker(repo)
-    label = color(GREEN_BG, "Worker:") if is_talker else color(BOLD, "Worker:")
+    is_active = repo.current_task is not None or _worker_is_agent_talker(repo)
+    label = color(GREEN_BG, "Worker:") if is_active else color(BOLD, "Worker:")
     return f"  {label} {state}"
 
 
