@@ -2909,10 +2909,14 @@ class TestReorderTasksBackground:
     def test_on_done_kwarg_calls_rewrite_fn(self, tmp_path: Path) -> None:
         started: list = []
         rewrite_calls: list = []
+        sync_calls: list = []
         calls, mock_reorder = self._capture_reorder_calls()
 
         def mock_rewrite(*a, **kw):
             rewrite_calls.append((a, kw))
+
+        def mock_sync(*a, **kw):
+            sync_calls.append((a, kw))
 
         _reorder_tasks_background(
             tmp_path,
@@ -2922,11 +2926,13 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _rewrite_fn=mock_rewrite,
             _reorder_fn=mock_reorder,
+            _sync_fn=mock_sync,
             _coalesce_state={},
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
         on_done()
+        assert len(sync_calls) == 1
         assert len(rewrite_calls) == 1
         args, kwargs = rewrite_calls[0]
         assert args[0] == tmp_path
@@ -2947,6 +2953,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _rewrite_fn=mock_rewrite,
+            _sync_fn=lambda *a, **kw: None,
             agent=fake_client,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
@@ -2955,6 +2962,55 @@ class TestReorderTasksBackground:
         on_done = calls[0][2]["_on_done"]
         on_done()
         assert rewrite_calls[0].get("agent") is fake_client
+
+    def test_on_done_syncs_before_rewrite(self, tmp_path: Path) -> None:
+        started: list = []
+        order: list[str] = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        def mock_sync(*a, **kw):
+            order.append("sync")
+
+        def mock_rewrite(*a, **kw):
+            order.append("rewrite")
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _rewrite_fn=mock_rewrite,
+            _reorder_fn=mock_reorder,
+            _sync_fn=mock_sync,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
+        on_done()
+        assert order == ["sync", "rewrite"]
+
+    def test_on_done_uses_default_sync_tasks_when_no_sync_fn(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _rewrite_fn=lambda *a, **kw: None,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
+        with patch("kennel.tasks.sync_tasks") as mock_sync:
+            on_done()
+        mock_sync.assert_called_once()
 
     def test_coalesces_when_already_running(self, tmp_path: Path) -> None:
         """Second call while first is running marks pending, does not spawn thread."""

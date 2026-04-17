@@ -361,19 +361,19 @@ class TestTaskPosition:
     def test_counts_up_past_completed_tasks(self) -> None:
         from kennel.status import _task_position
 
-        # 2 done, 1 in_progress, 1 pending → "3/4" not "1/2"
+        # Completed tasks do not offset the active queue position.
         tasks = [
             {"status": "completed"},
             {"status": "completed"},
             {"status": "in_progress"},
             {"status": "pending"},
         ]
-        assert _task_position(tasks) == (3, 4)
+        assert _task_position(tasks) == (1, 2)
 
     def test_pending_offsets_past_completed(self) -> None:
         from kennel.status import _task_position
 
-        # 3 done, 2 pending, no in_progress → "4/5"
+        # Completed tasks do not count toward the current queue length.
         tasks = [
             {"status": "completed"},
             {"status": "completed"},
@@ -381,7 +381,7 @@ class TestTaskPosition:
             {"status": "pending"},
             {"status": "pending"},
         ]
-        assert _task_position(tasks) == (4, 5)
+        assert _task_position(tasks) == (1, 2)
 
 
 class TestElapsedSinceIso:
@@ -1444,14 +1444,14 @@ class TestFormatStatus:
             pending=1,
             completed=2,
             current_task="Do the thing",
-            task_number=3,
-            task_total=3,
+            task_number=1,
+            task_total=1,
             issue_title="Add widget",
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue: #42 — Add widget" in output
-        assert "Worker: task 3/3 — Do the thing" in output
+        assert "Worker: task 1/1 — Do the thing" in output
 
     def test_paused_provider_overrides_worker_state(self) -> None:
         provider_status = ProviderPressureStatus(

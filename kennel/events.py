@@ -1189,6 +1189,7 @@ def _make_reorder_kwargs(
     agent: ProviderAgent,
     prompts: Prompts,
     rewrite_fn: Callable[..., None],
+    sync_fn: Callable[[Path, Any], None] | None = None,
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
 
@@ -1197,6 +1198,12 @@ def _make_reorder_kwargs(
             _notify_thread_change(change, config, gh, agent=None, prompts=None)
 
     def on_done() -> None:
+        if sync_fn is None:
+            from kennel.tasks import sync_tasks
+
+            sync_tasks(work_dir, gh)
+        else:
+            sync_fn(work_dir, gh)
         rewrite_fn(
             work_dir,
             gh,
@@ -1237,6 +1244,7 @@ def _reorder_tasks_background(
     prompts: Prompts | None = None,
     _rewrite_fn: Callable[..., None] | None = None,
     _reorder_fn: Callable[..., None] | None = None,
+    _sync_fn: Callable[[Path, Any], None] | None = None,
     _coalesce_state: dict[str, Any] | None = None,
 ) -> None:
     """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
@@ -1276,7 +1284,7 @@ def _reorder_tasks_background(
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(
-        work_dir, config, repo_cfg, registry, gh, agent, prompts, rewrite_fn
+        work_dir, config, repo_cfg, registry, gh, agent, prompts, rewrite_fn, _sync_fn
     )
 
     with _reorder_coalesce_lock:

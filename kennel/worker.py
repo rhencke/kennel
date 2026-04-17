@@ -1933,6 +1933,35 @@ class Worker:
         self.gh.comment_issue(repo, issue, msg)
         log.info("posted pickup comment on issue #%s", issue)
 
+    def _has_substantive_branch_commits(
+        self,
+        commits: list[dict[str, Any]],
+        remote: str,
+        default_branch: str,
+    ) -> bool:
+        """Return True when the branch has work beyond the empty wip sentinel."""
+        if len(commits) > 1:
+            return True
+        if not commits:
+            return False
+        base = self._git(
+            ["merge-base", "HEAD", f"{remote}/{default_branch}"],
+            check=False,
+        )
+        if base.returncode != 0:
+            return False
+        base_sha = base.stdout.strip()
+        log_result = self._git(
+            ["log", "--format=%s", f"{base_sha}..HEAD", "--reverse"],
+            check=False,
+        )
+        if log_result.returncode != 0:
+            return False
+        subjects = [
+            line.strip() for line in log_result.stdout.splitlines() if line.strip()
+        ]
+        return any(subject != "wip: start" for subject in subjects)
+
     def handle_promote_merge(
         self,
         fido_dir: Path,
@@ -2052,13 +2081,22 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            if pending:
+            has_real_branch_work = self._has_substantive_branch_commits(
+                commits, "origin", repo_ctx.default_branch
+            )
+            if pending and not has_real_branch_work:
                 log.info(
                     "PR #%s: %d tasks still pending — not promoting yet",
                     pr_number,
                     len(pending),
                 )
                 return 0
+            if pending:
+                log.info(
+                    "PR #%s: %d tasks still pending, but branch has real commits — continuing promote checks",
+                    pr_number,
+                    len(pending),
+                )
             checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
             required = self.gh.get_required_checks(
                 repo_ctx.repo, repo_ctx.default_branch
