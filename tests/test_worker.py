@@ -6,7 +6,6 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
@@ -1652,7 +1651,12 @@ class TestWorkerFindNextIssue:
         self, tmp_path: Path
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 42, "title": "Do the thing", "subIssues": {"nodes": []}}
+        issue = {
+            "number": 42,
+            "title": "Do the thing",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -1670,6 +1674,7 @@ class TestWorkerFindNextIssue:
         issue = {
             "number": 10,
             "title": "Parent task",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "CLOSED"}]},
         }
         gh.find_all_open_issues.return_value = [issue]
@@ -1710,9 +1715,20 @@ class TestWorkerFindNextIssue:
     def test_picks_first_eligible_issue(self, tmp_path: Path) -> None:
         """With no sub-issues to descend into, picker uses creation order."""
         worker, gh = self._make_worker(tmp_path)
+        fido_assignees = {"nodes": [{"login": "fido-bot"}]}
         issues = [
-            {"number": 1, "title": "First", "subIssues": {"nodes": []}},
-            {"number": 2, "title": "Second", "subIssues": {"nodes": []}},
+            {
+                "number": 1,
+                "title": "First",
+                "assignees": fido_assignees,
+                "subIssues": {"nodes": []},
+            },
+            {
+                "number": 2,
+                "title": "Second",
+                "assignees": fido_assignees,
+                "subIssues": {"nodes": []},
+            },
         ]
         gh.find_all_open_issues.return_value = issues
         gh.find_issues.return_value = issues
@@ -1726,7 +1742,12 @@ class TestWorkerFindNextIssue:
 
     def test_saves_state_when_issue_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 7, "title": "Fetch!", "subIssues": {"nodes": []}}
+        issue = {
+            "number": 7,
+            "title": "Fetch!",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -1751,7 +1772,12 @@ class TestWorkerFindNextIssue:
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
+        issue = {
+            "number": 5,
+            "title": "Add tests",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -1765,7 +1791,12 @@ class TestWorkerFindNextIssue:
 
     def test_calls_post_pickup_comment_when_issue_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
+        issue = {
+            "number": 5,
+            "title": "Add tests",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -1869,9 +1900,15 @@ class TestWorkerFindNextIssue:
         assert result == 200
         gh.find_all_open_issues.assert_called_once_with("alice", "proj")
 
-    def test_picks_first_open_sub_issue_and_claims_it(self, tmp_path: Path) -> None:
-        """When the assigned issue has an open, unassigned child, we claim
-        and descend into that child — it must land before the parent."""
+    def test_picks_first_open_sub_issue_under_owned_parent(
+        self, tmp_path: Path
+    ) -> None:
+        """When the assigned parent issue has an open unassigned child,
+        descent walks into that child and picks it as the leaf.  Under
+        the new contract (#775) the picker does **not** claim unassigned
+        children along the way — ownership is carried from the parent on
+        the trail.
+        """
         worker, gh = self._make_worker(tmp_path)
         closed_child = {
             "number": 110,
@@ -1892,9 +1929,9 @@ class TestWorkerFindNextIssue:
         parent_issue = {
             "number": 11,
             "title": "Parent",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": [closed_child, open_child]},
         }
-        # find_all_open_issues returns only open issues; closed_child is absent
         gh.find_all_open_issues.return_value = [parent_issue, open_child]
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -1903,16 +1940,21 @@ class TestWorkerFindNextIssue:
             patch.object(worker, "post_pickup_comment"),
         ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        # Picker chose the open child, and claimed it.
         assert result == 111
-        gh.add_assignee.assert_called_once_with("alice/proj", 111, "fido-bot")
+        # Strict no-claim rule: descent must not auto-assign the child.
+        gh.add_assignee.assert_not_called()
 
     def test_calls_post_pickup_comment_immediately_when_issue_found(
         self, tmp_path: Path
     ) -> None:
         """find_next_issue posts the pickup comment right after choosing the issue."""
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 17, "title": "Fix the thing", "subIssues": {"nodes": []}}
+        issue = {
+            "number": 17,
+            "title": "Fix the thing",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
@@ -2018,25 +2060,27 @@ class TestFreshSessionNudge:
 
 
 class TestPickNextIssue:
-    """Direct unit tests for _pick_next_issue / _walk_to_root / _descend_issue."""
+    """Direct unit tests for _pick_next_issue / _walk_to_root / _descend_issue.
 
-    def _claim_spy(self) -> tuple[list[int], Callable[[int], None]]:
-        claimed: list[int] = []
-        return claimed, claimed.append
+    Contract after #775:
+      * Walk-up continues to the true root.
+      * Descent is strict first-priority: only the first open sub-issue is
+        considered at each level; blocked-first-child abandons the tree.
+      * Descent never claims unassigned children.
+      * A resolved leaf is returned only when *login* is on the descent
+        trail (explicitly or via any ancestor in ``trail``).
+    """
 
     def test_single_assigned_issue_no_children_is_picked(self) -> None:
         from kennel.worker import _pick_next_issue
 
         issue = _issue(5, "Ready", assignees=["fido"], sub_issues=[])
-        claimed, claim = self._claim_spy()
         choice = _pick_next_issue(
             [issue],
             "fido",
             issue_index={5: issue},
-            claim=claim,
         )
         assert choice is not None and choice.number == 5
-        assert claimed == []
 
     def test_milestone_beats_no_milestone(self) -> None:
         from kennel.worker import _pick_next_issue
@@ -2047,50 +2091,53 @@ class TestPickNextIssue:
             [older, newer_with_ms],
             "fido",
             issue_index={1: older, 99: newer_with_ms},
-            claim=lambda n: None,
         )
         assert choice is not None and choice.number == 99
 
     def test_walks_up_to_root_before_descending(self) -> None:
-        """Assigned issue is a deep child — picker walks up to root, then
-        descends to whatever's first-open at the top of the tree."""
+        """Walk-up goes to the true root; descent picks the first open child.
+
+        Tree: #100 (root, owned) → [#200 (first, owned), #201 (second, owned)].
+        Assigned: #201.  Walk up: #201 → #100.  Descend from #100: first
+        child is #200 (owned), descend into #200, it is a leaf, owned on
+        trail → return #200.  Strict first-priority picks earliest sibling.
+        """
         from kennel.worker import _pick_next_issue
 
-        # Tree: #100 (root, unrelated) → [#200 (first, ours), #201 (second, ours)]
-        # We're assigned #201 but #200 comes before it in sub-issue order, so
-        # the descent from the root should pick #200.
         i200 = _issue(200, state="OPEN", assignees=["fido"], parent=100)
         i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
-        i100 = _issue(100, "root", sub_issues=[i200, i201])
+        i100 = _issue(100, "root", assignees=["fido"], sub_issues=[i200, i201])
         issue_index = {100: i100, 200: i200, 201: i201}
 
-        # Only #201 is in the assigned list; picker must still walk up to 100.
         assigned = _issue(201, state="OPEN", assignees=["fido"], parent=100)
         choice = _pick_next_issue(
             [assigned],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
         assert choice is not None and choice.number == 200
 
-    def test_blocked_when_earlier_sibling_is_someone_elses(self) -> None:
+    def test_abandons_tree_when_first_child_is_blocked(self) -> None:
+        """Strict first-priority: a later sibling assigned to fido is not a
+        fallback when the first open child is assigned to someone else.
+
+        Tree: #100 (root) → [#200 (alice), #201 (fido)].  Even though
+        #201 is Fido's, #200 is the first open child and blocks the
+        tree.  Descent abandons immediately (return None); Fido has no
+        other candidate, so no leaf is picked.
+        """
         from kennel.worker import _pick_next_issue
 
-        # #100 → [#200 assigned to other, #201 assigned to fido]
         i200 = _issue(200, state="OPEN", assignees=["alice"], parent=100)
         i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
         i100 = _issue(100, "root", sub_issues=[i200, i201])
         issue_index = {100: i100, 200: i200, 201: i201}
-        # #200 blocks the earlier slot, but there's a later sibling (#201) that's ours.
-        # The descent walks each open child in order — blocked, then eligible.
         choice = _pick_next_issue(
             [_issue(201, assignees=["fido"], parent=100)],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
-        assert choice is not None and choice.number == 201
+        assert choice is None
 
     def test_returns_none_when_only_open_children_are_others(self) -> None:
         from kennel.worker import _pick_next_issue
@@ -2099,36 +2146,68 @@ class TestPickNextIssue:
         i201 = _issue(201, state="OPEN", assignees=["bob"], parent=100)
         i100 = _issue(100, "root", sub_issues=[i200, i201])
         issue_index = {100: i100, 200: i200, 201: i201}
-        # Neither sibling is ours. Tree is blocked.
         choice = _pick_next_issue(
             [_issue(201, assignees=["bob"], parent=100)],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
         assert choice is None
 
-    def test_claims_unassigned_child_then_descends(self) -> None:
-        """Walks down a chain of unassigned descendants, claiming each."""
+    def test_descent_does_not_claim_unassigned_children(self) -> None:
+        """Descent is read-only: unassigned children are walked through but
+        never auto-assigned.  Ownership is carried from an ancestor in the
+        trail so the resolved leaf is still pickable.
+
+        Tree: #100 (owned) → #200 (unassigned) → #300 (unassigned, leaf).
+        Descent walks 100 → 200 → 300 without calling any claim hook.
+        The leaf is returned because #100 is owned on the trail.
+        """
         from kennel.worker import _pick_next_issue
 
-        # Tree: #100 → #200 (unassigned) → #300 (unassigned).
-        # The full tree is in the index; descent claims both children.
         i300 = _issue(300, state="OPEN", assignees=[], parent=200, sub_issues=[])
         i200 = _issue(200, state="OPEN", assignees=[], parent=100, sub_issues=[i300])
         i100 = _issue(100, "root", assignees=["fido"], sub_issues=[i200])
         issue_index = {100: i100, 200: i200, 300: i300}
 
-        claimed, claim = self._claim_spy()
+        # Patching add_assignee globally would be wrong here — _pick_next_issue
+        # no longer calls anything that claims.  We assert the signature has
+        # no `claim` parameter and that the resolved leaf is returned.
         choice = _pick_next_issue(
             [i100],
             "fido",
             issue_index=issue_index,
-            claim=claim,
         )
         assert choice is not None and choice.number == 300
-        # Both #200 and #300 were claimed on the way down.
-        assert claimed == [200, 300]
+
+    def test_returns_none_when_leaf_is_not_owned_on_trail(self) -> None:
+        """Descent into an unowned subtree must not return a leaf.
+
+        Tree: #100 (root, unassigned) → #200 (unassigned, leaf).  Fido
+        has a candidate that walks up to #100 (via the candidate's own
+        parent chain), but nothing on the descent path is assigned to
+        Fido.  Descent reaches the leaf but ``owned_on_trail`` is False,
+        so the picker returns None — Fido has no stake in this subtree.
+        """
+
+        # Candidate #900 lives in its own tree; we set up a situation where
+        # _walk_to_root returns #100 (candidate's grand-parent), but #100's
+        # subtree has no fido-assigned node.
+        i200 = _issue(200, state="OPEN", assignees=[], parent=100, sub_issues=[])
+        i100 = _issue(100, "root", sub_issues=[i200])
+        issue_index = {100: i100, 200: i200}
+        # The candidate here is #100 itself (contrived — no actual assignment
+        # but we test the descent path directly).  Use the direct call.
+        from kennel.worker import _descend_issue
+
+        choice = _descend_issue(
+            i100,
+            "fido",
+            issue_index=issue_index,
+            trail=[100],
+            milestone_source=None,
+            owned_on_trail=False,
+        )
+        assert choice is None
 
     def test_parent_cycle_is_broken_gracefully(self) -> None:
         """A self-referencing parent doesn't infinite-loop the walk."""
@@ -2136,13 +2215,11 @@ class TestPickNextIssue:
 
         node = _issue(50, "A", parent=50)
         result = _walk_to_root(node, issue_index={50: node})
-        # The walk bails at the first revisit; result is the node we end on.
         assert result["number"] == 50
 
     def test_reason_includes_descent_trail(self) -> None:
         from kennel.worker import _pick_next_issue
 
-        # root → leaf, picker ends at leaf with descent trail in reason.
         leaf = _issue(20, state="OPEN", assignees=["fido"], parent=10)
         root = _issue(10, "root", assignees=["fido"], sub_issues=[leaf])
         issue_index = {10: root, 20: leaf}
@@ -2150,7 +2227,6 @@ class TestPickNextIssue:
             [root],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
         assert choice is not None
         assert choice.number == 20
@@ -2161,7 +2237,7 @@ class TestPickNextIssue:
         from kennel.worker import _pick_next_issue
 
         child = _issue(2, state="OPEN", assignees=["fido"], parent=1)
-        root = _issue(1, "root", sub_issues=[child])
+        root = _issue(1, "root", assignees=["fido"], sub_issues=[child])
         issue_index = {1: root, 2: child}
 
         a = _issue(2, state="OPEN", assignees=["fido"], parent=1)
@@ -2170,23 +2246,22 @@ class TestPickNextIssue:
             [a, b],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
         assert choice is not None and choice.number == 2
-        # Walks up for each of the two, but descent runs exactly once (roots are deduped).
 
     def test_milestone_inherited_via_parent_note_in_reason(self) -> None:
         from kennel.worker import _pick_next_issue
 
         child = _issue(20, state="OPEN", assignees=["fido"], parent=10)
-        parent = _issue(10, "parent", milestone="v1", sub_issues=[child])
+        parent = _issue(
+            10, "parent", assignees=["fido"], milestone="v1", sub_issues=[child]
+        )
         issue_index = {10: parent, 20: child}
         assigned = _issue(20, state="OPEN", assignees=["fido"], parent=10)
         choice = _pick_next_issue(
             [assigned],
             "fido",
             issue_index=issue_index,
-            claim=lambda n: None,
         )
         assert choice is not None
         assert choice.number == 20
@@ -2197,11 +2272,68 @@ class TestPickNextIssue:
         the walk stops and treats the current node as the root."""
         from kennel.worker import _walk_to_root
 
-        # #200 claims parent #100, but #100 is not in the index (closed).
         child = _issue(200, state="OPEN", assignees=["fido"], parent=100)
         result = _walk_to_root(child, issue_index={200: child})
-        # Walk stops; the child itself is treated as the root.
         assert result["number"] == 200
+
+    def test_single_parent_assignment_contains_picker_to_subtree(self) -> None:
+        """Regression for #775's primary goal.
+
+        Fido is assigned only to #710 (mid-tree).  The true root is #40,
+        and #40's first open child is #39 (v3 tracker, not in Fido's
+        tree).  Under the new rules, descent from #40 goes into #39 and
+        eventually finds a leaf not on Fido's ownership trail — so the
+        picker returns None.  Without the strict-priority + no-claim
+        rules, the picker would have wandered into some sibling leaf
+        and claimed it.
+        """
+        from kennel.worker import _pick_next_issue
+
+        # Tree: #40 → [#39 → #33 (leaf, unassigned), #41 → #396 → #710 (Fido)]
+        i33 = _issue(33, state="OPEN", assignees=[], parent=39, sub_issues=[])
+        i39 = _issue(39, "v3", sub_issues=[i33])
+        i710 = _issue(710, state="OPEN", assignees=["fido"], parent=396, sub_issues=[])
+        i396 = _issue(396, "migration umbrella", parent=41, sub_issues=[i710])
+        i41 = _issue(41, "bugs", parent=40, sub_issues=[i396])
+        i40 = _issue(40, "root", sub_issues=[i39, i41])
+        issue_index = {40: i40, 39: i39, 33: i33, 41: i41, 396: i396, 710: i710}
+
+        candidate = _issue(710, state="OPEN", assignees=["fido"], parent=396)
+        choice = _pick_next_issue(
+            [candidate],
+            "fido",
+            issue_index=issue_index,
+        )
+        # Descent from #40 goes into #39 → #33.  #33 is unassigned and
+        # Fido owns nothing on [40, 39, 33] — abandon.
+        assert choice is None
+
+    def test_single_parent_assignment_picks_when_priority_path_hits_subtree(
+        self,
+    ) -> None:
+        """Sibling variant: the priority path actually enters Fido's subtree.
+
+        Tree: #40 → [#41 (first, our chain) → #710 (Fido) → #711 (Fido leaf)].
+        Descent 40 → 41 → 710 → 711.  #710 is owned on trail → leaf #711
+        is returned.
+        """
+        from kennel.worker import _pick_next_issue
+
+        i711 = _issue(711, state="OPEN", assignees=["fido"], parent=710, sub_issues=[])
+        i710 = _issue(
+            710, state="OPEN", assignees=["fido"], parent=41, sub_issues=[i711]
+        )
+        i41 = _issue(41, "bugs", parent=40, sub_issues=[i710])
+        i40 = _issue(40, "root", sub_issues=[i41])
+        issue_index = {40: i40, 41: i41, 710: i710, 711: i711}
+
+        candidate = _issue(710, state="OPEN", assignees=["fido"], parent=41)
+        choice = _pick_next_issue(
+            [candidate],
+            "fido",
+            issue_index=issue_index,
+        )
+        assert choice is not None and choice.number == 711
 
 
 class TestWorkerPostPickupComment:

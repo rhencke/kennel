@@ -410,7 +410,6 @@ def _pick_next_issue(
     login: str,
     *,
     issue_index: dict[int, dict[str, Any]],
-    claim: Callable[[int], None],
 ) -> PickerChoice | None:
     """Select the next issue to work on from the picker rules in #433.
 
@@ -418,17 +417,20 @@ def _pick_next_issue(
     in the repo (built from :meth:`~kennel.github.GitHub.find_all_open_issues`).
     Issues absent from the index are closed or unplanned and are skipped.
 
-    Algorithm:
+    Algorithm (fix for #775):
 
     1. For each assigned *candidate*, walk upward via ``.parent`` to the
-       root ancestor — the user requires the chosen issue to be the
+       true root ancestor — the user requires the chosen issue to be the
        "first open" item from the root down, not just from here.
     2. Dedupe roots by issue number.
     3. Rank roots: milestone-present before milestone-absent, then the
        original creation order of the first assigned descendant.
-    4. Descend each root via :func:`_descend_issue` — unassigned
-       children get claimed, children assigned to someone else block
-       their branch, and the first eligible leaf wins.
+    4. Descend each root via :func:`_descend_issue` using **strict
+       first-priority** semantics — consider only the first open
+       sub-issue at each level, abandon the tree if it is blocked by
+       another assignee, never claim unassigned children during descent,
+       and only return a leaf that *login* already owns (either
+       explicitly or via an ancestor in the descent trail).
     """
     roots: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -449,9 +451,9 @@ def _pick_next_issue(
             root,
             login,
             issue_index=issue_index,
-            claim=claim,
             trail=[root["number"]],
             milestone_source=root if _has_milestone(root) else None,
+            owned_on_trail=login in _issue_assignees(root),
         )
         if choice is not None:
             return choice
@@ -500,18 +502,25 @@ def _descend_issue(
     login: str,
     *,
     issue_index: dict[int, dict[str, Any]],
-    claim: Callable[[int], None],
     trail: list[int],
     milestone_source: dict[str, Any] | None,
+    owned_on_trail: bool,
 ) -> PickerChoice | None:
-    """Walk down *issue*'s sub-issues in rank order; return the first
-    eligible leaf (or *issue* itself if it has no open children).
+    """Strict first-priority descent (fix for #775).
 
-    Uses *issue_index* to resolve each child's full node (including its own
-    sub-issues) without additional API calls.  Children absent from the index
-    are closed or done and are treated as CLOSED.
+    At each level, the picker considers **only the first open sub-issue**
+    (in the order GitHub returns them — creation order).  If that first
+    open child is assigned to someone other than *login*, the whole tree
+    is abandoned (return ``None``) — later sibling branches are not
+    tried, preserving strict priority semantics.
 
-    Returns ``None`` when the whole subtree is blocked by other assignees.
+    Descent never claims unassigned children.  Ownership tracking is
+    carried through the recursion via *owned_on_trail*: it stays ``True``
+    once any node along the descent path is assigned to *login*.  A leaf
+    is returned only when *owned_on_trail* is ``True`` (i.e. Fido owns
+    the leaf itself, or an ancestor in ``trail``); otherwise the picker
+    walked into a subtree Fido has no stake in, and returns ``None`` so
+    the caller can move on to a different candidate's root.
     """
     children = list(issue.get("subIssues", {}).get("nodes") or [])
     # A child is "open" only when it is still present in the index (i.e.
@@ -524,6 +533,14 @@ def _descend_issue(
     ]
 
     if not open_children:
+        if not owned_on_trail:
+            log.info(
+                "picker: #%s reached as leaf but not owned by %s on trail %s — abandoning",
+                issue["number"],
+                login,
+                "/".join(f"#{n}" for n in trail),
+            )
+            return None
         depth_note = (
             f" (descended from #{'/#'.join(str(n) for n in trail[:-1])})"
             if len(trail) > 1
@@ -538,45 +555,29 @@ def _descend_issue(
             reason=f"picker: pick #{issue['number']}{depth_note}{milestone_note}",
         )
 
-    any_open = False
-    for child in open_children:
-        assignees = _issue_assignees(child)
-        if assignees and login not in assignees:
-            log.info(
-                "picker: skipping #%s — assigned to %s (blocks tree under #%s)",
-                child["number"],
-                ",".join(assignees),
-                trail[0],
-            )
-            continue
-        any_open = True
-        if login not in assignees:
-            log.info(
-                "picker: claiming #%s (unassigned child of #%s) as %s",
-                child["number"],
-                issue["number"],
-                login,
-            )
-            claim(child["number"])
-        choice = _descend_issue(
-            child,
-            login,
-            issue_index=issue_index,
-            claim=claim,
-            trail=[*trail, child["number"]],
-            milestone_source=(
-                milestone_source or (child if _has_milestone(child) else None)
-            ),
-        )
-        if choice is not None:
-            return choice
-    # Every open child was blocked by someone else.
-    if not any_open:
+    # Strict first-priority: consider only the first open child.
+    first = open_children[0]
+    assignees = _issue_assignees(first)
+    if assignees and login not in assignees:
         log.info(
-            "picker: #%s skipped — all open sub-issues blocked by other assignees",
-            issue["number"],
+            "picker: abandoning tree under #%s — first open sub-issue #%s blocked by %s",
+            trail[0],
+            first["number"],
+            ",".join(assignees),
         )
-    return None
+        return None
+
+    child_owned = login in assignees
+    return _descend_issue(
+        first,
+        login,
+        issue_index=issue_index,
+        trail=[*trail, first["number"]],
+        milestone_source=(
+            milestone_source or (first if _has_milestone(first) else None)
+        ),
+        owned_on_trail=owned_on_trail or child_owned,
+    )
 
 
 def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1116,14 +1117,10 @@ class Worker:
             repo_ctx.owner, repo_ctx.repo_name, repo_ctx.gh_user
         )
 
-        def claim(number: int) -> None:
-            self.gh.add_assignee(repo_ctx.repo, number, repo_ctx.gh_user)
-
         choice = _pick_next_issue(
             candidates,
             repo_ctx.gh_user,
             issue_index=issue_index,
-            claim=claim,
         )
         if choice is None:
             log.info(
