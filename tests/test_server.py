@@ -93,6 +93,7 @@ def _restore_handler_fns():
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
         "_fn_create_task": WebhookHandler._fn_create_task,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
+        "_fn_unblock_tasks": WebhookHandler._fn_unblock_tasks,
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
@@ -1861,6 +1862,76 @@ class TestProcessAction:
         finally:
             WebhookHandler._respond = original_respond  # type: ignore[method-assign]
         assert call_order == ["dispatch", "respond_200"]
+
+    def test_review_comment_calls_unblock_tasks(self, server: tuple) -> None:
+        """A pull_request_review_comment triggers unblock_tasks so BLOCKED tasks resume."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 700,
+                "body": "here is the answer",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 71, "title": "My PR", "body": ""},
+        }
+        mock_unblock = MagicMock(return_value=0)
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_unblock_tasks = mock_unblock
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        mock_unblock.assert_called_once_with(cfg.repos["owner/repo"].work_dir)
+
+    def test_issue_comment_calls_unblock_tasks(self, server: tuple) -> None:
+        """A top-level PR comment triggers unblock_tasks so BLOCKED tasks resume."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 701,
+                "body": "here is what you need",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/71#issuecomment-701",
+            },
+            "issue": {
+                "number": 71,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_unblock = MagicMock(return_value=0)
+        WebhookHandler.gh = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_unblock_tasks = mock_unblock
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        mock_unblock.assert_called_once_with(cfg.repos["owner/repo"].work_dir)
+
+    def test_non_comment_event_does_not_call_unblock_tasks(self, server: tuple) -> None:
+        """A PR merge event (no comment body) must NOT trigger unblock_tasks."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 72, "merged": True},
+        }
+        mock_unblock = MagicMock(return_value=0)
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_unblock_tasks = mock_unblock
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        mock_unblock.assert_not_called()
 
 
 class TestPopulateMemberships:

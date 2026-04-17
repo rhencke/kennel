@@ -19,6 +19,7 @@ from kennel.tasks import (
     list_tasks,
     remove_task,
     reorder_tasks,
+    unblock_tasks,
     update_task,
 )
 from kennel.types import TaskStatus, TaskType
@@ -305,6 +306,45 @@ class TestRemoveTask:
     def test_returns_false_if_not_found(self, tmp_path: Path) -> None:
         add_task(tmp_path, title="t", task_type=TaskType.SPEC)
         assert not remove_task(tmp_path, "nonexistent")
+
+
+class TestUnblockTasks:
+    def test_unblocks_blocked_tasks(self, tmp_path: Path) -> None:
+        t1 = add_task(tmp_path, title="first", task_type=TaskType.SPEC)
+        t2 = add_task(tmp_path, title="second", task_type=TaskType.SPEC)
+        update_task(tmp_path, t1["id"], TaskStatus.BLOCKED)
+        update_task(tmp_path, t2["id"], TaskStatus.BLOCKED)
+        count = unblock_tasks(tmp_path)
+        assert count == 2
+        tasks = list_tasks(tmp_path)
+        assert all(t["status"] == str(TaskStatus.PENDING) for t in tasks)
+
+    def test_returns_zero_when_nothing_blocked(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t", task_type=TaskType.SPEC)
+        assert unblock_tasks(tmp_path) == 0
+
+    def test_does_not_touch_non_blocked_tasks(self, tmp_path: Path) -> None:
+        t1 = add_task(tmp_path, title="pending", task_type=TaskType.SPEC)
+        t2 = add_task(tmp_path, title="done", task_type=TaskType.SPEC)
+        t3 = add_task(tmp_path, title="blocked", task_type=TaskType.SPEC)
+        update_task(tmp_path, t2["id"], TaskStatus.COMPLETED)
+        update_task(tmp_path, t3["id"], TaskStatus.BLOCKED)
+        count = unblock_tasks(tmp_path)
+        assert count == 1
+        tasks = {t["id"]: t for t in list_tasks(tmp_path)}
+        assert tasks[t1["id"]]["status"] == str(TaskStatus.PENDING)
+        assert tasks[t2["id"]]["status"] == str(TaskStatus.COMPLETED)
+        assert tasks[t3["id"]]["status"] == str(TaskStatus.PENDING)
+
+    def test_returns_zero_on_empty_file(self, tmp_path: Path) -> None:
+        assert unblock_tasks(tmp_path) == 0
+
+    def test_tasks_unblock_tasks_method(self, tmp_path: Path) -> None:
+        task = add_task(tmp_path, title="t", task_type=TaskType.SPEC)
+        update_task(tmp_path, task["id"], TaskStatus.BLOCKED)
+        count = Tasks(tmp_path).unblock_tasks()
+        assert count == 1
+        assert list_tasks(tmp_path)[0]["status"] == str(TaskStatus.PENDING)
 
 
 # ── _parse_reorder_response ───────────────────────────────────────────────────

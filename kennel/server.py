@@ -43,6 +43,7 @@ from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
+from kennel.tasks import unblock_tasks
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     Watchdog,
@@ -430,6 +431,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
     _fn_create_task = staticmethod(create_task)
     _fn_launch_worker = staticmethod(launch_worker)
+    _fn_unblock_tasks = staticmethod(unblock_tasks)
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
@@ -703,6 +705,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 category,
                 len(titles),
             )
+            # When a human comments on a PR, transition any BLOCKED tasks back
+            # to PENDING so the worker can re-evaluate and resume.
+            if action.reply_to or action.comment_body:
+                type(self)._fn_unblock_tasks(repo_cfg.work_dir)
             # Non-comment events just trigger kennel worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)
         except claude.ClaudeLeakError:

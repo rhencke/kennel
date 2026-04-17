@@ -124,6 +124,11 @@ def remove_task(work_dir: Path, task_id: str) -> bool:
     return Tasks(work_dir).remove(task_id)
 
 
+def unblock_tasks(work_dir: Path) -> int:
+    """Transition all BLOCKED tasks to PENDING.  Compatibility shim — prefer :class:`Tasks`."""
+    return Tasks(work_dir).unblock_tasks()
+
+
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     """Format a task list into work-queue markdown.
 
@@ -668,3 +673,22 @@ class Tasks(JsonFileStore):
                     log.info("task %s → %s", task_id, status)
                     return True
         return False
+
+    def unblock_tasks(self) -> int:
+        """Transition all BLOCKED tasks back to PENDING.
+
+        Called when a new PR comment arrives so the worker can re-evaluate
+        whether it is still blocked.  Returns the number of tasks unblocked.
+        """
+        count = 0
+        with _locked(self._data_path, write=True) as lock:
+            task_list = lock.read()
+            for t in task_list:
+                if t.get("status") == TaskStatus.BLOCKED:
+                    t["status"] = str(TaskStatus.PENDING)
+                    count += 1
+            if count:
+                lock.write(task_list)
+        if count:
+            log.info("unblocked %d task(s)", count)
+        return count
