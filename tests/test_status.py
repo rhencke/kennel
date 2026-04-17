@@ -1942,6 +1942,14 @@ class TestFormatStatusColor:
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert _CODES["green_bg"] not in worker_line
 
+    def test_worker_label_green_bg_when_session_owner_is_worker(self) -> None:
+        repo = self._repo(issue=1, session_owner="worker-orly", session_alive=True)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
+        assert f"{_CODES['green_bg']}Worker:" in worker_line
+
     def test_webhook_label_yellow_when_talker(self) -> None:
         repo = self._repo(
             issue=1,
@@ -1983,6 +1991,18 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         assert f"{_CODES['dim']}session idle" in output
+
+    def test_session_idle_hidden_while_worker_owns_agent(self) -> None:
+        repo = self._repo(
+            issue=1,
+            claude_pid=999,
+            session_alive=True,
+            session_owner="worker-orly",
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert "session idle" not in output
 
     def test_claude_running_uptime_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, claude_uptime=120)
