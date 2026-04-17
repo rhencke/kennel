@@ -64,3 +64,49 @@ def color(style: str, text: str) -> str:
     if not code:
         return text
     return f"{code}{text}{_RESET}"
+
+
+def wrap_raw(escape: str, text: str) -> str:
+    """Wrap *text* in a raw ANSI *escape* sequence when color is enabled.
+
+    Lower-level than :func:`color`: accepts any pre-built ANSI escape
+    (e.g. from :func:`rgb_fg`/:func:`rgb_bg`) so callers can render
+    provider-specific truecolor without registering a named style for
+    every provider.  Returns *text* unchanged when color is disabled or
+    *escape* is empty.
+    """
+    if not _color_enabled():
+        return text
+    if not escape:
+        return text
+    return f"{escape}{text}{_RESET}"
+
+
+def rgb_fg(r: int, g: int, b: int) -> str:
+    """Return a truecolor-foreground ANSI escape for (r, g, b)."""
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def rgb_bg(r: int, g: int, b: int) -> str:
+    """Return a truecolor-background ANSI escape for (r, g, b)."""
+    return f"\033[48;2;{r};{g};{b}m"
+
+
+def wrap_bg_line(bg_escape: str, line: str) -> str:
+    """Apply *bg_escape* across a pre-styled *line* so inner resets don't
+    punch holes in the background.
+
+    Inner ``\\x1b[0m`` resets clear every attribute, including the
+    background — so a naive ``f"{bg}{line}{_RESET}"`` would lose the tint
+    after the first styled token.  This helper re-applies ``bg_escape``
+    after every internal reset so the bg persists across the entire line,
+    then closes with a single final reset.
+
+    Returns *line* unchanged when color is disabled or *bg_escape* is
+    empty.
+    """
+    if not _color_enabled() or not bg_escape:
+        return line
+    if _RESET in line:
+        line = line.replace(_RESET, f"{_RESET}{bg_escape}")
+    return f"{bg_escape}{line}{_RESET}"

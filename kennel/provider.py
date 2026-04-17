@@ -31,6 +31,54 @@ class ProviderID(StrEnum):
     GEMINI = "gemini"
 
 
+@dataclass(frozen=True)
+class ProviderPalette:
+    """ANSI truecolor palette for a provider's status rendering.
+
+    ``dim_bg`` tints a repo's section block so all that repo's lines share
+    a provider-identifying background; ``bright_fg`` colors the provider's
+    token inside the global ``limits:`` line.  Both values are RGB triples
+    in the 0–255 range.
+
+    Guidelines for adding a new provider:
+
+    * ``dim_bg`` should be very dark (L* ≲ 20) so existing bright
+      foreground colors (white, cyan, yellow, magenta) remain readable
+      against it.  Aim for ≥4.5:1 contrast against white.
+    * ``bright_fg`` should be saturated and mid-to-high lightness so it
+      remains legible on a typical dark terminal background.  Light
+      terminals will lose contrast — users can opt out with ``NO_COLOR``.
+    """
+
+    dim_bg: tuple[int, int, int]
+    bright_fg: tuple[int, int, int]
+
+
+# Provider-specific color palettes.  Kept in one table so the contrast
+# audit test can iterate every provider and assert WCAG AA thresholds;
+# :mod:`kennel.status` looks colors up by ``ProviderID`` at render time.
+PROVIDER_PALETTES: dict[ProviderID, ProviderPalette] = {
+    ProviderID.CLAUDE_CODE: ProviderPalette(
+        dim_bg=(30, 15, 0),  # very dark burnt orange
+        bright_fg=(255, 160, 60),  # Claude-orange, legible on dark terminals
+    ),
+    ProviderID.COPILOT_CLI: ProviderPalette(
+        dim_bg=(22, 10, 30),  # very dark plum
+        bright_fg=(180, 130, 255),  # Copilot-purple, legible on dark terminals
+    ),
+}
+
+
+def palette_for(provider: ProviderID) -> ProviderPalette | None:
+    """Return the :class:`ProviderPalette` for *provider*, or ``None``.
+
+    Returns ``None`` for providers without a registered palette (e.g.
+    ``CODEX`` / ``GEMINI`` today).  Callers treat ``None`` as "render
+    without provider-specific color", not as an error.
+    """
+    return PROVIDER_PALETTES.get(provider)
+
+
 class TurnSessionMode(StrEnum):
     """How a provider turn should treat existing conversation state."""
 

@@ -133,3 +133,86 @@ class TestProviderModel:
 
     def test_comparison_to_unrelated_type_is_false(self) -> None:
         assert ProviderModel("gpt-5.4") != object()
+
+
+class TestProviderPalette:
+    """Provider-specific color palette + palette_for lookup + contrast audit."""
+
+    def test_palette_for_claude_code(self) -> None:
+        from kennel.provider import ProviderID, palette_for
+
+        palette = palette_for(ProviderID.CLAUDE_CODE)
+        assert palette is not None
+        assert palette.dim_bg == (30, 15, 0)
+        assert palette.bright_fg == (255, 160, 60)
+
+    def test_palette_for_copilot_cli(self) -> None:
+        from kennel.provider import ProviderID, palette_for
+
+        palette = palette_for(ProviderID.COPILOT_CLI)
+        assert palette is not None
+        assert palette.dim_bg == (22, 10, 30)
+        assert palette.bright_fg == (180, 130, 255)
+
+    def test_palette_for_codex_returns_none(self) -> None:
+        # CODEX/GEMINI have no palette registered today — callers must
+        # handle None as "render without provider color", not as an error.
+        from kennel.provider import ProviderID, palette_for
+
+        assert palette_for(ProviderID.CODEX) is None
+        assert palette_for(ProviderID.GEMINI) is None
+
+    @staticmethod
+    def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+        """WCAG relative luminance for an sRGB triple."""
+
+        def channel(value: int) -> float:
+            c = value / 255.0
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        r, g, b = rgb
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+    @classmethod
+    def _contrast_ratio(cls, a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+        la = cls._relative_luminance(a)
+        lb = cls._relative_luminance(b)
+        lighter, darker = (la, lb) if la >= lb else (lb, la)
+        return (lighter + 0.05) / (darker + 0.05)
+
+    def test_every_palette_clears_wcag_aa_vs_white(self) -> None:
+        """Dim-bg tints must keep white foreground text readable (≥4.5:1).
+
+        Prevents silent regressions when someone adds a new provider or
+        tweaks colors: the tint's dim_bg must preserve contrast with the
+        most common fg color used in status lines (white-ish).
+        """
+        from kennel.provider import PROVIDER_PALETTES
+
+        white = (255, 255, 255)
+        failures: list[str] = []
+        for pid, palette in PROVIDER_PALETTES.items():
+            ratio = self._contrast_ratio(palette.dim_bg, white)
+            if ratio < 4.5:
+                failures.append(
+                    f"{pid}: dim_bg={palette.dim_bg} vs white → {ratio:.2f}:1 (need ≥4.5)"
+                )
+        assert not failures, "\n".join(failures)
+
+    def test_bright_fg_clears_wcag_aa_vs_black(self) -> None:
+        """Bright fg on a typical dark-terminal bg must stay readable (≥4.5:1).
+
+        Light-terminal users get worse contrast — they should opt out
+        with NO_COLOR.  This test guards the dark-terminal happy path.
+        """
+        from kennel.provider import PROVIDER_PALETTES
+
+        black = (0, 0, 0)
+        failures: list[str] = []
+        for pid, palette in PROVIDER_PALETTES.items():
+            ratio = self._contrast_ratio(palette.bright_fg, black)
+            if ratio < 4.5:
+                failures.append(
+                    f"{pid}: bright_fg={palette.bright_fg} vs black → {ratio:.2f}:1"
+                )
+        assert not failures, "\n".join(failures)
