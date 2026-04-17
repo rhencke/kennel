@@ -143,7 +143,7 @@ class TestProviderPalette:
 
         palette = palette_for(ProviderID.CLAUDE_CODE)
         assert palette is not None
-        assert palette.dim_bg == (30, 15, 0)
+        assert palette.dim_bg == (60, 30, 5)
         assert palette.bright_fg == (255, 160, 60)
 
     def test_palette_for_copilot_cli(self) -> None:
@@ -151,7 +151,7 @@ class TestProviderPalette:
 
         palette = palette_for(ProviderID.COPILOT_CLI)
         assert palette is not None
-        assert palette.dim_bg == (22, 10, 30)
+        assert palette.dim_bg == (40, 20, 60)
         assert palette.bright_fg == (180, 130, 255)
 
     def test_palette_for_codex_returns_none(self) -> None:

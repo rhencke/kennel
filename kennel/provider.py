@@ -42,7 +42,7 @@ class ProviderPalette:
 
     Guidelines for adding a new provider:
 
-    * ``dim_bg`` should be very dark (L* ≲ 20) so existing bright
+    * ``dim_bg`` should be noticeably tinted but dark enough that bright
       foreground colors (white, cyan, yellow, magenta) remain readable
       against it.  Aim for ≥4.5:1 contrast against white.
     * ``bright_fg`` should be saturated and mid-to-high lightness so it
@@ -59,11 +59,11 @@ class ProviderPalette:
 # :mod:`kennel.status` looks colors up by ``ProviderID`` at render time.
 PROVIDER_PALETTES: dict[ProviderID, ProviderPalette] = {
     ProviderID.CLAUDE_CODE: ProviderPalette(
-        dim_bg=(30, 15, 0),  # very dark burnt orange
+        dim_bg=(60, 30, 5),  # noticeable burnt orange tint, still dark
         bright_fg=(255, 160, 60),  # Claude-orange, legible on dark terminals
     ),
     ProviderID.COPILOT_CLI: ProviderPalette(
-        dim_bg=(22, 10, 30),  # very dark plum
+        dim_bg=(40, 20, 60),  # obvious plum tint, still dark
         bright_fg=(180, 130, 255),  # Copilot-purple, legible on dark terminals
     ),
 }
