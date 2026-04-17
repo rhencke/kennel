@@ -1628,7 +1628,28 @@ class Worker:
         )
         if not threads:
             return False
-        log.info("unresolved threads: %d", len(threads))
+
+        # Claim each thread's first_db_id before launching the comments
+        # sub-agent.  This makes the claim bidirectional: if the webhook
+        # handler claims a thread between _filter_threads and here we skip it;
+        # conversely, if we claim a thread here, a concurrent webhook handler
+        # will see the claim and skip its own reply.  Either way, exactly one
+        # path handles each thread.
+        claimable: list[dict[str, Any]] = []
+        claimed_ids: list[int] = []
+        for t in threads:
+            first_db_id = t.get("first_db_id")
+            if first_db_id is not None and not _webhook_claimed.claim(first_db_id):
+                log.info("skipping thread %s — claimed by webhook", first_db_id)
+            else:
+                if first_db_id is not None:
+                    claimed_ids.append(first_db_id)
+                claimable.append(t)
+
+        if not claimable:
+            return False
+
+        log.info("unresolved threads: %d", len(claimable))
         context = (
             f"PR: {pr_number}\n"
             f"Repo: {repo_ctx.repo}\n"
@@ -1638,17 +1659,24 @@ class Worker:
             f"Upstream: origin/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}\n"
             f"GitHub user: {repo_ctx.gh_user}\n"
-            f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
+            f"\nUnresolved threads (JSON):\n{json.dumps({'threads': claimable})}"
         )
         build_prompt(fido_dir, "comments", context)
-        session_id, _ = provider_run(
-            fido_dir,
-            agent=self._provider_agent,
-            model=self._provider_agent.work_model,
-            cwd=self.work_dir,
-            session=None,
-            session_mode=self._consume_turn_session_mode(),
-        )
+        try:
+            session_id, _ = provider_run(
+                fido_dir,
+                agent=self._provider_agent,
+                model=self._provider_agent.work_model,
+                cwd=self.work_dir,
+                session=None,
+                session_mode=self._consume_turn_session_mode(),
+            )
+        except Exception:
+            # Release claims so a webhook redelivery (or the next worker
+            # iteration) can retry.
+            for cid in claimed_ids:
+                _webhook_claimed.release(cid)
+            raise
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True

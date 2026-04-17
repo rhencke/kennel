@@ -1,17 +1,25 @@
-"""Process-wide set of webhook-claimed review comment IDs.
+"""Process-wide set of claimed review comment IDs.
 
 The :class:`RepliedComments` class is a thread-safe owner of a set of
-comment database IDs that the webhook handler has already claimed (or is
-currently processing a reply for).  A single instance lives here so that
-both the webhook handler (``server.py``) and the worker (``worker.py``)
-can consult it without a circular import.
+comment database IDs that have been claimed by either the webhook handler or
+the worker's ``handle_threads`` path.  A single instance lives here so that
+both sides can coordinate without a circular import.
 
-``server.py`` claims IDs before calling ``reply_to_comment()`` (atomic
-check-and-add via :meth:`RepliedComments.claim`).  ``worker.py`` uses the
-same set in :meth:`~kennel.worker.Worker._filter_threads` to skip threads
-whose first comment was already claimed, preventing the comments sub-agent
-from posting a duplicate reply even when the webhook reply is still in
-flight and not yet visible in the GitHub API.
+**Bidirectional claim protocol**:
+
+- ``server.py`` claims IDs before calling ``reply_to_comment()`` (atomic
+  check-and-add via :meth:`RepliedComments.claim`).  ``worker.py`` uses the
+  same set in :meth:`~kennel.worker.Worker._filter_threads` to skip threads
+  whose first comment was already claimed.
+
+- ``worker.py`` also claims each thread's ``first_db_id`` in
+  :meth:`~kennel.worker.Worker.handle_threads` before launching the comments
+  sub-agent.  A concurrent webhook handler that arrives after the worker has
+  claimed a thread will see the claim and skip its own reply.
+
+Whichever path claims first wins.  The other path sees the claim and skips,
+preventing the comments sub-agent and the webhook handler from each posting
+a duplicate reply to the same thread (fixes #672).
 """
 
 from __future__ import annotations

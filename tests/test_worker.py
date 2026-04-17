@@ -5701,6 +5701,16 @@ class TestResolveAddressedThreads:
 class TestHandleThreads:
     """Tests for Worker.handle_threads."""
 
+    @pytest.fixture(autouse=True)
+    def _clean_claimed(self):  # type: ignore[override]
+        """Discard the databaseId=1 that _open_thread_node puts in claimed after each test."""
+        import kennel.claimed as kc
+
+        yield
+        # _open_thread_node() uses databaseId=1 for its first comment; handle_threads now
+        # claims that ID.  Discard it so subsequent tests start with a clean slate.
+        kc.replied_comments.discard(1)
+
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         return Worker(tmp_path, gh), gh
@@ -5835,6 +5845,222 @@ class TestHandleThreads:
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert "unresolved threads" in caplog.text
+
+    def test_claims_thread_first_db_id_before_sub_agent(self, tmp_path: Path) -> None:
+        """handle_threads claims each thread's first_db_id in _webhook_claimed before the sub-agent runs."""
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()  # first comment databaseId=1
+        gh.get_review_threads.return_value = [node]
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("kennel.tasks.sync_tasks_background"),
+        ):
+            result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        # The first_db_id must now be in the claim set so a concurrent webhook
+        # handler will see it and skip its own reply.
+        assert 1 in kc.replied_comments
+        # autouse fixture discards 1 after the test
+
+    def test_skips_thread_if_claimed_in_race_window(self, tmp_path: Path) -> None:
+        """Race simulation: webhook claims a thread ID after _filter_threads but before handle_threads claims it.
+
+        _filter_threads already checks the claim set, so we patch it to inject a thread
+        with a pre-claimed first_db_id — simulating the narrow race window between
+        _filter_threads returning and handle_threads reaching the claim step.
+        """
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = []  # not used; _filter_threads is patched
+        fido_dir = self._fido_dir(tmp_path)
+        race_thread = {
+            "id": "thread-race",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 901,
+            "first_body": "feedback",
+            "last_author": "owner",
+            "last_body": "feedback",
+            "url": "https://example.com",
+            "total": 1,
+        }
+        kc.replied_comments.add(901)
+        try:
+            with (
+                patch.object(w, "_filter_threads", return_value=[race_thread]),
+                patch("kennel.worker.build_prompt") as mock_bp,
+                patch(
+                    "kennel.worker.provider_run", return_value=("sid", "")
+                ) as mock_pr,
+                patch("kennel.tasks.sync_tasks_background"),
+            ):
+                result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+            assert result is False
+            mock_bp.assert_not_called()
+            mock_pr.assert_not_called()
+        finally:
+            kc.replied_comments.discard(901)
+
+    def test_returns_false_when_all_threads_claimed_in_race_window(
+        self, tmp_path: Path
+    ) -> None:
+        """Returns False when every filtered thread is claimed before handle_threads claims them."""
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        race_thread_a = {
+            "id": "thread-a",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 902,
+            "first_body": "feedback a",
+            "last_author": "owner",
+            "last_body": "feedback a",
+            "url": "https://example.com/a",
+            "total": 1,
+        }
+        race_thread_b = {
+            "id": "thread-b",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 903,
+            "first_body": "feedback b",
+            "last_author": "owner",
+            "last_body": "feedback b",
+            "url": "https://example.com/b",
+            "total": 1,
+        }
+        kc.replied_comments.add(902)
+        kc.replied_comments.add(903)
+        try:
+            with (
+                patch.object(
+                    w, "_filter_threads", return_value=[race_thread_a, race_thread_b]
+                ),
+                patch(
+                    "kennel.worker.provider_run", return_value=("sid", "")
+                ) as mock_pr,
+            ):
+                result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+            assert result is False
+            mock_pr.assert_not_called()
+        finally:
+            kc.replied_comments.discard(902)
+            kc.replied_comments.discard(903)
+
+    def test_releases_claims_on_provider_run_failure(self, tmp_path: Path) -> None:
+        """If provider_run raises, claimed thread IDs are released so the next attempt can retry."""
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()  # first comment databaseId=1
+        gh.get_review_threads.return_value = [node]
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.provider_run", side_effect=RuntimeError("boom")),
+            patch("kennel.tasks.sync_tasks_background"),
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        # Claim must be released so the webhook or next iteration can retry.
+        assert 1 not in kc.replied_comments
+        # autouse fixture also discards 1, redundant but harmless
+
+    def test_logs_skip_when_thread_claimed_in_race_window(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """Threads dropped in the race window produce an info-level log with the claimed ID."""
+        import logging
+
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        race_thread = {
+            "id": "thread-race",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 904,
+            "first_body": "feedback",
+            "last_author": "owner",
+            "last_body": "feedback",
+            "url": "https://example.com",
+            "total": 1,
+        }
+        kc.replied_comments.add(904)
+        try:
+            with (
+                patch.object(w, "_filter_threads", return_value=[race_thread]),
+                patch("kennel.worker.build_prompt"),
+                patch("kennel.worker.provider_run", return_value=("sid", "")),
+                patch("kennel.tasks.sync_tasks_background"),
+                caplog.at_level(logging.INFO, logger="kennel"),
+            ):
+                w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+            assert "claimed by webhook" in caplog.text
+        finally:
+            kc.replied_comments.discard(904)
+
+    def test_passes_only_claimable_threads_to_sub_agent_context(
+        self, tmp_path: Path
+    ) -> None:
+        """Only unclaimed threads are included in the context JSON passed to the sub-agent."""
+        import kennel.claimed as kc
+
+        w, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        # Inject two threads via _filter_threads: one pre-claimed (race window),
+        # one still free.
+        claimed_thread = {
+            "id": "thread-c",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 905,
+            "first_body": "claimed comment body",
+            "last_author": "owner",
+            "last_body": "claimed comment body",
+            "url": "https://example.com/c",
+            "total": 1,
+        }
+        free_thread = {
+            "id": "thread-f",
+            "is_bot": False,
+            "first_author": "owner",
+            "first_db_id": 906,
+            "first_body": "free comment body",
+            "last_author": "owner",
+            "last_body": "free comment body",
+            "url": "https://example.com/f",
+            "total": 1,
+        }
+        kc.replied_comments.add(905)
+        kc.replied_comments.discard(906)
+        try:
+            with (
+                patch.object(
+                    w, "_filter_threads", return_value=[claimed_thread, free_thread]
+                ),
+                patch("kennel.worker.build_prompt") as mock_bp,
+                patch("kennel.worker.provider_run", return_value=("sid", "")),
+                patch("kennel.tasks.sync_tasks_background"),
+            ):
+                w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+            _, _, context = mock_bp.call_args[0]
+            assert "free comment body" in context
+            assert "claimed comment body" not in context
+        finally:
+            kc.replied_comments.discard(905)
+            kc.replied_comments.discard(906)
 
 
 class TestRunThreadsIntegration:
