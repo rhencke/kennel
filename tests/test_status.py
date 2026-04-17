@@ -25,6 +25,7 @@ from kennel.status import (
     _current_task,
     _fetch_activities,
     _fido_running,
+    _format_agent_line,
     _format_uptime,
     _git_dir,
     _kennel_pid,
@@ -1306,6 +1307,98 @@ class TestCollect:
         assert kwargs["rescoping"] is False
 
 
+class TestFormatAgentLine:
+    """Unit tests for _format_agent_line — the dedicated per-repo agent body line."""
+
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_returns_none_when_no_pid_and_session_not_alive(self) -> None:
+        repo = self._repo(claude_pid=None, session_alive=False)
+        assert _format_agent_line(repo) is None
+
+    def test_returns_line_when_pid_present(self) -> None:
+        repo = self._repo(claude_pid=1234)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "pid 1234" in line
+
+    def test_returns_line_when_session_alive_no_pid(self) -> None:
+        repo = self._repo(claude_pid=None, session_alive=True)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "agent" in line
+
+    def test_includes_uptime_when_present(self) -> None:
+        repo = self._repo(claude_pid=42, claude_uptime=90)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "running 1m" in line
+
+    def test_omits_uptime_when_absent(self) -> None:
+        repo = self._repo(claude_pid=42, claude_uptime=None)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "running" not in line
+
+    def test_includes_session_idle_when_alive_and_no_talker(self) -> None:
+        repo = self._repo(claude_pid=42, session_alive=True, claude_talker=None)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "session idle" in line
+
+    def test_omits_session_idle_when_worker_is_agent_talker(self) -> None:
+        repo = self._repo(
+            claude_pid=42,
+            session_alive=True,
+            session_owner="worker-orly",
+        )
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "session idle" not in line
+
+    def test_includes_dropped_count_singular(self) -> None:
+        repo = self._repo(claude_pid=42, session_dropped_count=1)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "dropped session 1" in line
+
+    def test_includes_dropped_count_plural(self) -> None:
+        repo = self._repo(claude_pid=42, session_dropped_count=3)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "dropped sessions 3" in line
+
+    def test_uses_provider_name_as_label(self) -> None:
+        from kennel.provider import ProviderID
+
+        repo = self._repo(claude_pid=42, provider=ProviderID.COPILOT_CLI)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "copilot-cli" in line
+
+    def test_indented_with_two_spaces(self) -> None:
+        repo = self._repo(claude_pid=42)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert line.startswith("  ")
+
+
 class TestFormatStatus:
     def _repo(self, **kwargs) -> RepoStatus:
         defaults = dict(
@@ -1514,27 +1607,28 @@ class TestFormatStatus:
         # No task → Worker line shows waiting for work
         assert "Worker: waiting for work" in output
 
-    def test_claude_pid_on_worker_summary_when_no_talker(self) -> None:
-        """Runtime stats ride the repo summary when nobody is currently talking."""
+    def test_claude_pid_on_agent_line_when_no_talker(self) -> None:
+        """Agent info appears on a dedicated body line, not as a header suffix."""
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ pid 9999 (running 3m)" in output
-        # Header (worker summary) line carries the suffix.
-        assert any(
-            line.startswith("owner/repo:") and "→ pid 9999" in line
+        assert "pid 9999" in output
+        assert "running 3m" in output
+        # Info is on a body line, not the repo header.
+        assert not any(
+            line.startswith("owner/repo:") and "pid 9999" in line
             for line in output.splitlines()
         )
 
-    def test_claude_pid_no_uptime_on_worker_summary(self) -> None:
+    def test_claude_pid_no_uptime_on_agent_line(self) -> None:
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ pid 9999" in output
+        assert "pid 9999" in output
         assert "running" not in output
 
-    def test_worker_talker_highlights_worker_line_without_pid_suffix(self) -> None:
-        """Worker-kind talker → highlight the Worker label instead of a pid suffix."""
+    def test_worker_talker_shows_agent_line_and_no_pid_on_header(self) -> None:
+        """Worker-kind talker → agent line still shown; repo header carries no pid info."""
         repo = self._repo(
             issue=1,
             claude_pid=9999,
@@ -1549,16 +1643,14 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        worker_lines = [
-            line for line in output.splitlines() if line.startswith("  Worker:")
-        ]
-        assert any("→ pid" not in line for line in worker_lines)
-        # Header does not duplicate it.
+        # Agent line is always present when there's a pid.
+        assert "pid 9999" in output
+        # Header does not carry pid info — that belongs to the agent line.
         header = next(line for line in output.splitlines() if line.startswith("owner"))
-        assert "→ pid" not in header
+        assert "pid 9999" not in header
 
-    def test_agent_runtime_suffix_session_alive_no_talker(self) -> None:
-        """Session subprocess alive but nobody holds the lock → 'session idle'."""
+    def test_agent_line_session_alive_no_talker(self) -> None:
+        """Session alive but nobody holds the lock → dedicated line with 'session idle'."""
         repo = self._repo(
             issue=1,
             claude_pid=9999,
@@ -1568,11 +1660,15 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        # Suffix appears on worker summary and mentions session idle.
-        assert "→ pid 9999 (running 1m, session idle)" in output
+        # Appears on the dedicated agent line, not as a header suffix.
+        assert "pid 9999 (running 1m, session idle)" in output
+        assert not any(
+            line.startswith("owner/repo:") and "pid 9999" in line
+            for line in output.splitlines()
+        )
 
     def test_session_alive_without_claude_pid(self) -> None:
-        """Session_alive with no pid still signals idle agent presence."""
+        """Session_alive with no pid still signals idle agent presence on its own line."""
         repo = self._repo(
             issue=1,
             claude_pid=None,
@@ -1580,9 +1676,9 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ agent (session idle)" in output
+        assert "agent (session idle)" in output
 
-    def test_agent_runtime_suffix_shows_dropped_session_count(self) -> None:
+    def test_agent_line_shows_dropped_session_count(self) -> None:
         repo = self._repo(
             issue=1,
             claude_pid=9999,
@@ -1591,7 +1687,7 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ pid 9999 (running 1m, dropped sessions 2)" in output
+        assert "pid 9999 (running 1m, dropped sessions 2)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.

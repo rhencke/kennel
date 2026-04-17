@@ -613,14 +613,17 @@ _WEBHOOK_DISPLAY_CAP: int = 5
 """Max webhook lines to print per repo; overflow rolled into a +N-more line."""
 
 
-def _agent_runtime_suffix(repo: RepoStatus) -> str:
-    """`" → pid 123 (running 1m, session idle)"` or ``""``.
+def _format_agent_line(repo: RepoStatus) -> str | None:
+    """Dedicated first body line showing agent session state.
 
-    Used only when nobody is currently talking to the agent, so runtime/session
-    information still appears without hard-coding Claude onto active lines.
+    Returns None when there is nothing to display (no pid, session not alive).
+    Always shown when the agent exists — visible regardless of who is currently
+    talking so the info is never buried.  Uses the repo's provider as the label
+    so this works for Claude, Copilot, or any future provider.
     """
     if repo.claude_pid is None and not repo.session_alive:
-        return ""
+        return None
+
     parts: list[str] = []
     if repo.claude_uptime is not None:
         parts.append(color(DIM, f"running {_format_uptime(repo.claude_uptime)}"))
@@ -633,16 +636,17 @@ def _agent_runtime_suffix(repo: RepoStatus) -> str:
     if repo.session_dropped_count > 0:
         noun = "session" if repo.session_dropped_count == 1 else "sessions"
         parts.append(color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
+
     pid_str = (
         color(DIM, f"pid {repo.claude_pid}")
         if repo.claude_pid is not None
         else color(DIM, "agent")
     )
-    arrow = color(DIM, "→")
+    label = color(BOLD, f"{repo.provider}:")
     if parts:
         joined = ", ".join(parts)
-        return f" {arrow} {pid_str} {color(DIM, '(')}{joined}{color(DIM, ')')}"
-    return f" {arrow} {pid_str}"
+        return f"  {label} {pid_str} {color(DIM, '(')}{joined}{color(DIM, ')')}"
+    return f"  {label} {pid_str}"
 
 
 def _format_reset_at(resets_at: datetime) -> str:
@@ -727,24 +731,28 @@ def _format_repo_header(repo: RepoStatus) -> str:
     header = f"{name_styled} {state_styled}"
     if stats:
         header += " — " + ", ".join(stats)
-    # Runtime/session stats ride the repo summary only when nobody is talking.
-    if repo.claude_talker is None and not _worker_is_agent_talker(repo):
-        header += _agent_runtime_suffix(repo)
     return header
 
 
 def _format_repo_body(repo: RepoStatus) -> list[str]:
     """Per-repo body lines in fixed order:
 
-    1. ``Issue:  #N — title  (elapsed Xm)``
-    2. ``PR:     #N — title``
-    3. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
-    4. Webhook threads (indented ``├─`` / ``└─``), up to
+    1. ``{provider}: pid N (running Xm, session idle)`` — agent session state,
+       only when a pid or live session is present; uses the configured provider
+       name so it works for Claude, Copilot, or any future provider.
+    2. ``Issue:  #N — title  (elapsed Xm)``
+    3. ``PR:     #N — title``
+    4. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
+    5. Webhook threads (indented ``├─`` / ``└─``), up to
        :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to the agent
        sorts to the top and gets an ANSI background-highlighted label; overflow
        rolled into ``+N more webhook(s)``.
     """
     body: list[str] = []
+
+    agent_line = _format_agent_line(repo)
+    if agent_line is not None:
+        body.append(agent_line)
 
     if repo.issue is None:
         body.append("  no assigned issues")
