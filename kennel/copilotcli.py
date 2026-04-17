@@ -58,11 +58,17 @@ _COPILOT_JSON_BASE_ARGS = (
     "--allow-all",
     "-s",
 )
+_ACP_STREAM_LIMIT = 8 * 1024 * 1024
 
 
 def _is_missing_session_error(exc: RequestError) -> bool:
     """Return True when ACP reports that a session id no longer exists."""
     return "Resource not found: Session " in str(exc) and " not found" in str(exc)
+
+
+def _is_line_limit_overrun_error(exc: Exception) -> bool:
+    """Return True when ACP aborted on an oversized newline-delimited frame."""
+    return "Separator is found, but chunk is longer than limit" in str(exc)
 
 
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
@@ -742,7 +748,10 @@ class CopilotACPRuntime:
                 command[0],
                 *command[1:],
                 cwd=self._work_dir,
-                transport_kwargs={"stderr": subprocess.DEVNULL},
+                transport_kwargs={
+                    "stderr": subprocess.DEVNULL,
+                    "limit": _ACP_STREAM_LIMIT,
+                },
             )
             try:
                 connection, process = await agent_cm.__aenter__()
@@ -1096,6 +1105,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         message = str(exc)
         return (
             isinstance(exc, (BrokenPipeError, OSError))
+            or _is_line_limit_overrun_error(exc)
             or message == "Copilot ACP connection is not available"
             or (
                 message != "Copilot ACP runtime is stopped"
