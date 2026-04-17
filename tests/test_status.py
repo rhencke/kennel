@@ -2247,8 +2247,9 @@ class TestProviderColoredStatus:
 
     Feature: repo sections get the provider's dim_bg across all their
     lines; the limits-line provider tokens get the provider's bright_fg;
-    the active-agent "Worker:" row carries an ASCII ``*`` marker that is
-    visible even under ``NO_COLOR``.
+    the active-agent "Worker:" row carries an ASCII ``*`` marker under
+    ``NO_COLOR`` (GREEN_BG is the signal when color is enabled, so no
+    asterisk is needed in color mode).
     """
 
     def _repo(self, **kwargs) -> RepoStatus:
@@ -2283,6 +2284,28 @@ class TestProviderColoredStatus:
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         assert worker_lines[0].startswith("* "), worker_lines[0]
+
+    def test_active_worker_line_has_no_asterisk_when_color_enabled(self) -> None:
+        # When color is on, GREEN_BG provides the active-worker signal;
+        # the ``*`` marker must NOT appear (it would be redundant clutter).
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            repo = self._repo(
+                fido_running=True,
+                issue=7,
+                current_task={"title": "implement foo", "index": 1, "total": 2},
+            )
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
+        assert worker_lines, f"no Worker line in:\n{output}"
+        # Strip ANSI codes to check prefix cleanly.
+        import re
+
+        plain = re.sub(r"\033\[[^m]*m", "", worker_lines[0])
+        assert not plain.startswith("* "), (
+            f"unexpected asterisk in color mode: {plain!r}"
+        )
+        assert plain.startswith("  "), f"expected two-space indent: {plain!r}"
 
     def test_inactive_worker_line_keeps_alignment_without_marker(self) -> None:
         with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):

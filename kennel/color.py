@@ -44,7 +44,7 @@ _CODES: dict[str, str] = {
 }
 
 
-def _color_enabled() -> bool:
+def color_enabled() -> bool:
     """Return True if ANSI color output should be used."""
     if os.environ.get("FORCE_COLOR") == "1":
         return True
@@ -58,7 +58,7 @@ def color(style: str, text: str) -> str:
 
     Returns *text* unchanged when color is disabled or *style* is unknown.
     """
-    if not _color_enabled():
+    if not color_enabled():
         return text
     code = _CODES.get(style, "")
     if not code:
@@ -75,7 +75,7 @@ def wrap_raw(escape: str, text: str) -> str:
     every provider.  Returns *text* unchanged when color is disabled or
     *escape* is empty.
     """
-    if not _color_enabled():
+    if not color_enabled():
         return text
     if not escape:
         return text
@@ -105,7 +105,7 @@ def wrap_bg_line(bg_escape: str, line: str) -> str:
     Returns *line* unchanged when color is disabled or *bg_escape* is
     empty.
     """
-    if not _color_enabled() or not bg_escape:
+    if not color_enabled() or not bg_escape:
         return line
     if _RESET in line:
         line = line.replace(_RESET, f"{_RESET}{bg_escape}")

@@ -24,6 +24,7 @@ from kennel.color import (
     RED_BOLD,
     YELLOW_BG,
     color,
+    color_enabled,
     rgb_bg,
     rgb_fg,
     wrap_bg_line,
@@ -831,9 +832,10 @@ def _format_worker_thread_line(repo: RepoStatus) -> str:
     state = _worker_thread_state(repo)
     is_active = repo.current_task is not None or _worker_is_agent_talker(repo)
     # NO_COLOR users need an alternate signal to the GREEN_BG highlight;
-    # a leading "* " is visible in every terminal mode.  Inactive rows get
-    # two spaces so the label column stays aligned.
-    marker = "* " if is_active else "  "
+    # a leading "* " is visible when color is disabled.  Under color mode
+    # GREEN_BG already provides the highlight, so the asterisk is omitted.
+    # Inactive rows always get two spaces so the label column stays aligned.
+    marker = "* " if (is_active and not color_enabled()) else "  "
     label = color(GREEN_BG, "Worker:") if is_active else color(BOLD, "Worker:")
     line = f"{marker}{label} {state}"
     return line
