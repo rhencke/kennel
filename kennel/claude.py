@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -733,6 +734,10 @@ class ClaudeSession:
         # :meth:`__enter__` can register the talker with the correct kind
         # (``"worker"`` vs ``"webhook"``).  Cleared inside :meth:`__enter__`.
         self._pending_talker_kind: Literal["worker", "webhook"] | None = None
+        # Per-thread reentrance counter for the ``with self:`` context so
+        # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
+        # without double-registering the talker (fix for #658).
+        self._entry_tls: threading.local = threading.local()
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
         # blocking wait in iter_events() so the cancel signal is noticed
         # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
@@ -932,6 +937,12 @@ class ClaudeSession:
         :func:`get_talker` — whether they may preempt (fix for #637:
         webhooks must not preempt each other).
 
+        Supports reentrance via :meth:`hold_for_handler` (#658): when the
+        current thread is already inside a hold-for-handler block, the
+        RLock is re-acquired and the talker is NOT re-registered.  The
+        outermost entry owns the registration and unregisters in
+        :meth:`__exit__` when its depth returns to zero.
+
         Does *not* clear the cancel event — that is deferred to
         :meth:`iter_events` so a signal that lands between one holder's
         :meth:`__exit__` and the next holder's :meth:`iter_events` is not
@@ -946,33 +957,66 @@ class ClaudeSession:
         # We hold the lock now; any preempter waiting on this
         # (wait_for_pending_preempt) can wake.
         self._preempt_pending.clear()
-        kind = self._pending_talker_kind or current_thread_kind()
-        self._pending_talker_kind = None
-        if self._repo_name is not None:
-            try:
-                register_talker(
-                    ClaudeTalker(
-                        repo_name=self._repo_name,
-                        thread_id=threading.get_ident(),
-                        kind=kind,
-                        description="persistent session turn",
-                        claude_pid=self._proc.pid,
-                        started_at=_talker_now(),
+        depth = getattr(self._entry_tls, "depth", 0)
+        if depth == 0:
+            kind = self._pending_talker_kind or current_thread_kind()
+            self._pending_talker_kind = None
+            if self._repo_name is not None:
+                try:
+                    register_talker(
+                        ClaudeTalker(
+                            repo_name=self._repo_name,
+                            thread_id=threading.get_ident(),
+                            kind=kind,
+                            description="persistent session turn",
+                            claude_pid=self._proc.pid,
+                            started_at=_talker_now(),
+                        )
                     )
-                )
-            except ClaudeLeakError:
-                self._lock.release()
-                raise
+                except ClaudeLeakError:
+                    self._lock.release()
+                    raise
+        self._entry_tls.depth = depth + 1
         return self
 
     def __exit__(self, *args: object) -> None:
         """Release the session lock.  Unregisters the :class:`ClaudeTalker`
         before releasing the lock so no other thread can race in and see our
-        stale talker entry.
+        stale talker entry.  When called from within a :meth:`hold_for_handler`
+        (#658), only decrements the per-thread reentrance counter — the
+        outermost exit unregisters and fully releases.
         """
-        if self._repo_name is not None:
-            unregister_talker(self._repo_name, threading.get_ident())
+        depth = self._entry_tls.depth - 1
+        if depth == 0:
+            if self._repo_name is not None:
+                unregister_talker(self._repo_name, threading.get_ident())
+            self._entry_tls.depth = 0
+        else:
+            self._entry_tls.depth = depth
         self._lock.release()
+
+    @contextmanager
+    def hold_for_handler(
+        self, *, preempt_worker: bool = False
+    ) -> Iterator["ClaudeSession"]:
+        """Hold the session lock across multiple :meth:`prompt` calls.
+
+        Webhook handlers wrap their entire body in this so the worker can't
+        acquire the lock between individual turns (triage → reply →
+        reaction) and stall the reply behind a long worker turn (#658).
+        Inner :meth:`prompt` / ``with session:`` calls see a non-zero
+        reentrance depth and skip talker re-registration; the RLock handles
+        reentrant acquisition natively.
+
+        When *preempt_worker* is true, the caller's :attr:`_fire_worker_cancel`
+        fires once on entry so a currently-running worker turn is aborted
+        immediately instead of being waited out before the lock is acquired.
+        """
+        if preempt_worker:
+            try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+        self._pending_talker_kind = current_thread_kind()
+        with self:
+            yield self
 
     def send(self, content: str) -> None:
         """Write a user message to the session stdin, flushing immediately.

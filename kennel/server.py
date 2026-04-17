@@ -541,9 +541,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
         claude.set_thread_repo(repo_cfg.name)
         claude.set_thread_kind("webhook")
+        session = self.registry.get_session(repo_cfg.name)
+        needs_model = self._action_uses_model(action)
         try:
             with self.registry.webhook_activity(repo_cfg.name, description) as activity:
-                self._process_action_inner(action, repo_cfg, activity)
+                if (
+                    session is not None
+                    and needs_model
+                    and hasattr(session, "hold_for_handler")
+                ):
+                    # Hold the session across the whole handler (#658) so the
+                    # worker can't sneak in and acquire the lock between this
+                    # handler's individual turns — that stalled webhook replies
+                    # behind long worker turns.
+                    with session.hold_for_handler(preempt_worker=True):
+                        self._process_action_inner(action, repo_cfg, activity)
+                else:
+                    self._process_action_inner(action, repo_cfg, activity)
         except claude.ClaudeLeakError:
             # A webhook and a worker tried to talk to the same repo's claude
             # at the same time — the only safe action is to halt the whole
@@ -561,6 +575,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
             claude.set_thread_kind(None)
             claude.set_thread_repo(None)
+
+    def _action_uses_model(self, action: Action) -> bool:
+        """True when the webhook action will call ``agent.run_turn``.
+
+        Reply-capable actions (PR comments, review comments, review threads)
+        generate a response through the model and therefore benefit from
+        holding the session lock across their whole handler (#658).  Plain
+        webhook-action events (merges, check_runs) only restart workers and
+        don't touch the model — no point blocking the worker for those.
+        """
+        return bool(action.reply_to or action.review_comments or action.comment_body)
 
     def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""
