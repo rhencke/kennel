@@ -915,7 +915,8 @@ class TestWorker:
         assert worker._session is None
         worker.stop_session()  # must not raise
 
-    def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
+    def test_run_does_not_create_session_when_no_issue(self, tmp_path: Path) -> None:
+        """create_session is deferred — no call when there is no issue to work on."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
@@ -928,12 +929,47 @@ class TestWorker:
             patch.object(worker, "setup_hooks", return_value=("c", "s")),
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "create_session", mock_create),
-            patch.object(worker, "stop_session"),
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
             worker.run()
-        mock_create.assert_called_once_with()
+        mock_create.assert_not_called()
+
+    def test_run_creates_session_just_before_find_or_create_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """create_session is called exactly once, just before find_or_create_pr."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        call_order: list[str] = []
+
+        def record_create() -> None:
+            call_order.append("create_session")
+
+        def record_focp(*_a: object, **_kw: object) -> tuple[int, str, bool]:
+            call_order.append("find_or_create_pr")
+            return (42, "fix-bug", True)
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "create_session", side_effect=record_create),
+            patch.object(worker, "find_or_create_pr", side_effect=record_focp),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+
+        assert call_order == ["create_session", "find_or_create_pr"]
 
     def test_run_recovers_reply_promises_before_normal_handlers(
         self, tmp_path: Path
@@ -1063,7 +1099,11 @@ class TestWorker:
             worker.run()
         assert worker._session_issue == 7
 
-    def test_run_does_not_create_session_when_provided(self, tmp_path: Path) -> None:
+    def test_run_does_not_create_session_when_no_issue_even_with_prior_session(
+        self, tmp_path: Path
+    ) -> None:
+        """create_session is not called when there is nothing to do, even with a
+        prior session already attached (no issue → early return before session call)."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         mock_session = MagicMock()
@@ -10012,12 +10052,19 @@ class TestWorkerThread:
     # ── session lifecycle ─────────────────────────────────────────────────
 
     def test_session_carried_to_next_iteration(self, tmp_path: Path) -> None:
-        """Session pre-created by WorkerThread on first iteration is carried forward."""
+        """Session created lazily by Worker is carried to subsequent Workers via provider.
+
+        WorkerThread no longer pre-creates the session.  The first Worker
+        creates it (attaches to provider.agent) during its run(); WorkerThread
+        then reclaims the provider, so the second Worker sees the session
+        already attached via provider.agent.session.
+        """
         wt = self._make_thread(tmp_path)
         wt._wake = MagicMock()
-        pre_session = MagicMock()
-        wt._create_session = MagicMock(return_value=pre_session)
-        sessions_received: list = []
+
+        lazy_session = MagicMock()
+        sessions_at_run_start: list = []
+        call_count = 0
 
         def fake_worker_init(
             self_w,
@@ -10037,16 +10084,17 @@ class TestWorkerThread:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
-            self_w._session = session
             self_w._session_issue = session_issue
-            sessions_received.append(session)
-
-        call_count = 0
+            # Do NOT capture session= — it is always None after the change.
+            # Real session access goes through _provider (set by WorkerThread).
 
         def fake_worker_run(self_w) -> int:
             nonlocal call_count
             call_count += 1
+            sessions_at_run_start.append(self_w._provider.agent.session)
             if call_count == 1:
+                # Simulate Worker lazily creating a session during its run().
+                self_w._provider.agent.attach_session(lazy_session)
                 return 1
             wt._stop = True
             return 0
@@ -10057,13 +10105,11 @@ class TestWorkerThread:
         ):
             self._run_thread(wt)
 
-        assert len(sessions_received) == 2
-        # WorkerThread pre-creates the session before the first Worker runs,
-        # so the first Worker already inherits it, and subsequent Workers
-        # continue to inherit it (no carry-over / re-create on iteration 2).
-        assert sessions_received[0] is pre_session
-        assert sessions_received[1] is pre_session
-        wt._create_session.assert_called_once()
+        assert len(sessions_at_run_start) == 2
+        # Before first Worker runs, no session exists yet.
+        assert sessions_at_run_start[0] is None
+        # Second Worker inherits the session the first Worker created.
+        assert sessions_at_run_start[1] is lazy_session
 
     def test_session_issue_carried_to_next_iteration(self, tmp_path: Path) -> None:
         """session_issue set by one Worker.run() is passed to the next."""
@@ -10113,18 +10159,6 @@ class TestWorkerThread:
         assert len(issues_received) == 2
         assert issues_received[0] is None  # no carry-over on first iteration
         assert issues_received[1] == 42  # carried forward
-
-    def test_create_session_raises_when_provider_does_not_attach_one(
-        self, tmp_path: Path
-    ) -> None:
-        wt = self._make_thread(tmp_path)
-        provider = MagicMock()
-        provider.agent.session = None
-        wt._provider = provider
-        with pytest.raises(
-            RuntimeError, match="provider.ensure_session\\(\\) returned no session"
-        ):
-            wt._create_session()
 
     def test_session_stopped_when_thread_exits(self, tmp_path: Path) -> None:
         """WorkerThread stops the session when its loop finishes."""

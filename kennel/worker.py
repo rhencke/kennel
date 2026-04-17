@@ -2235,8 +2235,6 @@ class Worker:
 
             compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
             session_fresh = self._session is None
-            if session_fresh:
-                self.create_session()
             try:
                 issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
                 if issue is None:
@@ -2259,6 +2257,7 @@ class Worker:
                 self.post_pickup_comment(
                     repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
                 )
+                self.create_session()
                 pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )
@@ -2349,8 +2348,8 @@ class WorkerThread(threading.Thread):
 
     Neither ``_provider`` nor ``_session_issue`` survive a kennel/home restart
     — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
-    with no provider-attached session and creates a fresh session on its first
-    iteration.
+    with no provider-attached session; the session is created lazily by
+    :class:`Worker` immediately before the first real provider turn.
     """
 
     def __init__(
@@ -2516,15 +2515,6 @@ class WorkerThread(threading.Thread):
                 self._provider = provider
             return provider
 
-    def _create_session(self) -> PromptSession:
-        """Eagerly create the persistent provider session for this thread."""
-        provider = self._ensure_provider()
-        provider.agent.ensure_session(provider.agent.voice_model)
-        session = provider.agent.session
-        if session is None:
-            raise RuntimeError("provider.ensure_session() returned no session")
-        return session
-
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
@@ -2534,11 +2524,6 @@ class WorkerThread(threading.Thread):
                 if self._registry is not None:
                     self._registry.report_activity(self._repo_name, "idle", busy=False)
                 provider = self._ensure_provider()
-                session = provider.agent.session
-                if session is None:
-                    session = self._create_session()
-                    if provider.agent.session is not session:
-                        provider.agent.attach_session(session)
                 worker = Worker(
                     self.work_dir,
                     self._gh,
@@ -2546,7 +2531,6 @@ class WorkerThread(threading.Thread):
                     self._repo_name,
                     self._registry,
                     self._membership,
-                    session=session,
                     session_issue=self._session_issue,
                     config=self._config,
                     repo_cfg=self._repo_cfg,
