@@ -1104,6 +1104,9 @@ class Worker:
             }
         )
         self.set_status(f"Picking up issue #{choice.number}: {choice.title}")
+        self.post_pickup_comment(
+            repo_ctx.repo, choice.number, choice.title, repo_ctx.gh_user
+        )
         return choice.number
 
     def _git(
@@ -2273,9 +2276,6 @@ class Worker:
                 issue_data = self.gh.view_issue(repo_ctx.repo, issue)
                 issue_title = issue_data["title"]
                 issue_body = issue_data.get("body", "") or ""
-                self.post_pickup_comment(
-                    repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
-                )
                 pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                     ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
                 )

@@ -1299,9 +1299,8 @@ class TestWorker:
         ):
             assert worker.run() == 0
 
-    def test_run_calls_post_pickup_comment_when_issue_found(
-        self, tmp_path: Path
-    ) -> None:
+    def test_run_does_not_call_post_pickup_comment(self, tmp_path: Path) -> None:
+        """post_pickup_comment is now called from find_next_issue, not run()."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {
@@ -1326,7 +1325,7 @@ class TestWorker:
             patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
-        mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
+        mock_pickup.assert_not_called()
 
     def test_run_views_issue_for_title(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -1654,7 +1653,10 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 42
 
@@ -1670,7 +1672,10 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 10
 
@@ -1709,7 +1714,10 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = issues
         gh.find_issues.return_value = issues
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 1
 
@@ -1719,7 +1727,10 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = [issue]
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         state = State(fido_dir).load()
         assert state["issue"] == 7
@@ -1742,9 +1753,26 @@ class TestWorkerFindNextIssue:
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
-        with patch.object(worker, "set_status", mock_status):
+        with (
+            patch.object(worker, "set_status", mock_status),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("Picking up issue #5: Add tests")
+
+    def test_calls_post_pickup_comment_when_issue_found(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        issue = {"number": 5, "title": "Add tests", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_pickup = MagicMock()
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment", mock_pickup),
+        ):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        mock_pickup.assert_called_once_with("alice/proj", 5, "Add tests", "fido-bot")
 
     def test_calls_set_status_done_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -1777,6 +1805,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1829,7 +1858,10 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = [root, child]
         gh.find_issues.return_value = [child]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 200
         gh.find_all_open_issues.assert_called_once_with("alice", "proj")
@@ -1863,11 +1895,52 @@ class TestWorkerFindNextIssue:
         gh.find_all_open_issues.return_value = [parent_issue, open_child]
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         # Picker chose the open child, and claimed it.
         assert result == 111
         gh.add_assignee.assert_called_once_with("alice/proj", 111, "fido-bot")
+
+    def test_calls_post_pickup_comment_immediately_when_issue_found(
+        self, tmp_path: Path
+    ) -> None:
+        """find_next_issue posts the pickup comment right after choosing the issue."""
+        worker, gh = self._make_worker(tmp_path)
+        issue = {"number": 17, "title": "Fix the thing", "subIssues": {"nodes": []}}
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_pickup = MagicMock()
+        repo_ctx = self._make_repo_ctx(
+            owner="alice", repo_name="proj", repo="alice/proj", gh_user="fido-bot"
+        )
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment", mock_pickup),
+        ):
+            result = worker.find_next_issue(fido_dir, repo_ctx)
+        assert result == 17
+        mock_pickup.assert_called_once_with(
+            "alice/proj", 17, "Fix the thing", "fido-bot"
+        )
+
+    def test_does_not_call_post_pickup_comment_when_no_issue(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        mock_pickup = MagicMock()
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment", mock_pickup),
+        ):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        mock_pickup.assert_not_called()
 
 
 def _issue(
