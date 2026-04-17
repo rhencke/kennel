@@ -1999,7 +1999,13 @@ class TestReplyToIssueComment:
         assert "alice: first comment" in triage_ctx["conversation"]
         assert "bob: second comment" in triage_ctx["conversation"]
 
-    def test_conversation_context_exception_is_swallowed(self, tmp_path: Path) -> None:
+    def test_conversation_context_fetch_failure_logs_and_continues(
+        self, tmp_path: Path
+    ) -> None:
+        """Conversation fetch failure logs a warning and proceeds without context.
+
+        The reply pipeline must not be blocked by a best-effort history fetch.
+        """
         cfg = self._cfg(tmp_path)
         action = self._action()
         mock_gh = MagicMock()

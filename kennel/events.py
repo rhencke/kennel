@@ -901,7 +901,12 @@ def reply_to_issue_comment(
                     "\n\nFull conversation on this issue/PR:\n" + "\n".join(lines)
                 )
         except Exception:
-            pass  # best-effort
+            log.warning(
+                "reply_to_issue_comment: failed to fetch conversation history for PR #%s"
+                " — proceeding without it",
+                number,
+                exc_info=True,
+            )
 
     # Merge conversation context into triage context
     context = dict(action.context) if action.context else {}
