@@ -1975,6 +1975,38 @@ class TestFormatStatusColor:
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
+    def test_worker_label_green_bg_when_on_task_even_without_talker(self) -> None:
+        """Highlight stays on during the Python-only gap between
+        ``session.prompt`` calls — the talker is unregistered but the
+        worker is still assigned to a task (``current_task`` set)."""
+        repo = self._repo(
+            issue=1,
+            current_task="Do thing",
+            task_number=1,
+            task_total=3,
+            # No claude_talker, no session_owner — purely between-turn state.
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
+        assert f"{_CODES['green_bg']}Worker:" in worker_line
+
+    def test_worker_label_plain_when_napping_with_no_task(self) -> None:
+        """Highlight turns off when the worker has no task and no talker —
+        genuinely idle (napping / waiting for work)."""
+        repo = self._repo(
+            issue=1,
+            current_task=None,
+            session_alive=False,
+            session_owner=None,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
+        assert _CODES["green_bg"] not in worker_line
+
     def test_webhook_label_yellow_when_talker(self) -> None:
         repo = self._repo(
             issue=1,
