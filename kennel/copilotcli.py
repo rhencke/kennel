@@ -56,7 +56,6 @@ _COPILOT_JSON_BASE_ARGS = (
     "--allow-all",
     "-s",
 )
-_COPILOT_LIMITS_UNAVAILABLE = "Copilot CLI does not expose local usage limits."
 
 
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
@@ -854,10 +853,7 @@ class CopilotCLIAPI(ProviderAPI):
         return ProviderID.COPILOT_CLI
 
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
-        return ProviderLimitSnapshot(
-            provider=self.provider_id,
-            unavailable_reason=_COPILOT_LIMITS_UNAVAILABLE,
-        )
+        return ProviderLimitSnapshot(provider=self.provider_id)
 
 
 class CopilotCLIClient(SessionBackedAgent, ProviderAgent):

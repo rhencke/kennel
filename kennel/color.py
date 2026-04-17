@@ -24,6 +24,8 @@ MAGENTA = "magenta"
 GREEN = "green"
 YELLOW = "yellow"
 DARK_GRAY = "dark_gray"
+GREEN_BG = "green_bg"
+YELLOW_BG = "yellow_bg"
 
 # ANSI escape sequences
 _RESET = "\033[0m"
@@ -37,6 +39,8 @@ _CODES: dict[str, str] = {
     GREEN: "\033[32m",
     YELLOW: "\033[33m",
     DARK_GRAY: "\033[90m",
+    GREEN_BG: "\033[30;42m",
+    YELLOW_BG: "\033[30;43m",
 }
 
 

@@ -18,10 +18,16 @@ When invoked, determine the current state automatically. Never ask — just dete
 
 ## Watch mode
 
-Create a recurring 2-minute cron. Every tick:
+Use a long-lived monitor tool/session for watch mode instead of ad-hoc one-shot
+checks. Keep it running and sample every 2 minutes:
 
 ### Collect status
 Run `uv run kennel status` from `/home/rhencke/workspace/home`.
+
+Also watch the log directory `~/log` in the same monitor session so status
+changes and fresh errors are observed together. Prefer the active kennel logs
+there (`kennel-crash.log`, `kennel.log`, `kennel-*.log`, repo-specific launch
+logs) instead of a single hard-coded file.
 
 ### All good — report deltas only
 Compare to the previous check. Report only what changed:
@@ -38,7 +44,7 @@ Look deeper if you see:
 
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
-- `tail -5 ~/log/kennel-crash.log | grep -v '{"type'` — any errors?
+- inspect recent errors across the relevant files under `~/log/`, not just `kennel-crash.log`
 - Check if the fido session is still producing output
 - Check git status of managed repos for unexpected state
 
@@ -48,7 +54,7 @@ If you discover missing diagnostic tools or logging that would have helped, file
 
 ### Confirmed bad — transition to Vet mode
 If the problem persists across two checks:
-1. Cancel the 2-minute cron
+1. Cancel the monitor session
 2. Gather diagnostic context: what you observed, relevant log snippets, how many cycles the problem persisted, the last known good status
 3. Transition to **Vet mode** below, passing all that context
 

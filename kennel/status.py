@@ -18,10 +18,11 @@ from kennel.color import (
     DARK_GRAY,
     DIM,
     GREEN,
+    GREEN_BG,
     MAGENTA,
     RED,
     RED_BOLD,
-    YELLOW,
+    YELLOW_BG,
     color,
 )
 from kennel.config import RepoConfig
@@ -605,11 +606,11 @@ _WEBHOOK_DISPLAY_CAP: int = 5
 """Max webhook lines to print per repo; overflow rolled into a +N-more line."""
 
 
-def _claude_stats_suffix(repo: RepoStatus) -> str:
-    """`" → claude pid 123 (running 1m, session idle)"` or ``""``.
+def _agent_runtime_suffix(repo: RepoStatus) -> str:
+    """`" → pid 123 (running 1m, session idle)"` or ``""``.
 
-    Used both as the inline trailer on whatever line is "talking to" claude
-    and, when nobody is talking, appended to the worker summary line.
+    Used only when nobody is currently talking to the agent, so runtime/session
+    information still appears without hard-coding Claude onto active lines.
     """
     if repo.claude_pid is None and not repo.session_alive:
         return ""
@@ -619,9 +620,9 @@ def _claude_stats_suffix(repo: RepoStatus) -> str:
     if repo.session_alive and repo.claude_talker is None:
         parts.append(color(DIM, "session idle"))
     pid_str = (
-        color(DIM, f"claude pid {repo.claude_pid}")
+        color(DIM, f"pid {repo.claude_pid}")
         if repo.claude_pid is not None
-        else color(DIM, "claude")
+        else color(DIM, "agent")
     )
     arrow = color(DIM, "→")
     if parts:
@@ -676,9 +677,8 @@ def _format_repo_header(repo: RepoStatus) -> str:
     Stats list is comma-separated and only shows what matters right now:
     ``crashes N`` (skipped when 0), ``up X`` (worker thread uptime), ``BUSY``
     (no activity for ≥5m, informational since #444), optional ``last crash``
-    line when crash_count > 0.  If nobody is currently talking to claude the
-    claude pid/uptime suffix appears on this line; when a worker or webhook
-    IS talking, the suffix attaches to that line instead.
+    line when crash_count > 0.  If nobody is currently talking to the agent,
+    the generic pid/uptime suffix appears on this line.
     """
     state_word = "running" if repo.fido_running else "idle"
     state_style = GREEN if repo.fido_running else DIM
@@ -701,9 +701,9 @@ def _format_repo_header(repo: RepoStatus) -> str:
     header = f"{name_styled} {state_styled}"
     if stats:
         header += " — " + ", ".join(stats)
-    # Claude stats ride the worker summary only when nobody is talking.
+    # Runtime/session stats ride the repo summary only when nobody is talking.
     if repo.claude_talker is None:
-        header += _claude_stats_suffix(repo)
+        header += _agent_runtime_suffix(repo)
     return header
 
 
@@ -712,12 +712,11 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
 
     1. ``Issue:  #N — title  (elapsed Xm)``
     2. ``PR:     #N — title``
-    3. ``Worker: <state>`` (idle / task N/M — title / waiting on …), with
-       claude stats suffix when the worker thread is talking to claude
+    3. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
     4. Webhook threads (indented ``├─`` / ``└─``), up to
-       :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to claude
-       sorts to the top and gets the claude stats suffix; overflow rolled
-       into ``+N more webhook(s)``.
+       :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to the agent
+       sorts to the top and gets an ANSI background-highlighted label; overflow
+       rolled into ``+N more webhook(s)``.
     """
     body: list[str] = []
 
@@ -748,17 +747,12 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
 
 
 def _format_worker_thread_line(repo: RepoStatus) -> str:
-    """Worker-thread state line.  Attach claude stats when this thread is
-    the one talking to claude.
-    """
+    """Worker-thread state line, background-highlighted when it has the agent."""
     state = _worker_thread_state(repo)
     talker = repo.claude_talker
     is_talker = talker is not None and talker.kind == "worker"
-    label = color(GREEN, "Worker:") if is_talker else color(BOLD, "Worker:")
-    line = f"  {label} {state}"
-    if is_talker:
-        line += _claude_stats_suffix(repo)
-    return line
+    label = color(GREEN_BG, "Worker:") if is_talker else color(BOLD, "Worker:")
+    return f"  {label} {state}"
 
 
 def _worker_thread_state(repo: RepoStatus) -> str:
@@ -802,7 +796,7 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     talker_tid = (
         talker.thread_id if talker is not None and talker.kind == "webhook" else None
     )
-    # Stable sort: webhooks driving claude first, then everything else in
+    # Stable sort: webhooks driving the agent first, then everything else in
     # original order.
     webhooks.sort(key=lambda w: 0 if w.thread_id == talker_tid else 1)
 
@@ -812,11 +806,11 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     for i, w in enumerate(shown):
         branch = color(DIM, "└─" if overflow == 0 and i == len(shown) - 1 else "├─")
         is_talker = talker_tid is not None and w.thread_id == talker_tid
-        wh_label = color(YELLOW, "webhook:") if is_talker else color(BOLD, "webhook:")
+        wh_label = (
+            color(YELLOW_BG, "webhook:") if is_talker else color(BOLD, "webhook:")
+        )
         elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
         line = f"  {branch} {wh_label} {w.description} {elapsed}"
-        if is_talker:
-            line += _claude_stats_suffix(repo)
         lines.append(line)
     if overflow > 0:
         lines.append(

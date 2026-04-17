@@ -729,10 +729,9 @@ class TestCopilotCLISession:
 
 
 class TestCopilotCLIAPI:
-    def test_limit_snapshot_is_unavailable(self) -> None:
+    def test_limit_snapshot_is_unknown(self) -> None:
         assert CopilotCLIAPI().get_limit_snapshot() == ProviderLimitSnapshot(
-            provider=ProviderID.COPILOT_CLI,
-            unavailable_reason="Copilot CLI does not expose local usage limits.",
+            provider=ProviderID.COPILOT_CLI
         )
 
 

@@ -1357,21 +1357,17 @@ class TestFormatStatus:
 
     def test_includes_provider_unavailable_summary(self) -> None:
         provider_status = ProviderPressureStatus(
-            provider=ProviderID.COPILOT_CLI,
+            provider=ProviderID.CLAUDE_CODE,
             unavailable_reason="limits unavailable",
         )
         status = KennelStatus(
             kennel_pid=None,
             kennel_uptime=None,
-            repos=[
-                self._repo(
-                    provider=ProviderID.COPILOT_CLI, provider_status=provider_status
-                )
-            ],
+            repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
         output = format_status(status)
-        assert "copilot-cli unavailable" in output
+        assert "claude-code unavailable" in output
 
     def test_includes_provider_unknown_summary(self) -> None:
         provider_status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE)
@@ -1383,6 +1379,21 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "claude-code limits unknown" in output
+
+    def test_includes_copilot_unknown_summary(self) -> None:
+        provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[
+                self._repo(
+                    provider=ProviderID.COPILOT_CLI, provider_status=provider_status
+                )
+            ],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "copilot-cli limits unknown" in output
 
     def test_kennel_up_no_uptime(self) -> None:
         status = KennelStatus(kennel_pid=12345, kennel_uptime=None, repos=[])
@@ -1492,15 +1503,14 @@ class TestFormatStatus:
         assert "Worker: idle" in output
 
     def test_claude_pid_on_worker_summary_when_no_talker(self) -> None:
-        """Claude stats ride the worker summary line when nobody is currently
-        talking to claude for this repo."""
+        """Runtime stats ride the repo summary when nobody is currently talking."""
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ claude pid 9999 (running 3m)" in output
+        assert "→ pid 9999 (running 3m)" in output
         # Header (worker summary) line carries the suffix.
         assert any(
-            line.startswith("owner/repo:") and "→ claude pid 9999" in line
+            line.startswith("owner/repo:") and "→ pid 9999" in line
             for line in output.splitlines()
         )
 
@@ -1508,11 +1518,11 @@ class TestFormatStatus:
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ claude pid 9999" in output
+        assert "→ pid 9999" in output
         assert "running" not in output
 
-    def test_claude_pid_attaches_to_worker_line_when_worker_talker(self) -> None:
-        """Worker-kind talker → claude stats on the Worker thread line."""
+    def test_worker_talker_highlights_worker_line_without_pid_suffix(self) -> None:
+        """Worker-kind talker → highlight the Worker label instead of a pid suffix."""
         repo = self._repo(
             issue=1,
             claude_pid=9999,
@@ -1527,16 +1537,15 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        # Worker line has the claude suffix.
         worker_lines = [
             line for line in output.splitlines() if line.startswith("  Worker:")
         ]
-        assert any("→ claude pid 9999 (running 1m)" in line for line in worker_lines)
+        assert any("→ pid" not in line for line in worker_lines)
         # Header does not duplicate it.
         header = next(line for line in output.splitlines() if line.startswith("owner"))
-        assert "→ claude pid" not in header
+        assert "→ pid" not in header
 
-    def test_claude_pid_session_alive_no_talker(self) -> None:
+    def test_agent_runtime_suffix_session_alive_no_talker(self) -> None:
         """Session subprocess alive but nobody holds the lock → 'session idle'."""
         repo = self._repo(
             issue=1,
@@ -1548,10 +1557,10 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         # Suffix appears on worker summary and mentions session idle.
-        assert "→ claude pid 9999 (running 1m, session idle)" in output
+        assert "→ pid 9999 (running 1m, session idle)" in output
 
     def test_session_alive_without_claude_pid(self) -> None:
-        """Session_alive with no pid still signals claude presence via 'session idle'."""
+        """Session_alive with no pid still signals idle agent presence."""
         repo = self._repo(
             issue=1,
             claude_pid=None,
@@ -1559,7 +1568,7 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "→ claude (session idle)" in output
+        assert "→ agent (session idle)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.
@@ -1656,9 +1665,8 @@ class TestFormatStatus:
         # Worker line shows the free-form task title.
         assert "Worker: task: Freeform task" in output
 
-    def test_webhook_talker_sorts_to_top_with_claude_stats(self) -> None:
-        """When a webhook is the ClaudeTalker, its line sorts to the top of
-        the webhook section and carries the claude pid suffix."""
+    def test_webhook_talker_sorts_to_top_without_pid_suffix(self) -> None:
+        """When a webhook is the talker, its line sorts to the top and is highlighted."""
         repo = self._repo(
             issue=1,
             claude_pid=8888,
@@ -1684,9 +1692,9 @@ class TestFormatStatus:
             line for line in format_status(status).splitlines() if "webhook:" in line
         ]
         assert "replying to review" in webhook_lines[0]
-        assert "→ claude pid 8888" in webhook_lines[0]
+        assert "→ pid" not in webhook_lines[0]
         assert "triaging comment" in webhook_lines[1]
-        assert "→ claude pid" not in webhook_lines[1]
+        assert "→ pid" not in webhook_lines[1]
 
     def test_webhook_overflow_summary_when_more_than_five(self) -> None:
         """More than 5 webhook activities → first 5 shown + '+N more' line."""
@@ -1924,7 +1932,7 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
-        assert f"{_CODES['green']}Worker:" in worker_line
+        assert f"{_CODES['green_bg']}Worker:" in worker_line
 
     def test_worker_label_plain_when_not_talker(self) -> None:
         repo = self._repo(issue=1)
@@ -1932,7 +1940,7 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
-        assert _CODES["green"] not in worker_line
+        assert _CODES["green_bg"] not in worker_line
 
     def test_webhook_label_yellow_when_talker(self) -> None:
         repo = self._repo(
@@ -1952,7 +1960,7 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
-        assert f"{_CODES['yellow']}webhook:" in wh_line
+        assert f"{_CODES['yellow_bg']}webhook:" in wh_line
 
     def test_webhook_label_plain_when_not_talker(self) -> None:
         repo = self._repo(
@@ -1967,7 +1975,7 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
-        assert _CODES["yellow"] not in wh_line
+        assert _CODES["yellow_bg"] not in wh_line
 
     def test_session_idle_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, session_alive=True)
