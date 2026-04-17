@@ -1313,6 +1313,29 @@ class TestCopilotCLIClient:
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         assert client._run_cli_prompt("body", model="claude-opus-4-6", timeout=1) == ""
 
+    def test_run_one_shot_text_delegates_to_run_cli_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        runner = MagicMock(return_value=_completed(_copilot_output("assistant reply")))
+        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        result = client._run_one_shot_text("hello", client.voice_model)
+        assert result == "assistant reply"
+        runner.assert_called_once()
+
+    def test_generate_reply_no_session_uses_run_cli_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        runner = MagicMock(return_value=_completed(_copilot_output("  woof, on it!  ")))
+        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        assert client.generate_reply("pick up issue") == "woof, on it!"
+
+    def test_generate_branch_name_no_session_uses_run_cli_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        runner = MagicMock(return_value=_completed(_copilot_output("fix-thing\nextra")))
+        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        assert client.generate_branch_name("name it") == "fix-thing"
+
     def test_cli_prompt_logs_transcript(self, tmp_path: Path, caplog) -> None:
         runner = MagicMock(return_value=_completed(_copilot_output("cli result")))
         client = CopilotCLIClient(

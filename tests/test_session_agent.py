@@ -241,6 +241,13 @@ class TestSessionBackedAgent:
         agent = _FakeAgent(session_fn=lambda: session)
         assert agent.resume_status("sess-1", "resume") == "resumed status"
 
+    def test_generate_branch_name_no_session_uses_one_shot_fallback(self) -> None:
+        session = MagicMock(session_id="sess")
+        session.prompt.return_value = "fix-bug-123\nextra lines"
+        agent = _FakeAgent(session_fn=lambda: session)
+        # no attached session → uses _run_one_shot_text fallback path
+        assert agent.generate_branch_name("name a branch") == "fix-bug-123"
+
     def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = [BrokenPipeError("boom"), "done"]

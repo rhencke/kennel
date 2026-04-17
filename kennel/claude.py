@@ -1551,6 +1551,30 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
     def _json_parse_candidates(self, raw: str) -> tuple[str, ...]:
         return (raw, *(m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)))
 
+    def _run_one_shot_text(self, prompt: str, model: ProviderModel) -> str:
+        """Run ``claude --print`` with *prompt* on stdin; no persistent session created."""
+        cmd = [
+            "claude",
+            "--model",
+            model_name(model),
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--print",
+        ]
+        result = self._runner(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=self._work_dir,
+        )
+        output = result.stdout.strip()
+        raise_for_provider_error_output(output)
+        return extract_result_text(output)
+
     def run_turn(
         self,
         content: str,

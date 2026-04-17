@@ -3032,3 +3032,29 @@ class TestClaudeClientSharedHelpers:
         client = ClaudeClient(session=session)
         with pytest.raises(RuntimeError, match="matching live session"):
             client.resume_status("sess-42", "please shorten")
+
+    def test_run_one_shot_text_calls_runner_and_returns_extracted_text(self) -> None:
+        output = '{"type":"result","result":"pickup reply"}'
+        mock_runner = MagicMock(return_value=_completed(stdout=output))
+        client = ClaudeClient(runner=mock_runner)
+        result = client._run_one_shot_text("pick up issue", client.voice_model)
+        assert result == "pickup reply"
+        cmd = mock_runner.call_args[0][0]
+        assert "--print" in cmd
+        assert "--model" in cmd
+
+    def test_generate_reply_no_session_uses_runner(self) -> None:
+        output = '{"type":"result","result":"  woof, on it!  "}'
+        mock_runner = MagicMock(return_value=_completed(stdout=output))
+        client = ClaudeClient(runner=mock_runner)
+        assert client.generate_reply("please pick up this issue") == "woof, on it!"
+        mock_runner.assert_called_once()
+
+    def test_generate_branch_name_no_session_uses_runner(self) -> None:
+        import json as _json
+
+        output = _json.dumps({"type": "result", "result": "fix-thing\nextra"})
+        mock_runner = MagicMock(return_value=_completed(stdout=output))
+        client = ClaudeClient(runner=mock_runner)
+        assert client.generate_branch_name("name this issue") == "fix-thing"
+        mock_runner.assert_called_once()

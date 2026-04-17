@@ -318,6 +318,17 @@ class SessionBackedAgent:
             system_prompt=system_prompt,
         )
 
+    def _run_one_shot_text(self, prompt: str, model: ProviderModel) -> str:
+        """Run a one-shot prompt without creating a persistent session.
+
+        Subclasses with a subprocess backend (e.g. :class:`~kennel.claude.ClaudeClient`)
+        override this to avoid spawning a persistent session.  The base
+        implementation falls through to :meth:`_run_shared_turn`, which will
+        resolve or create a session via the normal session-resolution path.
+        """
+        text, _ = self._run_shared_turn(prompt, model=model)
+        return text
+
     def generate_reply(
         self,
         prompt: str,
@@ -325,10 +336,10 @@ class SessionBackedAgent:
         timeout: int = 30,
     ) -> str:
         del timeout
-        text, _ = self._run_shared_turn(
-            prompt,
-            model=self.voice_model if model is None else model,
-        )
+        m = self.voice_model if model is None else model
+        if self.session is None:
+            return self._run_one_shot_text(prompt, m).strip()
+        text, _ = self._run_shared_turn(prompt, model=m)
         return text.strip()
 
     def generate_branch_name(
@@ -338,10 +349,11 @@ class SessionBackedAgent:
         timeout: int = 15,
     ) -> str:
         del timeout
-        text, _ = self._run_shared_turn(
-            prompt,
-            model=self.brief_model if model is None else model,
-        )
+        m = self.brief_model if model is None else model
+        if self.session is None:
+            stripped = self._run_one_shot_text(prompt, m).strip()
+            return stripped.splitlines()[0] if stripped else ""
+        text, _ = self._run_shared_turn(prompt, model=m)
         stripped = text.strip()
         return stripped.splitlines()[0] if stripped else ""
 

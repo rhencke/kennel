@@ -1116,6 +1116,11 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     def _dead_prompt_error_message(self) -> str:
         return "Copilot CLI session died during prompt"
 
+    def _run_one_shot_text(self, prompt: str, model: ProviderModel) -> str:
+        """Run a one-shot Copilot prompt without creating a persistent session."""
+        raw = self._run_cli_prompt(prompt, model=model, timeout=30)
+        return extract_result_text(raw)
+
     def run_turn(
         self,
         content: str,
