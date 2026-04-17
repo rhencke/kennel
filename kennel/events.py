@@ -579,6 +579,16 @@ def reply_to_comment(
                 "fetched %d comment(s) in thread for context", len(thread_comments)
             )
 
+    # Fido login set — used for initial snapshot and post-re-fetch comparison.
+    _fido_logins = {"fidocancode", "fido-can-code"}
+
+    # Capture Fido reply IDs from the initial snapshot so we can detect new
+    # replies posted by concurrent handlers during the triage + generation
+    # window (compared against the re-fetched thread below).
+    initial_fido_ids: set[int] = {
+        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+    }
+
     # Root comment body — used for task title generation.
     # When the webhook fires on a reply (e.g. "Yes" or "Woof, you're right!"),
     # the task title should describe the reviewer's original feedback, not the reply.
@@ -658,10 +668,26 @@ def reply_to_comment(
                 len(thread_comments),
             )
 
+    # Skip posting if a concurrent handler already replied during triage.
+    # A Fido reply ID in the re-fetched thread that was not in the initial
+    # snapshot means another handler handled this comment — adding a second
+    # reply would be a duplicate.  Return early with the triage result so
+    # the caller can still queue tasks based on the category.
+    current_fido_ids: set[int] = {
+        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+    }
+    if current_fido_ids - initial_fido_ids:
+        log.info(
+            "concurrent handler already replied — skipping post for comment %s",
+            info.get("comment_id"),
+        )
+        if lock_fd:
+            lock_fd.close()
+        return (category, titles)
+
     # Edit the last Fido reply only if it is the most recent comment in the thread
     # (i.e. no human has spoken since). If a human posted a new comment after
     # Fido's last reply, post a fresh reply so the conversation stays coherent.
-    _fido_logins = {"fidocancode", "fido-can-code"}
     last_thread_author = (
         thread_comments[-1].get("author", "").lower() if thread_comments else ""
     )

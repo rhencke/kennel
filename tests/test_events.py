@@ -4074,9 +4074,12 @@ class TestReplyToCommentThreadRefetch:
         mock_gh.fetch_comment_thread.assert_called_with("owner/repo", 1, 500)
 
     def test_refetch_result_used_for_edit_vs_post(self, tmp_path: Path) -> None:
-        """If the re-fetch reveals a Fido reply that wasn't in the initial
-        snapshot (posted by a concurrent handler during triage), the decision
-        to edit vs. post uses the fresh data."""
+        """The edit-vs-post decision uses re-fetched thread state, not the
+        stale initial snapshot.  When the initial fetch shows Fido as last
+        speaker (→ would edit) but the re-fetch reveals a human replied since
+        (→ should post fresh), the re-fetch data wins: a new reply is posted.
+        Note: the Fido reply ID is in both fetches, so the concurrent-skip
+        guard is not triggered."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -4089,9 +4092,7 @@ class TestReplyToCommentThreadRefetch:
             if model == "claude-haiku-4-5":
                 return "NO"
             if "Triage" in prompt:
-                return "ACT: add type hints"
-            if "Convert this PR review comment" in prompt:
-                return "Add type hints"
+                return "ANSWER: acknowledged"
             return "Will do!"
 
         mock_gh = MagicMock()
@@ -4101,13 +4102,17 @@ class TestReplyToCommentThreadRefetch:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                # Initial fetch: no Fido reply yet
-                return [{"id": 501, "author": "reviewer", "body": "add type hints"}]
-            else:
-                # Re-fetch: concurrent handler posted a Fido reply during triage
+                # Initial fetch: Fido was last speaker (stale snapshot)
                 return [
                     {"id": 501, "author": "reviewer", "body": "add type hints"},
                     {"id": 502, "author": "fidocancode", "body": "Got it!"},
+                ]
+            else:
+                # Re-fetch: human commented after the initial fetch
+                return [
+                    {"id": 501, "author": "reviewer", "body": "add type hints"},
+                    {"id": 502, "author": "fidocancode", "body": "Got it!"},
+                    {"id": 503, "author": "reviewer", "body": "also type the return"},
                 ]
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
@@ -4120,11 +4125,10 @@ class TestReplyToCommentThreadRefetch:
             agent=_client(side_effect=fake_pp),
         )
 
-        # Re-fetch shows Fido reply is last → edit it rather than posting new
-        mock_gh.edit_review_comment.assert_called_once_with(
-            "owner/repo", 502, "Will do!"
-        )
-        mock_gh.reply_to_review_comment.assert_not_called()
+        # Re-fetch shows human is last → post new reply, not edit
+        # (Fido ID 502 existed in initial, so concurrent-skip is NOT triggered)
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
 
     def test_refetch_human_comment_added_during_triage_triggers_new_post(
         self, tmp_path: Path
@@ -4230,6 +4234,156 @@ class TestReplyToCommentThreadRefetch:
 
         # Falls back to initial snapshot (no Fido reply) → posts new reply
         mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
+
+    def test_skips_post_when_concurrent_fido_reply_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """If a new Fido reply appears in the re-fetch that wasn't in the
+        initial snapshot, a concurrent handler already replied — skip to
+        avoid duplicates.  Closes #438."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 507},
+            comment_body="please add docstrings",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add docstrings"
+            if "Convert this PR review comment" in prompt:
+                return "Add docstrings"
+            return "Woof, on it!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Initial fetch: no Fido reply yet
+                return [
+                    {"id": 507, "author": "reviewer", "body": "please add docstrings"}
+                ]
+            else:
+                # Re-fetch: concurrent handler posted a Fido reply during triage
+                return [
+                    {"id": 507, "author": "reviewer", "body": "please add docstrings"},
+                    {"id": 508, "author": "fidocancode", "body": "On it!"},
+                ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        cat, titles = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Concurrent handler already replied — neither post nor edit is called
+        mock_gh.reply_to_review_comment.assert_not_called()
+        mock_gh.edit_review_comment.assert_not_called()
+        # Triage result is still returned so the caller can queue tasks
+        assert cat == "ACT"
+        assert titles == ["Add docstrings"]
+
+    def test_no_skip_when_fido_reply_was_already_in_initial_fetch(
+        self, tmp_path: Path
+    ) -> None:
+        """A Fido reply that existed in the initial fetch is not treated as
+        a concurrent duplicate — the edit-vs-post flow proceeds normally."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 509},
+            comment_body="looks good to me",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: acknowledged"
+            return "Thanks for the feedback!"
+
+        mock_gh = MagicMock()
+
+        def fetch_side_effect(repo, pr, cid):
+            # Both fetches return the same Fido reply — it was already there
+            return [
+                {"id": 509, "author": "reviewer", "body": "looks good"},
+                {"id": 510, "author": "fidocancode", "body": "On it!"},
+            ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Fido was already last speaker — edits in place (not skipped)
+        mock_gh.edit_review_comment.assert_called_once()
+        mock_gh.reply_to_review_comment.assert_not_called()
+
+    def test_skips_post_fido_can_code_login_also_detected(self, tmp_path: Path) -> None:
+        """The 'fido-can-code' login is also recognised as a Fido reply
+        when checking for concurrent duplicates."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 511},
+            comment_body="fix the typo",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix typo"
+            if "Convert this PR review comment" in prompt:
+                return "Fix the typo"
+            return "Fixed the typo!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"id": 511, "author": "reviewer", "body": "fix the typo"}]
+            else:
+                # Concurrent reply from the fido-can-code login variant
+                return [
+                    {"id": 511, "author": "reviewer", "body": "fix the typo"},
+                    {"id": 512, "author": "fido-can-code", "body": "Fixed!"},
+                ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Concurrent Fido reply detected (via fido-can-code) — skip
+        mock_gh.reply_to_review_comment.assert_not_called()
         mock_gh.edit_review_comment.assert_not_called()
 
 
