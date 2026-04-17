@@ -4855,7 +4855,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4873,7 +4873,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4891,7 +4891,7 @@ class TestHandleCi:
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 7, "branch")
@@ -4913,7 +4913,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4930,7 +4930,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4953,7 +4953,7 @@ class TestHandleCi:
                 side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
             ),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4973,7 +4973,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 42, "branch")
@@ -4991,7 +4991,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 5, "fix-branch")
@@ -5014,7 +5014,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5040,7 +5040,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5058,7 +5058,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5078,7 +5078,7 @@ class TestHandleCi:
             patch.object(worker, "set_status") as mock_status,
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -5099,7 +5099,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
@@ -5135,7 +5135,7 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -6681,7 +6681,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
@@ -6698,7 +6698,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
@@ -6738,7 +6738,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             assert worker.execute_task(fido_dir, self._repo_ctx(), 7, "branch") is True
@@ -6757,7 +6757,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
@@ -6775,7 +6775,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
@@ -6796,7 +6796,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -6824,7 +6824,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
@@ -6844,7 +6844,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -6863,7 +6863,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("sess", "")) as mock_run,
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -6887,14 +6887,14 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
         mock_push.assert_called_once_with("origin", "my-slug")
 
     def test_completes_task_by_id(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
+        worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("My task title")
         with (
@@ -6904,11 +6904,11 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_complete.assert_called_once_with(task["id"])
+        mock_complete.assert_called_once_with(task["id"], gh)
 
     def test_skips_complete_when_push_fails(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -6921,7 +6921,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -6938,7 +6938,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -6955,14 +6955,14 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
 
     def test_completes_when_already_in_sync(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
+        worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
@@ -6972,11 +6972,11 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_complete.assert_called_once_with(task["id"])
+        mock_complete.assert_called_once_with(task["id"], gh)
 
     def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -6989,7 +6989,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7006,7 +7006,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7023,7 +7023,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7042,7 +7042,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
@@ -7062,7 +7062,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("my-session", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
@@ -7092,7 +7092,7 @@ class TestExecuteTask:
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7122,7 +7122,7 @@ class TestExecuteTask:
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7161,7 +7161,7 @@ class TestExecuteTask:
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7199,14 +7199,14 @@ class TestExecuteTask:
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         # provider_run called exactly once (initial dispatch), not again after break
         mock_run.assert_called_once()
-        # complete_by_id still called (idempotent — task already completed externally)
-        mock_complete.assert_called_once_with(task["id"])
+        # complete_with_resolve still called (idempotent — task already completed externally)
+        mock_complete.assert_called_once_with(task["id"], worker.gh)
 
     def test_uses_fresh_session_mode_once_after_repeated_no_commit_nudges(
         self, tmp_path: Path
@@ -7240,7 +7240,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", side_effect=fake_run) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br-42")
@@ -7280,7 +7280,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7298,7 +7298,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7324,7 +7324,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
@@ -7343,7 +7343,7 @@ class TestExecuteTask:
             patch("kennel.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7424,7 +7424,7 @@ class TestExecuteTask:
         assert not worker._abort_task.is_set()
         mock_sync.assert_called()
 
-    def test_abort_does_not_call_complete_by_id(self, tmp_path: Path) -> None:
+    def test_abort_does_not_call_complete_with_resolve(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1})
@@ -7438,7 +7438,7 @@ class TestExecuteTask:
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean"),
             patch("kennel.tasks.Tasks.remove"),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7458,7 +7458,7 @@ class TestExecuteTask:
                 worker, "_squash_wip_commit", return_value=False
             ) as mock_squash,
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "feat-branch")
@@ -7487,7 +7487,7 @@ class TestExecuteTask:
                 "ensure_pushed",
                 side_effect=lambda *a: call_order.append("push") or True,
             ),
-            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.Tasks.complete_with_resolve"),
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -7505,7 +7505,7 @@ class TestExecuteTask:
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "_squash_wip_commit", return_value=True),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("kennel.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")

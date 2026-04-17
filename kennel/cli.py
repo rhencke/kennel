@@ -21,47 +21,6 @@ class Cmd:
     def __init__(self, *, github: GitHub) -> None:
         self._github = github
 
-    def _resolve_thread_if_ours(self, thread: dict[str, Any]) -> None:
-        """Resolve the review thread if the last reply came from us."""
-        repo = thread.get("repo", "")
-        pr = thread.get("pr")
-        comment_id = thread.get("comment_id")
-        if not (repo and pr and comment_id):
-            return
-
-        github = self._github
-        try:
-            us = github.get_user()
-            comments = github.get_pull_comments(repo, pr)
-            thread_comments = sorted(
-                [
-                    c
-                    for c in comments
-                    if c.get("id") == comment_id
-                    or c.get("in_reply_to_id") == comment_id
-                ],
-                key=lambda c: c.get("created_at", ""),
-            )
-            if not thread_comments:
-                return
-            last_author = thread_comments[-1].get("user", {}).get("login", "")
-            if last_author != us:
-                log.info("thread has new replies from %s — not resolving", last_author)
-                return
-
-            owner, repo_name = repo.split("/", 1)
-            threads = github.get_review_threads(owner, repo_name, pr)
-            for t in threads:
-                if t["isResolved"]:
-                    continue
-                nodes = t["comments"]["nodes"]
-                if nodes and nodes[0].get("databaseId") == comment_id:
-                    github.resolve_thread(t["id"])
-                    log.info("thread resolved: %s", t["id"])
-                    return
-        except Exception as exc:  # noqa: BLE001
-            log.warning("thread resolution skipped: %s", exc)
-
     def add(
         self,
         work_dir: Path,
@@ -89,9 +48,7 @@ class Cmd:
         return task
 
     def complete(self, work_dir: Path, task_id: str) -> None:
-        thread = Tasks(work_dir).complete_by_id(task_id)
-        if thread:
-            self._resolve_thread_if_ours(thread)
+        Tasks(work_dir).complete_with_resolve(task_id, self._github)
 
     def list(self, work_dir: Path) -> None:
         result = Tasks(work_dir).list()

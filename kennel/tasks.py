@@ -681,6 +681,53 @@ class Tasks(JsonFileStore):
                     return t.get("thread")
         return None
 
+    def complete_with_resolve(self, task_id: str, gh: GitHub) -> None:
+        """Mark a task completed and resolve its review thread if we posted last.
+
+        Combines :meth:`complete_by_id` with the per-task thread-resolve logic
+        so both the worker and CLI share one path.  If the task has no thread
+        metadata, or we are not the last commenter, the resolve step is skipped
+        silently.
+        """
+        thread = self.complete_by_id(task_id)
+        if not thread:
+            return
+        repo = thread.get("repo", "")
+        pr = thread.get("pr")
+        comment_id = thread.get("comment_id")
+        if not (repo and pr and comment_id):
+            return
+        try:
+            us = gh.get_user()
+            comments = gh.get_pull_comments(repo, pr)
+            thread_comments = sorted(
+                [
+                    c
+                    for c in comments
+                    if c.get("id") == comment_id
+                    or c.get("in_reply_to_id") == comment_id
+                ],
+                key=lambda c: c.get("created_at", ""),
+            )
+            if not thread_comments:
+                return
+            last_author = thread_comments[-1].get("user", {}).get("login", "")
+            if last_author != us:
+                log.info("thread has new replies from %s — not resolving", last_author)
+                return
+            owner, repo_name = repo.split("/", 1)
+            threads = gh.get_review_threads(owner, repo_name, pr)
+            for t in threads:
+                if t["isResolved"]:
+                    continue
+                nodes = t["comments"]["nodes"]
+                if nodes and nodes[0].get("databaseId") == comment_id:
+                    gh.resolve_thread(t["id"])
+                    log.info("thread resolved: %s", t["id"])
+                    return
+        except Exception as exc:  # noqa: BLE001
+            log.warning("thread resolution skipped: %s", exc)
+
     def has_pending_for_comment(self, comment_id: int | str) -> bool:
         """Return True if any pending task references *comment_id*."""
         cid = int(comment_id)

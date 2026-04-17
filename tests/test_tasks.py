@@ -1047,3 +1047,161 @@ class TestTasks:
         with pytest.raises(ValueError, match="missing required type field"):
             with Tasks(work_dir).modify() as _:
                 pass
+
+
+class TestTasksCompleteWithResolve:
+    """Tests for Tasks.complete_with_resolve — the unified complete+thread-resolve path."""
+
+    def _work_dir(self, tmp_path: Path) -> Path:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        return work_dir
+
+    def test_marks_task_completed(self, tmp_path: Path) -> None:
+        work_dir = self._work_dir(tmp_path)
+        task = add_task(work_dir, "task", TaskType.SPEC)
+        Tasks(work_dir).complete_with_resolve(task["id"], MagicMock())
+        assert list_tasks(work_dir)[0]["status"] == "completed"
+
+    def test_no_thread_does_not_call_github(self, tmp_path: Path) -> None:
+        work_dir = self._work_dir(tmp_path)
+        task = add_task(work_dir, "task", TaskType.SPEC)
+        gh = MagicMock()
+        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        gh.get_user.assert_not_called()
+        gh.resolve_thread.assert_not_called()
+
+    def test_thread_missing_fields_skips_resolve(self, tmp_path: Path) -> None:
+        """Thread dict with missing pr/comment_id skips resolution."""
+        work_dir = self._work_dir(tmp_path)
+        task = add_task(work_dir, "task", TaskType.THREAD, thread={"repo": "a/b"})
+        gh = MagicMock()
+        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        gh.resolve_thread.assert_not_called()
+
+    def test_nonexistent_id_does_not_raise(self, tmp_path: Path) -> None:
+        work_dir = self._work_dir(tmp_path)
+        Tasks(work_dir).complete_with_resolve("nonexistent-id", MagicMock())
+
+    def test_resolves_thread_when_we_are_last(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = [
+            {
+                "id": 42,
+                "in_reply_to_id": None,
+                "user": {"login": "reviewer"},
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+            {
+                "id": 99,
+                "in_reply_to_id": 42,
+                "user": {"login": "fido-bot"},
+                "created_at": "2024-01-02T00:00:00Z",
+            },
+        ]
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 42}]},
+            }
+        ]
+
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_called_once_with("thread_node_abc")
+        assert "thread resolved: thread_node_abc" in caplog.text
+
+    def test_skips_resolve_when_not_last_commenter(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = [
+            {
+                "id": 42,
+                "in_reply_to_id": None,
+                "user": {"login": "fido-bot"},
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+            {
+                "id": 99,
+                "in_reply_to_id": 42,
+                "user": {"login": "reviewer"},
+                "created_at": "2024-01-02T00:00:00Z",
+            },
+        ]
+
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_not_called()
+        assert "not resolving" in caplog.text
+
+    def test_skips_resolve_when_no_matching_comments(self, tmp_path: Path) -> None:
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = []
+
+        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_not_called()
+
+    def test_skips_resolve_when_thread_already_resolved(self, tmp_path: Path) -> None:
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = [
+            {
+                "id": 42,
+                "in_reply_to_id": None,
+                "user": {"login": "fido-bot"},
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+        ]
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": True,
+                "comments": {"nodes": [{"databaseId": 42}]},
+            }
+        ]
+
+        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_not_called()
+
+    def test_exception_silenced_and_logged(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.side_effect = RuntimeError("network error")
+
+        with caplog.at_level(logging.WARNING, logger="kennel"):
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        assert "thread resolution skipped" in caplog.text

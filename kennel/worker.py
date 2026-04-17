@@ -2016,7 +2016,7 @@ class Worker:
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            self._tasks.complete_by_id(task["id"])
+            self._tasks.complete_with_resolve(task["id"], self.gh)
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh)
