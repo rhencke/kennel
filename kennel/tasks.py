@@ -10,7 +10,8 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
@@ -226,6 +227,27 @@ def _auto_complete_ask_tasks(
                 "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
             )
             tasks.complete_by_id(task["id"])
+
+
+@contextmanager
+def pr_body_lock(work_dir: Path) -> Iterator[None]:
+    """Blocking exclusive lock on the PR-body sync.lock file.
+
+    Acquires LOCK_EX (blocking, not LOCK_NB) so callers wait rather than
+    skip.  Use to serialize any full-body PR edit against sync_tasks, which
+    also acquires this same lock (with LOCK_NB).  Prevents a description
+    rewrite from overwriting a concurrent work-queue sync.
+    """
+    git_dir = _resolve_git_dir(work_dir)
+    fido_dir = git_dir / "fido"
+    fido_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = fido_dir / "sync.lock"
+    fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fd.close()
 
 
 def sync_tasks(

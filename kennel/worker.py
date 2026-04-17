@@ -716,6 +716,7 @@ def _extract_body(raw: str | None) -> str:
 
 
 def _write_pr_description(
+    work_dir: Path,
     gh: Any,
     repo: str,
     pr_number: int,
@@ -733,9 +734,13 @@ def _write_pr_description(
     divider).
 
     Generates the description via the provider agent and writes it back via
-    ``gh.edit_pr_body``.  Raises ``ValueError`` when the existing body has no
-    ``---`` divider (rewrite precondition) or when the agent returns no
-    ``<body>``-tagged content.
+    ``gh.edit_pr_body``.  The final PATCH is serialized through the same
+    ``sync.lock`` that :func:`kennel.tasks.sync_tasks` holds, preventing a
+    description rewrite from overwriting a concurrent work-queue update.
+
+    Raises ``ValueError`` when the existing body has no ``---`` divider
+    (rewrite precondition) or when the agent returns no ``<body>``-tagged
+    content.
     """
     if agent is None:
         raise ValueError("_write_pr_description requires agent")
@@ -781,7 +786,10 @@ def _write_pr_description(
         new_desc = f"{new_desc.rstrip()}\n\nFixes #{issue}."
 
     new_body = f"{new_desc.strip()}{divider}{rest}"
-    gh.edit_pr_body(repo, pr_number, new_body)
+    # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
+    # also acquire this lock) cannot interleave and overwrite each other.
+    with tasks.pr_body_lock(work_dir):
+        gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
 
@@ -1308,6 +1316,7 @@ class Worker:
             state["pr_number"] = pr_number
             state["pr_title"] = request
         _write_pr_description(
+            self.work_dir,
             self.gh,
             repo_ctx.repo,
             pr_number,

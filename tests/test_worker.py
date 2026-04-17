@@ -33,6 +33,7 @@ from kennel.tasks import (
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
     _format_work_queue,
+    pr_body_lock,
     sync_tasks,
     sync_tasks_background,
 )
@@ -3344,10 +3345,14 @@ class TestWritePrDescription:
         print_return="<body>Desc.\n\nFixes #1.</body>",
         issue=1,
         pr_number=42,
+        work_dir: Path | None = None,
     ):
+        from contextlib import nullcontext
+
         mock_cc = _client(print_return)
-        return (
-            _write_pr_description(
+        with patch("kennel.tasks.pr_body_lock", return_value=nullcontext()):
+            result = _write_pr_description(
+                work_dir or Path("/tmp"),
                 gh,
                 "owner/repo",
                 pr_number,
@@ -3355,14 +3360,31 @@ class TestWritePrDescription:
                 task_list or [],
                 existing_body,
                 agent=mock_cc,
-            ),
-            mock_cc,
-        )
+            )
+        return result, mock_cc
 
     def test_writes_to_github(self) -> None:
         gh = MagicMock()
         self._call(gh)
         gh.edit_pr_body.assert_called_once()
+
+    def test_acquires_pr_body_lock_when_writing(self) -> None:
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch(
+            "kennel.tasks.pr_body_lock", return_value=nullcontext()
+        ) as mock_lock:
+            _write_pr_description(
+                Path("/tmp"),
+                gh,
+                "owner/repo",
+                42,
+                1,
+                [],
+                agent=_client("<body>Desc.\n\nFixes #1.</body>"),
+            )
+        mock_lock.assert_called_once_with(Path("/tmp"))
 
     def test_raises_when_opus_returns_empty(self) -> None:
         gh = MagicMock()
@@ -3514,7 +3536,7 @@ class TestWritePrDescription:
     def test_requires_agent(self) -> None:
         gh = MagicMock()
         with pytest.raises(ValueError, match="_write_pr_description requires agent"):
-            _write_pr_description(gh, "owner/repo", 99, 42, [])
+            _write_pr_description(Path("/tmp"), gh, "owner/repo", 99, 42, [])
 
 
 class TestFindOrCreatePr:
@@ -9558,6 +9580,32 @@ class TestFormatWorkQueue:
         result = _format_work_queue(tasks)
         assert "<!-- type:ci -->" in result
         assert "<!-- type:thread -->" in result
+
+
+class TestPrBodyLock:
+    def test_acquires_and_releases_lock(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+            with pr_body_lock(tmp_path):
+                assert (fido_dir / "sync.lock").exists()
+
+    def test_lock_blocks_sync_tasks(self, tmp_path: Path) -> None:
+        """sync_tasks (LOCK_NB) must skip while pr_body_lock holds the lock."""
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        (fido_dir / "state.json").write_text('{"issue": 1}')
+        gh = MagicMock()
+        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+            with pr_body_lock(tmp_path):
+                sync_tasks(
+                    tmp_path,
+                    gh,
+                    _resolve_git_dir_fn=MagicMock(return_value=tmp_path / ".git"),
+                    _auto_complete_ask_tasks_fn=MagicMock(),
+                )
+        # sync_tasks should have skipped (couldn't acquire LOCK_NB)
+        gh.find_pr.assert_not_called()
 
 
 class TestApplyQueueToBody:
