@@ -40,7 +40,7 @@ from kennel.infra import (
     real_infra,
 )
 from kennel.provider_factory import DefaultProviderFactory
-from kennel.registry import WorkerRegistry, make_registry
+from kennel.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
 from kennel.watchdog import (  # noqa: PLC2701
@@ -529,8 +529,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         description = self._describe_action(action)
         claude.set_thread_repo(repo_cfg.name)
         try:
-            with self.registry.webhook_activity(repo_cfg.name, description):
-                self._process_action_inner(action, repo_cfg)
+            with self.registry.webhook_activity(repo_cfg.name, description) as activity:
+                self._process_action_inner(action, repo_cfg, activity)
         except claude.ClaudeLeakError:
             # A webhook and a worker tried to talk to the same repo's claude
             # at the same time — the only safe action is to halt the whole
@@ -546,12 +546,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""
         if action.reply_to:
-            cid = action.reply_to.get("comment_id")
-            return f"replying to review comment {cid}" if cid else "replying to review"
+            return "handling review comment"
         if action.review_comments:
-            return "replying to review thread"
+            return "handling review thread"
         if action.comment_body:
-            return "triaging PR comment"
+            return "handling PR comment"
         return "handling webhook action"
 
     def _reply_promise(self, action: Action) -> tuple[str, int] | None:
@@ -567,7 +566,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             raise TypeError(f"invalid reply promise comment id: {comment_id!r}")
         return comment_type, comment_id
 
-    def _process_action_inner(self, action: Action, repo_cfg: RepoConfig) -> None:
+    def _process_action_inner(
+        self,
+        action: Action,
+        repo_cfg: RepoConfig,
+        activity: WebhookActivityHandle,
+    ) -> None:
         # The worker thread's own ``worker_what`` is not touched here — this
         # handler runs on a separate webhook thread and its activity is
         # surfaced in the repo's :class:`~kennel.registry.WebhookActivity`
@@ -586,6 +590,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                     category, titles = None, []
                 else:
+                    activity.set_description("triaging review comment")
                     try:
                         category, titles = type(self)._fn_reply_to_comment(
                             action, self.config, repo_cfg, gh
@@ -615,6 +620,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
                 # ACT, DO → add each task title to work queue.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                    activity.set_description(
+                        "queuing review comment tasks"
+                        if len(titles or []) != 1
+                        else "queuing review comment task"
+                    )
                     for title in titles or []:
                         type(self)._fn_create_task(
                             title,
@@ -626,6 +636,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         )
 
             if action.review_comments:
+                activity.set_description("replying to review thread")
                 type(self)._fn_reply_to_review(
                     action, self.config, repo_cfg, gh, already_replied=_replied_comments
                 )
@@ -639,6 +650,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     log.info("already replied to comment %s — skipping", cid)
                     category, titles = None, []
                 else:
+                    activity.set_description("triaging PR comment")
                     try:
                         category, titles = type(self)._fn_reply_to_issue_comment(
                             action, self.config, repo_cfg, gh
@@ -666,6 +678,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                    activity.set_description(
+                        "queuing PR comment tasks"
+                        if len(titles) != 1
+                        else "queuing PR comment task"
+                    )
                     for title in titles:
                         type(self)._fn_create_task(
                             title,

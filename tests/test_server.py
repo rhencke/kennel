@@ -1690,6 +1690,55 @@ class TestProcessAction:
         assert status == 200
         mock_gh.add_reaction.assert_called_once()
 
+    def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
+        from kennel.events import Action
+        from kennel.registry import WorkerRegistry
+        from kennel.server import _replied_comments
+
+        cfg = _config(tmp_path)
+        handler = WebhookHandler.__new__(WebhookHandler)
+        handler.config = cfg
+        handler.registry = WorkerRegistry(MagicMock())
+        handler.gh = MagicMock()
+        phases: list[str] = []
+
+        def reply_to_issue_comment(*args: object) -> tuple[str, list[str]]:
+            del args
+            phases.append(
+                handler.registry.get_webhook_activities("owner/repo")[0].description
+            )
+            return "ACT", ["do it"]
+
+        def create_task(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            phases.append(
+                handler.registry.get_webhook_activities("owner/repo")[0].description
+            )
+
+        WebhookHandler._fn_reply_to_issue_comment = reply_to_issue_comment
+        WebhookHandler._fn_create_task = create_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        action = Action(
+            prompt="test",
+            comment_body="please fix",
+            thread={
+                "repo": "owner/repo",
+                "pr": 11,
+                "comment_id": 9300,
+                "url": "https://github.com/owner/repo/pull/11#issuecomment-9300",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+        )
+
+        try:
+            handler._process_action(action, cfg.repos["owner/repo"])
+        finally:
+            _replied_comments.discard(9300)
+
+        assert phases == ["triaging PR comment", "queuing PR comment task"]
+        assert handler.registry.get_webhook_activities("owner/repo") == []
+
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server

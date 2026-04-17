@@ -693,6 +693,31 @@ class TestWebhookActivity:
         reg = WorkerRegistry(MagicMock())
         assert reg.get_webhook_activities("ghost/repo") == []
 
+    def test_handle_can_update_description(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        with reg.webhook_activity("foo/bar", "handling") as activity:
+            assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
+            activity.set_description("triaging")
+            assert reg.get_webhook_activities("foo/bar")[0].description == "triaging"
+
+    def test_handle_update_after_exit_is_noop(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        with reg.webhook_activity("foo/bar", "handling") as activity:
+            pass
+        activity.set_description("triaging")
+        assert reg.get_webhook_activities("foo/bar") == []
+
+    def test_unknown_handle_update_is_noop(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        with reg.webhook_activity("foo/bar", "handling"):
+            reg.set_webhook_description("foo/bar", -1, "triaging")
+            assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
+
+    def test_unknown_repo_handle_update_is_noop(self) -> None:
+        reg = WorkerRegistry(MagicMock())
+        reg.set_webhook_description("ghost/repo", 1, "triaging")
+        assert reg.get_webhook_activities("ghost/repo") == []
+
 
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:

@@ -63,6 +63,21 @@ class WebhookActivity:
     thread_id: int
 
 
+@dataclass(frozen=True)
+class WebhookActivityHandle:
+    """Opaque handle for updating one in-flight webhook activity safely."""
+
+    repo_name: str
+    handle_id: int
+    registry: "WorkerRegistry"
+
+    def set_description(self, description: str) -> None:
+        """Update the displayed description for this webhook activity."""
+        self.registry.set_webhook_description(
+            self.repo_name, self.handle_id, description
+        )
+
+
 class WorkerRegistry:
     """Owns and manages one :class:`~kennel.worker.WorkerThread` per repo.
 
@@ -204,7 +219,7 @@ class WorkerRegistry:
         description: str,
         *,
         _now: Callable[[], datetime] = _utcnow,
-    ) -> Generator[None, None, None]:
+    ) -> Generator[WebhookActivityHandle, None, None]:
         """Register an in-flight webhook handler for the duration of the block.
 
         Usage::
@@ -221,10 +236,11 @@ class WorkerRegistry:
             started_at=_now(),
             thread_id=threading.get_ident(),
         )
+        handle = WebhookActivityHandle(repo_name, activity.handle_id, self)
         with self._webhook_lock:
             self._webhook_activities.setdefault(repo_name, []).append(activity)
         try:
-            yield
+            yield handle
         finally:
             with self._webhook_lock:
                 items = self._webhook_activities.get(repo_name)
@@ -232,6 +248,25 @@ class WorkerRegistry:
                     self._webhook_activities[repo_name] = [
                         a for a in items if a.handle_id != activity.handle_id
                     ]
+
+    def set_webhook_description(
+        self, repo_name: str, handle_id: int, description: str
+    ) -> None:
+        """Replace one webhook activity entry with an updated description."""
+        with self._webhook_lock:
+            items = self._webhook_activities.get(repo_name)
+            if items is None:
+                return
+            for i, activity in enumerate(items):
+                if activity.handle_id != handle_id:
+                    continue
+                items[i] = WebhookActivity(
+                    handle_id=activity.handle_id,
+                    description=description,
+                    started_at=activity.started_at,
+                    thread_id=activity.thread_id,
+                )
+                return
 
     def get_webhook_activities(self, repo_name: str) -> list[WebhookActivity]:
         """Return a snapshot of in-flight webhook activities for *repo_name*."""
