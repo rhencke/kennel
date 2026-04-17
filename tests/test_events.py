@@ -3987,6 +3987,13 @@ class TestReplyToCommentTerseEnrichment:
 
 
 class TestRewritePrDescription:
+    @pytest.fixture(autouse=True)
+    def _mock_pr_body_lock(self):
+        from contextlib import nullcontext
+
+        with patch("kennel.tasks.pr_body_lock", return_value=nullcontext()):
+            yield
+
     def _pr_body(self, desc: str = "Does something useful.\n\nFixes #42.") -> str:
         return (
             f"{desc}\n\n---\n\n## Work queue\n\n"

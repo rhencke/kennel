@@ -10,7 +10,8 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
@@ -228,6 +229,27 @@ def _auto_complete_ask_tasks(
             tasks.complete_by_id(task["id"])
 
 
+@contextmanager
+def pr_body_lock(work_dir: Path) -> Iterator[None]:
+    """Blocking exclusive lock on the PR-body sync.lock file.
+
+    Acquires LOCK_EX (blocking, not LOCK_NB) so callers wait rather than
+    skip.  Use to serialize any full-body PR edit against sync_tasks, which
+    also acquires this same lock (with LOCK_NB).  Prevents a description
+    rewrite from overwriting a concurrent work-queue sync.
+    """
+    git_dir = _resolve_git_dir(work_dir)
+    fido_dir = git_dir / "fido"
+    fido_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = fido_dir / "sync.lock"
+    fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fd.close()
+
+
 def sync_tasks(
     work_dir: Path,
     gh: GitHub,
@@ -286,14 +308,31 @@ def sync_tasks(
 
         body = gh.get_pr_body(repo, pr_number)
 
-        if "WORK_QUEUE_START" not in body:
+        has_start = "WORK_QUEUE_START" in body
+        has_end = "WORK_QUEUE_END" in body
+        if not has_start and not has_end:
             log.info(
                 "sync_tasks: PR #%s has no work queue markers — skipping",
                 pr_number,
             )
             return
+        if not has_start or not has_end:
+            log.warning(
+                "sync_tasks: PR #%s has incomplete work queue markers "
+                "(start=%s end=%s) — skipping",
+                pr_number,
+                has_start,
+                has_end,
+            )
+            return
 
         new_body = _apply_queue_to_body(body, queue)
+        if new_body == body:
+            log.info(
+                "sync_tasks: PR #%s work queue already up to date — no change",
+                pr_number,
+            )
+            return
         gh.edit_pr_body(repo, pr_number, new_body)
         log.info("sync_tasks: PR #%s work queue synced", pr_number)
     finally:

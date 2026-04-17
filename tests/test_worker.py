@@ -33,6 +33,7 @@ from kennel.tasks import (
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
     _format_work_queue,
+    pr_body_lock,
     sync_tasks,
     sync_tasks_background,
 )
@@ -3344,10 +3345,14 @@ class TestWritePrDescription:
         print_return="<body>Desc.\n\nFixes #1.</body>",
         issue=1,
         pr_number=42,
+        work_dir: Path | None = None,
     ):
+        from contextlib import nullcontext
+
         mock_cc = _client(print_return)
-        return (
-            _write_pr_description(
+        with patch("kennel.tasks.pr_body_lock", return_value=nullcontext()):
+            result = _write_pr_description(
+                work_dir or Path("/tmp"),
                 gh,
                 "owner/repo",
                 pr_number,
@@ -3355,14 +3360,31 @@ class TestWritePrDescription:
                 task_list or [],
                 existing_body,
                 agent=mock_cc,
-            ),
-            mock_cc,
-        )
+            )
+        return result, mock_cc
 
     def test_writes_to_github(self) -> None:
         gh = MagicMock()
         self._call(gh)
         gh.edit_pr_body.assert_called_once()
+
+    def test_acquires_pr_body_lock_when_writing(self) -> None:
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch(
+            "kennel.tasks.pr_body_lock", return_value=nullcontext()
+        ) as mock_lock:
+            _write_pr_description(
+                Path("/tmp"),
+                gh,
+                "owner/repo",
+                42,
+                1,
+                [],
+                agent=_client("<body>Desc.\n\nFixes #1.</body>"),
+            )
+        mock_lock.assert_called_once_with(Path("/tmp"))
 
     def test_raises_when_opus_returns_empty(self) -> None:
         gh = MagicMock()
@@ -3514,7 +3536,7 @@ class TestWritePrDescription:
     def test_requires_agent(self) -> None:
         gh = MagicMock()
         with pytest.raises(ValueError, match="_write_pr_description requires agent"):
-            _write_pr_description(gh, "owner/repo", 99, 42, [])
+            _write_pr_description(Path("/tmp"), gh, "owner/repo", 99, 42, [])
 
 
 class TestFindOrCreatePr:
@@ -9560,6 +9582,32 @@ class TestFormatWorkQueue:
         assert "<!-- type:thread -->" in result
 
 
+class TestPrBodyLock:
+    def test_acquires_and_releases_lock(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+            with pr_body_lock(tmp_path):
+                assert (fido_dir / "sync.lock").exists()
+
+    def test_lock_blocks_sync_tasks(self, tmp_path: Path) -> None:
+        """sync_tasks (LOCK_NB) must skip while pr_body_lock holds the lock."""
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        (fido_dir / "state.json").write_text('{"issue": 1}')
+        gh = MagicMock()
+        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+            with pr_body_lock(tmp_path):
+                sync_tasks(
+                    tmp_path,
+                    gh,
+                    _resolve_git_dir_fn=MagicMock(return_value=tmp_path / ".git"),
+                    _auto_complete_ask_tasks_fn=MagicMock(),
+                )
+        # sync_tasks should have skipped (couldn't acquire LOCK_NB)
+        gh.find_pr.assert_not_called()
+
+
 class TestApplyQueueToBody:
     def test_replaces_queue_section(self) -> None:
         body = "Before\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nAfter"
@@ -9818,6 +9866,101 @@ class TestSyncTasks:
         with patch("kennel.tasks.Tasks.list", return_value=[task]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
+
+    def test_warns_and_skips_when_only_start_marker_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.return_value = "<!-- WORK_QUEUE_START -->\nno end marker"
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+        assert "incomplete work queue markers" in caplog.text
+
+    def test_warns_and_skips_when_only_end_marker_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.return_value = "no start marker\n<!-- WORK_QUEUE_END -->"
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+        assert "incomplete work queue markers" in caplog.text
+
+    def test_skips_patch_and_logs_when_body_unchanged(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        # Build a body whose queue already matches the single pending task
+        task = {"title": "Do it", "status": "pending", "type": "spec"}
+        from kennel.tasks import _format_work_queue
+
+        queue = _format_work_queue([task])
+        body = f"desc\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+        gh.get_pr_body.return_value = body
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+
+    def test_completed_task_appears_in_pr_body_after_sync(self, tmp_path: Path) -> None:
+        """End-to-end: add a task, complete it, sync — PR body must show it done."""
+        from kennel.tasks import Tasks
+        from kennel.types import TaskType
+
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+
+        # Use real Tasks operations — no task-list mock
+        task = Tasks(tmp_path).add("Replace the marker", TaskType.SPEC)
+        Tasks(tmp_path).complete_by_id(task["id"])
+
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 42, "state": "OPEN"}
+        gh.get_pr_body.return_value = (
+            "desc\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\n"
+            "- [ ] Replace the marker **→ next** <!-- type:spec -->\n"
+            "<!-- WORK_QUEUE_END -->"
+        )
+
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        # Completed task must appear inside the <details> block, not as a pending item
+        assert "Replace the marker" in new_body
+        assert "- [x]" in new_body
+        assert "<details>" in new_body
+        assert "Completed (1)" in new_body
+        # Must not remain as a pending checkbox
+        assert "- [ ] Replace the marker" not in new_body
 
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()

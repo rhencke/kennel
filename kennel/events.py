@@ -1204,6 +1204,7 @@ def _rewrite_pr_description(
 
         body = gh.get_pr_body(repo, pr_number)
         _write_pr_description(
+            work_dir,
             gh,
             repo,
             pr_number,
