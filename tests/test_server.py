@@ -16,6 +16,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel import provider
+from kennel.claimed import RepliedComments
 from kennel.config import Config
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import Action, recover_reply_promises
@@ -831,6 +832,69 @@ class TestReplyPromiseKey:
         action = Action(prompt="x", thread={"comment_type": "pulls", "comment_id": "5"})
         with pytest.raises(TypeError, match="invalid reply promise comment id"):
             handler._reply_promise(action)
+
+
+class TestRepliedComments:
+    """Unit tests for the RepliedComments atomic-claim helper."""
+
+    def test_claim_returns_true_first_time(self) -> None:
+        rc = RepliedComments()
+        assert rc.claim(1) is True
+
+    def test_claim_returns_false_when_already_claimed(self) -> None:
+        rc = RepliedComments()
+        rc.claim(1)
+        assert rc.claim(1) is False
+
+    def test_claim_is_atomic_across_threads(self) -> None:
+        """Exactly one thread should win the claim under concurrent pressure."""
+        rc = RepliedComments()
+        results: list[bool] = []
+        lock = threading.Lock()
+
+        def try_claim() -> None:
+            result = rc.claim(42)
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=try_claim) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert results.count(True) == 1
+        assert results.count(False) == 19
+
+    def test_add_prevents_subsequent_claim(self) -> None:
+        rc = RepliedComments()
+        rc.add(7)
+        assert rc.claim(7) is False
+
+    def test_discard_allows_reclaim(self) -> None:
+        rc = RepliedComments()
+        assert rc.claim(3) is True
+        rc.discard(3)
+        assert rc.claim(3) is True
+
+    def test_contains(self) -> None:
+        rc = RepliedComments()
+        assert 5 not in rc
+        rc.add(5)
+        assert 5 in rc
+
+    def test_independent_ids_dont_interfere(self) -> None:
+        rc = RepliedComments()
+        assert rc.claim(10) is True
+        assert rc.claim(11) is True
+        assert rc.claim(10) is False
+        assert rc.claim(11) is False
+
+    def test_release_allows_reclaim(self) -> None:
+        """release() clears a claimed ID so a redelivery can retry after failure."""
+        rc = RepliedComments()
+        assert rc.claim(99) is True
+        rc.release(99)
+        assert rc.claim(99) is True
 
 
 class TestProcessAction:

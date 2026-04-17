@@ -5441,6 +5441,35 @@ class TestFilterThreads:
         )
         assert result[0]["total"] == 3
 
+    def test_excludes_webhook_claimed_thread(self, tmp_path: Path) -> None:
+        """Threads whose first comment ID was claimed by the webhook handler are skipped.
+
+        This prevents the comments sub-agent from posting a duplicate reply even
+        when the webhook's reply is still in flight and not yet visible via the
+        GitHub API (which the last_author == gh_user guard cannot catch).
+        """
+        import kennel.claimed as kc
+
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_db_id=700)
+        kc.replied_comments.add(700)
+        try:
+            result = w._filter_threads([node], "fido-bot", frozenset({"owner"}))
+            assert result == []
+        finally:
+            kc.replied_comments.discard(700)
+
+    def test_includes_unclaimed_thread(self, tmp_path: Path) -> None:
+        """Threads whose first comment ID is not in the webhook-claimed set are included."""
+        import kennel.claimed as kc
+
+        w = self._make_worker(tmp_path)
+        kc.replied_comments.discard(800)  # ensure clean state
+        result = w._filter_threads(
+            [self._make_node(first_db_id=800)], "fido-bot", frozenset({"owner"})
+        )
+        assert len(result) == 1
+
 
 class TestResolveAddressedThreads:
     """Tests for Worker.resolve_addressed_threads."""

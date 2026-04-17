@@ -701,7 +701,6 @@ def reply_to_review(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
-    already_replied: set[int] | None = None,
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -725,7 +724,7 @@ def reply_to_review(
     \"Submit review\") still arrives only through this event and is not
     yet handled.  Tracked separately — out of scope for the dedup fix.
     """
-    _ = (action, config, repo_cfg, gh, already_replied, agent, prompts)
+    _ = (action, config, repo_cfg, gh, agent, prompts)
     log.debug(
         "reply_to_review: skipping inline comments — handled per-comment (closes #518)"
     )

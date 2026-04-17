@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 from kennel import hooks, tasks
+from kennel.claimed import replied_comments as _webhook_claimed
 from kennel.claude import ClaudeCode
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
@@ -1487,8 +1488,14 @@ class Worker:
         A thread is included when:
         - it is not resolved,
         - it has at least one comment,
-        - the last commenter is not *gh_user* (awaiting a response), and
-        - the last commenter is either in *collaborators* or ends with ``[bot]``.
+        - the last commenter is not *gh_user* (awaiting a response),
+        - the last commenter is either in *collaborators* or ends with ``[bot]``, and
+        - the first comment's ID has not been claimed by the webhook handler.
+
+        The last rule prevents the comments sub-agent from posting a duplicate
+        reply to a thread that the webhook handler already claimed — even if
+        the reply is still in-flight and not yet visible in the GitHub API
+        (which ``last_author == gh_user`` alone cannot catch).
         """
         result = []
         for node in nodes:
@@ -1504,13 +1511,16 @@ class Worker:
                 continue
             if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
+            first_db_id = first_comment.get("databaseId")
+            if first_db_id is not None and first_db_id in _webhook_claimed:
+                continue
             first_login = (first_comment.get("author") or {}).get("login", "")
             result.append(
                 {
                     "id": node["id"],
                     "is_bot": first_login.endswith("[bot]"),
                     "first_author": first_login,
-                    "first_db_id": first_comment.get("databaseId"),
+                    "first_db_id": first_db_id,
                     "first_body": first_comment["body"],
                     "last_author": last_author,
                     "last_body": last_comment["body"],
