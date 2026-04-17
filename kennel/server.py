@@ -528,6 +528,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
         claude.set_thread_repo(repo_cfg.name)
+        claude.set_thread_kind("webhook")
         try:
             with self.registry.webhook_activity(repo_cfg.name, description) as activity:
                 self._process_action_inner(action, repo_cfg, activity)
@@ -541,6 +542,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
             os._exit(3)
         finally:
+            claude.set_thread_kind(None)
             claude.set_thread_repo(None)
 
     def _describe_action(self, action: Action) -> str:

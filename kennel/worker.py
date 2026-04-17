@@ -2529,6 +2529,7 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
         claude.set_thread_repo(self._repo_name)
+        claude.set_thread_kind("worker")
         try:
             while not self._stop:
                 if self._registry is not None:
@@ -2582,6 +2583,7 @@ class WorkerThread(threading.Thread):
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
         finally:
+            claude.set_thread_kind(None)
             claude.set_thread_repo(None)
             # Only stop the session on orderly shutdown — a crashed thread
             # leaves it alive so the registry can hand it to the replacement.
