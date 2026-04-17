@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
 
 from kennel.provider import PromptSession, ProviderModel, TurnSessionMode
+
+log = logging.getLogger(__name__)
 
 
 class SessionBackedAgent:
@@ -174,13 +177,85 @@ class SessionBackedAgent:
         raw = self.run_turn(prompt, model=model, system_prompt=full_system)
         if not raw:
             return ""
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            return ""
-        return (
-            obj[key] if isinstance(obj, dict) and isinstance(obj.get(key), str) else ""
-        )
+        for candidate in self._json_parse_candidates(raw):
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get(key), str):
+                return obj[key]
+        return ""
+
+    def _json_parse_candidates(self, raw: str) -> tuple[str, ...]:
+        return (raw,)
+
+    def _session_is_dead(self, session: PromptSession) -> bool:
+        return session.is_alive() is False
+
+    def _recover_prompt_session(self, session: PromptSession) -> bool:
+        recover = getattr(session, "recover", None)
+        if not callable(recover):
+            return False
+        recover()
+        return True
+
+    def _prompt_failure_is_passthrough(self, exc: Exception) -> bool:
+        del exc
+        return False
+
+    def _should_retry_prompt_failure(
+        self,
+        exc: Exception,
+        session: PromptSession,
+    ) -> bool:
+        del exc
+        return self._session_is_dead(session)
+
+    def _dead_prompt_error_message(self) -> str:
+        return "session died during prompt"
+
+    def _prompt_with_recovery(
+        self,
+        session: PromptSession,
+        content: str,
+        *,
+        model: ProviderModel | None,
+        system_prompt: str | None,
+    ) -> str:
+        recovered = False
+        while True:
+            try:
+                result = session.prompt(
+                    content, model=model, system_prompt=system_prompt
+                )
+            except Exception as exc:
+                if self._prompt_failure_is_passthrough(exc):
+                    raise
+                should_retry = self._should_retry_prompt_failure(exc, session)
+                if (
+                    recovered
+                    or not should_retry
+                    or not self._recover_prompt_session(session)
+                ):
+                    raise
+                recovered = True
+                log_name = type(self).__name__
+                log.warning(
+                    "%s: recovered session after prompt failure: %s", log_name, exc
+                )
+                continue
+            if (
+                result
+                or getattr(session, "last_turn_cancelled", False) is True
+                or not self._session_is_dead(session)
+            ):
+                return result
+            if recovered or not self._recover_prompt_session(session):
+                raise RuntimeError(self._dead_prompt_error_message())
+            recovered = True
+            log.warning(
+                "%s: recovered session after empty dead prompt", type(self).__name__
+            )
 
     def _run_shared_turn(
         self,

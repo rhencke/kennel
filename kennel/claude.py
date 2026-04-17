@@ -1528,57 +1528,23 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             return
         session.switch_model(model)
 
-    def _session_is_dead(self, session: PromptSession) -> bool:
-        return session.is_alive() is False
+    def _prompt_failure_is_passthrough(self, exc: Exception) -> bool:
+        return isinstance(exc, ClaudeProviderError)
 
-    def _recover_prompt_session(self, session: PromptSession) -> bool:
-        recover = getattr(session, "recover", None)
-        if not callable(recover):
-            return False
-        recover()
-        return True
-
-    def _prompt_with_recovery(
+    def _should_retry_prompt_failure(
         self,
+        exc: Exception,
         session: PromptSession,
-        content: str,
-        *,
-        model: ProviderModel | None,
-        system_prompt: str | None,
-    ) -> str:
-        recovered = False
-        while True:
-            try:
-                result = session.prompt(
-                    content, model=model, system_prompt=system_prompt
-                )
-            except ClaudeProviderError:
-                raise
-            except Exception as exc:
-                should_retry = isinstance(
-                    exc, (ClaudeStreamError, BrokenPipeError, OSError)
-                ) or self._session_is_dead(session)
-                if (
-                    recovered
-                    or not should_retry
-                    or not self._recover_prompt_session(session)
-                ):
-                    raise
-                recovered = True
-                log.warning(
-                    "ClaudeClient: recovered session after prompt failure: %s", exc
-                )
-                continue
-            if (
-                result
-                or getattr(session, "last_turn_cancelled", False) is True
-                or not self._session_is_dead(session)
-            ):
-                return result
-            if recovered or not self._recover_prompt_session(session):
-                raise RuntimeError("Claude session died during prompt")
-            recovered = True
-            log.warning("ClaudeClient: recovered session after empty dead prompt")
+    ) -> bool:
+        return isinstance(exc, (ClaudeStreamError, BrokenPipeError, OSError)) or (
+            self._session_is_dead(session)
+        )
+
+    def _dead_prompt_error_message(self) -> str:
+        return "Claude session died during prompt"
+
+    def _json_parse_candidates(self, raw: str) -> tuple[str, ...]:
+        return (raw, *(m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)))
 
     def run_turn(
         self,
@@ -1609,38 +1575,6 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             session.wait_for_pending_preempt()
             attempt += 1
             log.info("ClaudeClient.run_turn: preempted mid-flight — retry %d", attempt)
-
-    def _run_turn_json_value(
-        self,
-        prompt: str,
-        key: str,
-        model: ProviderModel,
-        system_prompt: str | None = None,
-    ) -> str:
-        """Run a prompt turn and parse JSON from the response at *key*."""
-        json_instruction = (
-            f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
-            " No other text before or after the JSON."
-        )
-        full_system = (
-            f"{system_prompt}\n\n{json_instruction}"
-            if system_prompt
-            else json_instruction
-        )
-        raw = self.run_turn(prompt, model=model, system_prompt=full_system)
-        if not raw:
-            return ""
-        candidates = [raw] + [
-            m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)
-        ]
-        for candidate in candidates:
-            try:
-                obj = json.loads(candidate)
-                if isinstance(obj.get(key), str):
-                    return obj[key]
-            except json.JSONDecodeError, AttributeError:
-                continue
-        return ""
 
     def generate_status(
         self,
