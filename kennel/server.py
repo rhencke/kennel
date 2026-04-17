@@ -529,6 +529,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
+        tid = threading.get_ident()
+        log.info(
+            "webhook handler: ENTER repo=%s description=%r tid=%d",
+            repo_cfg.name,
+            description,
+            tid,
+        )
         claude.set_thread_repo(repo_cfg.name)
         claude.set_thread_kind("webhook")
         try:
@@ -544,6 +551,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
             os._exit(3)
         finally:
+            log.info(
+                "webhook handler: EXIT repo=%s tid=%d",
+                repo_cfg.name,
+                tid,
+            )
             claude.set_thread_kind(None)
             claude.set_thread_repo(None)
 

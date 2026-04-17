@@ -1622,6 +1622,44 @@ class Worker:
             return False
         return True
 
+    def _commit_provider_leftovers_if_any(
+        self, task_title: str, head_before: str
+    ) -> str:
+        """Commit any uncommitted worktree changes left behind by the provider.
+
+        Copilot in particular sometimes applies patches via ``apply_patch``
+        but never runs ``git commit`` — the worktree diverges from HEAD and
+        the resume loop spins forever waiting for HEAD to move (#654).  If
+        HEAD hasn't moved since *head_before* but ``git status`` reports a
+        dirty worktree, kennel takes ownership and commits everything with a
+        ``wip: <task_title> (provider didn't commit)`` message so the outer
+        loop makes progress.  Returns the current HEAD sha.
+
+        No-op when HEAD already moved (provider committed on its own) or
+        when the worktree is clean (provider produced nothing).
+        """
+        head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        if head_after != head_before:
+            return head_after
+        porcelain = self._git(["status", "--porcelain"], check=False)
+        if porcelain.returncode != 0 or not porcelain.stdout.strip():
+            return head_after
+        log.warning(
+            "task produced uncommitted edits but no commit — committing on "
+            "provider's behalf: %s",
+            task_title,
+        )
+        self._git(["add", "-A"])
+        self._git(
+            [
+                "commit",
+                "-m",
+                f"wip: {task_title} (provider didn't commit)",
+            ],
+            check=False,
+        )
+        return self._git(["rev-parse", "HEAD"]).stdout.strip()
+
     def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
         """Drop the empty 'wip: start' sentinel if it is the branch root.
 
@@ -1763,7 +1801,7 @@ class Worker:
             session_mode=self._consume_turn_session_mode(),
         )
         log.info("task done (session=%s)", session_id)
-        head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
         if self._abort_task.is_set():
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
@@ -1838,7 +1876,7 @@ class Worker:
                 session_mode=session_mode,
             )
             log.info("task resume done (session=%s)", session_id)
-            head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+            head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
