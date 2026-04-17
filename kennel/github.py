@@ -432,6 +432,16 @@ class GitHub:
         """Post a comment on an issue."""
         self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
 
+    def delete_issue_comment(self, repo: str, comment_id: int | str) -> None:
+        """Delete an issue/PR top-level comment by id.
+
+        Used by the worker's leak-cleanup path to remove improvised
+        top-level PR comments fido sometimes posts during a task turn
+        when it can't make progress (see #669).
+        """
+        resp = self._s.delete(f"{self.BASE}/repos/{repo}/issues/comments/{comment_id}")
+        resp.raise_for_status()
+
     def get_user(self) -> str:
         """Return the authenticated GitHub username."""
         data = self._get("/user")

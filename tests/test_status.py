@@ -1645,6 +1645,15 @@ class TestFormatStatus:
         output = format_status(status)
         # Agent line is always present when there's a pid.
         assert "pid 9999" in output
+        # Active-agent rows start with "* Worker:" (NO_COLOR-friendly marker);
+        # inactive rows start with "  Worker:".  This repo's worker is the
+        # active talker, so check both prefixes for forward-compat.
+        worker_lines = [
+            line
+            for line in output.splitlines()
+            if line.startswith("  Worker:") or line.startswith("* Worker:")
+        ]
+        assert any("→ pid" not in line for line in worker_lines)
         # Header does not carry pid info — that belongs to the agent line.
         header = next(line for line in output.splitlines() if line.startswith("owner"))
         assert "pid 9999" not in header
@@ -2268,3 +2277,174 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
             output = format_status(status)
         assert "\033[" not in output
+
+
+class TestProviderColoredStatus:
+    """Provider-specific section-bg tinting + limits-line fg highlighting.
+
+    Feature: repo sections get the provider's dim_bg across all their
+    lines; the limits-line provider tokens get the provider's bright_fg;
+    the active-agent "Worker:" row carries an ASCII ``*`` marker that is
+    visible even under ``NO_COLOR``.
+    """
+
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_active_worker_line_starts_with_asterisk_marker(self) -> None:
+        # NO_COLOR alternate for the GREEN_BG highlight: active rows carry
+        # a leading ``* `` that's visible regardless of ANSI support.
+        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
+            repo = self._repo(
+                fido_running=True,
+                issue=7,
+                current_task={"title": "implement foo", "index": 1, "total": 2},
+            )
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
+        assert worker_lines, f"no Worker line in:\n{output}"
+        assert worker_lines[0].startswith("* "), worker_lines[0]
+
+    def test_inactive_worker_line_keeps_alignment_without_marker(self) -> None:
+        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
+            repo = self._repo(fido_running=True, issue=7)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
+        assert worker_lines, f"no Worker line in:\n{output}"
+        # Two-space indent preserves column alignment with the active form.
+        assert worker_lines[0].startswith("  Worker:"), worker_lines[0]
+
+    def test_limits_line_colors_claude_code_token_when_color_enabled(self) -> None:
+        from kennel.color import rgb_fg
+        from kennel.provider import PROVIDER_PALETTES
+
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            # pressure=0.50 keeps the status healthy — no warning/paused
+            # overlay — so the provider-color highlight wins.
+            provider_status = ProviderPressureStatus(
+                provider=ProviderID.CLAUDE_CODE,
+                pressure=0.50,
+                window_name="five_hour",
+            )
+            status = KennelStatus(
+                kennel_pid=None,
+                kennel_uptime=None,
+                repos=[self._repo(provider_status=provider_status)],
+                provider_statuses=[provider_status],
+            )
+            output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
+        expected_prefix = rgb_fg(*palette.bright_fg) + "claude-code"
+        limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
+        assert expected_prefix in limits_line
+
+    def test_limits_line_highlights_copilot_token(self) -> None:
+        from kennel.color import rgb_fg
+        from kennel.provider import PROVIDER_PALETTES
+
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
+            status = KennelStatus(
+                kennel_pid=None,
+                kennel_uptime=None,
+                repos=[
+                    self._repo(
+                        provider=ProviderID.COPILOT_CLI, provider_status=provider_status
+                    )
+                ],
+                provider_statuses=[provider_status],
+            )
+            output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.COPILOT_CLI]
+        expected_prefix = rgb_fg(*palette.bright_fg) + "copilot-cli"
+        limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
+        assert expected_prefix in limits_line
+
+    def test_limits_line_respects_paused_style_over_provider_fg(self) -> None:
+        # A paused / warning status wins over the provider highlight so
+        # state signalling isn't lost to identity coloring.
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            # pressure=0.99 crosses the pause threshold (0.95) → paused.
+            provider_status = ProviderPressureStatus(
+                provider=ProviderID.CLAUDE_CODE,
+                pressure=0.99,
+            )
+            status = KennelStatus(
+                kennel_pid=None,
+                kennel_uptime=None,
+                repos=[self._repo(provider_status=provider_status)],
+                provider_statuses=[provider_status],
+            )
+            output = format_status(status)
+        # DARK_GRAY code is \033[90m — must be present; truecolor provider
+        # prefix must NOT be (identity color suppressed while paused).
+        assert "\033[90m" in output
+
+    def test_repo_section_lines_get_provider_bg_when_color_enabled(self) -> None:
+        from kennel.color import rgb_bg
+        from kennel.provider import PROVIDER_PALETTES
+
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            repo = self._repo(fido_running=True, issue=7, issue_title="do thing")
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
+        expected_bg = rgb_bg(*palette.dim_bg)
+        repo_lines = [
+            ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
+        ]
+        assert repo_lines, f"no repo/issue lines:\n{output}"
+        for line in repo_lines:
+            assert expected_bg in line, f"bg missing from: {line!r}"
+
+    def test_repo_section_bg_omitted_for_provider_without_palette(self) -> None:
+        # CODEX has no registered palette — section renders without
+        # provider-bg wrap.  This test also guards against crashes when
+        # palette_for returns None.
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            repo = self._repo(provider=ProviderID.CODEX, fido_running=True, issue=7)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        # No truecolor bg escape (\033[48;2;...m) should appear anywhere.
+        assert "\033[48;2;" not in output
+
+    def test_limits_line_falls_back_when_provider_has_no_palette(self) -> None:
+        # CODEX has no palette registered; the limits line still renders,
+        # without a truecolor fg prefix for the provider token.
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            provider_status = ProviderPressureStatus(
+                provider=ProviderID.CODEX,
+                pressure=0.50,
+                window_name="five_hour",
+            )
+            status = KennelStatus(
+                kennel_pid=None,
+                kennel_uptime=None,
+                repos=[
+                    self._repo(
+                        provider=ProviderID.CODEX, provider_status=provider_status
+                    )
+                ],
+                provider_statuses=[provider_status],
+            )
+            output = format_status(status)
+        limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
+        assert "codex 50%" in limits_line
+        assert "\033[38;2;" not in limits_line

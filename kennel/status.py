@@ -24,9 +24,17 @@ from kennel.color import (
     RED_BOLD,
     YELLOW_BG,
     color,
+    rgb_bg,
+    rgb_fg,
+    wrap_bg_line,
+    wrap_raw,
 )
 from kennel.config import RepoConfig
-from kennel.provider import ProviderID, ProviderPressureStatus
+from kennel.provider import (
+    ProviderID,
+    ProviderPressureStatus,
+    palette_for,
+)
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import State
 from kennel.tasks import Tasks
@@ -686,7 +694,21 @@ def _provider_status_summary(status: ProviderPressureStatus) -> str:
 
 
 def _styled_provider_status(status: ProviderPressureStatus) -> str:
-    return color(_provider_status_style(status), _provider_status_summary(status))
+    base_style = _provider_status_style(status)
+    summary = _provider_status_summary(status)
+    if base_style:
+        # Preserve the existing dim/dark-gray rules (used when the provider
+        # is paused or warning) — those signal state more than identity, so
+        # they win over the provider-color highlight.
+        return color(base_style, summary)
+    # Highlight the provider name (prefix of the summary) with the provider's
+    # bright fg so each provider is visually identifiable in the limits line.
+    palette = palette_for(status.provider)
+    provider_token = str(status.provider)
+    if palette is not None and summary.startswith(provider_token):
+        tail = summary[len(provider_token) :]
+        return wrap_raw(rgb_fg(*palette.bright_fg), provider_token) + tail
+    return summary
 
 
 def _styled_repo_provider(repo: RepoStatus) -> str:
@@ -800,8 +822,12 @@ def _format_worker_thread_line(repo: RepoStatus) -> str:
     """
     state = _worker_thread_state(repo)
     is_active = repo.current_task is not None or _worker_is_agent_talker(repo)
+    # NO_COLOR users need an alternate signal to the GREEN_BG highlight;
+    # a leading "* " is visible in every terminal mode.  Inactive rows get
+    # two spaces so the label column stays aligned.
+    marker = "* " if is_active else "  "
     label = color(GREEN_BG, "Worker:") if is_active else color(BOLD, "Worker:")
-    line = f"  {label} {state}"
+    line = f"{marker}{label} {state}"
     if _worker_is_agent_talker(repo):
         line += f" {color(DIM, f'◀ {repo.provider}')}"
     return line
@@ -896,7 +922,11 @@ def format_status(status: KennelStatus) -> str:
         lines.append(provider_summary)
 
     for repo in status.repos:
-        lines.append(_format_repo_header(repo))
-        lines.extend(_format_repo_body(repo))
+        section = [_format_repo_header(repo), *_format_repo_body(repo)]
+        palette = palette_for(repo.provider)
+        if palette is not None:
+            bg = rgb_bg(*palette.dim_bg)
+            section = [wrap_bg_line(bg, line) for line in section]
+        lines.extend(section)
 
     return "\n".join(lines)

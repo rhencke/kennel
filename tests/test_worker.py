@@ -42,6 +42,7 @@ from kennel.worker import (
     RepoContextFilter,
     RepoNameFilter,
     WorkerContext,
+    _is_leaked_task_comment,
     _pick_next_task,
     _sanitize_slug,
     _sanitize_status_text,
@@ -6681,6 +6682,48 @@ class TestExecuteTask:
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_status.assert_called_once_with("Working on: Write the tests")
 
+    def test_deletes_leaked_blocked_comment_posted_during_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Fix for #669: a BLOCKED: top-level PR comment fido posts during a
+        task turn is detected post-turn and deleted before reviewers see it."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("update gitignore for generated JsCoq assets")
+
+        # Simulate: fetch before the turn returns one pre-existing fido comment;
+        # fetch after the turn returns that same comment plus a new improvised
+        # BLOCKED comment authored by fido during the provider run.
+        gh.get_issue_comments.side_effect = [
+            [{"id": 100, "user": {"login": "fido-bot"}, "body": "old status"}],
+            [
+                {"id": 100, "user": {"login": "fido-bot"}, "body": "old status"},
+                {
+                    "id": 200,
+                    "user": {"login": "fido-bot"},
+                    "body": (
+                        "BLOCKED: This task is already complete in pushed "
+                        "commit abc123 but I cannot run `kennel task complete`."
+                    ),
+                },
+            ],
+        ]
+
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            assert worker.execute_task(fido_dir, self._repo_ctx(), 7, "branch") is True
+
+        # The pre-existing comment 100 stays; only the improvised 200 is deleted.
+        gh.delete_issue_comment.assert_called_once_with("owner/repo", 200)
+
     def test_builds_task_prompt_with_correct_skill(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -10602,3 +10645,119 @@ class TestWorkerThread:
 
         assert received_config == [config]
         assert received_repo_cfg == [cfg]
+
+
+class TestIsLeakedTaskComment:
+    """Fix for #669 — detect improvised BLOCKED comments fido posts during a task turn."""
+
+    def test_matches_blocked_prefix(self) -> None:
+        body = (
+            "BLOCKED: This task is already complete in pushed commit 3382c67 "
+            "on `render-demo-level-browser`, but I cannot run `kennel task "
+            "complete /home/rhencke/workspace/orly 1776437985163-0702` because "
+            "this task invocation explicitly forbids using `kennel task`."
+        )
+        assert _is_leaked_task_comment(body)
+
+    def test_matches_cannot_run_kennel_task(self) -> None:
+        body = "Hey, quick update: I cannot run `kennel task complete ...` per the constraint."
+        assert _is_leaked_task_comment(body)
+
+    def test_matches_explicitly_forbids(self) -> None:
+        body = "Something something explicitly forbids using `kennel task complete`."
+        assert _is_leaked_task_comment(body)
+
+    def test_rejects_empty(self) -> None:
+        assert not _is_leaked_task_comment("")
+        assert not _is_leaked_task_comment("   \n  \t ")
+
+    def test_rejects_normal_reply(self) -> None:
+        assert not _is_leaked_task_comment(
+            "Good catch sniffing that out! 🐕 Fixed in commit abc123."
+        )
+
+    def test_rejects_blocked_in_body_not_prefix(self) -> None:
+        # First line check — "BLOCKED:" only counts when it starts the comment.
+        assert not _is_leaked_task_comment(
+            "Just a note: some tests were BLOCKED: by a missing fixture."
+        )
+
+
+class TestLeakedCommentCleanup:
+    """Fix for #669 — Worker snapshots and deletes leaked task-turn comments."""
+
+    def _worker_with_gh(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def test_snapshot_returns_only_fido_ids(self, tmp_path: Path) -> None:
+        worker, gh = self._worker_with_gh(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"id": 1, "user": {"login": "reviewer"}},
+            {"id": 2, "user": {"login": "fido-bot"}},
+            {"id": 3, "user": {"login": "fido-bot"}},
+            {"id": 4, "user": {"login": "other-bot"}},
+        ]
+        ids = worker._snapshot_fido_issue_comment_ids("owner/repo", 7, "fido-bot")
+        assert ids == {2, 3}
+        gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
+
+    def test_snapshot_returns_empty_on_upstream_error(self, tmp_path: Path) -> None:
+        import requests
+
+        worker, gh = self._worker_with_gh(tmp_path)
+        gh.get_issue_comments.side_effect = requests.ConnectionError("boom")
+        assert (
+            worker._snapshot_fido_issue_comment_ids("owner/repo", 1, "fido-bot")
+            == set()
+        )
+
+    def test_deletes_only_new_fido_blocked_comments(self, tmp_path: Path) -> None:
+        worker, gh = self._worker_with_gh(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"id": 10, "user": {"login": "fido-bot"}, "body": "old innocuous comment"},
+            {
+                "id": 11,
+                "user": {"login": "reviewer"},
+                "body": "BLOCKED: human wrote this",
+            },
+            {
+                "id": 12,
+                "user": {"login": "fido-bot"},
+                "body": "BLOCKED: cannot run `kennel task complete`",
+            },
+            {
+                "id": 13,
+                "user": {"login": "fido-bot"},
+                "body": "Fresh comment that is fine",
+            },
+        ]
+        worker._delete_leaked_task_comments(
+            "owner/repo", 7, "fido-bot", before_ids={10}
+        )
+        # Only comment 12 matches all three conditions: new (not in before),
+        # fido-authored, and leak-pattern.
+        gh.delete_issue_comment.assert_called_once_with("owner/repo", 12)
+
+    def test_deletion_errors_are_swallowed(self, tmp_path: Path) -> None:
+        import requests
+
+        worker, gh = self._worker_with_gh(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"id": 20, "user": {"login": "fido-bot"}, "body": "BLOCKED: nothing to do"},
+        ]
+        gh.delete_issue_comment.side_effect = requests.HTTPError("404 gone")
+        # Must not raise — cleanup is best-effort.
+        worker._delete_leaked_task_comments(
+            "owner/repo", 7, "fido-bot", before_ids=set()
+        )
+
+    def test_fetch_error_during_cleanup_is_swallowed(self, tmp_path: Path) -> None:
+        import requests
+
+        worker, gh = self._worker_with_gh(tmp_path)
+        gh.get_issue_comments.side_effect = requests.ConnectionError("boom")
+        worker._delete_leaked_task_comments(
+            "owner/repo", 7, "fido-bot", before_ids=set()
+        )
+        gh.delete_issue_comment.assert_not_called()

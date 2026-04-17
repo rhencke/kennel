@@ -600,6 +600,27 @@ class TestGitHubClass:
         assert mock_s.get.call_count == 1
         sleeper.assert_not_called()
 
+    def test_delete_issue_comment_calls_session_delete(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_s.delete.return_value = mock_resp
+        gh.delete_issue_comment("owner/repo", 42)
+        mock_s.delete.assert_called_once_with(
+            "https://api.github.com/repos/owner/repo/issues/comments/42"
+        )
+        mock_resp.raise_for_status.assert_called_once()
+
+    def test_delete_issue_comment_raises_on_error(self) -> None:
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = _requests.HTTPError("404")
+        mock_s.delete.return_value = mock_resp
+        with pytest.raises(_requests.HTTPError, match="404"):
+            gh.delete_issue_comment("owner/repo", 42)
+
     def test_paginate_retries_on_5xx_mid_stream(self) -> None:
         # Multi-page pagination: a 5xx on page 2 must not abort the
         # whole walk — it retries just that page.

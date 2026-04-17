@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Protocol
 
+import requests as _requests
+
 from kennel import hooks, tasks
 from kennel.claimed import replied_comments as _webhook_claimed
 from kennel.claude import ClaudeCode
@@ -369,6 +371,33 @@ class PickerChoice:
 
 def _has_milestone(issue: dict[str, Any]) -> bool:
     return bool((issue.get("milestone") or {}).get("title"))
+
+
+def _is_leaked_task_comment(body: str) -> bool:
+    """Match top-level PR issue comments fido improvises during a task turn.
+
+    Fix for #669: when a task's work was already done by a prior commit,
+    fido sometimes posts a top-level comment like
+    ``"BLOCKED: This task is already complete in pushed commit <sha>..."``
+    asking a human to mark the task done.  The worker detects these after
+    the turn and deletes them so reviewers never see them.
+
+    Narrow by design — only obviously-improvised comments match.  Legitimate
+    replies (webhook thread replies, rescope notifications, pickup
+    announcements) do not start with ``BLOCKED:`` and do not reference the
+    forbidden ``kennel task complete`` invocation.
+    """
+    stripped = (body or "").strip()
+    if not stripped:
+        return False
+    first_line = stripped.splitlines()[0].strip()
+    if first_line.startswith("BLOCKED:"):
+        return True
+    if "cannot run `kennel task" in stripped:
+        return True
+    if "explicitly forbids using `kennel task" in stripped:
+        return True
+    return False
 
 
 def _issue_assignees(issue: dict[str, Any]) -> list[str]:
@@ -1673,6 +1702,80 @@ class Worker:
         )
         return self._git(["rev-parse", "HEAD"]).stdout.strip()
 
+    def _snapshot_fido_issue_comment_ids(
+        self, repo: str, pr_number: int, fido_login: str
+    ) -> set[int]:
+        """Snapshot fido-authored issue-comment IDs on a PR (fix for #669).
+
+        Used as the before-image by :meth:`_delete_leaked_task_comments` so
+        only comments that appear *during* a task turn are considered for
+        cleanup.  Best-effort: on upstream error returns an empty set, which
+        conservatively means every later fido comment is treated as new.
+        """
+        try:
+            comments = self.gh.get_issue_comments(repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "leak-check: failed to snapshot issue comments on %s#%d",
+                repo,
+                pr_number,
+            )
+            return set()
+        return {
+            c["id"] for c in comments if c.get("user", {}).get("login") == fido_login
+        }
+
+    def _delete_leaked_task_comments(
+        self,
+        repo: str,
+        pr_number: int,
+        fido_login: str,
+        before_ids: set[int],
+    ) -> None:
+        """Delete top-level PR issue comments fido improvised during a task
+        turn (fix for #669).
+
+        Compares the current set of fido-authored issue comments on
+        *pr_number* against *before_ids*; any new comment matching
+        :func:`_is_leaked_task_comment` is deleted.  Post-hoc cleanup runs
+        after the task completion path; HTTP errors here are logged and
+        swallowed so a transient GitHub hiccup doesn't abort the caller.
+        """
+        try:
+            comments = self.gh.get_issue_comments(repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "leak-check: failed to fetch issue comments on %s#%d",
+                repo,
+                pr_number,
+            )
+            return
+        for c in comments:
+            cid = c["id"]
+            if cid in before_ids:
+                continue
+            if c.get("user", {}).get("login") != fido_login:
+                continue
+            body = c.get("body", "") or ""
+            if not _is_leaked_task_comment(body):
+                continue
+            try:
+                self.gh.delete_issue_comment(repo, cid)
+                log.warning(
+                    "deleted leaked top-level PR comment %d on %s#%d (body=%r)",
+                    cid,
+                    repo,
+                    pr_number,
+                    body[:200],
+                )
+            except _requests.RequestException:
+                log.exception(
+                    "leak-check: failed to delete comment %d on %s#%d",
+                    cid,
+                    repo,
+                    pr_number,
+                )
+
     def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
         """Drop the empty 'wip: start' sentinel if it is the branch root.
 
@@ -1803,6 +1906,12 @@ class Worker:
         pr_title = pr_data.get("title", "") or ""
         pr_body = pr_data.get("body", "") or ""
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        # Snapshot fido-authored PR comments so we can detect and delete any
+        # improvised top-level BLOCKED/leak comments this task turn posts
+        # (see #669 and :func:`_is_leaked_task_comment`).
+        leak_before_ids = self._snapshot_fido_issue_comment_ids(
+            repo_ctx.repo, pr_number, repo_ctx.gh_user
+        )
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         session_id, _output = provider_run(
@@ -1902,6 +2011,12 @@ class Worker:
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh)
+        # Sweep any leaked top-level PR comments (BLOCKED: ...) the provider
+        # improvised during this task turn.  Runs after task completion so a
+        # transient GitHub error during cleanup doesn't block progress.
+        self._delete_leaked_task_comments(
+            repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+        )
         return True
 
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:

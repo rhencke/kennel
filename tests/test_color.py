@@ -129,3 +129,76 @@ class TestColor:
     def test_color_enabled_dark_gray(self) -> None:
         with patch.dict("os.environ", self._enabled(), clear=True):
             assert color(DARK_GRAY, "paused") == "\033[90mpaused\033[0m"
+
+
+# ---------------------------------------------------------------------------
+# wrap_raw / rgb_fg / rgb_bg / wrap_bg_line  (provider-color feature)
+# ---------------------------------------------------------------------------
+
+
+class TestRawWrapping:
+    def _enabled(self) -> dict[str, object]:
+        return {"FORCE_COLOR": "1"}
+
+    def _disabled(self) -> dict[str, object]:
+        return {"NO_COLOR": ""}
+
+    def test_rgb_fg_emits_truecolor_escape(self) -> None:
+        from kennel.color import rgb_fg
+
+        assert rgb_fg(255, 160, 60) == "\033[38;2;255;160;60m"
+
+    def test_rgb_bg_emits_truecolor_escape(self) -> None:
+        from kennel.color import rgb_bg
+
+        assert rgb_bg(30, 15, 0) == "\033[48;2;30;15;0m"
+
+    def test_wrap_raw_wraps_when_enabled(self) -> None:
+        from kennel.color import rgb_fg, wrap_raw
+
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            result = wrap_raw(rgb_fg(10, 20, 30), "x")
+            assert result == f"\033[38;2;10;20;30mx{_RESET}"
+
+    def test_wrap_raw_returns_text_when_disabled(self) -> None:
+        from kennel.color import rgb_fg, wrap_raw
+
+        with patch.dict("os.environ", self._disabled(), clear=True):
+            assert wrap_raw(rgb_fg(10, 20, 30), "x") == "x"
+
+    def test_wrap_raw_ignores_empty_escape(self) -> None:
+        from kennel.color import wrap_raw
+
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            assert wrap_raw("", "x") == "x"
+
+    def test_wrap_bg_line_applies_bg_across_inner_resets(self) -> None:
+        """Inner `_RESET`s must not punch holes in the background."""
+        from kennel.color import rgb_bg, wrap_bg_line
+
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            bg = rgb_bg(30, 15, 0)
+            # A pre-styled line: bold "A" then plain "B".
+            line = f"\033[1mA{_RESET}B"
+            result = wrap_bg_line(bg, line)
+            # After every inner reset, bg is re-applied; one final reset closes.
+            assert result == f"{bg}\033[1mA{_RESET}{bg}B{_RESET}"
+
+    def test_wrap_bg_line_no_inner_reset(self) -> None:
+        from kennel.color import rgb_bg, wrap_bg_line
+
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            bg = rgb_bg(30, 15, 0)
+            assert wrap_bg_line(bg, "plain") == f"{bg}plain{_RESET}"
+
+    def test_wrap_bg_line_disabled_returns_line_unchanged(self) -> None:
+        from kennel.color import rgb_bg, wrap_bg_line
+
+        with patch.dict("os.environ", self._disabled(), clear=True):
+            assert wrap_bg_line(rgb_bg(30, 15, 0), "plain") == "plain"
+
+    def test_wrap_bg_line_empty_escape_returns_line_unchanged(self) -> None:
+        from kennel.color import wrap_bg_line
+
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            assert wrap_bg_line("", "plain") == "plain"

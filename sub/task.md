@@ -68,6 +68,13 @@ Task implemented, committed, and pushed.
 
 **Stop immediately after completing this one task. Do not start the next task. Your job is exactly one task per invocation.**
 
+### If the work is already done
+If you discover the task's change is already present in the current branch (e.g. a prior commit on this branch already did it, or a rescope merged the work into another task), **just stop**. Do not commit, do not push, do not post anything.
+
+Never post a top-level PR comment (`gh api .../issues/<n>/comments`) explaining you cannot mark the task complete. The worker handles task bookkeeping; your only job is the code. If there is nothing to change, leave no trace.
+
+Never prefix any PR comment with `BLOCKED:`. Never ask a human or the queue manager to mark a task complete on your behalf. The kennel worker sees your empty-tree run and completes the task itself.
+
 ## Constraints
 - **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
 - **Never** continue to another task after completing the current one. One task per invocation, period.
