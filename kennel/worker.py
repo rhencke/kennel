@@ -2014,25 +2014,33 @@ class Worker:
                     pr_number,
                 )
                 return 0
+            checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+            required = self.gh.get_required_checks(
+                repo_ctx.repo, repo_ctx.default_branch
+            )
+            if not ci_ready_for_review(checks, required):
+                log.info(
+                    "PR #%s: changes requested — all addressed, but CI not yet passing — deferring re-request",
+                    pr_number,
+                )
+                return 0
+            promoted_from_draft = False
+            if is_draft:
+                log.info(
+                    "PR #%s: changes requested — all addressed, CI passing — marking ready",
+                    pr_number,
+                )
+                self.gh.pr_ready(repo_ctx.repo, pr_number)
+                promoted_from_draft = True
             missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
             if missing:
-                checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
-                required = self.gh.get_required_checks(
-                    repo_ctx.repo, repo_ctx.default_branch
+                log.info(
+                    "PR #%s: changes requested — all addressed, CI passing — re-requesting review from %s",
+                    pr_number,
+                    ", ".join(missing),
                 )
-                if ci_ready_for_review(checks, required):
-                    log.info(
-                        "PR #%s: changes requested — all addressed, CI passing — re-requesting review from %s",
-                        pr_number,
-                        ", ".join(missing),
-                    )
-                    self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
-                else:
-                    log.info(
-                        "PR #%s: changes requested — all addressed, but CI not yet passing — deferring re-request",
-                        pr_number,
-                    )
-            return 0
+                self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
+            return 1 if promoted_from_draft else 0
 
         if is_draft:
             completed = [

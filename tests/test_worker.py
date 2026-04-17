@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, PropertyMock, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
 
 import pytest
 
@@ -7905,6 +7905,48 @@ class TestHandlePromoteMerge:
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
         assert result == 0
+
+    def test_changes_requested_draft_marks_ready_before_rerequest(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=True
+        )
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        with patch("kennel.tasks.Tasks.list", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+        ready_call = call.pr_ready("rhencke/myrepo", 9)
+        rerequest_call = call.add_pr_reviewers("rhencke/myrepo", 9, ["rhencke"])
+        assert ready_call in gh.mock_calls
+        assert rerequest_call in gh.mock_calls
+        assert gh.mock_calls.index(ready_call) < gh.mock_calls.index(rerequest_call)
+
+    def test_changes_requested_draft_marks_ready_without_readding_reviewer(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [{"author": {"login": "rhencke"}, "state": "CHANGES_REQUESTED"}],
+            "commits": [],
+            "isDraft": True,
+            "requestedReviewers": ["rhencke"],
+        }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        with patch("kennel.tasks.Tasks.list", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+        gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
+        gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_does_not_merge(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
