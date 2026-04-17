@@ -9819,6 +9819,48 @@ class TestSyncTasks:
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
+    def test_warns_and_skips_when_only_start_marker_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.return_value = "<!-- WORK_QUEUE_START -->\nno end marker"
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+        assert "incomplete work queue markers" in caplog.text
+
+    def test_warns_and_skips_when_only_end_marker_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.return_value = "no start marker\n<!-- WORK_QUEUE_END -->"
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+        assert "incomplete work queue markers" in caplog.text
+
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)

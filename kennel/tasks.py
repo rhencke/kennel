@@ -286,10 +286,21 @@ def sync_tasks(
 
         body = gh.get_pr_body(repo, pr_number)
 
-        if "WORK_QUEUE_START" not in body:
+        has_start = "WORK_QUEUE_START" in body
+        has_end = "WORK_QUEUE_END" in body
+        if not has_start and not has_end:
             log.info(
                 "sync_tasks: PR #%s has no work queue markers — skipping",
                 pr_number,
+            )
+            return
+        if not has_start or not has_end:
+            log.warning(
+                "sync_tasks: PR #%s has incomplete work queue markers "
+                "(start=%s end=%s) — skipping",
+                pr_number,
+                has_start,
+                has_end,
             )
             return
 
