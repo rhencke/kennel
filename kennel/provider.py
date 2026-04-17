@@ -180,6 +180,11 @@ class PromptSession(Protocol):
         """Return the provider-native persistent session identifier, if any."""
         ...
 
+    @property
+    def dropped_session_count(self) -> int:
+        """Return how many stale persistent session ids were dropped, if tracked."""
+        ...
+
     def prompt(
         self,
         content: str,
@@ -266,6 +271,11 @@ class ProviderAgent(Protocol):
     @property
     def session_id(self) -> str | None:
         """Return the provider-native persistent session identifier, if any."""
+        ...
+
+    @property
+    def session_dropped_count(self) -> int:
+        """Return the attached session's dropped-session count, if available."""
         ...
 
     voice_model: ProviderModel

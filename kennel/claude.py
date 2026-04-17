@@ -811,6 +811,11 @@ class ClaudeSession:
         """Durable Claude conversation id, if one has been established."""
         return self._session_id or None
 
+    @property
+    def dropped_session_count(self) -> int:
+        """Claude stream-json sessions do not track dropped resume tokens."""
+        return 0
+
     def _respawn(self, *, clear_session_id: bool, reason: str) -> None:
         """Stop the current subprocess and spawn a replacement."""
         log.info("ClaudeSession: %s (model=%s)", reason, self._model)

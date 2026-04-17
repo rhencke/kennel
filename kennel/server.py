@@ -757,6 +757,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             crash = self.registry.get_crash_info(a.repo_name)
             started_at = self.registry.thread_started_at(a.repo_name)
             repo_cfg = self.config.repos.get(a.repo_name)
+            dropped_count = int(self.registry.get_session_dropped_count(a.repo_name))
             worker_uptime = (
                 (now - started_at).total_seconds() if started_at is not None else None
             )
@@ -787,6 +788,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "session_owner": self.registry.get_session_owner(a.repo_name),
                     "session_alive": self.registry.get_session_alive(a.repo_name),
                     "session_pid": self.registry.get_session_pid(a.repo_name),
+                    "session_dropped_count": dropped_count,
                     "claude_talker": _serialize_talker(claude.get_talker(a.repo_name)),
                     "rescoping": self.registry.is_rescoping(a.repo_name),
                 }

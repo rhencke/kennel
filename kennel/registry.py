@@ -305,6 +305,11 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread.session_pid if thread is not None else None
 
+    def get_session_dropped_count(self, repo_name: str) -> int:
+        """Return how many stale persistent session ids were dropped for *repo_name*."""
+        thread = self._threads.get(repo_name)
+        return thread.session_dropped_count if thread is not None else 0
+
     def set_rescoping(self, repo_name: str, active: bool) -> None:
         """Set the rescoping-active flag for *repo_name*.
 

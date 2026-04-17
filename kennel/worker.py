@@ -2432,6 +2432,13 @@ class WorkerThread(threading.Thread):
             provider = self._provider
         return provider.agent.session_pid if provider is not None else None
 
+    @property
+    def session_dropped_count(self) -> int:
+        """Number of stale provider session ids dropped by the live session."""
+        with self._provider_lock:
+            provider = self._provider
+        return provider.agent.session_dropped_count if provider is not None else 0
+
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()

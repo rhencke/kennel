@@ -86,7 +86,12 @@ class TestSessionBackedAgent:
             agent._spawn_owned_session(ProviderModel("model"))
 
     def test_session_properties_attach_and_detach(self) -> None:
-        session = MagicMock(owner="worker", pid=123, session_id="sess-1")
+        session = MagicMock(
+            owner="worker",
+            pid=123,
+            session_id="sess-1",
+            dropped_session_count=2,
+        )
         session.is_alive.return_value = True
         agent = _FakeAgent(session=session)
         assert agent.session is session
@@ -94,6 +99,7 @@ class TestSessionBackedAgent:
         assert agent.session_alive is True
         assert agent.session_pid == 123
         assert agent.session_id == "sess-1"
+        assert agent.session_dropped_count == 2
         assert agent.detach_session() is session
         assert agent.session is None
 
@@ -103,6 +109,7 @@ class TestSessionBackedAgent:
         assert (
             _FakeAgent(session=type("S", (), {"session_id": 123})()).session_id is None
         )
+        assert _FakeAgent().session_dropped_count == 0
 
     def test_ensure_session_requires_factory_inputs(self) -> None:
         with pytest.raises(

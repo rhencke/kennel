@@ -83,6 +83,7 @@ class RepoStatus:
     webhook_activities: list[WebhookActivityInfo] = field(default_factory=list)
     session_owner: str | None = None
     session_alive: bool = False
+    session_dropped_count: int = 0
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
 
@@ -315,6 +316,7 @@ def _fetch_activities(
                 "session_owner": item.get("session_owner"),
                 "session_alive": item.get("session_alive", False),
                 "session_pid": item.get("session_pid"),
+                "session_dropped_count": item.get("session_dropped_count", 0),
                 "claude_talker": item.get("claude_talker"),
                 "provider_status": _parse_provider_status(item.get("provider_status")),
                 "rescoping": item.get("rescoping", False),
@@ -435,6 +437,7 @@ def repo_status(
     session_owner: str | None = None,
     session_alive: bool = False,
     session_pid: int | None = None,
+    session_dropped_count: int = 0,
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
@@ -468,6 +471,7 @@ def repo_status(
             webhook_activities=webhook_activities,
             session_owner=session_owner,
             session_alive=session_alive,
+            session_dropped_count=session_dropped_count,
             claude_talker=claude_talker,
             rescoping=rescoping,
         )
@@ -522,6 +526,7 @@ def repo_status(
         webhook_activities=webhook_activities,
         session_owner=session_owner,
         session_alive=session_alive,
+        session_dropped_count=session_dropped_count,
         claude_talker=claude_talker,
         rescoping=rescoping,
     )
@@ -586,6 +591,9 @@ def collect() -> KennelStatus:
                 session_owner=info.get("session_owner") if info else None,
                 session_alive=bool(info.get("session_alive")) if info else False,
                 session_pid=session_pid_val,
+                session_dropped_count=int(info.get("session_dropped_count", 0))
+                if info
+                else 0,
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
@@ -623,6 +631,9 @@ def _agent_runtime_suffix(repo: RepoStatus) -> str:
         and repo.claude_talker is None
     ):
         parts.append(color(DIM, "session idle"))
+    if repo.session_dropped_count > 0:
+        noun = "session" if repo.session_dropped_count == 1 else "sessions"
+        parts.append(color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
     pid_str = (
         color(DIM, f"pid {repo.claude_pid}")
         if repo.claude_pid is not None

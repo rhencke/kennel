@@ -504,6 +504,7 @@ class TestFetchActivities:
                 "session_owner": None,
                 "session_alive": False,
                 "session_pid": None,
+                "session_dropped_count": 0,
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
@@ -543,6 +544,7 @@ class TestFetchActivities:
                 "session_owner": None,
                 "session_alive": False,
                 "session_pid": None,
+                "session_dropped_count": 0,
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
@@ -557,6 +559,7 @@ class TestFetchActivities:
                 "session_owner": None,
                 "session_alive": False,
                 "session_pid": None,
+                "session_dropped_count": 0,
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
@@ -1116,6 +1119,7 @@ class TestCollect:
             session_owner=None,
             session_alive=False,
             session_pid=None,
+            session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
         )
@@ -1152,6 +1156,7 @@ class TestCollect:
             session_owner=None,
             session_alive=False,
             session_pid=None,
+            session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
         )
@@ -1181,6 +1186,7 @@ class TestCollect:
             session_owner=None,
             session_alive=False,
             session_pid=None,
+            session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
         )
@@ -1258,6 +1264,7 @@ class TestCollect:
             session_owner=None,
             session_alive=False,
             session_pid=None,
+            session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
         )
@@ -1574,6 +1581,17 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         assert "→ agent (session idle)" in output
+
+    def test_agent_runtime_suffix_shows_dropped_session_count(self) -> None:
+        repo = self._repo(
+            issue=1,
+            claude_pid=9999,
+            claude_uptime=60,
+            session_dropped_count=2,
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "→ pid 9999 (running 1m, dropped sessions 2)" in output
 
     def test_multiple_repos(self) -> None:
         # Each repo emits a header + "no assigned issues" body line.

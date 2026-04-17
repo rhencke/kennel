@@ -216,6 +216,18 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_pid("foo/bar") == 77777
 
+    def test_get_session_dropped_count_returns_zero_for_unknown_repo(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_session_dropped_count("unknown/repo") == 0
+
+    def test_get_session_dropped_count_delegates_to_thread(
+        self, tmp_path: Path
+    ) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.session_dropped_count = 4
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_session_dropped_count("foo/bar") == 4
+
     def test_get_session_returns_none_for_unknown_repo(self) -> None:
         reg, _ = self._make_registry()
         assert reg.get_session("unknown/repo") is None

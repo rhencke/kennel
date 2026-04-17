@@ -217,6 +217,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.get_session_dropped_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
@@ -232,6 +233,7 @@ class TestGetEndpoint:
         assert entry["worker_uptime_seconds"] is None
         assert entry["webhook_activities"] == []
         assert entry["session_owner"] is None
+        assert entry["session_dropped_count"] == 0
 
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -254,10 +256,12 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.get_session_dropped_count.return_value = 3
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data[0]["session_owner"] == "worker-home"
+        assert data[0]["session_dropped_count"] == 3
 
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         from datetime import datetime, timezone

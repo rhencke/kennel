@@ -77,6 +77,15 @@ class SessionBackedAgent:
         session_id = getattr(session, "session_id")
         return session_id if isinstance(session_id, str) and session_id else None
 
+    @property
+    def session_dropped_count(self) -> int:
+        with self._session_lock:
+            session = self._session
+        if session is None or not hasattr(session, "dropped_session_count"):
+            return 0
+        dropped = getattr(session, "dropped_session_count")
+        return dropped if isinstance(dropped, int) and dropped >= 0 else 0
+
     def ensure_session(self, model: ProviderModel | None = None) -> None:
         with self._session_lock:
             session = self._session

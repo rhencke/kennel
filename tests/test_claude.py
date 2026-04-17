@@ -796,6 +796,12 @@ class TestClaudeSessionWakeupPipe:
         session._drain_wakeup()  # should not raise
         session.stop()
 
+    def test_dropped_session_count_is_zero(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert session.dropped_session_count == 0
+        session.stop()
+
 
 class TestClaudeSessionSend:
     def test_writes_json_user_message_to_stdin(self, tmp_path: Path) -> None:

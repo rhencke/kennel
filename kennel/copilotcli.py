@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import acp
+from acp.exceptions import RequestError
 from acp.schema import (
     AllowedOutcome,
     ClientCapabilities,
@@ -57,6 +58,11 @@ _COPILOT_JSON_BASE_ARGS = (
     "--allow-all",
     "-s",
 )
+
+
+def _is_missing_session_error(exc: RequestError) -> bool:
+    """Return True when ACP reports that a session id no longer exists."""
+    return "Resource not found: Session " in str(exc) and " not found" in str(exc)
 
 
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
@@ -124,6 +130,20 @@ def _combine_prompt(
         if part is not None and part.strip()
     ]
     return "\n\n---\n\n".join(parts)
+
+
+def _unexpected_new_session_prompt(content: str) -> str:
+    """Prepend a recovery nudge after ACP unexpectedly drops a stale session."""
+    return (
+        "IMPORTANT: Your previous persistent Copilot session was unexpectedly lost, "
+        "so you are now continuing in a brand new session.\n\n"
+        "Re-orient from the current repository state before acting. Do not rely on "
+        "memory from the lost session. Treat the prompt below as the authoritative "
+        "current task context, verify the live repo/branch/task state as needed, "
+        "and continue the work without duplicating already-completed steps.\n\n"
+        "---\n\n"
+        f"{content}"
+    )
 
 
 def _copilot(
@@ -508,6 +528,9 @@ class CopilotACPRuntime:
         self._prompt_chunks: list[str] = []
         self._tool_starts_logged: set[str] = set()
         self._tool_results_logged: set[str] = set()
+        self._metrics_lock = threading.Lock()
+        self._dropped_session_count = 0
+        self._needs_session_recovery_nudge = False
         self._thread = threading.Thread(
             target=self._run_loop,
             name=f"copilot-acp-{work_dir.name}",
@@ -547,6 +570,11 @@ class CopilotACPRuntime:
     def is_alive(self) -> bool:
         process = self._process
         return process is not None and process.returncode is None
+
+    @property
+    def dropped_session_count(self) -> int:
+        with self._metrics_lock:
+            return self._dropped_session_count
 
     def ensure_session(
         self, session_id: str | None, model: ProviderModel | str | None
@@ -657,6 +685,7 @@ class CopilotACPRuntime:
     async def _reset_session_async(self, model: ProviderModel | str | None) -> str:
         normalized = _normalize_model(model)
         await self._ensure_connection_async(normalized)
+        self._needs_session_recovery_nudge = False
         target_session_id = await self._attach_session_async(None)
         await self._set_model_async(target_session_id, normalized)
         return target_session_id
@@ -668,12 +697,18 @@ class CopilotACPRuntime:
         connection = self._connection
         if connection is None:
             raise RuntimeError("Copilot ACP connection is not available")
+        prompt_content = (
+            _unexpected_new_session_prompt(content)
+            if self._needs_session_recovery_nudge
+            else content
+        )
+        self._needs_session_recovery_nudge = False
         self._active_prompt_session_id = target_session_id
         self._prompt_chunks = []
         self._tool_starts_logged = set()
         self._tool_results_logged = set()
         response = await connection.prompt(
-            prompt=[acp.text_block(content)],
+            prompt=[acp.text_block(prompt_content)],
             session_id=target_session_id,
         )
         text = "".join(self._prompt_chunks)
@@ -739,14 +774,28 @@ class CopilotACPRuntime:
             response = await connection.new_session(cwd=str(self._work_dir))
             self._attached_session_id = response.session_id
             return response.session_id
-        if self._supports_load_session():
-            await connection.load_session(
-                cwd=str(self._work_dir), session_id=session_id
+        try:
+            if self._supports_load_session():
+                await connection.load_session(
+                    cwd=str(self._work_dir), session_id=session_id
+                )
+            else:
+                await connection.resume_session(
+                    cwd=str(self._work_dir), session_id=session_id
+                )
+        except RequestError as exc:
+            if not _is_missing_session_error(exc):
+                raise
+            self.log_warning(
+                "copilot session dropped: %s not found — starting fresh",
+                session_id,
             )
-        else:
-            await connection.resume_session(
-                cwd=str(self._work_dir), session_id=session_id
-            )
+            with self._metrics_lock:
+                self._dropped_session_count += 1
+            self._needs_session_recovery_nudge = True
+            response = await connection.new_session(cwd=str(self._work_dir))
+            self._attached_session_id = response.session_id
+            return response.session_id
         self._attached_session_id = session_id
         return session_id
 
@@ -855,6 +904,10 @@ class CopilotCLISession:
     @property
     def session_id(self) -> str | None:
         return self._session_id
+
+    @property
+    def dropped_session_count(self) -> int:
+        return self._runtime.dropped_session_count
 
     @property
     def last_turn_cancelled(self) -> bool:

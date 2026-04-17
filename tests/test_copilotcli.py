@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from acp.exceptions import RequestError
 
 from kennel import claude
 from kennel.copilotcli import (
@@ -100,6 +101,7 @@ class FakeRuntime:
         self.pid = 111
         self.alive = True
         self.next_prompt = ("done", "end_turn", "sess-next")
+        self.dropped_session_count = 0
 
     def ensure_session(self, session_id: str | None, model: str | None) -> str:
         self.ensure_calls.append((session_id, model))
@@ -130,8 +132,16 @@ class FakeRuntime:
 
 
 class FakeConnection:
-    def __init__(self, *, load_supported: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        load_supported: bool = True,
+        fail_load_session: bool = False,
+        fail_resume_session: bool = False,
+    ) -> None:
         self.load_supported = load_supported
+        self.fail_load_session = fail_load_session
+        self.fail_resume_session = fail_resume_session
         self.initialize_calls: list[tuple[int, object, object]] = []
         self.new_session_calls: list[str] = []
         self.load_session_calls: list[tuple[str, str]] = []
@@ -164,10 +174,18 @@ class FakeConnection:
 
     async def load_session(self, cwd: str, session_id: str) -> object:
         self.load_session_calls.append((cwd, session_id))
+        if self.fail_load_session:
+            raise RequestError(
+                404, f"Resource not found: Session {session_id} not found"
+            )
         return SimpleNamespace()
 
     async def resume_session(self, cwd: str, session_id: str) -> object:
         self.resume_session_calls.append((cwd, session_id))
+        if self.fail_resume_session:
+            raise RequestError(
+                404, f"Resource not found: Session {session_id} not found"
+            )
         return SimpleNamespace()
 
     async def set_session_model(self, model_id: str, session_id: str) -> object:
@@ -548,6 +566,75 @@ class TestCopilotACPRuntime:
         finally:
             runtime.stop()
 
+    def test_missing_loaded_session_starts_fresh_and_counts_drop(
+        self, tmp_path: Path
+    ) -> None:
+        connection = FakeConnection(load_supported=True, fail_load_session=True)
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            assert runtime.ensure_session("persisted", None) == "sess-1"
+            assert connection.load_session_calls == [(str(tmp_path), "persisted")]
+            assert connection.new_session_calls == [str(tmp_path)]
+            assert runtime.dropped_session_count == 1
+        finally:
+            runtime.stop()
+
+    def test_missing_loaded_session_nudges_next_prompt(self, tmp_path: Path) -> None:
+        connection = FakeConnection(load_supported=True, fail_load_session=True)
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            session_id = runtime.ensure_session("persisted", None)
+            runtime.prompt(session_id, "hello", None)
+            prompt_block = connection.prompt_calls[0][1][0]
+            assert "previous persistent Copilot session was unexpectedly lost" in (
+                prompt_block.text
+            )
+            assert prompt_block.text.endswith("hello")
+        finally:
+            runtime.stop()
+
+    def test_missing_resumed_session_starts_fresh_and_counts_drop(
+        self, tmp_path: Path
+    ) -> None:
+        connection = FakeConnection(load_supported=False, fail_resume_session=True)
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            assert runtime.ensure_session("persisted", None) == "sess-1"
+            assert connection.resume_session_calls == [(str(tmp_path), "persisted")]
+            assert connection.new_session_calls == [str(tmp_path)]
+            assert runtime.dropped_session_count == 1
+        finally:
+            runtime.stop()
+
+    def test_non_missing_load_session_error_is_not_swallowed(
+        self, tmp_path: Path
+    ) -> None:
+        connection = FakeConnection(load_supported=True)
+
+        async def broken_load_session(cwd: str, session_id: str) -> object:
+            del cwd, session_id
+            raise RequestError(500, "boom")
+
+        connection.load_session = broken_load_session
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            with pytest.raises(RequestError, match="boom"):
+                runtime.ensure_session("persisted", None)
+        finally:
+            runtime.stop()
+
     def test_cancel_without_connection_is_noop(self, tmp_path: Path) -> None:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
@@ -793,6 +880,7 @@ class TestCopilotCLISession:
         session.recover()
         session.reset(CopilotCLIClient.voice_model)
         assert session.session_id == "sess-reset"
+        assert session.dropped_session_count == 0
         assert session.pid == 111
         assert session.is_alive() is True
         session.stop()
