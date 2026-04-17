@@ -972,6 +972,47 @@ class TestProcessAction:
             / "pulls-205"
         ).exists()
 
+    def test_review_comment_promise_written_before_attempt(self, server: tuple) -> None:
+        """Promise is durable before the reply attempt, not just on exception."""
+        url, cfg = server
+        promise_path = (
+            cfg.repos["owner/repo"].work_dir
+            / ".git"
+            / "fido"
+            / "reply-promises"
+            / "pulls-207"
+        )
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 207,
+                "body": "please add logging",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        promise_existed_during_call = []
+
+        def check_promise_during_call(*args, **kwargs):
+            promise_existed_during_call.append(promise_path.exists())
+            return ("ACT", ["do the thing"])
+
+        WebhookHandler._fn_reply_to_comment = check_promise_during_call
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        assert promise_existed_during_call == [True], (
+            "promise must exist before attempt"
+        )
+        assert not promise_path.exists(), "promise must be removed after success"
+
     def test_successful_redelivery_clears_stale_review_promise(
         self, server: tuple
     ) -> None:
@@ -1410,6 +1451,49 @@ class TestProcessAction:
             / "reply-promises"
             / "issues-302"
         ).exists()
+
+    def test_issue_comment_promise_written_before_attempt(self, server: tuple) -> None:
+        """Promise is durable before the issue-comment reply attempt, not just on exception."""
+        url, cfg = server
+        promise_path = (
+            cfg.repos["owner/repo"].work_dir
+            / ".git"
+            / "fido"
+            / "reply-promises"
+            / "issues-305"
+        )
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 305,
+                "body": "please fix this",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/14#issuecomment-305",
+            },
+            "issue": {
+                "number": 14,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        promise_existed_during_call = []
+
+        def check_promise_during_call(*args, **kwargs):
+            promise_existed_during_call.append(promise_path.exists())
+            return ("ACT", ["fix the thing"])
+
+        WebhookHandler._fn_reply_to_issue_comment = check_promise_during_call
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.gh = MagicMock()
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        assert promise_existed_during_call == [True], (
+            "promise must exist before attempt"
+        )
+        assert not promise_path.exists(), "promise must be removed after success"
 
     def test_successful_redelivery_clears_stale_issue_promise(
         self, server: tuple

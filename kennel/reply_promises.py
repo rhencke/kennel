@@ -58,12 +58,6 @@ def remove_reply_promise(fido_dir: Path, comment_type: str, comment_id: int) -> 
     _promise_path(fido_dir, comment_type, comment_id).unlink()
 
 
-def has_reply_promise(fido_dir: Path, comment_type: str, comment_id: int) -> bool:
-    """Return whether the durable promise file currently exists."""
-    _validate_comment_type(comment_type)
-    return _promise_path(fido_dir, comment_type, comment_id).exists()
-
-
 def list_reply_promises(fido_dir: Path) -> list[ReplyPromise]:
     """Return promises in filesystem timestamp order."""
     promise_dir = _promise_dir(fido_dir)

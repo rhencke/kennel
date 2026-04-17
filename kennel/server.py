@@ -634,23 +634,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     category, titles = None, []
                 else:
                     activity.set_description("triaging review comment")
-                    try:
-                        category, titles = type(self)._fn_reply_to_comment(
-                            action, self.config, repo_cfg, gh
+                    if promise is not None:
+                        reply_promises.add_reply_promise(
+                            repo_cfg.work_dir / ".git" / "fido",
+                            promise[0],
+                            promise[1],
                         )
-                    except Exception:
-                        if promise is not None:
-                            reply_promises.add_reply_promise(
-                                repo_cfg.work_dir / ".git" / "fido",
-                                promise[0],
-                                promise[1],
-                            )
-                        raise
-                    if promise is not None and reply_promises.has_reply_promise(
-                        repo_cfg.work_dir / ".git" / "fido",
-                        promise[0],
-                        promise[1],
-                    ):
+                    category, titles = type(self)._fn_reply_to_comment(
+                        action, self.config, repo_cfg, gh
+                    )
+                    if promise is not None:
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
@@ -694,23 +687,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     category, titles = None, []
                 else:
                     activity.set_description("triaging PR comment")
-                    try:
-                        category, titles = type(self)._fn_reply_to_issue_comment(
-                            action, self.config, repo_cfg, gh
+                    if promise is not None:
+                        reply_promises.add_reply_promise(
+                            repo_cfg.work_dir / ".git" / "fido",
+                            promise[0],
+                            promise[1],
                         )
-                    except Exception:
-                        if promise is not None:
-                            reply_promises.add_reply_promise(
-                                repo_cfg.work_dir / ".git" / "fido",
-                                promise[0],
-                                promise[1],
-                            )
-                        raise
-                    if promise is not None and reply_promises.has_reply_promise(
-                        repo_cfg.work_dir / ".git" / "fido",
-                        promise[0],
-                        promise[1],
-                    ):
+                    category, titles = type(self)._fn_reply_to_issue_comment(
+                        action, self.config, repo_cfg, gh
+                    )
+                    if promise is not None:
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
