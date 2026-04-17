@@ -837,7 +837,7 @@ def _format_worker_thread_line(repo: RepoStatus) -> str:
     label = color(GREEN_BG, "Worker:") if is_active else color(BOLD, "Worker:")
     line = f"{marker}{label} {state}"
     if _worker_is_agent_talker(repo):
-        line += f" {color(DIM, f'◀ {repo.provider}')}"
+        line += f" {color(DIM, f'<- {repo.provider}')}"
     return line
 
 
@@ -899,7 +899,7 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
         elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
         line = f"  {branch} {wh_label} {w.description} {elapsed}"
         if is_talker:
-            line += f" {color(DIM, f'◀ {repo.provider}')}"
+            line += f" {color(DIM, f'<- {repo.provider}')}"
         lines.append(line)
     if overflow > 0:
         lines.append(
