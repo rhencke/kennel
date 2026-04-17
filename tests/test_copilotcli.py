@@ -18,6 +18,7 @@ from acp.exceptions import RequestError
 
 from kennel import claude
 from kennel.copilotcli import (
+    _ACP_STREAM_LIMIT,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
@@ -25,6 +26,7 @@ from kennel.copilotcli import (
     CopilotCLISession,
     _combine_prompt,
     _CopilotACPClient,
+    _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
     _TerminalManager,
@@ -288,6 +290,12 @@ class TestHelpers:
         )
         assert extract_session_id(output) == "two"
 
+    def test_line_limit_overrun_helper_matches_message(self) -> None:
+        assert _is_line_limit_overrun_error(
+            ValueError("Separator is found, but chunk is longer than limit")
+        )
+        assert not _is_line_limit_overrun_error(ValueError("boom"))
+
     def test_combine_prompt_joins_sections(self) -> None:
         assert (
             _combine_prompt(
@@ -478,6 +486,31 @@ class TestCopilotACPClient:
 
 
 class TestCopilotACPRuntime:
+    def test_spawn_uses_large_transport_limit(self, tmp_path: Path) -> None:
+        seen_kwargs: dict[str, object] = {}
+
+        @asynccontextmanager
+        async def spawn(
+            client: _CopilotACPClient, command: str, *args: str, **kwargs: object
+        ):
+            del command, args
+            seen_kwargs.update(kwargs)
+            context = FakeAgentContext(client, FakeConnection())
+            try:
+                yield await context.__aenter__()
+            finally:
+                await context.__aexit__(None, None, None)
+
+        runtime = CopilotACPRuntime(work_dir=tmp_path, spawn_agent_process=spawn)
+        try:
+            runtime.ensure_session(None, None)
+            assert seen_kwargs["transport_kwargs"] == {
+                "stderr": subprocess.DEVNULL,
+                "limit": _ACP_STREAM_LIMIT,
+            }
+        finally:
+            runtime.stop()
+
     def test_command_for_none_effort_uses_base_command(self, tmp_path: Path) -> None:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
@@ -1156,6 +1189,17 @@ class TestCopilotCLIClient:
         session = MagicMock()
         session.prompt.side_effect = [
             RuntimeError("Copilot ACP connection is not available"),
+            "done",
+        ]
+        client = CopilotCLIClient(session=session)
+        assert client.run_turn("fetch", model=client.voice_model) == "done"
+        assert session.prompt.call_count == 2
+        session.recover.assert_called_once_with()
+
+    def test_run_turn_recovers_and_retries_after_line_limit_overrun(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [
+            ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
         client = CopilotCLIClient(session=session)
