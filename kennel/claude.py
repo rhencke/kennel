@@ -1169,8 +1169,15 @@ class ClaudeSession:
                 self._model if model is None else model_name(model),
             )
         self._pending_talker_kind = current_thread_kind()
+        tid = threading.get_ident()
+        t_start = time.monotonic()
         try:
             with self:
+                log.info(
+                    "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
+                    tid,
+                    time.monotonic() - t_start,
+                )
                 if model is not None:
                     self.switch_model(model)
                 if system_prompt:
@@ -1178,7 +1185,16 @@ class ClaudeSession:
                 else:
                     body = content
                 self.send(body)
-                return self.consume_until_result()
+                result = self.consume_until_result()
+                log.info(
+                    "session.prompt: turn complete (tid=%d, total=%.2fs, "
+                    "result_len=%d, cancelled=%s)",
+                    tid,
+                    time.monotonic() - t_start,
+                    len(result or ""),
+                    self._last_turn_cancelled,
+                )
+                return result
         finally:
             # If an exception blew us out of `with self:` before __enter__
             # could clear the event, do it here so a stuck event doesn't

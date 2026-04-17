@@ -939,6 +939,12 @@ def reply_to_issue_comment(
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
     )
+    log.info(
+        "reply generation returned for PR #%s — body_len=%d preview=%r",
+        number,
+        len(body or ""),
+        (body or "")[:80],
+    )
     if not body:
         raise ValueError(
             f"issue-comment reply: run_turn returned empty for PR #{number}"
@@ -946,11 +952,14 @@ def reply_to_issue_comment(
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     gh.comment_issue(repo_full, number, body)
-    log.info("reply posted")
+    log.info("reply posted on PR #%s", number)
 
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
     if _cid:
+        log.info(
+            "reply_to_issue_comment: adding reaction on PR #%s comment %s", number, _cid
+        )
         maybe_react(
             comment,
             _cid,
@@ -961,7 +970,15 @@ def reply_to_issue_comment(
             agent=agent,
             prompts=prompts,
         )
+        log.info(
+            "reply_to_issue_comment: reaction path done on PR #%s comment %s",
+            number,
+            _cid,
+        )
 
+    log.info(
+        "reply_to_issue_comment: complete for PR #%s (category=%s)", number, category
+    )
     return (category, titles)
 
 
