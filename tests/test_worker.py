@@ -3992,7 +3992,7 @@ class TestSeedTasksFromPrBody:
         mock_add.assert_not_called()
 
     def test_adds_single_task_from_body(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from kennel.types import TaskStatus, TaskType
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("Fix the bug")
@@ -4001,7 +4001,9 @@ class TestSeedTasksFromPrBody:
             patch("kennel.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
-        mock_add.assert_called_once_with("Fix the bug", TaskType.SPEC)
+        mock_add.assert_called_once_with(
+            "Fix the bug", TaskType.SPEC, status=TaskStatus.PENDING
+        )
 
     def test_adds_multiple_tasks(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -4015,7 +4017,11 @@ class TestSeedTasksFromPrBody:
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
 
-    def test_skips_completed_tasks(self, tmp_path: Path) -> None:
+    def test_seeds_completed_tasks_as_completed(self, tmp_path: Path) -> None:
+        """#646: completed tasks are seeded with status=COMPLETED so the
+        downstream 'all tasks done → promote' logic can see them."""
+        from kennel.types import TaskStatus
+
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
             "body": (
@@ -4031,11 +4037,19 @@ class TestSeedTasksFromPrBody:
             patch("kennel.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
-        # Only the unchecked task should have been added
-        assert mock_add.call_count == 1
-        assert mock_add.call_args.args[0] == "Still pending"
+        assert mock_add.call_count == 3
+        statuses = [c.kwargs["status"] for c in mock_add.call_args_list]
+        assert statuses == [
+            TaskStatus.COMPLETED,
+            TaskStatus.COMPLETED,
+            TaskStatus.PENDING,
+        ]
 
-    def test_skips_all_when_only_completed(self, tmp_path: Path) -> None:
+    def test_seeds_all_completed_queue(self, tmp_path: Path) -> None:
+        """#646: a PR whose work queue is fully completed seeds the completed
+        tasks so the worker can recognize it as ready to promote."""
+        from kennel.types import TaskStatus
+
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
             "body": (
@@ -4050,7 +4064,9 @@ class TestSeedTasksFromPrBody:
             patch("kennel.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
-        mock_add.assert_not_called()
+        assert mock_add.call_count == 2
+        for c in mock_add.call_args_list:
+            assert c.kwargs["status"] == TaskStatus.COMPLETED
 
     def test_strips_next_marker(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

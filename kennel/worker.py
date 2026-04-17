@@ -1853,16 +1853,19 @@ class Worker:
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
-        Extracts ONLY unchecked task items (``- [ ] ...``) between
-        ``WORK_QUEUE_START`` and ``WORK_QUEUE_END`` markers and adds them via
-        :func:`~kennel.tasks.add_task`.  Completed (``- [x]``) tasks are
-        skipped — the work is already in the git history; re-creating them
-        as pending would send fido into a "no commits produced" retry loop.
+        Extracts **both** unchecked (``- [ ] ...``) and checked
+        (``- [x] ...``) task items between ``WORK_QUEUE_START`` and
+        ``WORK_QUEUE_END`` markers.  Unchecked items are added as pending;
+        checked items are added with status=COMPLETED so the downstream
+        "all tasks done → promote the PR" logic can see them (fix for #646 —
+        previously completed items were skipped, and a PR whose work queue
+        held only completed items looked like a fresh PR needing setup).
+
         Lines without a ``<!-- type:X -->`` comment are skipped with a
         warning (e.g. stale multi-line task bodies from older PR bodies).
 
         No-op if tasks.json is already non-empty, or if no markers /
-        unchecked items are found.
+        items are found.
         """
         if self._tasks.list():
             return  # already have tasks — nothing to seed
@@ -1875,12 +1878,15 @@ class Worker:
         )
         if not match:
             return
-        parsed: list[tuple[str, TaskType]] = []
+        parsed: list[tuple[str, TaskType, TaskStatus]] = []
         for line in match.group(1).splitlines():
-            m = re.match(r"^- \[ \] (.+)$", line)
-            if not m:
+            check = re.match(r"^- \[( |x)\] (.+)$", line)
+            if not check:
                 continue
-            rest = m.group(1)
+            status = (
+                TaskStatus.COMPLETED if check.group(1) == "x" else TaskStatus.PENDING
+            )
+            rest = check.group(2)
             type_match = re.search(r"<!-- type:(\w+) -->", rest)
             if not type_match:
                 log.warning("skipping task line without type marker: %r", line)
@@ -1891,12 +1897,23 @@ class Worker:
             title = re.sub(r"\s*\*\*→ next\*\*\s*", "", title).strip()
             if not title:
                 continue
-            parsed.append((title, task_type))
+            parsed.append((title, task_type, status))
         if not parsed:
             return
-        for title, task_type in parsed:
-            self._tasks.add(title, task_type)
-        log.info("seeded %d tasks from PR body", len(parsed))
+        pending = 0
+        completed = 0
+        for title, task_type, status in parsed:
+            self._tasks.add(title, task_type, status=status)
+            if status == TaskStatus.COMPLETED:
+                completed += 1
+            else:
+                pending += 1
+        log.info(
+            "seeded %d tasks from PR body (%d pending, %d completed)",
+            len(parsed),
+            pending,
+            completed,
+        )
 
     def post_pickup_comment(
         self, repo: str, issue: int, issue_title: str, gh_user: str
