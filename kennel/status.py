@@ -617,7 +617,11 @@ def _agent_runtime_suffix(repo: RepoStatus) -> str:
     parts: list[str] = []
     if repo.claude_uptime is not None:
         parts.append(color(DIM, f"running {_format_uptime(repo.claude_uptime)}"))
-    if repo.session_alive and repo.claude_talker is None:
+    if (
+        repo.session_alive
+        and not _worker_is_agent_talker(repo)
+        and repo.claude_talker is None
+    ):
         parts.append(color(DIM, "session idle"))
     pid_str = (
         color(DIM, f"pid {repo.claude_pid}")
@@ -634,6 +638,14 @@ def _agent_runtime_suffix(repo: RepoStatus) -> str:
 def _format_reset_at(resets_at: datetime) -> str:
     """Format provider reset times in a compact UTC form."""
     return resets_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _worker_is_agent_talker(repo: RepoStatus) -> bool:
+    """True when the worker thread currently owns the provider session."""
+    if repo.claude_talker is not None:
+        return repo.claude_talker.kind == "worker"
+    owner = repo.session_owner or ""
+    return owner.startswith("worker-")
 
 
 def _provider_status_style(status: ProviderPressureStatus) -> str:
@@ -702,7 +714,7 @@ def _format_repo_header(repo: RepoStatus) -> str:
     if stats:
         header += " — " + ", ".join(stats)
     # Runtime/session stats ride the repo summary only when nobody is talking.
-    if repo.claude_talker is None:
+    if repo.claude_talker is None and not _worker_is_agent_talker(repo):
         header += _agent_runtime_suffix(repo)
     return header
 
@@ -749,8 +761,7 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
 def _format_worker_thread_line(repo: RepoStatus) -> str:
     """Worker-thread state line, background-highlighted when it has the agent."""
     state = _worker_thread_state(repo)
-    talker = repo.claude_talker
-    is_talker = talker is not None and talker.kind == "worker"
+    is_talker = _worker_is_agent_talker(repo)
     label = color(GREEN_BG, "Worker:") if is_talker else color(BOLD, "Worker:")
     return f"  {label} {state}"
 
