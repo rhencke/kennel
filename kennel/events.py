@@ -557,7 +557,9 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return ("ACT", [action.comment_body[:80]])
+            # Return empty titles so the caller creates no phantom tasks.
+            # Another process holds the lock and will handle reply + task creation.
+            return ("ACT", [])
     else:
         lock_fd = None
 
@@ -620,7 +622,7 @@ def reply_to_comment(
     )
 
     log.info(
-        "generating %s reply for PR #%s comment %s",
+        "reply generator: requesting %s reply for PR #%s comment %s",
         category,
         info["pr"],
         info["comment_id"],
@@ -629,6 +631,11 @@ def reply_to_comment(
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+    )
+    log.info(
+        "reply generator: returned %d chars (preview=%r)",
+        len(body or ""),
+        (body or "")[:80],
     )
     if not body:
         raise ValueError(
@@ -743,7 +750,13 @@ def needs_more_context(
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
+    log.info("needs-more-context check: requesting haiku")
     answer = agent.run_turn(prompt, model=agent.brief_model).upper()
+    log.info(
+        "needs-more-context check: returned %d chars (answer=%r)",
+        len(answer),
+        answer[:20],
+    )
     return answer.startswith("YES")
 
 
@@ -766,16 +779,31 @@ def _summarize_as_action_item(
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
+    log.info("summarize-action-item: requesting initial title from opus")
     result = agent.run_turn(prompt, model=agent.voice_model).strip()
+    log.info(
+        "summarize-action-item: returned %d chars (preview=%r)",
+        len(result),
+        result[:60],
+    )
     for _ in range(3):
         if not result or len(result) <= _MAX_TITLE_LEN:
             break
+        log.info(
+            "summarize-action-item: title too long (%d chars), requesting shorten",
+            len(result),
+        )
         result = agent.run_turn(
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
         ).strip()
+        log.info(
+            "summarize-action-item: shorten returned %d chars (preview=%r)",
+            len(result),
+            result[:60],
+        )
     if not result:
         raise ValueError("_summarize_as_action_item: run_turn returned empty")
     return result[:_MAX_TITLE_LEN]
@@ -873,7 +901,12 @@ def reply_to_issue_comment(
                     "\n\nFull conversation on this issue/PR:\n" + "\n".join(lines)
                 )
         except Exception:
-            pass  # best-effort
+            log.warning(
+                "reply_to_issue_comment: failed to fetch conversation history for PR #%s"
+                " — proceeding without it",
+                number,
+                exc_info=True,
+            )
 
     # Merge conversation context into triage context
     context = dict(action.context) if action.context else {}

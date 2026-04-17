@@ -1153,6 +1153,83 @@ class TestProcessAction:
         finally:
             ks._replied_comments.discard(203)
 
+    def test_preempted_review_comment_creates_no_phantom_task(
+        self, server: tuple
+    ) -> None:
+        """When reply_to_comment returns ('ACT', []) due to per-comment lock
+        contention (preempted reply), _process_action_inner must not enqueue any
+        tasks — the process that holds the lock is responsible for reply and task
+        creation."""
+        import kennel.server as ks
+
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 510,
+                "body": "please rename this variable",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "foo.py",
+                "line": 3,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 51, "title": "My PR", "body": ""},
+        }
+        mock_task = MagicMock()
+        # Simulate lock-contention: another process holds the lock, so
+        # reply_to_comment returns ACT with empty titles instead of a task title.
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ACT", []))
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_launch_worker = MagicMock()
+        try:
+            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+            assert status == 200
+            mock_task.assert_not_called()
+        finally:
+            ks._replied_comments.discard(510)
+
+    def test_swallowed_comment_outcome_is_logged(
+        self, server: tuple, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """_process_action_inner must emit an 'action outcome:' summary log for
+        every processed comment.  Without this log a comment could be silently
+        swallowed — consumed by the webhook handler without any visible trace."""
+        import logging
+
+        import kennel.server as ks
+
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 511,
+                "body": "looks good to me",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/52#issuecomment-511",
+            },
+            "issue": {
+                "number": 52,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        try:
+            with caplog.at_level(logging.INFO, logger="kennel.server"):
+                status = _post_webhook(url, cfg, "issue_comment", payload)
+            assert status == 200
+            assert "action outcome:" in caplog.text
+        finally:
+            ks._replied_comments.discard(511)
+
     def test_duplicate_issue_comment_delivery_skips_second_reply(
         self, server: tuple
     ) -> None:

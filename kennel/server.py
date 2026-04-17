@@ -581,6 +581,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             gh = cast(GitHub, self.gh)  # always set by serve() before first request
             handled = False
+            category: str | None = None
+            titles: list[str] = []
 
             if action.reply_to:
                 promise = self._reply_promise(action)
@@ -693,6 +695,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             registry=self.registry,
                         )
 
+            log.info(
+                "action outcome: handled=%s category=%s tasks=%d",
+                handled,
+                category,
+                len(titles),
+            )
             # Non-comment events just trigger kennel worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)
         except claude.ClaudeLeakError:
