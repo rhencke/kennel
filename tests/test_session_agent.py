@@ -51,6 +51,26 @@ class _FakeAgent(SessionBackedAgent):
         return session.prompt(content, model=model, system_prompt=system_prompt)
 
 
+class _RecoveringFakeAgent(_FakeAgent):
+    def run_turn(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None = None,
+        system_prompt: str | None = None,
+        retry_on_preempt: bool = False,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+    ) -> str:
+        del retry_on_preempt
+        session = self._resolve_turn_session(model=model, session_mode=session_mode)
+        return self._prompt_with_recovery(
+            session,
+            content,
+            model=model,
+            system_prompt=system_prompt,
+        )
+
+
 class TestSessionBackedAgent:
     def test_base_abstract_methods_raise(self) -> None:
         agent = SessionBackedAgent(
@@ -213,3 +233,21 @@ class TestSessionBackedAgent:
         session.prompt.return_value = "resumed status"
         agent = _FakeAgent(session_fn=lambda: session)
         assert agent.resume_status("sess-1", "resume") == "resumed status"
+
+    def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [BrokenPipeError("boom"), "done"]
+        session.is_alive.return_value = False
+        agent = _RecoveringFakeAgent(session=session)
+        assert agent.run_turn("hi", model=agent.voice_model) == "done"
+        session.recover.assert_called_once_with()
+
+    def test_prompt_with_recovery_raises_after_second_dead_empty_result(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = ["", ""]
+        session.last_turn_cancelled = False
+        session.is_alive.side_effect = [False, False]
+        agent = _RecoveringFakeAgent(session=session)
+        with pytest.raises(RuntimeError, match="session died during prompt"):
+            agent.run_turn("hi", model=agent.voice_model)
+        session.recover.assert_called_once_with()

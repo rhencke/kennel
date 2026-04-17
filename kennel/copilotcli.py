@@ -909,61 +909,23 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             repo_name=self._repo_name,
         )
 
-    def _session_is_dead(self, session: PromptSession) -> bool:
-        return session.is_alive() is False
-
-    def _recover_prompt_session(self, session: PromptSession) -> bool:
-        recover = getattr(session, "recover", None)
-        if not callable(recover):
-            return False
-        recover()
-        return True
-
-    def _prompt_with_recovery(
+    def _should_retry_prompt_failure(
         self,
+        exc: Exception,
         session: PromptSession,
-        content: str,
-        *,
-        model: ProviderModel | None,
-        system_prompt: str | None,
-    ) -> str:
-        recovered = False
-        while True:
-            try:
-                result = session.prompt(
-                    content, model=model, system_prompt=system_prompt
-                )
-            except Exception as exc:
-                message = str(exc)
-                should_retry = (
-                    isinstance(exc, (BrokenPipeError, OSError))
-                    or message == "Copilot ACP connection is not available"
-                    or (
-                        message != "Copilot ACP runtime is stopped"
-                        and self._session_is_dead(session)
-                    )
-                )
-                if (
-                    recovered
-                    or not should_retry
-                    or not self._recover_prompt_session(session)
-                ):
-                    raise
-                recovered = True
-                log.warning(
-                    "CopilotCLIClient: recovered session after prompt failure: %s", exc
-                )
-                continue
-            if (
-                result
-                or getattr(session, "last_turn_cancelled", False) is True
-                or not self._session_is_dead(session)
-            ):
-                return result
-            if recovered or not self._recover_prompt_session(session):
-                raise RuntimeError("Copilot CLI session died during prompt")
-            recovered = True
-            log.warning("CopilotCLIClient: recovered session after empty dead prompt")
+    ) -> bool:
+        message = str(exc)
+        return (
+            isinstance(exc, (BrokenPipeError, OSError))
+            or message == "Copilot ACP connection is not available"
+            or (
+                message != "Copilot ACP runtime is stopped"
+                and self._session_is_dead(session)
+            )
+        )
+
+    def _dead_prompt_error_message(self) -> str:
+        return "Copilot CLI session died during prompt"
 
     def run_turn(
         self,
@@ -996,35 +958,6 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             log.info(
                 "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt
             )
-
-    def _run_turn_json_value(
-        self,
-        prompt: str,
-        key: str,
-        model: ProviderModel,
-        system_prompt: str | None = None,
-    ) -> str:
-        json_instruction = (
-            f'Respond with ONLY a JSON object in the form {{"{key}": "your answer"}}.'
-            " No other text before or after the JSON."
-        )
-        full_system = (
-            f"{system_prompt}\n\n{json_instruction}"
-            if system_prompt
-            else json_instruction
-        )
-        raw = self.run_turn(prompt, model=model, system_prompt=full_system)
-        if not raw:
-            return ""
-        candidates = [raw]
-        for candidate in candidates:
-            try:
-                obj = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and isinstance(obj.get(key), str):
-                return obj[key]
-        return ""
 
     def print_prompt_from_file(
         self,
