@@ -1,0 +1,11 @@
+opam-version: "2.0"
+name: "rocq-python-extraction"
+synopsis: "Rocq → Python extraction plugin"
+description: "Phase 1 skeleton: all nodes emit # UNIMPL stubs."
+maintainer: "FidoCanCode"
+authors: ["FidoCanCode"]
+license: "LGPL-2.1-or-later"
+depends: [
+  "dune" {>= "3.21"}
+  "rocq-core" {>= "9.2"}
+]

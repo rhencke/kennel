@@ -1,0 +1,5 @@
+(rocq.theory
+ (name PyExtractTest)
+ (synopsis "Phase 1 acceptance test")
+ (plugins rocq-python-extraction)
+ (modules acceptance))
