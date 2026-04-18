@@ -28,19 +28,13 @@
 
 Declare ML Module "rocq-python-extraction".
 
-(* ------------------------------------------------------------------ *)
-(*  Load extraction vernaculars (Extract Inductive, etc.)              *)
-(* ------------------------------------------------------------------ *)
+(* The extraction vernaculars (Extract Inductive, etc.) are registered by
+   the rocq-runtime.plugins.extraction ML plugin, which our plugin depends
+   on.  No Stdlib theory import is required — they are available the moment
+   the plugin is loaded via [Declare ML Module] above.
 
-From Stdlib Require Import extraction.Extraction.
-
-(* ------------------------------------------------------------------ *)
-(*  Stdlib imports for primitive types                                 *)
-(* ------------------------------------------------------------------ *)
-
-From Stdlib Require Import Numbers.Cyclic.Int63.PrimInt63.
-From Stdlib Require Import Floats.PrimFloat.
-From Stdlib Require Import Strings.PrimString.
+   Similarly, [int], [float], and primitive string literals are kernel
+   primitives; no Stdlib import is needed for their basic use. *)
 
 (* ------------------------------------------------------------------ *)
 (*  Extract Inductive bool → Python True/False (enables ternary emit)  *)
@@ -116,8 +110,10 @@ Definition uint_val : int := 42.
 (** MLfloat: IEEE 754 float literal. *)
 Definition float_val : float := 3.14.
 
-(** MLstring: primitive byte-string literal. *)
-Definition str_val : PrimString.string := "hello"%pstring.
+(** MLstring: primitive byte-string literal.  Type inferred from the
+    [%pstring] notation; no [PrimString.string] qualified annotation needed
+    when the Stdlib is not installed. *)
+Definition str_val := "hello"%pstring.
 
 (** MLaxiom: unproved assumption — extracts to [raise NotImplementedError]. *)
 Axiom todo_val : nat.

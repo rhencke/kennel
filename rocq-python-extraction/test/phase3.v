@@ -14,8 +14,8 @@
 
 Declare ML Module "rocq-python-extraction".
 
-From Stdlib Require Import extraction.Extraction.
-From Stdlib Require Import Lists.List.
+(* Extraction vernaculars come from the ML plugin; [nat], [bool], [option],
+   [prod], and [list] are prelude types — no Stdlib imports required. *)
 
 (* ------------------------------------------------------------------ *)
 (*  bool → Python bool                                                 *)
