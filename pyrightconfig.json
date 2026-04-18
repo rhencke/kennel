@@ -1,6 +1,7 @@
 {
   "pythonVersion": "3.14",
   "include": ["kennel"],
+  "exclude": ["kennel/models_generated"],
   "typeCheckingMode": "strict",
   "reportUnknownMemberType": false,
   "reportUnknownVariableType": false,

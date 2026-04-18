@@ -20,6 +20,10 @@ kennel = "kennel.main:main"
 
 [tool.ruff]
 target-version = "py314"
+# Generated Python from Rocq extraction — formatted by build.sh, not by the
+# pre-commit hook.  ruff format is applied during generation; lint is skipped
+# because generated code has unused imports that are valid for richer models.
+exclude = ["kennel/models_generated"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -31,6 +35,9 @@ addopts = "-n auto"
 
 [tool.coverage.run]
 source = ["kennel"]
+# Exclude generated Rocq extraction output — tested indirectly via the
+# Docker-backed CI build, not by the Python test suite.
+omit = ["kennel/models_generated/*"]
 
 [tool.coverage.report]
 fail_under = 100
