@@ -13,7 +13,8 @@ PY_ARTIFACTS := \
 	_build/default/float_val.py \
 	_build/default/str_val.py \
 	_build/default/todo_val.py \
-	_build/default/bool_not.py
+	_build/default/bool_not.py \
+	_build/default/nat_double.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \
