@@ -897,6 +897,95 @@ class TestRepliedComments:
         assert rc.claim(99) is True
 
 
+class TestPatchIssueCache:
+    """Tests for ``_patch_issue_cache`` — webhook → cache event patcher (#812)."""
+
+    def _payload(self, repo_owner: str = "owner") -> dict:
+        return {
+            "repository": {
+                "full_name": f"{repo_owner}/repo",
+                "owner": {"login": repo_owner},
+            },
+        }
+
+    def test_assigned_event_patches_cache(self, server: tuple) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+        payload = {
+            **self._payload(),
+            "action": "assigned",
+            "issue": {
+                "number": 42,
+                "title": "x",
+                "updated_at": "2026-04-18T22:00:00Z",
+                "created_at": "2026-04-15T00:00:00Z",
+            },
+            "assignee": {"login": "fido"},
+        }
+        status = _post_webhook(url, cfg, "issues", payload)
+        assert status == 200
+        # _patch_issue_cache called → cache.apply_event called once with
+        # the translator's ('assigned', payload) output.
+        cache.apply_event.assert_called()
+        args, _ = cache.apply_event.call_args
+        assert args[0] == "assigned"
+        assert args[1]["issue_number"] == 42
+        assert args[1]["login"] == "fido"
+
+    def test_non_issue_event_does_not_touch_cache(self, server: tuple) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+        payload = {
+            **self._payload(),
+            "action": "synchronize",
+            "pull_request": {"number": 7},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        cache.apply_event.assert_not_called()
+
+    def test_irrelevant_issue_action_does_not_touch_cache(self, server: tuple) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+        payload = {
+            **self._payload(),
+            "action": "labeled",  # not a picker-relevant action
+            "issue": {
+                "number": 42,
+                "title": "x",
+                "updated_at": "2026-04-18T22:00:00Z",
+                "created_at": "2026-04-15T00:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "issues", payload)
+        assert status == 200
+        cache.apply_event.assert_not_called()
+
+    def test_cache_apply_failure_does_not_500(self, server: tuple) -> None:
+        """Cache patching is best-effort — failure logs and returns 200
+        so the dispatch + ack still happen and the hourly reconcile heals."""
+        url, cfg = server
+        cache = MagicMock()
+        cache.apply_event.side_effect = RuntimeError("boom")
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+        payload = {
+            **self._payload(),
+            "action": "assigned",
+            "issue": {
+                "number": 42,
+                "title": "x",
+                "updated_at": "2026-04-18T22:00:00Z",
+                "created_at": "2026-04-15T00:00:00Z",
+            },
+            "assignee": {"login": "fido"},
+        }
+        status = _post_webhook(url, cfg, "issues", payload)
+        assert status == 200
+
+
 class TestProcessAction:
     """Tests for _process_action — the background thread that dispatches actions."""
 

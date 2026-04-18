@@ -515,6 +515,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(500, "dispatch error")
             return
 
+        # Patch the issue tree cache before ACK too — failure here is
+        # recoverable (hourly reconcile heals drift), so log and continue
+        # rather than 500-ing the webhook (#812).
+        try:
+            self._patch_issue_cache(event, payload, repo_cfg)
+        except Exception:
+            log.exception(
+                "issue-cache patch failed for %s — hourly reconcile will heal",
+                repo_name,
+            )
+
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")
 
@@ -527,6 +538,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Process in background thread so we don't block the server.
         if action:
             type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+
+    def _patch_issue_cache(
+        self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
+    ) -> None:
+        """Translate the webhook to a cache event and apply it to the
+        per-repo :class:`~kennel.issue_cache.IssueTreeCache` (#812).
+
+        No-op when the event isn't picker-relevant (translator returns
+        ``None``).  No-op also when the cache hasn't been initialized —
+        the worker thread bootstraps the cache on its first iteration,
+        and any events arriving before that get queued by the cache
+        itself and drained when the inventory load completes.
+        """
+        from kennel.cache_webhooks import translate
+
+        translation = translate(event, payload)
+        if translation is None:
+            return
+        cache_event_type, cache_payload = translation
+        cache = self.registry.get_issue_cache(repo_cfg.name)
+        cache.apply_event(cache_event_type, cache_payload)
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
