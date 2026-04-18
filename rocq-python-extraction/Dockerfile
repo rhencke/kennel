@@ -1,6 +1,6 @@
 FROM ocaml/opam:debian-12-ocaml-5.3
 
-# Install system build tools
+# Install system build tools and Python 3 (needed for .py syntax validation)
 RUN sudo apt-get update \
     && sudo apt-get install -y --no-install-recommends \
         make \
@@ -8,6 +8,7 @@ RUN sudo apt-get update \
         pkg-config \
         libgmp-dev \
         linux-libc-dev \
+        python3 \
     && sudo rm -rf /var/lib/apt/lists/*
 
 # Install Rocq 9.2 and dune, clean up opam cache.
