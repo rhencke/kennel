@@ -69,7 +69,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         run: |
           docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
-            sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
+            sh -c "cp -r /src /tmp/work && rm -f /tmp/work/dune-workspace && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
 
       # Build the models/ theory using the unified dune workspace.  dune
       # resolves the plugin → theory dependency within the workspace so no
