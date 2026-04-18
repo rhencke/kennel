@@ -58,6 +58,11 @@ _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 # have commented on its own issue (fix for #636).
 _PICKUP_COMMENT_MARKER = "<!-- fido:pickup -->"
 
+# Invisible HTML marker appended to retry-acknowledgement comments (the ones
+# fido posts when restarting on an issue whose prior PR(s) were closed).
+# Allows the retry path to dedup across crash-replay cycles (fix for #802).
+_RETRY_COMMENT_MARKER = "<!-- fido:retry-ack -->"
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -1208,90 +1213,122 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
-    def _salvage_interrupted_pr(
-        self,
-        fido_dir: Path,
-        repo_ctx: RepoContext,
-        issue: int,
-        request: str,
-        remote: str,
-    ) -> tuple[int, str, bool] | None:
-        """Recover from a prior ``find_or_create_pr`` that crashed after setup
-        ran but before :meth:`GitHub.create_pr`.  Fix for #795.
+    def _reset_local_workspace(
+        self, fido_dir: Path, repo_ctx: RepoContext, remote: str
+    ) -> None:
+        """Reset the workspace to a pristine default-branch state so a fresh
+        attempt at the current issue starts from zero (closes #795, #802).
 
-        Symptoms of the limbo state:
-        - ``find_pr`` returned ``None`` (no PR exists on GitHub);
-        - the current local branch is not the default branch;
-        - that branch has at least one commit ahead of the upstream default;
-        - ``tasks.json`` is populated (setup completed).
+        Supersedes the narrower ``_salvage_interrupted_pr`` (which tried to
+        open a PR on a mid-setup orphan branch).  Per user spec: whenever
+        no open PR exists for the issue, fido starts fresh — new branch,
+        new triage, new task list — and never reuses partial prior work.
+        Any crashed-mid-setup tasks.json or orphan branch is garbage.
 
-        When all four hold, the prior iteration got as far as "push branch +
-        run setup" but never opened the PR.  Rather than delete the branch
-        and re-run setup from scratch (the old behavior — confusio's #206
-        loop), open the draft PR against the existing branch and continue as
-        if setup had just finished.
+        Steps:
 
-        Returns the ``(pr_number, slug, is_fresh=True)`` tuple to hand back
-        to the caller, or ``None`` when no salvage is possible.
+        1. ``git checkout <default>`` (ignore failure — we may already be
+           on default).
+        2. ``git fetch origin``.
+        3. ``git reset --hard origin/<default>``.
+        4. ``git clean -df``.
+        5. Delete every non-default local branch (``git branch -D`` each).
+           Missing branch is logged, not raised.
+        6. Wipe ``tasks.json`` to ``[]``.
+        7. Clear ``pr_number`` / ``pr_title`` / ``current_task_id`` from
+           ``state.json``.  The issue fields stay so the worker knows what
+           it's still working on.
         """
-        # Cheap check first: no tasks → nothing to salvage, no git calls.
-        if not self._tasks.list():
-            return None
-        try:
-            current_stdout = self._git(["branch", "--show-current"]).stdout
-        except subprocess.CalledProcessError:
-            return None
-        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-            current_stdout, str
+        default = repo_ctx.default_branch
+        self._git(["checkout", default], check=False)
+        self._git(["fetch", remote])
+        self._git(["reset", "--hard", f"{remote}/{default}"])
+        self._git(["clean", "-df"])
+        # Delete every non-default local branch.
+        branches_out = self._git(
+            ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]
+        ).stdout
+        if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            branches_out, str
         ):
-            return None
-        current = current_stdout.strip()
-        if not current or current == repo_ctx.default_branch:
-            return None
-        try:
-            ahead_stdout = self._git(
-                [
-                    "rev-list",
-                    "--count",
-                    f"{remote}/{repo_ctx.default_branch}..HEAD",
-                ]
-            ).stdout
-        except subprocess.CalledProcessError:
-            return None
-        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-            ahead_stdout, str
-        ):
-            return None
-        ahead = ahead_stdout.strip()
-        if not ahead.isdigit() or int(ahead) < 1:
-            return None
-        log.info(
-            "salvage: interrupted attempt on branch %s — opening PR against "
-            "existing branch instead of rebuilding (see #795)",
-            current,
-        )
-        url = self.gh.create_pr(
-            repo_ctx.repo,
-            request,
-            f"Fixes #{issue}.",
-            repo_ctx.default_branch,
-            current,
-        )
-        pr_number = int(url.rstrip("/").split("/")[-1])
+            for br in branches_out.splitlines():
+                br = br.strip()
+                if not br or br == default:
+                    continue
+                result = self._git(["branch", "-D", br], check=False)
+                if result.returncode != 0:
+                    log.info(
+                        "fresh-retry: local branch %s already absent — skipping",
+                        br,
+                    )
+        # Wipe tasks.json — use modify() to get an exclusive flock so the
+        # empty-list write can't race with a concurrent task add/complete.
+        with self._tasks.modify() as data:
+            data.clear()
+        # Clear stale PR / task fields from state.json, keep issue fields.
         with State(fido_dir).modify() as state:
-            state["pr_number"] = pr_number
-            state["pr_title"] = request
-        _write_pr_description(
-            self.work_dir,
-            self.gh,
-            repo_ctx.repo,
-            pr_number,
-            issue,
-            self._tasks.list(),
-            agent=self._provider_agent,
+            state.pop("pr_number", None)
+            state.pop("pr_title", None)
+            state.pop("current_task_id", None)
+        log.info(
+            "fresh-retry: workspace reset to %s/%s (tasks wiped, PR state cleared)",
+            remote,
+            default,
         )
-        log.info("salvage: PR #%s opened on branch %s  %s", pr_number, current, url)
-        return pr_number, current, True
+
+    def _post_retry_acknowledgement(
+        self,
+        repo: str,
+        issue: int,
+        issue_title: str,
+        gh_user: str,
+        closed_prs: list[int],
+    ) -> None:
+        """Post a Fido-voiced comment naming the prior closed PRs and
+        acknowledging the retry from a clean slate (fix for #802).
+
+        Idempotent on :data:`_RETRY_COMMENT_MARKER`: if a retry-ack is
+        already present on the issue since it was last opened (or reopened),
+        this is a no-op.  Guards against crash-before-setup-done replays
+        spamming the issue with duplicate acknowledgements.
+        """
+        issue_data = self.gh.view_issue(repo, issue)
+        issue_created = issue_data.get("created_at", "")
+        events = self.gh.get_issue_events(repo, issue)
+        last_opened = issue_created
+        for e in events:
+            if e.get("event") == "reopened":
+                last_opened = e.get("created_at", last_opened)
+
+        comments = self.gh.get_issue_comments(repo, issue)
+        has_retry_ack = any(
+            c.get("user", {}).get("login") == gh_user
+            and c.get("created_at", "") >= last_opened
+            and _RETRY_COMMENT_MARKER in c.get("body", "")
+            for c in comments
+        )
+        if has_retry_ack:
+            log.info(
+                "issue #%s: retry-ack already posted — skipping (closed=%s)",
+                issue,
+                closed_prs,
+            )
+            return
+
+        prompts = self._get_prompts()
+        prompt = prompts.pickup_retry_comment_prompt(issue_title, closed_prs)
+        msg = self._provider_agent.generate_reply(
+            prompt, self._provider_agent.voice_model
+        )
+        if not msg:
+            pr_list = ", ".join(f"#{n}" for n in closed_prs)
+            msg = (
+                f"Retrying — prior PR(s) {pr_list} were closed. "
+                f"Starting fresh — new branch, new triage, new task list."
+            )
+        body = f"{msg}\n\n{_RETRY_COMMENT_MARKER}"
+        self.gh.comment_issue(repo, issue, body)
+        log.info("posted retry-ack on issue #%s (prior closed: %s)", issue, closed_prs)
 
     def find_or_create_pr(
         self,
@@ -1370,17 +1407,23 @@ class Worker:
             )
             return pr_number, slug, False
 
-        # Recovery path for #795: if a previous iteration got as far as
-        # running setup (tasks.json populated) and pushing a branch, but
-        # crashed before ``create_pr``, then the current branch is the slug
-        # from that attempt and there is no PR on GitHub.  Before starting
-        # over from scratch, try to salvage that work: open the PR against
-        # the existing branch and treat it like a fresh PR from here on.
-        salvaged = self._salvage_interrupted_pr(
-            fido_dir, repo_ctx, issue, request, remote
+        # No open PR exists — always take the fresh-retry path (supersedes
+        # #795 salvage, which could resurrect a half-planned tasks.json from
+        # a setup-midflight crash).  Closes #802.
+        #
+        # Reset the local workspace to a pristine default-branch state so
+        # nothing from a prior attempt (branch, stale tasks, stale PR
+        # fields in state.json) leaks into the new one.  Then, if prior
+        # closed-not-merged PRs exist, post a Fido-voiced retry-ack
+        # comment naming them — idempotent on a marker.
+        self._reset_local_workspace(fido_dir, repo_ctx, remote)
+        closed_prs = self.gh.find_closed_unmerged_prs_for_issue(
+            repo_ctx.repo, issue, repo_ctx.gh_user
         )
-        if salvaged is not None:
-            return salvaged
+        if closed_prs:
+            self._post_retry_acknowledgement(
+                repo_ctx.repo, issue, issue_title, repo_ctx.gh_user, closed_prs
+            )
 
         # Generate branch slug via the provider brief model
         raw_slug = self._provider_agent.generate_branch_name(

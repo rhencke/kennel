@@ -430,6 +430,98 @@ class GitHub:
             }
         return None
 
+    def find_closed_unmerged_prs_for_issue(
+        self, repo: str, issue_number: int | str, user: str
+    ) -> list[int]:
+        """Return PR numbers of closed-not-merged PRs this *user* authored
+        for *issue_number* (oldest first).
+
+        Used by the fresh-retry path: when an issue has a prior closed-not-
+        merged PR, fido must start over from scratch — new branch, new
+        triage, new task list — acknowledging the rejection in the pickup
+        comment.  See FidoCanCode/home#802.
+
+        Applies the same timeline scan as :meth:`find_pr`: only PRs that
+        reference the issue via a closing keyword in their body or via the
+        sidebar ``ConnectedEvent`` (with matching ``DisconnectedEvent``
+        removal) count.  Filters by author = *user* so an unrelated human
+        PR on the same branch never triggers a retry comment.
+        """
+        owner, name = repo.split("/", 1)
+        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
+        query = (
+            "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
+            "repository(owner:$owner,name:$repo){"
+            "issue(number:$number){"
+            "timelineItems("
+            "first:100,"
+            "itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT,DISCONNECTED_EVENT],"
+            "after:$cursor"
+            "){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{__typename"
+            "...on CrossReferencedEvent{source{__typename"
+            " ...on PullRequest{number state merged title body author{login}}}}"
+            "...on ConnectedEvent{subject{__typename"
+            " ...on PullRequest{number state merged author{login}}}}"
+            "...on DisconnectedEvent{subject{__typename"
+            " ...on PullRequest{number}}}"
+            "}}}}}"
+        )
+        keyword_prs: set[int] = set()
+        sidebar_prs: set[int] = set()
+        pr_cache: dict[int, dict[str, Any]] = {}
+        cursor: str | None = None
+        while True:
+            data = self._graphql(
+                query,
+                owner=owner,
+                repo=name,
+                number=int(issue_number),
+                cursor=cursor,
+            )
+            items = data["data"]["repository"]["issue"]["timelineItems"]
+            if not items:
+                return []
+            for node in items["nodes"]:
+                typename = node["__typename"]
+                if typename == "CrossReferencedEvent":
+                    pr = node.get("source") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    if pr.get("author", {}).get("login") != user:
+                        continue
+                    body = pr.get("body", "") or ""
+                    title = pr.get("title", "") or ""
+                    if not (pattern.search(body) or pattern.search(title)):
+                        continue
+                    pr_cache.setdefault(pr["number"], pr)
+                    keyword_prs.add(pr["number"])
+                elif typename == "ConnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    if pr.get("author", {}).get("login") != user:
+                        continue
+                    pr_cache.setdefault(pr["number"], pr)
+                    sidebar_prs.add(pr["number"])
+                elif typename == "DisconnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") == "PullRequest":
+                        sidebar_prs.discard(pr["number"])
+            page_info = items["pageInfo"]
+            if not page_info["hasNextPage"]:
+                break
+            cursor = page_info["endCursor"]
+        eligible = keyword_prs | sidebar_prs
+        closed_unmerged: list[int] = []
+        for pr_num in sorted(eligible):
+            pr = pr_cache[pr_num]
+            if pr.get("state") == "CLOSED" and not pr.get("merged"):
+                closed_unmerged.append(pr_num)
+        return closed_unmerged
+
     def comment_issue(self, repo: str, number: int | str, body: str) -> None:
         """Post a comment on an issue."""
         self._post(f"/repos/{repo}/issues/{number}/comments", body=body)

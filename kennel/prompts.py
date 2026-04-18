@@ -197,6 +197,34 @@ class Prompts:
             f"{plain}"
         )
 
+    def pickup_retry_comment_prompt(
+        self, issue_title: str, closed_pr_numbers: list[int]
+    ) -> str:
+        """Prompt for a retry-acknowledgement comment when prior PRs for the
+        same issue were closed-not-merged (closes FidoCanCode/home#802).
+
+        Fido takes the rejection gracefully, acknowledges each prior PR by
+        number, and promises a genuine fresh start (new branch, new triage,
+        new task list) — no reuse of the old work.
+        """
+        pr_list = ", ".join(f"#{n}" for n in closed_pr_numbers)
+        plain = (
+            f"Picking up issue again: {issue_title}.  "
+            f"My prior attempt(s) ({pr_list}) were closed, so I'm starting "
+            f"fresh — new branch, new triage, new task list, no reuse of the "
+            f"old work."
+        )
+        return (
+            f"{self.persona}\n\n"
+            "Rewrite the following GitHub issue comment in character as Fido. "
+            "Keep it to 2-3 sentences. "
+            "Acknowledge the prior closed PR(s) by number, take the rejection "
+            "gracefully, and commit to starting genuinely fresh (not reusing "
+            "anything from the old attempt). "
+            "Output only the comment text, no quotes, no explanation.\n\n"
+            f"{plain}"
+        )
+
     def status_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
         """Build the combined status-text + emoji prompt for a session nudge.
 

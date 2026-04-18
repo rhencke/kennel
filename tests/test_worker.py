@@ -38,6 +38,7 @@ from kennel.tasks import (
 )
 from kennel.types import GitIdentity
 from kennel.worker import (
+    _RETRY_COMMENT_MARKER,
     GitIdentityError,
     LockHeld,
     RepoContext,
@@ -3844,6 +3845,10 @@ class TestFindOrCreatePr:
         self, tmp_path: Path, provider_agent: MagicMock | None = None
     ) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
+        # Most tests exercise the "no closed PR history" case — default to
+        # an empty list so the fresh-retry path doesn't try to post a
+        # retry-acknowledgement comment on every test.
+        gh.find_closed_unmerged_prs_for_issue.return_value = []
         return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
     def _make_repo_ctx(
@@ -4218,7 +4223,10 @@ class TestFindOrCreatePr:
 
         def side_effect(args, check=True):  # noqa: ARG001
             git_calls.append(list(args))
-            return MagicMock()
+            fake = MagicMock()
+            fake.stdout = ""  # no existing non-default branches to delete
+            fake.returncode = 0
+            return fake
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
@@ -4229,9 +4237,20 @@ class TestFindOrCreatePr:
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        assert git_calls[0] == ["fetch", "origin"]
-        assert git_calls[-2] == ["commit", "--allow-empty", "-m", "wip: start"]
-        assert git_calls[-1] == ["push", "-u", "origin", "do-work"]
+        # _reset_local_workspace fires first: checkout default, fetch, reset
+        # --hard, clean, for-each-ref (which returns empty, so no branch -D).
+        assert git_calls[0] == ["checkout", "main"]
+        assert git_calls[1] == ["fetch", "origin"]
+        assert git_calls[2] == ["reset", "--hard", "origin/main"]
+        assert git_calls[3] == ["clean", "-df"]
+        assert git_calls[4] == [
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/",
+        ]
+        # Then the fresh-start branch creation follows.
+        assert ["commit", "--allow-empty", "-m", "wip: start"] in git_calls
+        assert ["push", "-u", "origin", "do-work"] in git_calls
 
     def test_no_pr_deletes_existing_branch_before_creating(
         self, tmp_path: Path
@@ -4331,24 +4350,43 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "42" in caplog.text
 
+    def test_no_pr_posts_retry_ack_when_closed_prs_exist(self, tmp_path: Path) -> None:
+        """Fresh-retry path must post the retry-ack comment when prior
+        closed-not-merged PRs exist for the issue (fix #802)."""
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "redo"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.find_closed_unmerged_prs_for_issue.return_value = [215]
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/300"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_retry = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch.object(worker, "_post_retry_acknowledgement", mock_retry),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.provider_start", return_value=""),
+            patch("kennel.worker._write_pr_description"),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 206, "Migrate")
+        mock_retry.assert_called_once_with(
+            "owner/proj", 206, "Migrate", "fido-bot", [215]
+        )
 
-class TestSalvageInterruptedPr:
-    """Recovery path for #795: prior iteration ran setup + pushed branch but
-    crashed before ``create_pr``.  Salvage opens the PR on the existing branch
-    instead of rebuilding."""
 
-    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+class TestResetLocalWorkspaceAndRetryAck:
+    """Fresh-retry workspace reset + retry-acknowledgement comment (closes
+    FidoCanCode/home#802; supersedes #795 salvage)."""
+
+    def _make_worker(
+        self, tmp_path: Path, provider_agent: MagicMock | None = None
+    ) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
-        gh.get_repo_info.return_value = "owner/repo"
-        gh.get_user.return_value = "fido"
-        gh.get_default_branch.return_value = "main"
-        gh.create_pr.return_value = "https://github.com/owner/repo/pull/88"
-        return Worker(tmp_path, gh, provider_agent=_client()), gh
-
-    def _fido_dir(self, tmp_path: Path) -> Path:
-        d = tmp_path / ".git" / "fido"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -4359,261 +4397,224 @@ class TestSalvageInterruptedPr:
             default_branch="main",
         )
 
-    def _git_side_effect(self, branch: str, ahead: str):
-        def _side(args, *_, **__):
-            if args == ["branch", "--show-current"]:
-                return subprocess.CompletedProcess(args, 0, stdout=branch, stderr="")
-            if args[0] == "rev-list":
-                return subprocess.CompletedProcess(args, 0, stdout=ahead, stderr="")
-            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-        return _side
+    # --- _reset_local_workspace ---
 
-    def test_salvages_when_branch_has_commits_and_tasks_exist(
-        self, tmp_path: Path
-    ) -> None:
-        worker, gh = self._make_worker(tmp_path)
+    def test_reset_runs_checkout_fetch_reset_clean(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("rescue-me", "3\n"),
-            ),
-            patch("kennel.worker._write_pr_description") as mock_write,
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                fido_dir, self._repo_ctx(), 42, "title (closes #42)", "origin"
-            )
-        assert result == (88, "rescue-me", True)
-        gh.create_pr.assert_called_once_with(
-            "owner/repo", "title (closes #42)", "Fixes #42.", "main", "rescue-me"
-        )
-        mock_write.assert_called_once()
-        state = State(fido_dir).load()
-        assert state["pr_number"] == 88
-        assert state["pr_title"] == "title (closes #42)"
+        git_calls: list[list[str]] = []
 
-    def test_skips_when_on_default_branch(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("main", "0\n"),
-            ),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_branch_has_no_commits_ahead(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("work", "0\n"),
-            ),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_tasks_empty(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("work", "2\n"),
-            ),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_branch_query_fails(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-
-        def _raise(*_, **__):
-            raise subprocess.CalledProcessError(1, ["git"])
-
-        with (
-            patch.object(worker, "_git", side_effect=_raise),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_rev_list_fails(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        calls: list[list[str]] = []
-
-        def _side(args, *_, **__):
-            calls.append(args)
-            if args == ["branch", "--show-current"]:
-                return subprocess.CompletedProcess(args, 0, stdout="work", stderr="")
-            raise subprocess.CalledProcessError(1, ["git", *args])
-
-        with (
-            patch.object(worker, "_git", side_effect=_side),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_ahead_is_not_numeric(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("work", "garbage\n"),
-            ),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_branch_query_returns_non_string(self, tmp_path: Path) -> None:
-        """Defensive: if ``_git`` ever hands back a non-str stdout (mocks,
-        future refactors), salvage bails rather than exploding downstream."""
-        worker, gh = self._make_worker(tmp_path)
-        fake = MagicMock()
-        fake.stdout = None
-        with (
-            patch.object(worker, "_git", return_value=fake),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-        ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
-
-    def test_skips_when_ahead_stdout_is_non_string(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-
-        def _side(args, *_, **__):
-            if args == ["branch", "--show-current"]:
-                return subprocess.CompletedProcess(args, 0, stdout="work", stderr="")
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(list(args))
             fake = MagicMock()
-            fake.stdout = None
+            fake.stdout = ""  # no non-default branches
+            fake.returncode = 0
             return fake
 
         with (
-            patch.object(worker, "_git", side_effect=_side),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.tasks.Tasks.modify") as mock_modify,
         ):
-            result = worker._salvage_interrupted_pr(
-                self._fido_dir(tmp_path),
-                self._repo_ctx(),
-                1,
-                "t",
-                "origin",
-            )
-        assert result is None
-        gh.create_pr.assert_not_called()
+            mock_modify.return_value.__enter__.return_value = []
+            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        assert git_calls[0] == ["checkout", "main"]
+        assert git_calls[1] == ["fetch", "origin"]
+        assert git_calls[2] == ["reset", "--hard", "origin/main"]
+        assert git_calls[3] == ["clean", "-df"]
 
-    def test_find_or_create_pr_uses_salvage_before_rebuild(
+    def test_reset_deletes_non_default_local_branches(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        delete_calls: list[str] = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            fake = MagicMock()
+            fake.returncode = 0
+            if args[:1] == ["for-each-ref"]:
+                fake.stdout = "main\nold-feature\nstale-branch\n"
+            elif args[:2] == ["branch", "-D"]:
+                delete_calls.append(args[2])
+                fake.stdout = ""
+            else:
+                fake.stdout = ""
+            return fake
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.tasks.Tasks.modify") as mock_modify,
+        ):
+            mock_modify.return_value.__enter__.return_value = []
+            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        assert delete_calls == ["old-feature", "stale-branch"]
+
+    def test_reset_tolerates_missing_branch(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            fake = MagicMock()
+            if args[:1] == ["for-each-ref"]:
+                fake.stdout = "main\nghost-branch\n"
+                fake.returncode = 0
+            elif args[:2] == ["branch", "-D"]:
+                fake.stdout = ""
+                fake.returncode = 1  # branch doesn't exist
+            else:
+                fake.stdout = ""
+                fake.returncode = 0
+            return fake
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.tasks.Tasks.modify") as mock_modify,
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            mock_modify.return_value.__enter__.return_value = []
+            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        assert "ghost-branch already absent" in caplog.text
+
+    def test_reset_wipes_tasks(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        tasks_captured: list[list] = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            fake = MagicMock()
+            fake.stdout = ""
+            fake.returncode = 0
+            return fake
+
+        initial = [{"id": "t1", "title": "old", "status": "pending", "type": "spec"}]
+
+        class FakeLock:
+            def __enter__(self_lock):
+                tasks_captured.append(initial)
+                return initial
+
+            def __exit__(self_lock, *args):
+                pass
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch.object(worker._tasks, "modify", return_value=FakeLock()),
+        ):
+            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        # The reset called .clear() on the yielded list.
+        assert initial == []
+
+    def test_reset_clears_pr_fields_keeps_issue_fields(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        # Seed state.json
+        State(fido_dir).save(
+            {
+                "issue": 206,
+                "issue_title": "X",
+                "issue_started_at": "2026-04-18T00:00:00Z",
+                "pr_number": 215,
+                "pr_title": "stale",
+                "current_task_id": "t-abc",
+                "session_id": "s-123",
+            }
+        )
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            fake = MagicMock()
+            fake.stdout = ""
+            fake.returncode = 0
+            return fake
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.tasks.Tasks.modify") as mock_modify,
+        ):
+            mock_modify.return_value.__enter__.return_value = []
+            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        state = State(fido_dir).load()
+        assert state["issue"] == 206
+        assert state["issue_title"] == "X"
+        assert state["issue_started_at"] == "2026-04-18T00:00:00Z"
+        assert state["session_id"] == "s-123"
+        assert "pr_number" not in state
+        assert "pr_title" not in state
+        assert "current_task_id" not in state
+
+    # --- _post_retry_acknowledgement ---
+
+    def test_retry_ack_posts_fido_voiced_comment(self, tmp_path: Path) -> None:
+        mock_agent = _client()
+        mock_agent.generate_reply.return_value = (
+            "Woof — trying again! I see my prior attempts #215 were closed..."
+        )
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_agent)
+        gh.view_issue.return_value = {"created_at": "2026-04-18T00:00:00Z"}
+        gh.get_issue_events.return_value = []
+        gh.get_issue_comments.return_value = []
+        worker._post_retry_acknowledgement(
+            "owner/repo", 206, "Migrate Gitea", "fido", [215]
+        )
+        gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        assert "Woof" in body
+        assert _RETRY_COMMENT_MARKER in body
+
+    def test_retry_ack_skips_when_marker_already_present(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.view_issue.return_value = {"created_at": "2026-04-18T00:00:00Z"}
+        gh.get_issue_events.return_value = []
+        gh.get_issue_comments.return_value = [
+            {
+                "user": {"login": "fido"},
+                "created_at": "2026-04-18T15:00:00Z",
+                "body": f"prev retry {_RETRY_COMMENT_MARKER}",
+            }
+        ]
+        worker._post_retry_acknowledgement(
+            "owner/repo", 206, "Migrate Gitea", "fido", [215]
+        )
+        gh.comment_issue.assert_not_called()
+
+    def test_retry_ack_checks_after_last_reopen(self, tmp_path: Path) -> None:
+        """A retry-ack from before a reopen event doesn't count — the issue
+        was fresh-assigned again so a new retry-ack is warranted."""
+        mock_agent = _client()
+        mock_agent.generate_reply.return_value = "fresh comment"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_agent)
+        gh.view_issue.return_value = {"created_at": "2026-04-18T00:00:00Z"}
+        gh.get_issue_events.return_value = [
+            {"event": "reopened", "created_at": "2026-04-18T20:00:00Z"}
+        ]
+        # Prior retry-ack is *before* the reopen — should not dedup.
+        gh.get_issue_comments.return_value = [
+            {
+                "user": {"login": "fido"},
+                "created_at": "2026-04-18T15:00:00Z",
+                "body": f"stale {_RETRY_COMMENT_MARKER}",
+            }
+        ]
+        worker._post_retry_acknowledgement("owner/repo", 206, "t", "fido", [215])
+        gh.comment_issue.assert_called_once()
+
+    def test_retry_ack_falls_back_when_provider_returns_empty(
         self, tmp_path: Path
     ) -> None:
-        """End-to-end: when no PR exists but the workspace has an interrupted
-        attempt, ``find_or_create_pr`` returns via the salvage path without
-        running the setup sub-agent again."""
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = None
-        fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=self._git_side_effect("rescue-me", "2\n"),
-            ),
-            patch("kennel.worker._write_pr_description"),
-            patch(
-                "kennel.tasks.Tasks.list",
-                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
-            ),
-            patch("kennel.worker.provider_start") as mock_setup,
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._repo_ctx(), 7, "fix thing"
-            )
-        assert result == (88, "rescue-me", True)
-        mock_setup.assert_not_called()
+        mock_agent = _client()
+        mock_agent.generate_reply.return_value = ""
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_agent)
+        gh.view_issue.return_value = {"created_at": "2026-04-18T00:00:00Z"}
+        gh.get_issue_events.return_value = []
+        gh.get_issue_comments.return_value = []
+        worker._post_retry_acknowledgement("owner/repo", 206, "t", "fido", [215, 210])
+        body = gh.comment_issue.call_args.args[2]
+        assert "#215" in body and "#210" in body
+        assert _RETRY_COMMENT_MARKER in body
 
 
 class TestSeedTasksFromPrBody:

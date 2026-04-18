@@ -616,6 +616,40 @@ class TestPromptsPickupCommentPrompt:
         assert isinstance(Prompts("persona").pickup_comment_prompt("title"), str)
 
 
+class TestPromptsPickupRetryCommentPrompt:
+    """Fresh-retry pickup-ack prompt (fix for FidoCanCode/home#802)."""
+
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").pickup_retry_comment_prompt("t", [10])
+        assert "I am Fido." in result
+
+    def test_includes_issue_title_and_prs(self) -> None:
+        result = Prompts("p").pickup_retry_comment_prompt("Migrate Gitea", [215, 210])
+        assert "Migrate Gitea" in result
+        assert "#215" in result
+        assert "#210" in result
+
+    def test_instructs_acknowledgement(self) -> None:
+        result = Prompts("p").pickup_retry_comment_prompt("t", [7])
+        assert "starting genuinely fresh" in result
+        assert "closed PR" in result
+
+    def test_requests_fresh_start_commitment(self) -> None:
+        result = Prompts("p").pickup_retry_comment_prompt("t", [1])
+        assert "not reusing anything" in result
+
+    def test_output_constraint_present(self) -> None:
+        result = Prompts("p").pickup_retry_comment_prompt("t", [1])
+        assert "Output only the comment text" in result
+
+    def test_single_pr_formatted(self) -> None:
+        result = Prompts("p").pickup_retry_comment_prompt("t", [42])
+        assert "#42" in result
+
+    def test_returns_string(self) -> None:
+        assert isinstance(Prompts("p").pickup_retry_comment_prompt("t", [1]), str)
+
+
 # ── Prompts.rescope_prompt ───────────────────────────────────────────────────
 
 

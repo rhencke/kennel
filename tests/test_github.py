@@ -887,6 +887,159 @@ class TestGitHubClass:
         }
         assert gh.find_pr("o/r", 1, "fido") is None
 
+    # --- find_closed_unmerged_prs_for_issue (fix for FidoCanCode/home#802) ---
+
+    def _gql_pr_full(
+        self,
+        number: int,
+        state: str,
+        user: str,
+        body: str = "",
+        merged: bool = False,
+    ) -> dict:
+        """Build a PR node with the ``state`` + ``merged`` fields the
+        closed-unmerged lookup queries (find_pr doesn't need ``merged``
+        because it only returns open PRs).
+        """
+        return {
+            "__typename": "PullRequest",
+            "number": number,
+            "state": state,
+            "merged": merged,
+            "title": "",
+            "body": body,
+            "author": {"login": user},
+        }
+
+    def test_find_closed_unmerged_returns_matching_prs(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "fido", "closes #206", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == [215]
+
+    def test_find_closed_unmerged_skips_merged(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(214, "CLOSED", "fido", "closes #205", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 205, "fido") == []
+
+    def test_find_closed_unmerged_skips_open(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(220, "OPEN", "fido", "closes #206")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_filters_by_user(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(300, "CLOSED", "other-human", "closes #206")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_returns_sorted_oldest_first(self) -> None:
+        gh, mock_s = self._gh()
+        pr1 = self._gql_pr_full(215, "CLOSED", "fido", "closes #206")
+        pr2 = self._gql_pr_full(210, "CLOSED", "fido", "closes #206")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr1), self._cross_ref_node(pr2)]
+        )
+        # PR numbers are a monotonic proxy for creation order.
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == [
+            210,
+            215,
+        ]
+
+    def test_find_closed_unmerged_requires_closing_keyword(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(
+            215, "CLOSED", "fido", "some unrelated body without link"
+        )
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_uses_connected_event(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "fido")  # no body keyword
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._connected_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == [215]
+
+    def test_find_closed_unmerged_disconnect_removes_sidebar_link(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "fido")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._connected_node(pr), self._disconnected_node(215)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_skips_non_pr_source(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [
+                {
+                    "__typename": "CrossReferencedEvent",
+                    "source": {"__typename": "Issue", "number": 999},
+                },
+            ]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_skips_non_pr_connected_subject(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [
+                {
+                    "__typename": "ConnectedEvent",
+                    "subject": {"__typename": "Issue", "number": 999},
+                },
+            ]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_connected_filters_by_user(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "other-human")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._connected_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
+    def test_find_closed_unmerged_follows_pagination(self) -> None:
+        gh, mock_s = self._gh()
+        pr_page1 = self._gql_pr_full(210, "CLOSED", "fido", "closes #206")
+        pr_page2 = self._gql_pr_full(215, "CLOSED", "fido", "closes #206")
+        mock_s.post.return_value.json.side_effect = [
+            self._gql_timeline(
+                [self._cross_ref_node(pr_page1)],
+                has_next=True,
+                cursor="abc",
+            ),
+            self._gql_timeline(
+                [self._cross_ref_node(pr_page2)], has_next=False, cursor=None
+            ),
+        ]
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == [
+            210,
+            215,
+        ]
+
+    def test_find_closed_unmerged_empty_timeline(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = {
+            "data": {"repository": {"issue": {"timelineItems": {}}}}
+        }
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
+
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
