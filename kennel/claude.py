@@ -862,12 +862,21 @@ class ClaudeSession(OwnedSession):
         ``control_request`` so claude aborts the running tool on its
         side rather than completing it first.
 
+        Also sets :attr:`_preempt_pending` so :meth:`iter_events` does
+        not clobber the cancel signal at the start of the very next
+        turn (fix for #786 — worker could run a full turn to completion
+        when the webhook fired cancel during the worker's
+        ``__enter__`` → ``send`` window, because ``_in_turn`` was still
+        False at fire time and ``iter_events`` then cleared the signal
+        before the poll loop could respect it).
+
         Gated on :attr:`_in_turn` because ``control_request`` sent to an
         idle subprocess never elicits a ``type=result`` back and would
         hang the next :meth:`consume_until_result` indefinitely (hazard
         called out in the original :meth:`prompt` docstring).
         """
         self._cancel.set()
+        self._preempt_pending.set()
         self._wake()
         if self._in_turn:
             try:
@@ -1110,7 +1119,12 @@ class ClaudeSession(OwnedSession):
         should not be silently swallowed.
         """
         assert self._proc.stdout is not None
-        self._cancel.clear()
+        # Clear the cancel event only when no preempter is actively waiting
+        # (fix for #786).  Otherwise the signal fired by the preempter is
+        # meant for the current holder — clobbering it here lets the turn
+        # run to completion before the preempter ever gets the lock.
+        if not self._preempt_pending.is_set():
+            self._cancel.clear()
         self._last_turn_cancelled = False
         last_activity = time.monotonic()
 

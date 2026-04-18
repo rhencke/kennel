@@ -1252,6 +1252,57 @@ class TestClaudeSessionIterEvents:
         assert not session._cancel.is_set()
         session.stop()
 
+    def test_cancel_preserved_when_preempt_pending(self, tmp_path: Path) -> None:
+        """Fix for #786: when a preempter is actively waiting, the cancel
+        signal targeting the current holder must survive iter_events' start
+        so the first poll cycle respects it — otherwise the turn runs to
+        full completion before the preempter ever gets the lock.
+        """
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
+            _json.dumps({"type": "result", "result": "done"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        # Simulate the exact webhook preempt race: _fire_worker_cancel has
+        # set both events on the target thread's side.
+        session._cancel.set()
+        session._preempt_pending.set()
+        events = list(session.iter_events())
+        # Loop must bail immediately — no events consumed — because the
+        # pending-preempter branch kept the cancel signal intact.
+        assert events == []
+        assert session._cancel.is_set()
+        assert session._last_turn_cancelled is True
+        session.stop()
+
+    def test_cancel_still_cleared_when_no_preempt_pending(self, tmp_path: Path) -> None:
+        """Symmetry check: with no preempter waiting, a stale cancel from a
+        previous turn is still cleared at iter_events' start (preserves the
+        existing ``test_cancel_cleared_at_iter_events_start`` semantics)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._cancel.set()
+        # _preempt_pending intentionally NOT set — cancel is stale.
+        list(session.iter_events())
+        assert not session._cancel.is_set()
+        session.stop()
+
+    def test_fire_worker_cancel_sets_preempt_pending(self, tmp_path: Path) -> None:
+        """Regression guard for #786: the cancel fire path must mark a
+        preempter as pending, not just set the cancel event, so the race
+        with iter_events' clear is defused."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert not session._cancel.is_set()
+        assert not session._preempt_pending.is_set()
+        session._fire_worker_cancel()
+        assert session._cancel.is_set()
+        assert session._preempt_pending.is_set()
+        session.stop()
+
     def test_stops_when_cancel_set_during_turn(self, tmp_path: Path) -> None:
         # A cancel set AFTER iter_events() starts (i.e., during polling) must
         # abort the loop on the next cycle.
