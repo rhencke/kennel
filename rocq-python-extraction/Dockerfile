@@ -13,9 +13,14 @@ RUN sudo apt-get update \
 
 # Add the rocq-prover opam repository, which carries rocq-stdlib.9.1.0 (not
 # yet in the default opam repository).  Then install Rocq 9.1, rocq-stdlib
-# 9.1.0, and dune, and clean up the opam cache.  rocq-stdlib.9.1.0 provides
-# PrimInt63, PrimFloat, and PrimString (needed for MLuint/MLfloat/MLstring
-# test coverage).
+# 9.1.0, and a pinned dune, and clean up the opam cache.  rocq-stdlib.9.1.0
+# provides PrimInt63, PrimFloat, and PrimString (needed for MLuint/MLfloat/
+# MLstring test coverage).
+#
+# dune is pinned to 3.21.1 because dune-project declares (lang dune 3.21) and
+# dune 3.22.x breaks rocq 9.1.0 compilation of parameterised inductive
+# patterns (constructor argument count mismatch).  Re-evaluate when upgrading
+# to rocq 9.2 or later.
 #
 # The install is wrapped in a retry loop because the rocq-prover release
 # server occasionally returns 504 Gateway Timeout on the stdlib tarball.
@@ -23,7 +28,7 @@ RUN sudo apt-get update \
 # upstream hiccups without failing the whole image build.
 RUN opam repo add rocq-released https://rocq-prover.org/opam/released \
     && for attempt in 1 2 3; do \
-         opam install -y rocq-core.9.1.0 rocq-stdlib.9.1.0 dune && break; \
+         opam install -y rocq-core.9.1.0 rocq-stdlib.9.1.0 dune.3.21.1 && break; \
          echo "opam install attempt $attempt failed — retrying in 20 s..."; \
          sleep 20; \
        done \
