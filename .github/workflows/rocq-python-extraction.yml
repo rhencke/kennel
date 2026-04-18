@@ -18,8 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull container image
-        run: docker pull ghcr.io/fidocancode/rocq-python-extraction:latest
+      - name: Pull or build container image
+        run: |
+          docker pull ghcr.io/fidocancode/rocq-python-extraction:latest || \
+          docker build -t ghcr.io/fidocancode/rocq-python-extraction:latest \
+            rocq-python-extraction
 
       - name: Build and test
         run: |
