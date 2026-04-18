@@ -30,7 +30,7 @@ let python_extract ~opaque_access qid =
   let base   = Id.to_string (Nametab.basename_of_global gr) in
   let name   = Id.of_string base in
   let pp     =
-    Python.python_descr.preamble state name None DirPath.Set.empty safe ++
+    Python.python_descr.preamble state name None [] safe ++
     Python.python_descr.pp_struct state struc
   in
   let fname  = base ^ ".py" in

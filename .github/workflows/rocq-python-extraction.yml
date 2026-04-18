@@ -18,13 +18,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull or build container image
+      # Set up buildx so we can use the GitHub Actions layer cache.
+      - uses: docker/setup-buildx-action@v3
+
+      # Build from the local Dockerfile with layer caching.  Unchanged layers
+      # (especially the opam install step, which takes most of the build time)
+      # are restored from the GHA cache so only changed layers are rebuilt.
+      # Dockerfile changes in a PR still take effect immediately because the
+      # cache is content-addressed per layer.
+      - name: Build container image
         run: |
-          docker pull ghcr.io/fidocancode/rocq-python-extraction:latest || \
-          docker build -t ghcr.io/fidocancode/rocq-python-extraction:latest \
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to   type=gha,mode=max \
+            --load \
+            -t rocq-python-extraction:ci \
             rocq-python-extraction
 
       - name: Build and test
         run: |
-          docker run --rm -v "$PWD:/src:ro" ghcr.io/fidocancode/rocq-python-extraction:latest \
+          docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
             sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"

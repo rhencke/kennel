@@ -290,6 +290,12 @@ let rec pp_expr state env = function
         pp_expr state env body_true  ++ str " if " ++
         pp_expr state env scrutinee  ++ str " else " ++
         pp_expr state env body_false
+      else if is_custom_match branches then
+        (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
+           Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
+           each branch becomes a Python lambda.  This handles types like
+           [nat → int] whose constructors do not exist as Python patterns. *)
+        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
         (* General match: emit Python [match]/[case] statement.
            This is a statement in Python, so it only works correctly when the
@@ -342,12 +348,55 @@ let rec pp_expr state env = function
       prlist_with_sep fnl pp_one (List.init n (fun j -> j)) ++ fnl () ++
       pp_pyid name_arr.(i)
 
+(*s Custom-match expression emitter.
+    When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
+    function, case analysis on [T] cannot use Python [match]/[case] (the
+    constructors don't exist as Python patterns).  Instead we emit a
+    functional application:
+
+      (fn)(lambda: arm0_body, lambda x: arm1_body, …, scrutinee)
+
+    Each branch becomes a [lambda] thunk.  The convention — branch thunks
+    first, scrutinee last — must match what the user wrote in ["fn"].
+    For example, for [nat → int]:
+
+      Extract Inductive nat => "int" ["0" "(lambda x: x+1)"]
+        "(lambda fO, fS, n: fO() if n == 0 else fS(n-1))".
+
+    yields  [(lambda fO, fS, n: fO() if n == 0 else fS(n-1))(lambda: 0,
+              lambda m_: ..., n)].
+
+    [pp_custom_match_expr] is mutually recursive with [pp_expr] because it
+    calls [pp_expr] to emit each branch body. *)
+
+and pp_custom_match_expr state env s scrutinee branches =
+  let pp_arm (ids, _pat, body) =
+    let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+    let params = List.rev ids' in
+    match params with
+    | [] ->
+        (* No binders: unit thunk. *)
+        str "lambda: " ++ pp_expr state env' body
+    | _  ->
+        let pp_p id = if Id.equal id dummy_name then str "_" else pp_pyid id in
+        str "lambda " ++
+        prlist_with_sep (fun () -> str ", ") pp_p params ++
+        str ": " ++
+        pp_expr state env' body
+  in
+  str "(" ++ str s ++ str ")(" ++
+  prlist_with_sep (fun () -> str ", ") pp_arm (Array.to_list branches) ++
+  str ", " ++
+  pp_expr state env scrutinee ++
+  str ")"
+
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
     a statement, not an expression.  This printer recurses into [MLcase]
     branches so that each leaf arm gets its own [return], producing valid
     Python.  The boolean ternary (two-arm bool match) is still treated as an
-    expression and wrapped in a single [return].
+    expression and wrapped in a single [return].  Custom-match expressions
+    are pure expressions and likewise wrapped in a single [return].
 
     [indent] is the indentation level (in spaces) at which the [match] keyword
     itself will appear.  [case] arms are emitted at [indent + 4], and their
@@ -365,6 +414,10 @@ let rec pp_return_body state env indent = function
       if is_bool then
         (* Ternary — valid expression; a single [return] suffices. *)
         str "return " ++ pp_expr state env expr
+      else if is_custom_match branches then
+        (* Custom-match — also a pure expression. *)
+        str "return " ++
+        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
         (* General match: put [return] inside each arm so the branch is
            a valid statement.  [case] must be indented inside the [match]
@@ -450,6 +503,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
+      else if is_custom p.ip_typename_ref then
+        str "# " ++ Id.print p.ip_typename ++
+        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
         str "# " ++ Id.print p.ip_typename ++
         str ": singleton inductive, constructor was " ++
@@ -458,12 +514,18 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
+      else if is_custom p.ip_typename_ref then
+        str "# " ++ Id.print p.ip_typename ++
+        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
         pp_one_cons state p (Some fields) 0
   | Standard | Coinductive ->
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
+        else if is_custom p.ip_typename_ref then
+          str "# " ++ Id.print p.ip_typename ++
+          str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
         else
           let n = Array.length p.ip_types in
           prlist_with_sep (fun () -> fnl ())

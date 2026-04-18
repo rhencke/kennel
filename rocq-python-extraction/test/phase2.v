@@ -28,19 +28,21 @@
 
 Declare ML Module "rocq-python-extraction".
 
-(* ------------------------------------------------------------------ *)
-(*  Load extraction vernaculars (Extract Inductive, etc.)              *)
-(* ------------------------------------------------------------------ *)
+(* [Extract Inductive] and related vernaculars are registered by the
+   rocq-runtime.plugins.extraction ML plugin.  That plugin is part of
+   rocq-core (not rocq-stdlib), so it is always available.  We load it
+   directly rather than via [From Stdlib Require Import extraction.Extraction].
 
-From Stdlib Require Import extraction.Extraction.
+   The primitive-type theories (PrimInt63, PrimFloat, PrimString) come from
+   rocq-stdlib.9.1.0 — the latest stdlib release compatible with our Docker
+   image.  We import them explicitly so that [int], [float], and [%pstring]
+   are in scope for the MLuint/MLfloat/MLstring definitions below. *)
+Declare ML Module "rocq-runtime.plugins.extraction".
 
-(* ------------------------------------------------------------------ *)
-(*  Stdlib imports for primitive types                                 *)
-(* ------------------------------------------------------------------ *)
-
-From Stdlib Require Import Numbers.Cyclic.Int63.PrimInt63.
-From Stdlib Require Import Floats.PrimFloat.
-From Stdlib Require Import Strings.PrimString.
+From Stdlib Require Import
+  Numbers.Cyclic.Int63.PrimInt63  (* provides the [int] type *)
+  Floats.PrimFloat                 (* provides the [float] type *)
+  Strings.PrimString.              (* provides the [%pstring] notation *)
 
 (* ------------------------------------------------------------------ *)
 (*  Extract Inductive bool → Python True/False (enables ternary emit)  *)
@@ -117,7 +119,7 @@ Definition uint_val : int := 42.
 Definition float_val : float := 3.14.
 
 (** MLstring: primitive byte-string literal. *)
-Definition str_val : PrimString.string := "hello"%pstring.
+Definition str_val := "hello"%pstring.
 
 (** MLaxiom: unproved assumption — extracts to [raise NotImplementedError]. *)
 Axiom todo_val : nat.

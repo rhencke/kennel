@@ -27,3 +27,80 @@ for f in nat_add.py mk_pair_r.py zeros.py uint_val.py float_val.py str_val.py to
   python3 -m py_compile \"$f\" || exit 1; \
 done && echo 'All extracted .py files are syntactically valid Python.'"
   )))
+
+; Phase 3 round-trip tests: extracted(f(x)) == expected(x) for each primitive.
+; Each rule depends on the phase3.vo build which produces the .py side-effects.
+
+; bool → Python bool: bool_not(True) is False and bool_not(False) is True.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('bool_not.py').read()); \
+assert bool_not(True) is False, 'bool_not(True): got ' + repr(bool_not(True)); \
+assert bool_not(False) is True, 'bool_not(False): got ' + repr(bool_not(False)); \
+print('Phase 3 bool round-trip: OK')\
+\""
+  )))
+
+; nat → Python int: nat_double(k) == 2*k for k in {0, 3, 5}.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('nat_double.py').read()); \
+assert nat_double(0) == 0, 'nat_double(0): got ' + repr(nat_double(0)); \
+assert nat_double(3) == 6, 'nat_double(3): got ' + repr(nat_double(3)); \
+assert nat_double(5) == 10, 'nat_double(5): got ' + repr(nat_double(5)); \
+print('Phase 3 nat round-trip: OK')\
+\""
+  )))
+
+; option → Python Optional: option_inc propagates None and increments Some values.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('option_inc.py').read()); \
+assert option_inc(None) is None, 'option_inc(None): got ' + repr(option_inc(None)); \
+assert option_inc(0) == 1, 'option_inc(0): got ' + repr(option_inc(0)); \
+assert option_inc(5) == 6, 'option_inc(5): got ' + repr(option_inc(5)); \
+print('Phase 3 option round-trip: OK')\
+\""
+  )))
+
+; prod → Python tuple: pair_swap swaps the two components of an int 2-tuple.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('pair_swap.py').read()); \
+assert pair_swap((0, 1)) == (1, 0), 'pair_swap((0, 1)): got ' + repr(pair_swap((0, 1))); \
+assert pair_swap((3, 7)) == (7, 3), 'pair_swap((3, 7)): got ' + repr(pair_swap((3, 7))); \
+assert pair_swap((5, 5)) == (5, 5), 'pair_swap((5, 5)): got ' + repr(pair_swap((5, 5))); \
+print('Phase 3 prod round-trip: OK')\
+\""
+  )))
+
+; list → Python list: list_add_one increments every element by one.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('list_add_one.py').read()); \
+assert list_add_one([]) == [], 'list_add_one([]): got ' + repr(list_add_one([])); \
+assert list_add_one([0, 1, 2]) == [1, 2, 3], 'list_add_one([0,1,2]): got ' + repr(list_add_one([0, 1, 2])); \
+assert list_add_one([5]) == [6], 'list_add_one([5]): got ' + repr(list_add_one([5])); \
+print('Phase 3 list round-trip: OK')\
+\""
+  )))

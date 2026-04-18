@@ -7,5 +7,5 @@ authors: ["FidoCanCode"]
 license: "LGPL-2.1-or-later"
 depends: [
   "dune" {>= "3.21"}
-  "rocq-core" {>= "9.2"}
+  "rocq-core" {>= "9.1"}
 ]
