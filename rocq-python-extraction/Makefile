@@ -17,7 +17,12 @@ PY_ARTIFACTS := \
 	_build/default/nat_double.py \
 	_build/default/option_inc.py \
 	_build/default/pair_swap.py \
-	_build/default/list_add_one.py
+	_build/default/list_add_one.py \
+	_build/default/mylist_is_empty.py \
+	_build/default/bintree_is_leaf.py \
+	_build/default/roseforest_is_empty.py \
+	_build/default/mforest_is_empty.py \
+	_build/default/myopt_flatten.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \

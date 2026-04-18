@@ -104,3 +104,85 @@ assert list_add_one([5]) == [6], 'list_add_one([5]): got ' + repr(list_add_one([
 print('Phase 3 list round-trip: OK')\
 \""
   )))
+
+; ---------------------------------------------------------------------------
+; Phase 4 round-trip tests: inductive datatype emission.
+; Each rule depends on test/phase4.vo which produces the .py side-effects.
+; The Python scripts use exec() to load the generated file, then assert that
+; functions built on non-remapped dataclass hierarchies behave correctly.
+; ---------------------------------------------------------------------------
+
+; MyList A: mylist_is_empty returns True for MNil and False for MCons.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('mylist_is_empty.py').read()); \
+assert mylist_is_empty(MNil()) is True,  'mylist_is_empty(MNil()): got '  + repr(mylist_is_empty(MNil())); \
+assert mylist_is_empty(MCons(1, MNil())) is False, 'mylist_is_empty(MCons(...)): got ' + repr(mylist_is_empty(MCons(1, MNil()))); \
+print('Phase 4 MyList round-trip: OK')\
+\""
+  )))
+
+; BinTree: bintree_is_leaf returns True for BLeaf and False for BNode.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('bintree_is_leaf.py').read()); \
+assert bintree_is_leaf(BLeaf()) is True,  'bintree_is_leaf(BLeaf()): got ' + repr(bintree_is_leaf(BLeaf())); \
+assert bintree_is_leaf(BNode(BLeaf(), 42, BLeaf())) is False, 'bintree_is_leaf(BNode(...)): got ' + repr(bintree_is_leaf(BNode(BLeaf(), 42, BLeaf()))); \
+print('Phase 4 BinTree round-trip: OK')\
+\""
+  )))
+
+; RoseTree/RoseForest (mutual, parameterised): roseforest_is_empty.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('roseforest_is_empty.py').read()); \
+assert roseforest_is_empty(RFNil()) is True,  'roseforest_is_empty(RFNil()): got ' + repr(roseforest_is_empty(RFNil())); \
+assert roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())) is False, 'roseforest_is_empty(RFCons(...)): got ' + repr(roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil()))); \
+print('Phase 4 RoseForest round-trip: OK')\
+\""
+  )))
+
+; MTree/MForest (mutual, non-parameterised): mforest_is_empty.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('mforest_is_empty.py').read()); \
+assert mforest_is_empty(FNil()) is True,  'mforest_is_empty(FNil()): got ' + repr(mforest_is_empty(FNil())); \
+assert mforest_is_empty(FCons(MLeaf(1), FNil())) is False, 'mforest_is_empty(FCons(...)): got ' + repr(mforest_is_empty(FCons(MLeaf(1), FNil()))); \
+print('Phase 4 MForest round-trip: OK')\
+\""
+  )))
+
+; MyOpt A: myopt_flatten collapses one layer of nesting.
+; Also exercises zero-arg dataclass construction (MyNone() not just MyNone).
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('myopt_flatten.py').read()); \
+r1 = myopt_flatten(MyNone()); \
+assert isinstance(r1, MyNone), 'myopt_flatten(MyNone()): got ' + repr(r1); \
+r2 = myopt_flatten(MySome(MyNone())); \
+assert isinstance(r2, MyNone), 'myopt_flatten(MySome(MyNone())): got ' + repr(r2); \
+r3 = myopt_flatten(MySome(MySome(42))); \
+assert isinstance(r3, MySome) and r3.arg0 == 42, 'myopt_flatten(MySome(MySome(42))): got ' + repr(r3); \
+print('Phase 4 MyOpt round-trip: OK')\
+\""
+  )))

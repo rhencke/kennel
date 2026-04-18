@@ -281,7 +281,12 @@ let rec pp_expr state env = function
             (List.mapi (fun i a -> (i, a)) args) ++
           str ")"
         else if List.is_empty args then
-          str cons_name
+          (* Zero-argument constructor.  Inline-custom constructors are plain
+             literals (["True"], ["None"], ["0"], etc.) that are emitted
+             as-is.  Native dataclass constructors need ["()"] appended so
+             they produce an instance rather than a class reference. *)
+          if is_inline_custom r then str cons_name
+          else str cons_name ++ str "()"
         else
           (* Standard type: positional arguments [ConstrName(a, b)] *)
           str cons_name ++ str "(" ++
