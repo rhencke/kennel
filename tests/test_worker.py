@@ -10348,6 +10348,129 @@ class TestHandlePromoteMerge:
         assert result == 1
         gh.pr_ready.assert_called_once()
 
+    # --- auto-merge on approval (fix #787) ---
+
+    def test_draft_promote_enables_auto_merge(self, tmp_path: Path) -> None:
+        """After marking a draft PR ready, auto-merge is enabled so the PR
+        squash-merges the instant approval lands — no 60s polling lag."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        gh.try_enable_auto_merge.return_value = True
+        completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
+        with patch("kennel.tasks.Tasks.list", return_value=[completed]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
+        gh.try_enable_auto_merge.assert_called_once_with(
+            "rhencke/myrepo", 9, squash=True
+        )
+
+    def test_non_draft_review_request_enables_auto_merge(self, tmp_path: Path) -> None:
+        """Non-draft PR in NONE review state, CI green, reviewer requested —
+        auto-merge should be enabled here too."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": [],
+        }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.try_enable_auto_merge.return_value = True
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
+        gh.try_enable_auto_merge.assert_called_once_with(
+            "rhencke/myrepo", 11, squash=True
+        )
+
+    def test_auto_merge_skipped_when_repo_has_it_disabled(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        gh.try_enable_auto_merge.return_value = False
+        completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
+        assert "auto-merge not available" in caplog.text
+
+    def test_auto_merge_enabled_logs_confirmation(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        gh.try_enable_auto_merge.return_value = True
+        completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
+        assert "auto-merge enabled" in caplog.text
+
+    def test_auto_merge_failure_logs_and_continues(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """Auto-merge enable raising doesn't break the mark-ready flow —
+        polling fallback still works, but we log the failure."""
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        gh.try_enable_auto_merge.side_effect = RuntimeError("boom")
+        completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
+        assert result == 1  # mark-ready still happened
+        assert "failed to enable auto-merge" in caplog.text
+
+    def test_auto_merge_not_attempted_on_ci_not_passing(self, tmp_path: Path) -> None:
+        """When CI isn't green yet, we don't request review and don't try to
+        enable auto-merge — nothing to auto-merge against."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": False,
+            "requestedReviewers": [],
+        }
+        gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
+        gh.get_required_checks.return_value = ["ci"]
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
+        gh.try_enable_auto_merge.assert_not_called()
+
 
 class TestRunPromoteMergeIntegration:
     """Tests that Worker.run() calls handle_promote_merge after execute_task."""

@@ -1577,6 +1577,57 @@ class TestGitHubClass:
         assert body["variables"]["mergeMethod"] == "SQUASH"
         assert body["variables"]["prId"] == "PR_abc"
 
+    def test_try_enable_auto_merge_returns_true_when_enabled(self) -> None:
+        """Fix #787: try_enable_auto_merge enables auto-merge without
+        falling back to an immediate REST merge on unapproved PRs."""
+        gh, mock_s = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "enablePullRequestAutoMerge": {
+                    "pullRequest": {"autoMergeRequest": {"mergeMethod": "SQUASH"}}
+                }
+            }
+        }
+        mock_s.get.return_value = pr_resp
+        mock_s.post.return_value = graphql_resp
+        assert gh.try_enable_auto_merge("o/r", 10, squash=True) is True
+        body = mock_s.post.call_args.kwargs["json"]
+        assert "enablePullRequestAutoMerge" in body["query"]
+        assert body["variables"]["mergeMethod"] == "SQUASH"
+        mock_s.put.assert_not_called()
+
+    def test_try_enable_auto_merge_returns_false_when_unavailable(self) -> None:
+        """When the repo has auto-merge disabled, return False — caller
+        must not fall back to an immediate REST merge (would 405 on
+        unapproved PRs, unlike pr_merge(auto=True))."""
+        gh, mock_s = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {
+            "errors": [
+                {
+                    "type": "UNPROCESSABLE",
+                    "message": "Pull request Auto merge is not allowed for this repository",
+                }
+            ]
+        }
+        mock_s.get.return_value = pr_resp
+        mock_s.post.return_value = graphql_resp
+        assert gh.try_enable_auto_merge("o/r", 10) is False
+        mock_s.put.assert_not_called()
+
+    def test_try_enable_auto_merge_returns_false_on_already_merged(self) -> None:
+        gh, mock_s = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
+        mock_s.get.return_value = pr_resp
+        assert gh.try_enable_auto_merge("o/r", 10) is False
+        mock_s.post.assert_not_called()
+
     def test_pr_merge_already_merged_returns_early(self) -> None:
         """If the PR is already merged, skip the merge call silently."""
         gh, mock_s = self._gh()

@@ -2480,6 +2480,7 @@ class Worker:
                     ", ".join(missing),
                 )
                 self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
+            self._enable_auto_merge_on_approval(repo_ctx, pr_number)
             return 1
 
         missing = sorted(repo_ctx.collaborators - set(requested_reviewers))
@@ -2495,6 +2496,7 @@ class Worker:
                     ", ".join(missing),
                 )
                 self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, missing)
+                self._enable_auto_merge_on_approval(repo_ctx, pr_number)
             else:
                 log.info(
                     "PR #%s: CI not yet passing — waiting before requesting review",
@@ -2505,6 +2507,41 @@ class Worker:
         log.info("PR #%s: no work", pr_number)
         self.set_status("Napping — waiting for work", busy=False)
         return 0
+
+    def _enable_auto_merge_on_approval(
+        self, repo_ctx: RepoContext, pr_number: int
+    ) -> None:
+        """Try to enable GitHub's native auto-merge on a just-ready / review-
+        requested PR so the merge lands the instant approval arrives — rather
+        than relying on the worker's 60s polling cadence to notice the state
+        flip (fix for #787).
+
+        Silently no-ops when the repo has auto-merge disabled (common on
+        repos without branch protection).  The worker's approval-polling
+        path remains as a fallback so this change is strictly additive.
+        """
+        try:
+            enabled = self.gh.try_enable_auto_merge(
+                repo_ctx.repo, pr_number, squash=True
+            )
+        except Exception as exc:
+            log.warning(
+                "PR #%s: failed to enable auto-merge (%s) — will rely on polling",
+                pr_number,
+                exc,
+            )
+            return
+        if enabled:
+            log.info(
+                "PR #%s: auto-merge enabled — will merge on approval",
+                pr_number,
+            )
+        else:
+            log.info(
+                "PR #%s: auto-merge not available on this repo — "
+                "will rely on polling to merge after approval",
+                pr_number,
+            )
 
     def rescope_before_pick(self) -> None:
         """Run a synchronous provider-agent rescope before picking the next task.

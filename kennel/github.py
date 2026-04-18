@@ -797,6 +797,24 @@ class GitHub:
                     return
             raise
 
+    def try_enable_auto_merge(
+        self, repo: str, pr: int | str, squash: bool = True
+    ) -> bool:
+        """Enable GitHub's native auto-merge on *pr* without falling back to
+        an immediate REST merge (fix for #787).
+
+        Returns ``True`` if auto-merge was enabled, ``False`` when the repo
+        has auto-merge disabled (GraphQL ``UNPROCESSABLE``).  Unlike
+        :meth:`pr_merge` with ``auto=True``, this does not attempt the REST
+        merge on failure — callers using this in the "mark ready, not yet
+        approved" path must not trigger the REST path, which would 405 on
+        the pending review requirement.
+        """
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        if pr_data.get("merged"):
+            return False
+        return self._try_enable_auto_merge(repo, pr, pr_data, squash)
+
     def _try_enable_auto_merge(
         self,
         repo: str,
