@@ -1,5 +1,5 @@
 (** Rocq → Python extraction backend.
-    Phase 2: expression printer — leaf nodes and [MLglob]. *)
+    Phase 2: expression printer — leaf nodes, [MLglob], [MLapp], [MLlam]. *)
 
 open Pp
 open Names
@@ -108,9 +108,39 @@ let rec pp_expr state env = function
       str "b\"" ++ str (py_escape_bytes (Pstring.to_string s)) ++ str "\""
   | MLparray _ ->
       str "raise NotImplementedError(\"MLparray: persistent arrays not yet supported\")"
+  | MLapp (f, args) ->
+      (* Flatten left-associative curried application:
+         MLapp(MLapp(f,[a]),[b]) → f(a, b) *)
+      let rec collect acc = function
+        | MLapp (g, more) -> collect (more @ acc) g
+        | head            -> (head, acc)
+      in
+      let (head, all_args) = collect args f in
+      (* Parenthesise the function if it is itself a lambda expression,
+         since [lambda x: e] has very low precedence in Python. *)
+      let pp_head =
+        match head with
+        | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
+        | _       -> pp_expr state env head
+      in
+      pp_head ++ str "(" ++
+      prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+      str ")"
+  | MLlam _ as a ->
+      (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
+         [collect_lams] returns ids innermost-first; reverse for Python source order. *)
+      let ids, body = collect_lams a in
+      let params = List.map id_of_mlid ids in
+      let params, env' = push_vars params env in
+      let pp_param id =
+        (* Erased binders use [_] (Python's throwaway) in binder position. *)
+        if Id.equal id dummy_name then str "_" else Id.print id
+      in
+      str "lambda " ++
+      prlist_with_sep (fun () -> str ", ") pp_param (List.rev params) ++
+      str ": " ++
+      pp_expr state env' body
   (* Stubs — replaced in subsequent tasks *)
-  | MLapp  _  -> str "# UNIMPL MLapp"
-  | MLlam  _  -> str "# UNIMPL MLlam"
   | MLletin _ -> str "# UNIMPL MLletin"
   | MLcons  _ -> str "# UNIMPL MLcons"
   | MLtuple _ -> str "# UNIMPL MLtuple"
