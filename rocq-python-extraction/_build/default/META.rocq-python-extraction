@@ -1,8 +1,0 @@
-directory = "."
-description = "Rocq → Python extraction plugin"
-requires =
-"rocq-runtime.interp rocq-runtime.plugins.extraction rocq-runtime.vernac"
-archive(byte) = "rocq_python_extraction_plugin.cma"
-archive(native) = "rocq_python_extraction_plugin.cmxa"
-plugin(byte) = "rocq_python_extraction_plugin.cma"
-plugin(native) = "rocq_python_extraction_plugin.cmxs"
