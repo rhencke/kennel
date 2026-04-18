@@ -1,0 +1,4 @@
+(lang dune 3.21)
+(name rocq-python-extraction)
+
+(using rocq 0.11)

@@ -1,0 +1,5 @@
+(library
+ (name rocq_python_extraction_plugin)
+ (synopsis "Rocq → Python extraction plugin")
+ (flags :standard -rectypes -open Extraction_plugin)
+ (libraries rocq-runtime.plugins.extraction))
