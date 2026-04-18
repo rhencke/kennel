@@ -10,8 +10,10 @@ RUN sudo apt-get update \
         linux-libc-dev \
     && sudo rm -rf /var/lib/apt/lists/*
 
-# Install Rocq 9.2 (core + stdlib) and dune, clean up opam cache
-RUN opam install -y rocq-core.9.2.0 rocq-stdlib.9.2.0 dune \
+# Install Rocq 9.2 (core + stdlib) and dune, clean up opam cache.
+# rocq-stdlib is versioned independently from rocq-core; pin core and let
+# opam resolve a compatible stdlib version automatically.
+RUN opam install -y rocq-core.9.2.0 rocq-stdlib dune \
     && opam clean --all
 
 WORKDIR /workspace
