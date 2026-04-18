@@ -17,6 +17,29 @@ Sources read:
 
 ---
 
+## 0. Python Target
+
+**The sole target is Python 3.14t** (the free-threaded build, no GIL).
+
+All generated code is written for 3.14t and makes no attempt at backwards
+compatibility with older Python versions.  Specifically:
+
+- `match`/`case` structural pattern matching (3.10+) is used freely.
+- PEP 604 union syntax (`A | B`) is used in type annotations and union
+  aliases (3.10+).
+- `from typing import Generic, TypeVar` is used for parameterised base
+  classes; `typing.Callable` is used for arrow-type annotations.
+- Annotation evaluation follows 3.14 semantics: annotations are **not**
+  evaluated eagerly by default (PEP 649 / deferred evaluation), so forward
+  references in dataclass field annotations work without quoting or
+  `from __future__ import annotations`.
+- The free-threaded runtime (`-Xgil=0`) is assumed; the generated code does
+  not contain GIL-dependent concurrency assumptions.
+
+The Dockerfile and CI both pin to a compatible Rocq + Python build.
+
+---
+
 ## 1. Background: MiniML
 
 Rocq's extraction pipeline first elaborates Gallina terms into **MiniML**, a
