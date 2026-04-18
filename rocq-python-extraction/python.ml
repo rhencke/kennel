@@ -1,5 +1,6 @@
 (** Rocq → Python extraction backend.
-    Phase 2: expression printer — leaf nodes, [MLglob], [MLapp], [MLlam]. *)
+    Phase 2: expression printer — leaf nodes, [MLglob], [MLapp], [MLlam],
+    [MLletin], [MLtuple], [MLcons]. *)
 
 open Pp
 open Names
@@ -76,6 +77,35 @@ let pp_glob state r =
   if is_inline_custom r then str (find_custom r)
   else str (pp_global state Term r)
 
+(*s Helpers for [MLcons] emission. *)
+
+(** Return the parent inductive reference for a constructor or inductive ref. *)
+let get_ind r =
+  let open GlobRef in
+  match r.glob with
+  | IndRef _              -> r
+  | ConstructRef (ind, _) -> { glob = IndRef ind; inst = r.inst }
+  | _                     -> assert false
+
+(** KerName of an inductive reference (for record field key lookup). *)
+let kn_of_ind r =
+  let open GlobRef in
+  match r.glob with
+  | IndRef (kn, _) -> MutInd.user kn
+  | _              -> assert false
+
+(** Python keyword-argument name for record field at position [i].
+    Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
+let pp_field_name state r fds i =
+  match List.nth fds i with
+  | Some r' -> str (pp_global_with_key state Term (kn_of_ind (get_ind r)) r')
+  | None    -> str (Printf.sprintf "arg%d" i)
+
+(** Raw constructor name for [r], accounting for inline-custom declarations. *)
+let str_cons state r =
+  if is_inline_custom r then find_custom r
+  else pp_global state Cons r
+
 (*s Core expression printer.
     [env] carries de Bruijn binder names (innermost first).
     Compound nodes not yet implemented emit [# UNIMPL <Node>] stubs;
@@ -140,10 +170,64 @@ let rec pp_expr state env = function
       prlist_with_sep (fun () -> str ", ") pp_param (List.rev params) ++
       str ": " ++
       pp_expr state env' body
+  | MLletin (id, a1, a2) ->
+      (* Let binding in expression context: lambda-lift to [(lambda x: a2)(a1)].
+         This is safe in pure functional code and avoids statement–expression
+         impedance.  Statement-level [Dterm] will get a proper [def]/assignment
+         form in the "Wire Dterm and Dfix" task. *)
+      let params, env' = push_vars [id_of_mlid id] env in
+      let bname = List.hd params in
+      let pp_binder =
+        if Id.equal bname dummy_name then str "_" else Id.print bname
+      in
+      str "(lambda " ++ pp_binder ++ str ": " ++
+      pp_expr state env' a2 ++ str ")(" ++
+      pp_expr state env a1 ++ str ")"
+  | MLtuple l ->
+      (* Tuple literal: (a, b, c) *)
+      str "(" ++
+      prlist_with_sep (fun () -> str ", ") (pp_expr state env) l ++
+      str ")"
+  | MLcons (_, r, args) ->
+      let cons_name = str_cons state r in
+      if is_coinductive (State.get_table state) r then
+        (* Coinductive: wrap in a thunk so consumers can force lazily *)
+        str "lambda: " ++
+        ( if String.equal "" cons_name then
+            (* erased coinductive constructor — unusual but valid *)
+            (match args with [a] -> pp_expr state env a | _ -> assert false)
+          else if List.is_empty args then str cons_name
+          else
+            str cons_name ++ str "(" ++
+            prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
+            str ")" )
+      else if String.equal "" cons_name then
+        (* Singleton / newtype erasure — emit content directly *)
+        ( match args with
+          | []  -> str "None"
+          | [a] -> pp_expr state env a
+          | _   ->
+              str "(" ++
+              prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
+              str ")" )
+      else
+        let fds = get_record_fields (State.get_table state) r in
+        if not (List.is_empty fds) then
+          (* Record type: keyword arguments [T(field=a, field2=b)] *)
+          str cons_name ++ str "(" ++
+          prlist_with_sep (fun () -> str ", ")
+            (fun (i, a) ->
+               pp_field_name state r fds i ++ str "=" ++ pp_expr state env a)
+            (List.mapi (fun i a -> (i, a)) args) ++
+          str ")"
+        else if List.is_empty args then
+          str cons_name
+        else
+          (* Standard type: positional arguments [ConstrName(a, b)] *)
+          str cons_name ++ str "(" ++
+          prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
+          str ")"
   (* Stubs — replaced in subsequent tasks *)
-  | MLletin _ -> str "# UNIMPL MLletin"
-  | MLcons  _ -> str "# UNIMPL MLcons"
-  | MLtuple _ -> str "# UNIMPL MLtuple"
   | MLcase  _ -> str "# UNIMPL MLcase"
   | MLfix   _ -> str "# UNIMPL MLfix"
 
