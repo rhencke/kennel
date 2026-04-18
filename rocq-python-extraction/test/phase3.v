@@ -5,8 +5,9 @@
     [extracted(f(x)) == expected(x)] via a Python driver in the [dune] file.
 
     Coverage (grows as tasks land):
-      bool → Python bool  ([True]/[False] ternary, both directions)
-      nat  → Python int   (constructor inline lambdas + custom match function)
+      bool   → Python bool      ([True]/[False] ternary, both directions)
+      nat    → Python int       (constructor inline lambdas + custom match)
+      option → Python Optional  (Some erased to value; None → Python None)
 *)
 
 Declare ML Module "rocq-python-extraction".
@@ -53,3 +54,31 @@ Fixpoint nat_double (n : nat) : nat :=
   end.
 
 Python Extraction nat_double.
+
+(* ------------------------------------------------------------------ *)
+(*  option → Python Optional                                           *)
+(*                                                                     *)
+(*  Constructor mapping (Rocq ctor order: Some=0, None=1):            *)
+(*    Some → ""     (singleton erasure: emit the wrapped value as-is) *)
+(*    None → "None" (Python's None literal)                           *)
+(*  Custom match function dispatches on Python None-ness:             *)
+(*    (lambda fSome, fNone, x: fNone() if x is None else fSome(x))   *)
+(*  Applied as: fn(Some_thunk, None_thunk, scrutinee)                 *)
+(* ------------------------------------------------------------------ *)
+
+Extract Inductive option => ""
+  [ "" "None" ]
+  "(lambda fSome, fNone, x: fNone() if x is None else fSome(x))".
+
+(** [option_inc]: lift successor over option nat — exercises both the
+    Some branch (applies S to the wrapped nat) and the None branch
+    (propagates None).  With nat→int and option→Optional, the extracted
+    function operates on plain Python ints and Python None.
+    Expected: option_inc None = None; option_inc (Some n) = Some (S n). *)
+Definition option_inc (o : option nat) : option nat :=
+  match o with
+  | None   => None
+  | Some n => Some (S n)
+  end.
+
+Python Extraction option_inc.

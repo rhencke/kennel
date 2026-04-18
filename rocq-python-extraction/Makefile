@@ -14,7 +14,8 @@ PY_ARTIFACTS := \
 	_build/default/str_val.py \
 	_build/default/todo_val.py \
 	_build/default/bool_not.py \
-	_build/default/nat_double.py
+	_build/default/nat_double.py \
+	_build/default/option_inc.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \

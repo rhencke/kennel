@@ -59,3 +59,18 @@ assert nat_double(5) == 10, 'nat_double(5): got ' + repr(nat_double(5)); \
 print('Phase 3 nat round-trip: OK')\
 \""
   )))
+
+; option → Python Optional: option_inc propagates None and increments Some values.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('option_inc.py').read()); \
+assert option_inc(None) is None, 'option_inc(None): got ' + repr(option_inc(None)); \
+assert option_inc(0) == 1, 'option_inc(0): got ' + repr(option_inc(0)); \
+assert option_inc(5) == 6, 'option_inc(5): got ' + repr(option_inc(5)); \
+print('Phase 3 option round-trip: OK')\
+\""
+  )))
