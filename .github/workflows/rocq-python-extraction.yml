@@ -18,13 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull or build container image
+      # Always build from the local Dockerfile so Dockerfile changes in a PR
+      # take effect immediately rather than using a stale published image.
+      - name: Build container image
         run: |
-          docker pull ghcr.io/fidocancode/rocq-python-extraction:latest || \
-          docker build -t ghcr.io/fidocancode/rocq-python-extraction:latest \
-            rocq-python-extraction
+          docker build -t rocq-python-extraction:ci rocq-python-extraction
 
       - name: Build and test
         run: |
-          docker run --rm -v "$PWD:/src:ro" ghcr.io/fidocancode/rocq-python-extraction:latest \
+          docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
             sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
