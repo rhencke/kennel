@@ -1,0 +1,5 @@
+(rocq.theory
+ (name KennelModels)
+ (synopsis "Kennel coordination models — extracted to kennel/models_generated/")
+ (plugins rocq-python-extraction)
+ (modules seed))
