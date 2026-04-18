@@ -1,0 +1,34 @@
+name: Publish rocq-python-extraction image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rocq-python-extraction/Dockerfile'
+      - '.github/workflows/rocq-python-extraction-image.yml'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: rocq-python-extraction
+          push: true
+          tags: |
+            ghcr.io/fidocancode/rocq-python-extraction:latest
+            ghcr.io/fidocancode/rocq-python-extraction:${{ github.sha }}

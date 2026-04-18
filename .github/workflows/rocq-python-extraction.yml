@@ -18,13 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml / opam
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: "5.3"
-
-      - name: Install dependencies
-        run: opam install -y --deps-only rocq-python-extraction/rocq-python-extraction.opam
+      - name: Pull container image
+        run: docker pull ghcr.io/fidocancode/rocq-python-extraction:latest
 
       - name: Build and test
-        run: opam exec -- make -C rocq-python-extraction test
+        run: |
+          docker run --rm -v "$PWD:/src:ro" ghcr.io/fidocancode/rocq-python-extraction:latest \
+            sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
