@@ -5,10 +5,14 @@ on:
     branches: [main]
     paths:
       - 'rocq-python-extraction/**'
+      - 'models/**'
+      - 'dune-workspace'
       - '.github/workflows/rocq-python-extraction.yml'
   pull_request:
     paths:
       - 'rocq-python-extraction/**'
+      - 'models/**'
+      - 'dune-workspace'
       - '.github/workflows/rocq-python-extraction.yml'
 
 jobs:
@@ -35,7 +39,21 @@ jobs:
             -t rocq-python-extraction:ci \
             rocq-python-extraction
 
-      - name: Build and test
+      - name: Build and test extraction plugin
         run: |
           docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
             sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
+
+      # Build the models/ theory using the unified dune workspace.  dune
+      # resolves the plugin → theory dependency within the workspace so no
+      # separate install step is needed.  This verifies that every .v model
+      # extracts successfully whenever models/ or the plugin changes.
+      - name: Build models
+        run: |
+          docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
+            bash -euo pipefail -c '
+              cp -r /src /tmp/work
+              chmod -R u+w /tmp/work
+              cd /tmp/work
+              opam exec -- dune build models/
+            '
