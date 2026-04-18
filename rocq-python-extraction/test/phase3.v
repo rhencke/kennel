@@ -17,8 +17,13 @@ Declare ML Module "rocq-python-extraction".
 (* [Extract Inductive] and related vernaculars are registered by the
    rocq-runtime.plugins.extraction ML plugin, part of rocq-core.  Load it
    directly — no rocq-stdlib import needed.  [nat], [bool], [option], [prod],
-   and [list] are prelude types; always in scope without explicit imports. *)
+   and [list] are prelude types; always in scope without explicit imports.
+
+   [list_scope] is defined in [Init.Datatypes] (part of the prelude) and
+   provides the [[h :: t]] cons notation.  Open it here so the list section
+   can use infix notation without importing [Lists.List]. *)
 Declare ML Module "rocq-runtime.plugins.extraction".
+Open Scope list_scope.
 
 (* ------------------------------------------------------------------ *)
 (*  bool → Python bool                                                 *)

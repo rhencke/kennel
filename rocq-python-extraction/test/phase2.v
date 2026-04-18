@@ -31,13 +31,19 @@ Declare ML Module "rocq-python-extraction".
 (* [Extract Inductive] and related vernaculars are registered by the
    rocq-runtime.plugins.extraction ML plugin.  That plugin is part of
    rocq-core (not rocq-stdlib), so it is always available.  We load it
-   directly here rather than going through [From Stdlib Require Import
-   extraction.Extraction], which would require a compatible rocq-stdlib
-   release (none exists for rocq-core.9.2.0 in the default opam repo).
+   directly rather than via [From Stdlib Require Import extraction.Extraction],
+   which has no compatible release for rocq-core.9.2.0 in the default opam repo.
 
-   [int], [float], and primitive string literals are kernel primitives;
-   no Stdlib import is needed for their basic use. *)
+   The primitive-type theories (PrimInt63, PrimFloat, PrimString) are bundled
+   inside rocq-core and accessible via Rocq's search path even though there is
+   no separate rocq-stdlib opam package installed; dune does not need a
+   [(theories Stdlib)] entry to find them at compile time. *)
 Declare ML Module "rocq-runtime.plugins.extraction".
+
+From Stdlib Require Import
+  Numbers.Cyclic.Int63.PrimInt63  (* provides the [int] type *)
+  Floats.PrimFloat                 (* provides the [float] type *)
+  Strings.PrimString.              (* provides the [%pstring] notation *)
 
 (* ------------------------------------------------------------------ *)
 (*  Extract Inductive bool → Python True/False (enables ternary emit)  *)
