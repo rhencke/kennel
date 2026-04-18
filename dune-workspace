@@ -1,0 +1,7 @@
+(lang dune 3.21)
+
+; Root dune workspace — co-locates rocq-python-extraction (plugin) and models
+; (theory) so dune resolves the plugin dependency without a separate install step.
+;
+; Developers: run  dune build models/  from the repo root to build both.
+; The models/build.sh script drives this via Docker for reproducibility.

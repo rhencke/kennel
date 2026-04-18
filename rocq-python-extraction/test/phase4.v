@@ -25,18 +25,34 @@ Extract Inductive nat  => "int"
   [ "0" "(lambda x: x + 1)" ]
   "(lambda fO, fS, n: fO() if n == 0 else fS(n - 1))".
 
+(* Prevent user-defined inductives from being treated as sort-polymorphic.
+   Rocq 9.1.0 had a bug where sort-polymorphic inductives (those whose
+   parameters can be Prop or Type) caused an ML arity mismatch during
+   extraction when pattern-matching on nullary constructors, giving:
+     "constructor expected N argument(s) while applied to 0"
+   Rocq 9.1.1 fixed the underlying bug (PR #21479).  Keeping this flag
+   here is still good practice: it makes all inductives in this file
+   monomorphic, which is the correct semantic for Python extraction. *)
+Unset Universe Polymorphism.
+
 (* ------------------------------------------------------------------ *)
 (*  1. Polymorphic singly-linked list                                   *)
 (* ------------------------------------------------------------------ *)
 
-Inductive MyList (A : Type) :=
+Inductive MyList (A : Set) :=
   | MNil  : MyList A
   | MCons : A -> MyList A -> MyList A.
+
+(* In Rocq 9.x the inductive parameter [A] is not automatically made implicit
+   in constructor arguments; we must declare it explicitly so that pattern
+   arms like [| MNil => ...] do not require the type as an extra argument. *)
+Arguments MNil {A}.
+Arguments MCons {A} _ _.
 
 (** [mylist_is_empty]: [True] iff the list is [MNil].
     Exercises pattern matching on a parameterised non-remapped inductive
     and returning a remapped primitive (bool → Python bool). *)
-Definition mylist_is_empty {A : Type} (l : MyList A) : bool :=
+Definition mylist_is_empty {A : Set} (l : MyList A) : bool :=
   match l with
   | MNil      => true
   | MCons _ _ => false
@@ -67,15 +83,19 @@ Python Extraction bintree_is_leaf.
 (*  3. Rose tree / forest (mutual, parameterised)                       *)
 (* ------------------------------------------------------------------ *)
 
-Inductive RoseTree (A : Type) :=
+Inductive RoseTree (A : Set) :=
   | RNode : A -> RoseForest A -> RoseTree A
-with RoseForest (A : Type) :=
+with RoseForest (A : Set) :=
   | RFNil  : RoseForest A
   | RFCons : RoseTree A -> RoseForest A -> RoseForest A.
 
+Arguments RNode {A} _ _.
+Arguments RFNil {A}.
+Arguments RFCons {A} _ _.
+
 (** [roseforest_is_empty]: [True] iff the forest has no trees.
     Exercises the second packet of a mutual parameterised inductive. *)
-Definition roseforest_is_empty {A : Type} (f : RoseForest A) : bool :=
+Definition roseforest_is_empty {A : Set} (f : RoseForest A) : bool :=
   match f with
   | RFNil      => true
   | RFCons _ _ => false
@@ -108,16 +128,19 @@ Python Extraction mforest_is_empty.
 (*  5. Polymorphic option; option-of-option flatten                     *)
 (* ------------------------------------------------------------------ *)
 
-Inductive MyOpt (A : Type) :=
+Inductive MyOpt (A : Set) :=
   | MyNone : MyOpt A
   | MySome : A -> MyOpt A.
+
+Arguments MyNone {A}.
+Arguments MySome {A} _.
 
 (** [myopt_flatten]: flatten one level of option nesting.
     [MyNone] stays [MyNone]; [MySome x] unwraps to [x].
     Exercises: (a) constructing a zero-arg non-remapped dataclass in the
     return position ([MyNone()] rather than the class object [MyNone]),
     and (b) returning a value bound in the enclosing match arm. *)
-Definition myopt_flatten {A : Type} (o : MyOpt (MyOpt A)) : MyOpt A :=
+Definition myopt_flatten {A : Set} (o : MyOpt (MyOpt A)) : MyOpt A :=
   match o with
   | MyNone   => MyNone
   | MySome x => x
