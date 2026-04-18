@@ -27,3 +27,20 @@ for f in nat_add.py mk_pair_r.py zeros.py uint_val.py float_val.py str_val.py to
   python3 -m py_compile \"$f\" || exit 1; \
 done && echo 'All extracted .py files are syntactically valid Python.'"
   )))
+
+; Phase 3 round-trip tests: extracted(f(x)) == expected(x) for each primitive.
+; Each rule depends on the phase3.vo build which produces the .py side-effects.
+
+; bool → Python bool: bool_not(True) is False and bool_not(False) is True.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('bool_not.py').read()); \
+assert bool_not(True) is False, 'bool_not(True): got ' + repr(bool_not(True)); \
+assert bool_not(False) is True, 'bool_not(False): got ' + repr(bool_not(False)); \
+print('Phase 3 bool round-trip: OK')\
+\""
+  )))
