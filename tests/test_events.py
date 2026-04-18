@@ -6,7 +6,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel.claude import ClaudeClient
-from kennel.config import Config
+from kennel.config import Config, RepoMembership
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import (
     Action,
@@ -3611,6 +3611,215 @@ class TestNotifyThreadChange:
             "owner/repo", 42, "Auto reply", 999
         )
         mock_gh.comment_issue.assert_not_called()
+
+
+class TestBackfillMissedPrComments:
+    """Replay of issue_comment webhooks missed during kennel downtime (fix #794).
+
+    Only top-level PR comments are in scope — inline review comments and review
+    threads are already scanned each iteration by ``Worker.handle_threads``.
+    """
+
+    def _cfg(
+        self, tmp_path: Path, allowed_bots: frozenset[str] = frozenset()
+    ) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=allowed_bots,
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _repo_cfg(
+        self, tmp_path: Path, collaborators: frozenset[str] = frozenset({"rhencke"})
+    ) -> RepoConfig:
+        return RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=collaborators),
+        )
+
+    def _comment(
+        self,
+        comment_id: int,
+        user: str = "rhencke",
+        body: str = "hello",
+    ) -> dict:
+        return {
+            "id": comment_id,
+            "user": {"login": user},
+            "body": body,
+            "html_url": f"https://github.com/owner/repo/pull/1#issuecomment-{comment_id}",
+        }
+
+    def test_creates_task_for_allowed_collaborator_comment(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [self._comment(100)]
+        mock_gh.is_thread_resolved_for_comment.return_value = False
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        with patch("kennel.events.create_task") as mock_create:
+            count = backfill_missed_pr_comments(
+                cfg, repo_cfg, mock_gh, 1, gh_user="fidocancode"
+            )
+        assert count == 1
+        mock_create.assert_called_once()
+        _, kwargs = mock_create.call_args
+        assert kwargs["thread"]["comment_id"] == 100
+        assert kwargs["thread"]["comment_type"] == "issues"
+        assert kwargs["thread"]["author"] == "rhencke"
+
+    def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="fidocancode", body="my own reply")
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="FidoCanCode",
+            )
+        mock_create.assert_not_called()
+
+    def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="Alice", body="mine")
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="alice",
+            )
+        mock_create.assert_not_called()
+
+    def test_skips_fido_literal_name_even_if_gh_user_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        """Defense in depth: even if ``gh_user`` is misconfigured, comments
+        from the literal fido account must never trigger a backfill task."""
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="fido-can-code", body="my reply")
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="mis-configured-bot",
+            )
+        mock_create.assert_not_called()
+
+    def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="random-stranger")
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+        mock_create.assert_not_called()
+
+    def test_allows_configured_bots(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="dependabot[bot]", body="bump dep")
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+        assert mock_create.call_count == 1
+        _, kwargs = mock_create.call_args
+        assert "bot" in kwargs["thread"]["author"]
+
+    def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, user="rhencke", body="human msg"),
+            self._comment(101, user="bot[bot]", body="bot msg"),
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+        prompts = [c.args[0] for c in mock_create.call_args_list]
+        assert any("human/owner" in p for p in prompts)
+        assert any("(bot)" in p for p in prompts)
+
+    def test_skips_empty_login_and_missing_id(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            {"id": 1, "user": {"login": ""}, "body": "x"},
+            {"id": None, "user": {"login": "rhencke"}, "body": "x"},
+            {"id": 2, "user": None, "body": "x"},
+        ]
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+        mock_create.assert_not_called()
+
+    def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
+        from kennel.events import backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = []
+        with patch("kennel.events.create_task") as mock_create:
+            count = backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+        assert count == 0
+        mock_create.assert_not_called()
 
 
 class TestLaunchSync:

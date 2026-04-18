@@ -827,11 +827,16 @@ class Worker:
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
+        first_iteration: bool = False,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
         self._abort_task = abort_task if abort_task is not None else threading.Event()
         self._repo_name = repo_name
+        # Replay missed issue_comment webhooks exactly once per WorkerThread
+        # lifetime (at startup).  Fix for #794 — without this, top-level PR
+        # comments that land while kennel is down go unanswered on restart.
+        self._first_iteration = first_iteration
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
@@ -2606,6 +2611,21 @@ class Worker:
                 prompts=self._get_prompts(),
             )
             self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+            if self._first_iteration and not pr_is_fresh:
+                # One-shot replay of missed issue_comment webhooks (fix #794).
+                # Runs only on the first iteration per WorkerThread lifetime so
+                # the steady-state loop stays fast; create_task dedups on
+                # comment_id so re-tasking already-handled comments is a no-op.
+                from kennel.events import backfill_missed_pr_comments
+
+                backfill_missed_pr_comments(
+                    recovery_config,
+                    recovery_repo_cfg,
+                    self.gh,
+                    pr_number,
+                    gh_user=repo_ctx.gh_user,
+                )
+                self._first_iteration = False
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
             else:
@@ -2710,6 +2730,9 @@ class WorkerThread(threading.Thread):
         self._config = config
         self._repo_cfg = repo_cfg
         self.__dict__["_bootstrap_session"] = session
+        # True until the first ``Worker.run()`` returns — flipped after that so
+        # the one-shot startup backfill (fix #794) only fires once per thread.
+        self._is_first_iteration = True
 
     @property
     def _session(self) -> PromptSession | None:
@@ -2922,6 +2945,7 @@ class WorkerThread(threading.Thread):
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,
+                    first_iteration=self._is_first_iteration,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]
@@ -2932,6 +2956,7 @@ class WorkerThread(threading.Thread):
                         self._provider = worker._provider  # pyright: ignore[reportPrivateUsage]
                     self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
                     self._persist_session_id()
+                    self._is_first_iteration = False
 
                 if result == 1:
                     # Did work — loop immediately without waiting.

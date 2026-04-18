@@ -4622,6 +4622,71 @@ class TestRunSeedTasksIntegration:
             worker.run()
         mock_seed.assert_called_once_with("owner/repo", 42)
 
+    def test_backfill_runs_on_first_iteration_only(self, tmp_path: Path) -> None:
+        """Worker with ``first_iteration=True`` triggers the missed-comments
+        backfill (fix #794); with False it does not.
+        """
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        repo_ctx = self._make_mock_repo_ctx()
+        calls: list[int] = []
+
+        def _backfill(*_args, **kwargs):
+            calls.append(kwargs.get("gh_user") or _args[-1])
+            return 0
+
+        def _run_once(first: bool) -> None:
+            worker = Worker(tmp_path, gh, first_iteration=first)
+            with (
+                patch.object(
+                    worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
+                ),
+                patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+                patch.object(worker, "setup_hooks", return_value=("c", "s")),
+                patch.object(worker, "teardown_hooks"),
+                patch.object(worker, "get_current_issue", return_value=7),
+                patch.object(worker, "post_pickup_comment"),
+                patch.object(
+                    worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+                ),
+                patch.object(worker, "seed_tasks_from_pr_body"),
+                patch.object(worker, "handle_ci", return_value=False),
+                patch.object(worker, "handle_threads", return_value=False),
+                patch(
+                    "kennel.events.backfill_missed_pr_comments", side_effect=_backfill
+                ),
+            ):
+                worker.run()
+
+        _run_once(first=True)
+        _run_once(first=False)
+        assert len(calls) == 1  # exactly one backfill, on the first-iteration run
+
+    def test_backfill_skipped_for_fresh_pr(self, tmp_path: Path) -> None:
+        """A freshly-created PR has no comments to backfill — skip the call to
+        avoid one superfluous API round-trip."""
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh, first_iteration=True)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(
+                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
+            ),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("kennel.events.backfill_missed_pr_comments") as mock_backfill,
+        ):
+            worker.run()
+        mock_backfill.assert_not_called()
+
     def test_seed_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path
     ) -> None:
@@ -10918,8 +10983,9 @@ class TestWorkerThread:
             config=None,
             repo_cfg=None,
             provider_factory=None,
+            first_iteration=False,
         ):
-            del provider_factory
+            del provider_factory, first_iteration
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -11023,8 +11089,9 @@ class TestWorkerThread:
             config=None,
             repo_cfg=None,
             provider_factory=None,
+            first_iteration=False,
         ) -> None:
-            del provider_factory
+            del provider_factory, first_iteration
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -11075,8 +11142,9 @@ class TestWorkerThread:
             config=None,
             repo_cfg=None,
             provider_factory=None,
+            first_iteration=False,
         ) -> None:
-            del provider_factory
+            del provider_factory, first_iteration
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -11216,8 +11284,9 @@ class TestWorkerThread:
             config=None,
             repo_cfg=None,
             provider_factory=None,
+            first_iteration=False,
         ) -> None:
-            del provider_factory
+            del provider_factory, first_iteration
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -11427,8 +11496,9 @@ class TestWorkerThread:
             config=None,
             repo_cfg=None,
             provider_factory=None,
+            first_iteration=False,
         ) -> None:
-            del provider_factory
+            del provider_factory, first_iteration
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task

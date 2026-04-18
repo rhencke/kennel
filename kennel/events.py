@@ -1508,6 +1508,61 @@ def create_task(
     return new_task
 
 
+def backfill_missed_pr_comments(
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    pr_number: int,
+    *,
+    gh_user: str,
+) -> int:
+    """Replay ``issue_comment`` webhooks we may have missed while kennel was
+    down (fix for #794).  Returns the number of comments inspected.
+
+    Scope is narrow by design: only **top-level PR comments** are replayed.
+    Inline review comments and review threads are already scanned each
+    iteration by ``Worker.handle_threads``, so the worker loop backfills
+    those on its own — only issue-comments are invisible to the loop.
+
+    Idempotent: :func:`create_task` dedups on ``comment_id`` regardless of
+    status, so replaying the same comment after fido already replied is a
+    no-op.  This function is intended to run **once per WorkerThread
+    lifetime** (at startup) — not every iteration.
+    """
+    log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
+    comments = gh.get_issue_comments(repo_cfg.name, pr_number)
+    for c in comments:
+        user = (c.get("user") or {}).get("login", "")
+        if not user:
+            continue
+        if user.lower() == gh_user.lower():
+            continue
+        if user.lower() in ("fidocancode", "fido-can-code"):
+            continue
+        if not _is_allowed(user, repo_cfg, config):
+            continue
+        comment_id = c.get("id")
+        if comment_id is None:
+            continue
+        body = c.get("body", "") or ""
+        is_bot = user.endswith("[bot]")
+        thread = {
+            "repo": repo_cfg.name,
+            "pr": pr_number,
+            "comment_id": comment_id,
+            "url": c.get("html_url", ""),
+            "author": user,
+            "comment_type": "issues",
+        }
+        prompt = (
+            f"PR top-level comment on #{pr_number} by {user} "
+            f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
+        )
+        create_task(prompt, config, repo_cfg, gh, thread=thread)
+    log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
+    return len(comments)
+
+
 def launch_sync(config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
     """Sync tasks.json → PR body in a background thread."""
     from kennel.tasks import sync_tasks_background
