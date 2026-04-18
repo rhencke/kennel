@@ -25,13 +25,14 @@ Extract Inductive nat  => "int"
   [ "0" "(lambda x: x + 1)" ]
   "(lambda fO, fS, n: fO() if n == 0 else fS(n - 1))".
 
-(* Prevent user-defined parameterised inductives from being treated as
-   universe-polymorphic.  In Rocq 9.1.0 the extraction infrastructure
-   cannot erase the universe variable from an ML constructor pattern,
-   which causes "constructor expected N argument(s)" errors at every
-   match site that pattern-matches on a non-remapped constructor.
-   Remapped inductives (bool, nat, option, list) are unaffected because
-   their match arms never go through the Miniml arity check. *)
+(* Prevent user-defined inductives from being treated as sort-polymorphic.
+   Rocq 9.1.0 had a bug where sort-polymorphic inductives (those whose
+   parameters can be Prop or Type) caused an ML arity mismatch during
+   extraction when pattern-matching on nullary constructors, giving:
+     "constructor expected N argument(s) while applied to 0"
+   Rocq 9.1.1 fixed the underlying bug (PR #21479).  Keeping this flag
+   here is still good practice: it makes all inductives in this file
+   monomorphic, which is the correct semantic for Python extraction. *)
 Unset Universe Polymorphism.
 
 (* ------------------------------------------------------------------ *)
@@ -41,6 +42,12 @@ Unset Universe Polymorphism.
 Inductive MyList (A : Set) :=
   | MNil  : MyList A
   | MCons : A -> MyList A -> MyList A.
+
+(* In Rocq 9.x the inductive parameter [A] is not automatically made implicit
+   in constructor arguments; we must declare it explicitly so that pattern
+   arms like [| MNil => ...] do not require the type as an extra argument. *)
+Arguments MNil {A}.
+Arguments MCons {A} _ _.
 
 (** [mylist_is_empty]: [True] iff the list is [MNil].
     Exercises pattern matching on a parameterised non-remapped inductive
@@ -82,6 +89,10 @@ with RoseForest (A : Set) :=
   | RFNil  : RoseForest A
   | RFCons : RoseTree A -> RoseForest A -> RoseForest A.
 
+Arguments RNode {A} _ _.
+Arguments RFNil {A}.
+Arguments RFCons {A} _ _.
+
 (** [roseforest_is_empty]: [True] iff the forest has no trees.
     Exercises the second packet of a mutual parameterised inductive. *)
 Definition roseforest_is_empty {A : Set} (f : RoseForest A) : bool :=
@@ -120,6 +131,9 @@ Python Extraction mforest_is_empty.
 Inductive MyOpt (A : Set) :=
   | MyNone : MyOpt A
   | MySome : A -> MyOpt A.
+
+Arguments MyNone {A}.
+Arguments MySome {A} _.
 
 (** [myopt_flatten]: flatten one level of option nesting.
     [MyNone] stays [MyNone]; [MySome x] unwraps to [x].
