@@ -2,5 +2,7 @@
  (name PyExtractTest)
  (synopsis "Phase 2–3 acceptance tests — core term nodes and primitive remapping")
  (plugins rocq-python-extraction)
- (theories Stdlib)
+ ; rocq-stdlib has no release compatible with rocq-core.9.2.0 in the default
+ ; opam repo.  The Stdlib theories are bundled in rocq-core and found via
+ ; Rocq's own search path; dune does not need to resolve a separate package.
  (modules acceptance phase2 phase3))
