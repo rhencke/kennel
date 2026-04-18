@@ -16,7 +16,8 @@ PY_ARTIFACTS := \
 	_build/default/bool_not.py \
 	_build/default/nat_double.py \
 	_build/default/option_inc.py \
-	_build/default/pair_swap.py
+	_build/default/pair_swap.py \
+	_build/default/list_add_one.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \

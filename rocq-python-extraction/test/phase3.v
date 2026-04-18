@@ -9,11 +9,13 @@
       nat    → Python int       (constructor inline lambdas + custom match)
       option → Python Optional  (Some erased to value; None → Python None)
       prod   → Python tuple     (erased constructor; tuple patterns in match)
+      list   → Python list      (nil→[], cons→prepend; custom match on emptiness)
 *)
 
 Declare ML Module "rocq-python-extraction".
 
 From Stdlib Require Import extraction.Extraction.
+From Stdlib Require Import Lists.List.
 
 (* ------------------------------------------------------------------ *)
 (*  bool → Python bool                                                 *)
@@ -108,3 +110,32 @@ Definition pair_swap (p : nat * nat) : nat * nat :=
   end.
 
 Python Extraction pair_swap.
+
+(* ------------------------------------------------------------------ *)
+(*  list → Python list                                                 *)
+(*                                                                     *)
+(*  Constructor mapping:                                               *)
+(*    nil  → "[]"                    (empty list literal)              *)
+(*    cons → "(lambda h, t: [h] + t)" (prepend head onto tail)        *)
+(*  Custom match function dispatches on Python list emptiness:         *)
+(*    (lambda fnil, fcons, l: fnil() if l == [] else fcons(l[0], l[1:])) *)
+(*  Applied as: fn(nil_thunk, cons_thunk, scrutinee)                  *)
+(* ------------------------------------------------------------------ *)
+
+Extract Inductive list => "list"
+  [ "[]" "(lambda h, t: [h] + t)" ]
+  "(lambda fnil, fcons, l: fnil() if l == [] else fcons(l[0], l[1:]))".
+
+(** [list_add_one]: increment every element of a [list nat] by one.
+    Exercises both the nil branch (returns []) and the cons branch
+    (prepends the incremented head onto the recursively-processed tail).
+    With [nat → int] and [list → list], the extracted function operates
+    on plain Python lists of ints.
+    Expected: list_add_one [] = []; list_add_one [h; …] = [h+1; …]. *)
+Fixpoint list_add_one (l : list nat) : list nat :=
+  match l with
+  | nil    => nil
+  | h :: t => (S h) :: list_add_one t
+  end.
+
+Python Extraction list_add_one.

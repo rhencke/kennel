@@ -89,3 +89,18 @@ assert pair_swap((5, 5)) == (5, 5), 'pair_swap((5, 5)): got ' + repr(pair_swap((
 print('Phase 3 prod round-trip: OK')\
 \""
   )))
+
+; list → Python list: list_add_one increments every element by one.
+(rule
+ (alias runtest)
+ (deps test/phase3.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('list_add_one.py').read()); \
+assert list_add_one([]) == [], 'list_add_one([]): got ' + repr(list_add_one([])); \
+assert list_add_one([0, 1, 2]) == [1, 2, 3], 'list_add_one([0,1,2]): got ' + repr(list_add_one([0, 1, 2])); \
+assert list_add_one([5]) == [6], 'list_add_one([5]): got ' + repr(list_add_one([5])); \
+print('Phase 3 list round-trip: OK')\
+\""
+  )))
