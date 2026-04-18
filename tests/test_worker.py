@@ -1905,9 +1905,12 @@ class TestWorkerFindNextIssue:
     ) -> None:
         """When the assigned parent issue has an open unassigned child,
         descent walks into that child and picks it as the leaf.  Under
-        the new contract (#775) the picker does **not** claim unassigned
-        children along the way — ownership is carried from the parent on
-        the trail.
+        the descent contract from #775 the picker does not auto-claim
+        intermediate nodes along the way — ownership is carried from
+        the parent on the trail.
+
+        The chosen leaf itself is claimed post-pick for GitHub-visible
+        ownership (fix for #779).
         """
         worker, gh = self._make_worker(tmp_path)
         closed_child = {
@@ -1941,8 +1944,41 @@ class TestWorkerFindNextIssue:
         ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 111
-        # Strict no-claim rule: descent must not auto-assign the child.
+        # #779 — the chosen leaf is claimed exactly once for GitHub visibility.
+        gh.add_assignee.assert_called_once_with("alice/proj", 111, "fido-bot")
+
+    def test_does_not_claim_when_no_eligible_issue(self, tmp_path: Path) -> None:
+        """When the picker returns None, no leaf-claim fires."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_all_open_issues.return_value = []
+        gh.find_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with patch.object(worker, "set_status"):
+            worker.find_next_issue(fido_dir, self._make_repo_ctx())
         gh.add_assignee.assert_not_called()
+
+    def test_claims_chosen_leaf_even_when_already_assigned(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-claiming an already-fido-assigned leaf is safe (idempotent
+        GitHub API)."""
+        worker, gh = self._make_worker(tmp_path)
+        issue = {
+            "number": 42,
+            "title": "Already ours",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
+        gh.find_all_open_issues.return_value = [issue]
+        gh.find_issues.return_value = [issue]
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
+            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        assert result == 42
+        gh.add_assignee.assert_called_once_with("alice/proj", 42, "fido-bot")
 
     def test_calls_post_pickup_comment_immediately_when_issue_found(
         self, tmp_path: Path
@@ -2012,6 +2048,62 @@ def _issue(
     if sub_issues is not None:
         node["subIssues"] = {"nodes": sub_issues}
     return node
+
+
+class TestIssueHasOpenSubIssues:
+    """Helper that drives the sub-issue-drift guard (fix for #780)."""
+
+    def _worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def test_returns_true_when_at_least_one_sub_issue_is_open(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.get_sub_issues.return_value = iter(
+            [
+                {"number": 202, "state": "OPEN"},
+                {"number": 203, "state": "CLOSED"},
+            ]
+        )
+        assert worker._issue_has_open_sub_issues("owner/repo", 201) is True
+
+    def test_returns_false_when_all_sub_issues_closed(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.get_sub_issues.return_value = iter(
+            [
+                {"number": 202, "state": "CLOSED"},
+                {"number": 203, "state": "CLOSED"},
+            ]
+        )
+        assert worker._issue_has_open_sub_issues("owner/repo", 201) is False
+
+    def test_returns_false_when_no_sub_issues(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.get_sub_issues.return_value = iter([])
+        assert worker._issue_has_open_sub_issues("owner/repo", 201) is False
+
+    def test_short_circuits_on_first_open_child(self, tmp_path: Path) -> None:
+        """Iterator is consumed only up to the first OPEN entry — large
+        sub-trees don't cause extra API pagination."""
+        worker, gh = self._worker(tmp_path)
+        sentinel_hit = []
+
+        def lazy_iter():
+            yield {"number": 202, "state": "OPEN"}
+            sentinel_hit.append(True)  # should not be reached
+            yield {"number": 203, "state": "OPEN"}
+
+        gh.get_sub_issues.return_value = lazy_iter()
+        assert worker._issue_has_open_sub_issues("owner/repo", 201) is True
+        assert sentinel_hit == []
+
+    def test_splits_repo_correctly_for_api_call(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.get_sub_issues.return_value = iter([])
+        worker._issue_has_open_sub_issues("FidoCanCode/home", 710)
+        gh.get_sub_issues.assert_called_once_with("FidoCanCode", "home", 710)
 
 
 class TestNoCommitNudge:
@@ -4483,6 +4575,87 @@ class TestRunSeedTasksIntegration:
         ):
             worker.run()
         mock_seed.assert_not_called()
+
+    def test_abandons_state_when_current_issue_has_open_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Fix for #780: fido drops the active issue out of state.json when
+        it acquires open sub-issues post-pickup, so the next iteration
+        descends into the first child instead of continuing to work the
+        parent.  Assignees are not touched (per-repo policy)."""
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        # Persist initial state naming #201 as active.
+        (fido_dir / "state.json").write_text(
+            '{"issue": 201, "issue_title": "Parent", '
+            '"pr_number": 99, "pr_title": "Parent PR", '
+            '"issue_started_at": "2026-04-18T00:40:06Z", '
+            '"current_task_id": "t1", "session_id": "keep-me"}'
+        )
+        find_or_create_pr_mock = MagicMock()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=201),
+            patch.object(worker, "_issue_has_open_sub_issues", return_value=True),
+            patch.object(worker, "find_or_create_pr", find_or_create_pr_mock),
+        ):
+            result = worker.run()
+        # Worker returned cleanly without touching find_or_create_pr.
+        assert result == 0
+        find_or_create_pr_mock.assert_not_called()
+        # State.json kept session_id (not touched) but dropped issue/pr fields.
+        import json
+
+        state = json.loads((fido_dir / "state.json").read_text())
+        assert "issue" not in state
+        assert "issue_title" not in state
+        assert "issue_started_at" not in state
+        assert "pr_number" not in state
+        assert "pr_title" not in state
+        assert "current_task_id" not in state
+        assert state.get("session_id") == "keep-me"
+        # Assignees untouched.
+        gh.add_assignee.assert_not_called()
+
+    def test_does_not_abandon_when_current_issue_is_still_a_leaf(
+        self, tmp_path: Path
+    ) -> None:
+        """Sibling: when the current issue has no open sub-issues, the
+        guard from #780 does not trigger and the normal task flow runs."""
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Leaf", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=42),
+            patch.object(worker, "_issue_has_open_sub_issues", return_value=False),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(100, "fix", False)
+            ) as mock_pr,
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+        ):
+            worker.run()
+        # Normal flow: find_or_create_pr was called.
+        mock_pr.assert_called_once()
 
 
 class TestExtractRunId:

@@ -1006,6 +1006,22 @@ class Worker:
             return None
         return int(issue)
 
+    def _issue_has_open_sub_issues(self, repo: str, number: int) -> bool:
+        """Return True if issue *number* in *repo* has at least one open
+        sub-issue (fix for #780).
+
+        Called each outer iteration so fido abandons an issue that was a
+        leaf at pickup but has since acquired children (e.g. fido itself
+        groomed it into sub-issues, or a human added children).  Uses the
+        existing :meth:`GitHub.get_sub_issues` iterator; returns on the
+        first open child to avoid paginating the whole sub-tree.
+        """
+        owner, repo_name = repo.split("/", 1)
+        for child in self.gh.get_sub_issues(owner, repo_name, number):
+            if child.get("state") != "CLOSED":
+                return True
+        return False
+
     def set_status(
         self,
         what: str,
@@ -1134,6 +1150,7 @@ class Worker:
         log.info(
             "starting issue #%s: %s (%s)", choice.number, choice.title, choice.reason
         )
+        self.gh.add_assignee(repo_ctx.repo, choice.number, repo_ctx.gh_user)
         State(fido_dir).save(
             {
                 "issue": choice.number,
@@ -2462,6 +2479,28 @@ class Worker:
                 if issue is None:
                     issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
                 if issue is None:
+                    return 0
+
+                # Guard: if the active issue has acquired open sub-issues
+                # post-pickup (e.g. fido groomed it into sub-issues, or a
+                # human added children), it is no longer a leaf.  Drop the
+                # issue out of state.json so the next iteration's picker
+                # re-descends from the true root and lands on the first
+                # open child.  Assignees are not touched (per-repo policy).
+                # Fix for #780.
+                if self._issue_has_open_sub_issues(repo_ctx.repo, issue):
+                    log.warning(
+                        "issue #%s has acquired open sub-issues — abandoning "
+                        "state so picker re-descends next iteration (see #780)",
+                        issue,
+                    )
+                    with State(ctx.fido_dir).modify() as state:
+                        state.pop("issue", None)
+                        state.pop("issue_title", None)
+                        state.pop("issue_started_at", None)
+                        state.pop("pr_number", None)
+                        state.pop("pr_title", None)
+                        state.pop("current_task_id", None)
                     return 0
 
                 self._next_turn_session_mode = TurnSessionMode.REUSE
