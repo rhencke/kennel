@@ -42,7 +42,7 @@ let preamble _state _name _comment _used_modules _safe =
   (* [Callable] is used in type annotations for arrow types.  It must be
      imported even though [from __future__ import annotations] defers
      evaluation, because type checkers still resolve the name. *)
-  str "from typing import Callable" ++ fnl () ++
+  str "from typing import Callable, Generic, TypeVar" ++ fnl () ++
   str "__ = None  # erased logical argument" ++ fnl ()
 
 (*s Helpers for Python literal emission. *)
@@ -480,6 +480,15 @@ let pp_term_decl state env name a =
        [pp_return_body] generates the rest with absolute column positions. *)
     str "    " ++ pp_return_body state env' 4 body ++ fnl ()
 
+(*s TypeVar name helper. *)
+
+(** Python [TypeVar] name for the [i]-th type parameter (0-based).
+    Indices 0–25 map to [_A]–[_Z]; beyond that we use [_T<i>] so we
+    never run out of names for exotic mutual inductives. *)
+let typevar_name i =
+  if i < 26 then Printf.sprintf "_%c" (Char.chr (65 + i))
+  else Printf.sprintf "_T%d" i
+
 (*s Type annotation emitter.
     Converts an [ml_type] to a Python annotation fragment.  The annotations
     are used only for documentation and optional static analysis —
@@ -488,10 +497,7 @@ let pp_term_decl state env name a =
 
     [from __future__ import annotations] in the preamble makes all
     annotations lazy strings (PEP 563), so forward and recursive references
-    work without explicit quoting.
-
-    TypeVar and Generic support (for parameterised inductives) land in the
-    next task; [Tvar] and [Tvar'] fall back to [object] for now. *)
+    work without explicit quoting. *)
 
 let rec pp_type state = function
   | Tarr (t1, t2) ->
@@ -514,9 +520,10 @@ let rec pp_type state = function
         str name ++ str "[" ++
         prlist_with_sep (fun () -> str ", ") (pp_type state) args ++
         str "]"
-  | Tvar _ | Tvar' _ ->
-      (* Type-variable parameters; TypeVar/Generic support in next task. *)
-      str "object"
+  | Tvar i | Tvar' i ->
+      (* Emit the TypeVar name corresponding to the [i]-th type parameter.
+         The TypeVar declaration itself is emitted by [pp_ind_decl]. *)
+      str (typevar_name i)
   | Tdummy _ | Tunknown | Taxiom | Tmeta _ ->
       str "object"
 
@@ -593,10 +600,39 @@ let pp_ind_decl state (ind : ml_ind) =
         str "# " ++ Id.print p.ip_typename ++
         str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
-        (* Records have a single constructor that doubles as the type; no
-           separate base class is needed. *)
-        pp_one_cons state p (Some fields) None 0
+        let tvars = List.init ind.ind_nparams typevar_name in
+        (* Emit TypeVar declarations once, before the dataclass. *)
+        let pp_typevars =
+          if List.is_empty tvars then mt ()
+          else
+            prlist_with_sep mt
+              (fun tv ->
+                 str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
+              tvars ++ fnl ()
+        in
+        (* For a parameterised record, inherit [Generic[_A, _B, …]] so that
+           type-checkers can track type arguments.  Unparameterised records
+           keep the plain dataclass (no base class). *)
+        let base_opt =
+          if List.is_empty tvars then None
+          else
+            Some ("Generic[" ^ String.concat ", " tvars ^ "]")
+        in
+        pp_typevars ++
+        pp_one_cons state p (Some fields) base_opt 0
   | Standard | Coinductive ->
+      let tvars = List.init ind.ind_nparams typevar_name in
+      (* TypeVar declarations are emitted once, before all packets, because
+         mutual inductives share the same type parameters.  For example,
+         [tree A] and [forest A] in a mutual definition both use [_A]. *)
+      let pp_typevars =
+        if List.is_empty tvars then mt ()
+        else
+          prlist_with_sep mt
+            (fun tv ->
+               str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
+            tvars ++ fnl ()
+      in
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
@@ -606,16 +642,40 @@ let pp_ind_decl state (ind : ml_ind) =
         else
           let tname = pp_global state Term p.ip_typename_ref in
           let n = Array.length p.ip_types in
-          (* Shared base class — one plain [class] with no fields.  Each
-             constructor inherits from it so downstream code can type-check
-             against the inductive name and [match]/[case] gets a common root. *)
-          str "class " ++ str tname ++ str ":" ++ fnl () ++
-          str "    pass" ++ fnl () ++
-          fnl () ++
-          prlist_with_sep (fun () -> fnl ())
-            (fun j -> pp_one_cons state p None (Some tname) j)
-            (List.init n (fun j -> j))
+          (* Shared base class.  For parameterised inductives it inherits
+             [Generic[_A, …]] so that type-checkers can track type arguments. *)
+          let pp_base =
+            if List.is_empty tvars then
+              str "class " ++ str tname ++ str ":" ++ fnl () ++
+              str "    pass" ++ fnl ()
+            else
+              str "class " ++ str tname ++
+              str "(Generic[" ++
+              prlist_with_sep (fun () -> str ", ") str tvars ++
+              str "]):" ++ fnl () ++
+              str "    pass" ++ fnl ()
+          in
+          (* Constructor dataclasses, each inheriting from the base class. *)
+          let pp_cons =
+            prlist_with_sep (fun () -> fnl ())
+              (fun j -> pp_one_cons state p None (Some tname) j)
+              (List.init n (fun j -> j))
+          in
+          (* Union alias for type-checker use: [TypeNameT = Con1 | Con2 | …].
+             PEP 604 union syntax (Python 3.10+, fine — we target 3.14t). *)
+          let cons_names =
+            List.init n (fun j -> pp_global state Cons p.ip_consnames_ref.(j))
+          in
+          let pp_union =
+            str tname ++ str "T = " ++
+            prlist_with_sep (fun () -> str " | ") str cons_names ++
+            fnl ()
+          in
+          pp_base ++ fnl () ++
+          pp_cons ++ fnl () ++
+          fnl () ++ pp_union
       in
+      pp_typevars ++
       prlist_with_sep (fun () -> fnl ())
         pp_packet
         (Array.to_list ind.ind_packets)
