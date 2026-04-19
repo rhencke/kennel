@@ -33,32 +33,46 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
-            if git diff --name-only "$BASE" "$HEAD" | \
-               grep -qE '^(rocq-python-extraction/|models/|dune-workspace$|\.github/workflows/rocq-python-extraction\.yml$)'; then
+            CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+            if echo "$CHANGED" | grep -qE '^(rocq-python-extraction/|models/|dune-workspace$|\.github/workflows/rocq-python-extraction\.yml$)'; then
               echo "relevant=true"  >> "$GITHUB_OUTPUT"
             else
               echo "relevant=false" >> "$GITHUB_OUTPUT"
               echo "No Rocq/models files changed — short-circuiting green."
             fi
+            if echo "$CHANGED" | grep -q '^rocq-python-extraction/Dockerfile$'; then
+              echo "dockerfile_changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "dockerfile_changed=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             # Push event: path filters on the trigger already gate relevance.
             echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "dockerfile_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Fast path: Dockerfile is unchanged, so pull the already-built image
+      # from ghcr.io instead of rebuilding it.  This avoids the ~1:30 overhead
+      # of `load: true` even when all layers are cached.
+      - name: Pull pre-built container image
+        if: steps.changes.outputs.relevant == 'true' && steps.changes.outputs.dockerfile_changed == 'false'
+        run: |
+          docker pull ghcr.io/fidocancode/rocq-python-extraction:latest
+          docker tag ghcr.io/fidocancode/rocq-python-extraction:latest rocq-python-extraction:ci
+
       # Set up buildx so we can use the GitHub Actions layer cache.
+      # Only needed when the Dockerfile itself changed and we must rebuild.
       - name: Set up Docker Buildx
-        if: steps.changes.outputs.relevant == 'true'
+        if: steps.changes.outputs.relevant == 'true' && steps.changes.outputs.dockerfile_changed == 'true'
         uses: docker/setup-buildx-action@v3
 
-      # Build from the local Dockerfile with layer caching.  Unchanged layers
-      # (especially the opam install step, which takes most of the build time)
-      # are restored from the GHA cache so only changed layers are rebuilt.
-      # Dockerfile changes in a PR still take effect immediately because the
-      # cache is content-addressed per layer.  The scope key isolates this
-      # workflow's cache from the publish workflow's so the two don't clobber
-      # each other.
+      # Build from the local Dockerfile with layer caching.  Only runs when
+      # the Dockerfile actually changed in this PR so the change can be tested
+      # before merge.  Unchanged layers (especially the opam install step) are
+      # restored from the GHA cache.  The scope key isolates this workflow's
+      # cache from the publish workflow's so the two don't clobber each other.
       - name: Build container image
-        if: steps.changes.outputs.relevant == 'true'
+        if: steps.changes.outputs.relevant == 'true' && steps.changes.outputs.dockerfile_changed == 'true'
         uses: docker/build-push-action@v6
         with:
           context: rocq-python-extraction
