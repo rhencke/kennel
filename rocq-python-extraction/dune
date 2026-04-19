@@ -24,115 +24,49 @@
  (action (bash "python3 %{dep:test/check_phase2_syntax.py}")))
 
 ; Phase 3 round-trip tests: extracted(f(x)) == expected(x) for each primitive.
-; Each rule depends on the phase3.vo build which produces the .py side-effects.
-
-; bool → Python bool: bool_not(True) is False and bool_not(False) is True.
+; Primitives covered: bool, nat, option, prod, list.
 (rule
  (alias runtest)
- (deps test/phase3.vo test/check_bool_not.py)
- (action (bash "python3 %{dep:test/check_bool_not.py}")))
+ (deps test/phase3.vo
+       test/check_bool_not.py
+       test/check_nat_double.py
+       test/check_option_inc.py
+       test/check_pair_swap.py
+       test/check_list_add_one.py)
+ (action
+  (progn
+   (run python3 %{dep:test/check_bool_not.py})
+   (run python3 %{dep:test/check_nat_double.py})
+   (run python3 %{dep:test/check_option_inc.py})
+   (run python3 %{dep:test/check_pair_swap.py})
+   (run python3 %{dep:test/check_list_add_one.py}))))
 
-; nat → Python int: nat_double(k) == 2*k for k in {0, 3, 5}.
-(rule
- (alias runtest)
- (deps test/phase3.vo test/check_nat_double.py)
- (action (bash "python3 %{dep:test/check_nat_double.py}")))
-
-; option → Python Optional: option_inc propagates None and increments Some values.
-(rule
- (alias runtest)
- (deps test/phase3.vo test/check_option_inc.py)
- (action (bash "python3 %{dep:test/check_option_inc.py}")))
-
-; prod → Python tuple: pair_swap swaps the two components of an int 2-tuple.
-(rule
- (alias runtest)
- (deps test/phase3.vo test/check_pair_swap.py)
- (action (bash "python3 %{dep:test/check_pair_swap.py}")))
-
-; list → Python list: list_add_one increments every element by one.
-(rule
- (alias runtest)
- (deps test/phase3.vo test/check_list_add_one.py)
- (action (bash "python3 %{dep:test/check_list_add_one.py}")))
-
-; ---------------------------------------------------------------------------
 ; Phase 4 round-trip tests: inductive datatype emission.
-; Each rule depends on test/phase4.vo which produces the .py side-effects.
-; The Python scripts use exec() to load the generated file, then assert that
-; functions built on non-remapped dataclass hierarchies behave correctly.
-; ---------------------------------------------------------------------------
-
-; MyList A: mylist_is_empty returns True for MNil and False for MCons.
+; Inductives covered: MyList, BinTree, RoseTree/RoseForest (mutual parameterised),
+; MTree/MForest (mutual), MyOpt, Even/Odd (mutual Dfix), is_even/is_odd (Dfix over
+; remapped nat), NTree (nested), STree/DTree (mutual non-list), color (PEP 8 casing).
 (rule
  (alias runtest)
- (deps test/phase4.vo test/check_mylist_is_empty.py)
- (action (bash "python3 %{dep:test/check_mylist_is_empty.py}")))
-
-; BinTree: bintree_is_leaf returns True for BLeaf and False for BNode.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_bintree_is_leaf.py)
- (action (bash "python3 %{dep:test/check_bintree_is_leaf.py}")))
-
-; RoseTree/RoseForest (mutual, parameterised): roseforest_is_empty.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_roseforest_is_empty.py)
- (action (bash "python3 %{dep:test/check_roseforest_is_empty.py}")))
-
-; MTree/MForest (mutual, non-parameterised): mforest_is_empty.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_mforest_is_empty.py)
- (action (bash "python3 %{dep:test/check_mforest_is_empty.py}")))
-
-; MyOpt A: myopt_flatten collapses one layer of nesting.
-; Also exercises zero-arg dataclass construction (MyNone() not just MyNone).
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_myopt_flatten.py)
- (action (bash "python3 %{dep:test/check_myopt_flatten.py}")))
-
-; Even/Odd (mutual, non-parameterised): even_depth measures alternating parity depth.
-; Exercises: (a) a mutual inductive group with cross-referencing constructors, and
-; (b) a mutually-recursive fixpoint (Dfix) that pattern-matches both packets.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_even_depth.py)
- (action (bash "python3 %{dep:test/check_even_depth.py}")))
-
-; is_even / is_odd (mutual fixpoint over remapped nat): boolean parity check.
-; Exercises a Dfix mutual fixpoint whose input (nat → int) and output
-; (bool → Python bool) are both remapped primitives — no user-defined
-; dataclass involved at all.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_is_even.py)
- (action (bash "python3 %{dep:test/check_is_even.py}")))
-
-; NTree (nested inductive): NNode carries a native Python list of NTree children.
-; Exercises: (a) a constructor field typed list[NTree] (remapped container +
-; non-remapped element), (b) pattern matching returning a remapped bool.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_ntree_is_leaf.py)
- (action (bash "python3 %{dep:test/check_ntree_is_leaf.py}")))
-
-; STree / DTree (mutual, non-parameterised): stree_size counts SLit leaf nodes.
-; Exercises: (a) a mutual inductive where SSeq carries a DTree sub-tree and
-; DDecl carries an STree (not a simple list-of-the-other pattern),
-; (b) a Dfix mutual fixpoint accumulating a remapped nat across both packets.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_stree_size.py)
- (action (bash "python3 %{dep:test/check_stree_size.py}")))
-
-; color: lowercase Rocq inductive → capitalized Python base class.
-; Verifies that the extraction plugin capitalizes the base class name
-; (color → Color) per PEP 8.  The isinstance check confirms the name
-; is correct in the emitted class hierarchy, not just in a comment.
-(rule
- (alias runtest)
- (deps test/phase4.vo test/check_color_is_red.py)
- (action (bash "python3 %{dep:test/check_color_is_red.py}")))
+ (deps test/phase4.vo
+       test/check_mylist_is_empty.py
+       test/check_bintree_is_leaf.py
+       test/check_roseforest_is_empty.py
+       test/check_mforest_is_empty.py
+       test/check_myopt_flatten.py
+       test/check_even_depth.py
+       test/check_is_even.py
+       test/check_ntree_is_leaf.py
+       test/check_stree_size.py
+       test/check_color_is_red.py)
+ (action
+  (progn
+   (run python3 %{dep:test/check_mylist_is_empty.py})
+   (run python3 %{dep:test/check_bintree_is_leaf.py})
+   (run python3 %{dep:test/check_roseforest_is_empty.py})
+   (run python3 %{dep:test/check_mforest_is_empty.py})
+   (run python3 %{dep:test/check_myopt_flatten.py})
+   (run python3 %{dep:test/check_even_depth.py})
+   (run python3 %{dep:test/check_is_even.py})
+   (run python3 %{dep:test/check_ntree_is_leaf.py})
+   (run python3 %{dep:test/check_stree_size.py})
+   (run python3 %{dep:test/check_color_is_red.py}))))
