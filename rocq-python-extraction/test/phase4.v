@@ -10,7 +10,8 @@
       BinTree       — non-parameterised binary tree carrying nat values
       RoseTree A    — mutual parameterised rose tree / forest
       MTree/MForest — mutual non-parameterised tree / forest
-      MyOpt A       — polymorphic option; option-of-option flatten *)
+      MyOpt A       — polymorphic option; option-of-option flatten
+      Even/Odd      — mutual non-parameterised parity types + mutual fixpoint *)
 
 Declare ML Module "rocq-python-extraction".
 
@@ -175,3 +176,42 @@ Definition color_is_red (c : color) : bool :=
   end.
 
 Python Extraction color_is_red.
+
+(* ------------------------------------------------------------------ *)
+(*  7. Even/Odd mutual inductive — mutual types + mutual fixpoint       *)
+(*                                                                      *)
+(*  [Even] and [Odd] are a pair of mutually defined types encoding      *)
+(*  parity witnesses:                                                   *)
+(*    EvenO      : zero is even                                         *)
+(*    EvenS o    : if o : Odd  then the successor is even               *)
+(*    OddS  e    : if e : Even then the successor is odd                *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a mutual inductive group whose constructors cross-reference   *)
+(*        one another (EvenS carries an Odd; OddS carries an Even),     *)
+(*    (b) a mutually-recursive fixpoint (Dfix) that pattern-matches on  *)
+(*        both packets in alternation.                                   *)
+(* ------------------------------------------------------------------ *)
+
+Inductive Even :=
+  | EvenO : Even
+  | EvenS : Odd -> Even
+with Odd :=
+  | OddS : Even -> Odd.
+
+(** [even_depth]: count the number of constructor alternations.
+    With nat → int remapping:
+      even_depth EvenO                          = 0
+      even_depth (EvenS (OddS EvenO))           = 2
+      even_depth (EvenS (OddS (EvenS (OddS EvenO)))) = 4 *)
+Fixpoint even_depth (e : Even) : nat :=
+  match e with
+  | EvenO   => O
+  | EvenS o => S (odd_depth o)
+  end
+with odd_depth (o : Odd) : nat :=
+  match o with
+  | OddS e => S (even_depth e)
+  end.
+
+Python Extraction even_depth.
