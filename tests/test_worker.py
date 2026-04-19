@@ -11595,6 +11595,72 @@ class TestSyncTasks:
         # Must not remain as a pending checkbox
         assert "- [ ] Replace the marker" not in new_body
 
+    def test_completed_task_renders_as_checked_even_when_background_sync_holds_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: #842 — post-completion sync must not skip when background sync holds lock.
+
+        Scenario: a background sync acquires the lock and starts running with stale data
+        (task still pending).  While it holds the lock, the task is marked completed in
+        tasks.json.  The post-completion sync_tasks(blocking=True) must *wait* for the
+        lock rather than skipping, then read fresh data and render the task as [x].
+        """
+        import fcntl
+        import threading
+
+        from kennel.tasks import Tasks
+        from kennel.types import TaskType
+
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        sync_lock_path = fido_dir / "sync.lock"
+
+        # Add a task to tasks.json so the real Tasks.list() can read it
+        task = Tasks(tmp_path).add("Close the ticket", TaskType.SPEC)
+
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 9, "state": "OPEN"}
+        gh.get_pr_body.return_value = (
+            "desc\n<!-- WORK_QUEUE_START -->\n"
+            "- [ ] Close the ticket **→ next** <!-- type:spec -->\n"
+            "<!-- WORK_QUEUE_END -->"
+        )
+
+        lock_held = threading.Event()
+        complete_done = threading.Event()
+
+        def hold_lock_until_complete() -> None:
+            """Simulate a background sync that holds the lock while task is being completed."""
+            with open(sync_lock_path, "w") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                lock_held.set()
+                complete_done.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_lock_until_complete, daemon=True)
+        holder.start()
+        lock_held.wait(timeout=5)
+
+        # Simulate the worker completing the task while background sync holds the lock
+        Tasks(tmp_path).complete_by_id(task["id"])
+
+        # Post-completion sync (blocking=True) must wait, not skip
+        # Release the lock shortly after the blocking sync starts waiting
+        release_timer = threading.Timer(0.05, complete_done.set)
+        release_timer.start()
+        sync_tasks(tmp_path, gh, blocking=True, **self._sync_kwargs(fido_dir))
+
+        holder.join(timeout=2)
+
+        # The PR body must reflect the completed state, not the stale pending state
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        assert "- [x]" in new_body
+        assert "<details>" in new_body
+        assert "Completed (1)" in new_body
+        assert "- [ ] Close the ticket" not in new_body
+
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
