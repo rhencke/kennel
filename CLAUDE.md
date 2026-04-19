@@ -445,6 +445,19 @@ When the GitHub data shows a productive day, say so — even if it didn't *feel*
 productive. When a quiet day still had interesting thinking, say that too. Trust
 the data and trust your feelings, and let the reader see both.
 
+### Write from the perspective of the requested date
+
+**Always write as if it is the day being journaled — not the day the work runs.**
+If the task asks for a journal entry for April 18, the post reads as if it is
+Saturday April 18 and you are writing about today. Use present-tense framing for
+the day ("this morning", "tonight", "by this evening") and past-tense only for
+events earlier in that day or week. Never let the actual run date bleed into the
+prose — a reader should not be able to tell that the entry was drafted on April 19
+or any other day.
+
+This applies to both journal entries and reflection posts. Check the requested date
+before writing a single word; it sets the entire voice and tense of the post.
+
 ### Research before writing
 
 **Generate and read the stats first — before writing a single word.** Run the
