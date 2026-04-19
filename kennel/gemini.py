@@ -136,7 +136,7 @@ class GeminiSession(ACPSession):
 class GeminiClient(ACPClient, ProviderAgent):
     """Injectable collaborator for Gemini CLI interactions."""
 
-    voice_model = ProviderModel("gemini-2.0-flash", "high")
+    voice_model = ProviderModel("gemini-2.0-pro-exp", "high")
     work_model = ProviderModel("gemini-2.0-pro-exp", "medium")
     brief_model = ProviderModel("gemini-2.0-flash", "low")
 
