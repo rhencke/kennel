@@ -1053,6 +1053,40 @@ def populate_memberships(config: Config, gh: GitHub) -> None:
         )
 
 
+def bootstrap_issue_caches(
+    repos: dict[str, RepoConfig],
+    gh: GitHub,
+    registry: WorkerRegistry,
+) -> None:
+    """Bootstrap every per-repo :class:`~kennel.issue_cache.IssueTreeCache` at startup (#837).
+
+    Called once in :func:`run` after the registry is created but before the
+    watchdog threads start.  Each repo gets a fresh ``find_all_open_issues``
+    snapshot so the cache is warm from the first moment — even for repos
+    whose worker resumes on an existing issue and never calls
+    ``find_next_issue`` during the current kennel run.
+
+    Per-repo failures are swallowed (logged, not raised): a single GitHub
+    API hiccup must not prevent kennel from starting.  The hourly
+    :class:`~kennel.watchdog.ReconcileWatchdog` will heal any cold repo
+    within the hour.
+    """
+    for name in repos:
+        owner, repo_name = name.split("/", 1)
+        cache = registry.get_issue_cache(name)
+        try:
+            snapshot_started_at = datetime.now(tz=timezone.utc)
+            log.info("startup: bootstrapping issue cache for %s", name)
+            inventory = gh.find_all_open_issues(owner, repo_name)
+            cache.load_inventory(inventory, snapshot_started_at=snapshot_started_at)
+        except Exception:
+            log.exception(
+                "startup: failed to bootstrap issue cache for %s — "
+                "ReconcileWatchdog will heal within the hour",
+                name,
+            )
+
+
 def _startup_pull(proc: ProcessRunner, clock: Clock, os_proc: OsProcess) -> None:
     """Sync the runner clone on startup and re-exec if HEAD changed."""
     runner_dir = _runner_dir()
@@ -1094,6 +1128,7 @@ def run(
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
     _GitHub: type[GitHub] = GitHub,
+    _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
 ) -> None:
     config = _from_args()
 
@@ -1167,6 +1202,10 @@ def run(
     )
     registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
+    # Bootstrap issue caches eagerly so the picker has warm data immediately —
+    # even for repos whose worker resumes on an existing issue and never calls
+    # find_next_issue during this run (closes #837).
+    _bootstrap_issue_caches(config.repos, gh, registry)
     # Route webhook-handler prompt calls through the per-repo persistent
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)

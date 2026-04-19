@@ -2470,6 +2470,87 @@ class TestPopulateMemberships:
         assert cfg.repos["o/r2"].membership.collaborators == frozenset({"bob", "carol"})
 
 
+class TestBootstrapIssueCaches:
+    """Tests for bootstrap_issue_caches() (#837)."""
+
+    def _make_repos(self, tmp_path: Path) -> dict[str, RepoConfig]:
+        return {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+
+    def test_calls_find_all_open_issues_with_owner_and_repo_name(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.server import bootstrap_issue_caches
+
+        repos = self._make_repos(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.return_value = []
+        mock_registry = MagicMock()
+        mock_registry.get_issue_cache.return_value = MagicMock()
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        mock_gh.find_all_open_issues.assert_called_once_with("owner", "repo")
+
+    def test_calls_load_inventory_on_cache_with_returned_issues(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.server import bootstrap_issue_caches
+
+        repos = self._make_repos(tmp_path)
+        mock_gh = MagicMock()
+        fake_inventory = [{"number": 1}]
+        mock_gh.find_all_open_issues.return_value = fake_inventory
+        mock_cache = MagicMock()
+        mock_registry = MagicMock()
+        mock_registry.get_issue_cache.return_value = mock_cache
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        mock_registry.get_issue_cache.assert_called_once_with("owner/repo")
+        mock_cache.load_inventory.assert_called_once_with(
+            fake_inventory, snapshot_started_at=ANY
+        )
+
+    def test_bootstraps_all_repos(self, tmp_path: Path) -> None:
+        from kennel.server import bootstrap_issue_caches
+
+        repos = {
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
+        }
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.return_value = []
+        mock_registry = MagicMock()
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        assert mock_gh.find_all_open_issues.call_count == 2
+        mock_gh.find_all_open_issues.assert_any_call("a", "r1")
+        mock_gh.find_all_open_issues.assert_any_call("b", "r2")
+
+    def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
+        """A single GitHub API error must not prevent kennel from starting."""
+        from kennel.server import bootstrap_issue_caches
+
+        repos = {
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
+        }
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_cache_r2 = MagicMock()
+        mock_registry = MagicMock()
+        mock_registry.get_issue_cache.side_effect = lambda name: (
+            MagicMock() if name == "a/r1" else mock_cache_r2
+        )
+
+        # Must not raise despite the first repo failing.
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        # Second repo should still be bootstrapped.
+        mock_cache_r2.load_inventory.assert_called_once()
+
+
 class TestRun:
     """Tests for the run() entry point."""
 
@@ -2960,6 +3041,41 @@ class TestRun:
         finally:
             _sys.excepthook = saved_sys
             _threading.excepthook = saved_thr
+
+    def test_run_calls_bootstrap_issue_caches_with_repos_gh_and_registry(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_registry = MagicMock()
+        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_bootstrap = MagicMock()
+        mock_gh_instance = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=mock_make_registry,
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+            _GitHub=lambda: mock_gh_instance,
+            _Watchdog=MagicMock(),
+            _ReconcileWatchdog=MagicMock(),
+            _bootstrap_issue_caches=mock_bootstrap,
+        )
+
+        mock_bootstrap.assert_called_once_with(
+            fake_cfg.repos, mock_gh_instance, mock_registry
+        )
 
 
 def _self_restart_cfg(tmp_path: Path) -> Config:
