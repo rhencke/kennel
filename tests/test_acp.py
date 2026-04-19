@@ -335,6 +335,11 @@ class TestACPRuntime:
 
         runtime.stop()
 
+    def test_normalize_model_default(self, tmp_path: Path) -> None:
+        runtime = ACPRuntime(ProviderID.GEMINI, ["gemini"], work_dir=tmp_path)
+        assert runtime._normalize_model("m1") == ProviderModel("m1")
+        runtime.stop()
+
     def test_normalize_model_custom(self, tmp_path: Path) -> None:
         norm = MagicMock(return_value=ProviderModel("mapped"))
         runtime = ACPRuntime(

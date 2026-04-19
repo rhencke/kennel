@@ -13,6 +13,7 @@ from kennel.gemini import (
     GeminiAPI,
     GeminiClient,
     GeminiSession,
+    _GeminiACPClient,
     extract_result_text,
     extract_session_id,
 )
@@ -150,12 +151,36 @@ class TestGeminiClient:
         )
 
 
+class TestGeminiACPRuntime:
+    def test_init_and_client_factory(self, tmp_path: Path) -> None:
+        mock_spawn = MagicMock()
+        runtime = GeminiACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=mock_spawn,
+        )
+        assert runtime.provider_id == ProviderID.GEMINI
+        client = runtime._default_client_factory(runtime)
+        assert isinstance(client, _GeminiACPClient)
+        runtime.stop()
+
+
 class TestGeminiSession:
     def test_init_defaults_runtime(self, tmp_path: Path) -> None:
         sys_file = tmp_path / "sys.md"
         sys_file.write_text("")
-        session = GeminiSession(sys_file, work_dir=tmp_path, model="m")
-        assert isinstance(session._runtime, GeminiACPRuntime)
+
+        mock_runtime = MagicMock(spec=GeminiACPRuntime)
+        mock_runtime.ensure_session.return_value = "s1"
+        factory = MagicMock(return_value=mock_runtime)
+
+        session = GeminiSession(
+            sys_file,
+            work_dir=tmp_path,
+            model="m",
+            runtime_factory=factory,
+        )
+        assert session._runtime is mock_runtime
+        factory.assert_called_once_with(work_dir=tmp_path, repo_name=None)
         session.stop()
 
 
