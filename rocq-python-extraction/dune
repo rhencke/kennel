@@ -70,3 +70,16 @@
    (run python3 %{dep:test/check_ntree_is_leaf.py})
    (run python3 %{dep:test/check_stree_size.py})
    (run python3 %{dep:test/check_color_is_red.py}))))
+
+; Phase 5 round-trip tests: nested patterns.
+; Exercises: 3-level deep nested constructor patterns (has_left3) and
+; cross-type nested patterns across a mutual Expr/Val inductive (expr_is_num_pair).
+(rule
+ (alias runtest)
+ (deps test/phase5.vo
+       test/check_has_left3.py
+       test/check_expr_is_num_pair.py)
+ (action
+  (progn
+   (run python3 %{dep:test/check_has_left3.py})
+   (run python3 %{dep:test/check_expr_is_num_pair.py}))))
