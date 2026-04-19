@@ -101,6 +101,7 @@ def _restore_handler_fns():
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
+        "kennel_started_at": WebhookHandler.kennel_started_at,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -329,7 +330,11 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
-        assert json.loads(resp.read()) == {"activities": [], "rate_limit": None}
+        assert json.loads(resp.read()) == {
+            "activities": [],
+            "rate_limit": None,
+            "kennel_uptime_seconds": None,
+        }
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
         url, _ = server
@@ -1241,6 +1246,139 @@ class TestStatusXml:
         body = resp.read().decode()
         assert "<description>replying to review</description>" in body
         assert "<thread_id>789</thread_id>" in body
+
+    def test_status_xml_includes_kennel_uptime(self, server: tuple) -> None:
+        """<kennel_uptime_seconds> appears in the root element when kennel_started_at is set."""
+        from datetime import datetime, timezone
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.kennel_started_at = datetime(
+            2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
+        )
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<kennel_uptime_seconds>" in body
+
+    def test_status_xml_no_kennel_uptime_when_not_started(self, server: tuple) -> None:
+        """<kennel_uptime_seconds> is absent when kennel_started_at is None (default)."""
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        assert WebhookHandler.kennel_started_at is None
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<kennel_uptime_seconds>" not in body
+
+    def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
+        """<rate_limit> with nested windows appears in the root element when available."""
+        from datetime import UTC, datetime
+
+        from kennel.rate_limit import (
+            RateLimitMonitor,
+            RateLimitSnapshot,
+            RateLimitWindow,
+        )
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        snap = RateLimitSnapshot(
+            rest=RateLimitWindow(
+                name="rest",
+                used=100,
+                limit=5000,
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=UTC),
+            ),
+            graphql=RateLimitWindow(
+                name="graphql",
+                used=5,
+                limit=5000,
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=UTC),
+            ),
+            fetched_at=datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
+        )
+        monitor = MagicMock(spec=RateLimitMonitor)
+        monitor.latest.return_value = snap
+        WebhookHandler.rate_limit_monitor = monitor
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<rate_limit>" in body
+        assert "<rest>" in body
+        assert "<used>100</used>" in body
+        assert "<graphql>" in body
+        assert "<used>5</used>" in body
+
+    def test_status_json_includes_kennel_uptime(self, server: tuple) -> None:
+        """kennel_uptime_seconds appears in /status.json when kennel_started_at is set."""
+        from datetime import datetime, timezone
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.kennel_started_at = datetime(
+            2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
+        )
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data["kennel_uptime_seconds"] is not None
+        assert data["kennel_uptime_seconds"] >= 0
+
+    def test_status_json_kennel_uptime_null_when_not_started(
+        self, server: tuple
+    ) -> None:
+        """kennel_uptime_seconds is null in /status.json when kennel_started_at is None."""
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = []
+        assert WebhookHandler.kennel_started_at is None
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data["kennel_uptime_seconds"] is None
+
+    def test_status_xml_includes_issue_cache_as_nested_elements(
+        self, server: tuple
+    ) -> None:
+        """issue_cache dict is emitted as nested XML children, not as str(dict)."""
+        from datetime import datetime, timezone
+
+        from kennel.issue_cache import IssueTreeCache
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="working",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 3,
+                    "title": "demo",
+                    "createdAt": "2026-04-01T00:00:00Z",
+                    "assignees": {"nodes": []},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<issue_cache>" in body
+        assert "<open_issues>1</open_issues>" in body
+        assert "<loaded>true</loaded>" in body
 
 
 class TestStaticFileServing:

@@ -137,8 +137,8 @@ def _repo_status(act: dict[str, Any]) -> str:
     return act.get("what") or "waiting"
 
 
-def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
-    """Serialize activity dicts to namespaced structural XML with an XSLT PI.
+def _activities_to_xml(payload: dict[str, Any]) -> bytes:
+    """Serialize the full status payload to namespaced structural XML with an XSLT PI.
 
     Pure function — transforms data, no I/O.  The server emits this structural
     XML in the ``https://fidocancode.dog/kennel`` namespace.  The browser
@@ -147,9 +147,33 @@ def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
     is then styled by ``status.css`` via a CSS processing instruction.
 
     Three-layer pipeline: structural XML → XSLT → display XML → CSS.
+
+    The root ``<kennel>`` element carries kennel-level metadata (uptime, rate
+    limits) before the per-repo ``<repo>`` children so XSLT can render a
+    dashboard header without reaching into any individual repo card.
     """
     root = Element(f"{{{_NS_KENNEL}}}kennel")
-    for act in activities:
+
+    # Kennel-level metadata — emitted before per-repo elements.
+    kennel_uptime = payload.get("kennel_uptime_seconds")
+    if kennel_uptime is not None:
+        el = SubElement(root, f"{{{_NS_KENNEL}}}kennel_uptime_seconds")
+        el.text = _xml_text(kennel_uptime)
+
+    rate_limit = payload.get("rate_limit")
+    if rate_limit is not None:
+        rl_el = SubElement(root, f"{{{_NS_KENNEL}}}rate_limit")
+        for rl_key, rl_val in rate_limit.items():
+            if isinstance(rl_val, dict):
+                child_el = SubElement(rl_el, f"{{{_NS_KENNEL}}}{rl_key}")
+                for k, v in rl_val.items():
+                    sub_el = SubElement(child_el, f"{{{_NS_KENNEL}}}{k}")
+                    sub_el.text = _xml_text(v)
+            else:
+                child_el = SubElement(rl_el, f"{{{_NS_KENNEL}}}{rl_key}")
+                child_el.text = _xml_text(rl_val)
+
+    for act in payload.get("activities", []):
         repo = SubElement(root, f"{{{_NS_KENNEL}}}repo")
         repo.set(f"{{{_NS_DOG}}}status", _repo_status(act))
         for key, value in act.items():
@@ -172,6 +196,12 @@ def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
                     for pk, pv in value.items():
                         el = SubElement(ps_el, f"{{{_NS_KENNEL}}}{pk}")
                         el.text = _xml_text(pv)
+            elif key == "issue_cache":
+                ic_el = SubElement(repo, f"{{{_NS_KENNEL}}}issue_cache")
+                if value is not None:
+                    for ik, iv in value.items():
+                        el = SubElement(ic_el, f"{{{_NS_KENNEL}}}{ik}")
+                        el.text = _xml_text(iv)
             else:
                 el = SubElement(repo, f"{{{_NS_KENNEL}}}{key}")
                 el.text = _xml_text(value)
@@ -572,6 +602,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     registry: WorkerRegistry
     provider_factory: DefaultProviderFactory | None = None
     rate_limit_monitor: Any = None
+    # Set by run() to record when the server came up, used for kennel uptime.
+    kennel_started_at: datetime | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -1004,7 +1036,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/status":
-            body = _activities_to_xml(self._collect_activities())
+            body = _activities_to_xml(self._collect_status_payload())
             self._respond_body("application/xml; charset=utf-8", body)
         elif self.path == "/status.json":
             body = json.dumps(self._collect_status_payload()).encode()
@@ -1015,16 +1047,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(200, "kennel is running")
 
     def _collect_status_payload(self) -> dict[str, Any]:
-        """Build the JSON payload for ``/status.json``.
+        """Build the status payload shared by ``/status.json`` and ``/status`` XML.
 
-        Wraps the per-repo activity list and a global rate-limit snapshot
-        (closes #812 follow-up) under top-level keys so future global
-        signals can be added without churn — kennel status reads
-        ``activities`` and ``rate_limit`` independently.
+        Wraps the per-repo activity list, a global rate-limit snapshot, and
+        kennel-level metadata (uptime) under top-level keys.  Both endpoints
+        call this method so they always render the same data.
         """
+        now = datetime.now(tz=timezone.utc)
+        started = self.kennel_started_at
+        kennel_uptime = (now - started).total_seconds() if started is not None else None
         return {
             "activities": self._collect_activities(),
             "rate_limit": _serialize_rate_limit(self.rate_limit_monitor),
+            "kennel_uptime_seconds": kennel_uptime,
         }
 
     def _collect_activities(self) -> list[dict[str, Any]]:
@@ -1324,6 +1359,7 @@ def run(
     rate_limit_monitor = _RateLimitMonitor(gh)
     rate_limit_monitor.start_thread()
     WebhookHandler.rate_limit_monitor = rate_limit_monitor
+    WebhookHandler.kennel_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 
