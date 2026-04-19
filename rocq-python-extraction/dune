@@ -83,3 +83,19 @@
   (progn
    (run python3 %{dep:test/check_has_left3.py})
    (run python3 %{dep:test/check_expr_is_num_pair.py}))))
+
+; Phase 6 round-trip tests: record projections (issue #720).
+; 2-field record: basic projection (first field, second field) and field-swap
+;   construction — verifies MLcase Record → attribute-access lambda-lift.
+; 5-field record: all 5 named fields accessible by name — the acceptance
+;   criterion that record projections use readable Python identifiers, not
+;   positional _0/_1/… names.
+(rule
+ (alias runtest)
+ (deps test/phase6.vo
+       test/check_proj_pair_r.py
+       test/check_point5.py)
+ (action
+  (progn
+   (run python3 %{dep:test/check_proj_pair_r.py})
+   (run python3 %{dep:test/check_point5.py}))))
