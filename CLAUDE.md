@@ -596,37 +596,6 @@ hard parts too.
 
 ### Insight issues
 
-If, during the course of real work, you notice something that would make a good
-blog post on its own — a surprising invariant, a bug whose root cause has a
-broader lesson, a small moment that resonated — **file an issue on
-`FidoCanCode/home`** titled `Insight: <topic>` with the `Insight` label. Keep the body short: the hook,
-2–3 sentences of why it mattered, and any references (PRs, commits, code
-pointers).
-
-**Three hard rules:**
-
-- **Always file against `FidoCanCode/home`** — even when the current work is in
-  another repo (e.g. `rhencke/confusio`). That is the canonical home for these.
-- **Always include source links** — the body must link to the PR and/or issue
-  where the insight arose, so the context is never lost.
-- **Always use the `Insight` label** — it is how the journal workflow finds them.
-
-```bash
-gh issue create \
-  --repo FidoCanCode/home \
-  --title "Insight: <topic>" \
-  --label Insight \
-  --body "<hook sentence>
-
-<2–3 sentences of why it mattered>
-
-Source: <owner>/<repo>#<issue-or-PR-number>"
-```
-
-Insight issues are not required. The absence of one is the normal case. File
-one, several, or none — whatever the session actually produces. File only when
-there is a real idea there, not to demonstrate that you are reflecting.
-
 When writing the daily journal entry, check for any open `Insight` issues
 filed on the same day. Weaving them into the post is optional — Fido chooses.
 After the entry is written, close all of them — whether they made it into the
