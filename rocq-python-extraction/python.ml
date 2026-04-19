@@ -367,11 +367,13 @@ let rec pp_expr state env = function
         (* Append a catch-all arm unless the last explicit branch is already
            a wildcard.  Python [match] silently falls through with no result
            when no arm matches; [assert_never] turns that into a loud type-
-           checker-visible error so non-exhaustive patterns are never silent. *)
+           checker-visible error so non-exhaustive patterns are never silent.
+           [case _:] is the Pythonic wildcard; [_] is still a valid variable
+           so we can pass it to [assert_never] for the type-checker benefit. *)
         let catch_all =
           if has_wildcard_last branches then mt ()
-          else fnl () ++ str "    case _unreachable:" ++ fnl () ++
-               str "        assert_never(_unreachable)"
+          else fnl () ++ str "    case _:" ++ fnl () ++
+               str "        assert_never(_)"
         in
         str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches) ++
@@ -492,12 +494,13 @@ let rec pp_return_body state env indent = function
           str body_pfx ++ pp_return_body state env' (indent + 8) body
         in
         (* Same catch-all logic as the expression-context path: append
-           [case _unreachable: assert_never(_unreachable)] unless the last
-           explicit arm is already a wildcard. *)
+           [case _: assert_never(_)] unless the last explicit arm is already
+           a wildcard.  [_] is a valid Python variable even in [case _:],
+           so passing it to [assert_never] satisfies type checkers. *)
         let catch_all =
           if has_wildcard_last branches then mt ()
-          else fnl () ++ str case_pfx ++ str "case _unreachable:" ++ fnl () ++
-               str body_pfx ++ str "assert_never(_unreachable)"
+          else fnl () ++ str case_pfx ++ str "case _:" ++ fnl () ++
+               str body_pfx ++ str "assert_never(_)"
         in
         str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches) ++
