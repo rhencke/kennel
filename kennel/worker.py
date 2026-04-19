@@ -69,6 +69,51 @@ log = logging.getLogger(__name__)
 _thread_repo: threading.local = threading.local()
 
 
+_STALE_INDEX_LOCK_SECONDS: float = 30.0
+"""How old ``.git/index.lock`` must be before :func:`_remove_stale_index_lock`
+treats it as abandoned.  Larger than any normal kennel-initiated git
+operation, so a concurrent legit writer won't have its lock yanked."""
+
+
+def _stderr_is_index_lock_error(stderr: str) -> bool:
+    """Match git's specific lock-contention error message.
+
+    Git emits ``fatal: Unable to create '<path>/.git/index.lock': File
+    exists.`` on any index-touching operation when the lock file is
+    already present.  Matching on the stable substring avoids false
+    positives from other exit-128 failure modes (closes #827).
+    """
+    return "Unable to create" in stderr and "index.lock" in stderr
+
+
+def _remove_stale_index_lock(
+    work_dir: Path,
+    *,
+    stale_after_seconds: float = _STALE_INDEX_LOCK_SECONDS,
+    _now: Callable[..., datetime] = datetime.now,
+) -> bool:
+    """Remove ``<work_dir>/.git/index.lock`` iff it is older than
+    *stale_after_seconds*.  Returns ``True`` when a stale lock was
+    removed, ``False`` otherwise (lock missing, or too fresh to be
+    safely considered abandoned).
+
+    The age gate is deliberately larger than any realistic concurrent
+    git write so we never race a legit writer.  Kennel is
+    single-worker-per-repo, so contention in practice comes from
+    provider tool calls that finished seconds ago; 30 s is a safe floor.
+    """
+    lock = work_dir / ".git" / "index.lock"
+    try:
+        stat = lock.stat()
+    except FileNotFoundError:
+        return False
+    age = _now(tz=timezone.utc).timestamp() - stat.st_mtime
+    if age < stale_after_seconds:
+        return False
+    lock.unlink()
+    return True
+
+
 class RepoContextFilter(logging.Filter):
     """Inject the current worker thread's repo name into every log record.
 
@@ -1303,21 +1348,66 @@ class Worker:
             return False
         return data.get("state") == "OPEN"
 
+    def _local_branch_exists(self, slug: str) -> bool:
+        """Return ``True`` when ``refs/heads/<slug>`` exists locally.
+
+        Discriminates git's exit codes (closes #828):
+
+        - exit 0 → branch exists.
+        - exit 1 → branch missing (expected; rev-parse's "no match" code).
+        - anything else (128 = stale lock, corrupt repo, bad cwd, …) →
+          propagate as :class:`subprocess.CalledProcessError` so callers
+          don't silently fall through to the create-branch path on a
+          real failure.
+        """
+        try:
+            self._git(["rev-parse", "--verify", "--quiet", f"refs/heads/{slug}"])
+            return True
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 1:
+                return False
+            raise
+
     def _git(
         self,
         args: list[str],
         check: bool = True,
         *,
         _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        _now: Callable[..., datetime] = datetime.now,
     ) -> subprocess.CompletedProcess[str]:
-        """Run a git command in self.work_dir."""
-        return _run(
-            ["git", *args],
-            cwd=self.work_dir,
-            capture_output=True,
-            text=True,
-            check=check,
-        )
+        """Run a git command in self.work_dir.
+
+        Self-heals from stale ``.git/index.lock`` (closes #827): if the
+        command fails with git's "Unable to create '.git/index.lock':
+        File exists" error AND the lock file is older than
+        :data:`_STALE_INDEX_LOCK_SECONDS` seconds, the lock is removed
+        and the command is retried exactly once.  The staleness window
+        protects against yanking a lock from under a concurrent writer.
+        """
+
+        def _call() -> subprocess.CompletedProcess[str]:
+            return _run(
+                ["git", *args],
+                cwd=self.work_dir,
+                capture_output=True,
+                text=True,
+                check=check,
+            )
+
+        try:
+            return _call()
+        except subprocess.CalledProcessError as exc:
+            if not _stderr_is_index_lock_error(exc.stderr or ""):
+                raise
+            if not _remove_stale_index_lock(self.work_dir, _now=_now):
+                raise
+            log.warning(
+                "git: removed stale .git/index.lock in %s and retrying %s",
+                self.work_dir,
+                args[0] if args else "(no args)",
+            )
+            return _call()
 
     def git_clean(self) -> None:
         """Discard uncommitted changes and untracked files in the work tree.
@@ -1489,9 +1579,9 @@ class Worker:
             # Open PR — resume
             log.info("resuming PR #%s on branch %s", pr_number, slug)
             self._git(["fetch", remote])
-            try:
+            if self._local_branch_exists(slug):
                 self._git(["checkout", slug])
-            except subprocess.CalledProcessError:
+            else:
                 self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
             task_list = self._tasks.list()
             if not task_list:

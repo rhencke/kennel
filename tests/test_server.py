@@ -3702,6 +3702,65 @@ class TestSelfRestart:
         finally:
             srv.shutdown()
 
+    def test_kills_active_children_before_exec(self, tmp_path: Path) -> None:
+        """execvp replaces the process image; any claude subprocess not
+        killed first gets reparented to init and keeps writing to the
+        workspace (closes #829).  Self-restart must stop every worker
+        and SIGTERM every tracked child BEFORE the exec."""
+        srv, url, cfg, mock_registry = self._make_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            call_log: list[str] = []
+
+            def _kill():
+                call_log.append("kill_active_children")
+
+            real_stop_all = mock_registry.stop_all
+            real_stop_and_join = mock_registry.stop_and_join
+            real_stop_all.side_effect = lambda: call_log.append("stop_all")
+            real_stop_and_join.side_effect = lambda repo: call_log.append(
+                f"stop_and_join:{repo}"
+            )
+            WebhookHandler._fn_kill_active_children = staticmethod(_kill)  # type: ignore[assignment]
+
+            os_proc = _FakeOsProcess()
+            # Wrap execvp so we can observe ordering.
+            original_execvp = os_proc.execvp
+            orig_execvp_calls = os_proc.execvp_calls
+
+            def _tracking_execvp(cmd, args):  # type: ignore[no-untyped-def]
+                call_log.append("execvp")
+                orig_execvp_calls.append((cmd, args))
+
+            os_proc.execvp = _tracking_execvp  # type: ignore[method-assign]
+            WebhookHandler.infra = Infra(
+                proc=_FakeProcessRunner(
+                    [
+                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(),  # fetch
+                        MagicMock(),  # reset
+                    ]
+                ),
+                clock=_FakeClock(times=[0.0, 0.0]),
+                fs=_FakeFilesystem(),
+                os_proc=os_proc,
+            )
+            status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            assert status == 200
+            # stop_and_join + stop_all + kill_active_children MUST all run
+            # before execvp.
+            execvp_idx = call_log.index("execvp")
+            assert "stop_and_join:owner/kennel" in call_log[:execvp_idx]
+            assert "stop_all" in call_log[:execvp_idx]
+            assert "kill_active_children" in call_log[:execvp_idx]
+            # Defensive: kill_active_children should be the last thing
+            # before execvp so it's the most recent TERM.
+            assert call_log[execvp_idx - 1] == "kill_active_children"
+            # Silence the cleanup-path noise.
+            del original_execvp
+        finally:
+            srv.shutdown()
+
     def test_skips_when_self_repo_mismatch(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:

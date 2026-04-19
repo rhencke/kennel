@@ -3753,6 +3753,174 @@ class TestGit:
         assert mock_run.call_args[1]["capture_output"] is True
         assert mock_run.call_args[1]["text"] is True
 
+    def test_stale_index_lock_removed_and_retried(self, tmp_path: Path) -> None:
+        """First call fails with git's index.lock error; when the lock
+        is stale, the second call succeeds (closes #827)."""
+        import os as _os
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_bytes(b"stale")
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
+        _os.utime(lock, (old, old))
+
+        calls: list[int] = []
+        success = MagicMock(returncode=0)
+
+        def _run(*args, **kwargs):  # noqa: ARG001
+            calls.append(1)
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(
+                    128,
+                    args[0],
+                    stderr="fatal: Unable to create '.git/index.lock': File exists.",
+                )
+            return success
+
+        result = Worker(tmp_path, MagicMock())._git(["add", "-A"], _run=_run)
+        assert result is success
+        assert len(calls) == 2
+        assert not lock.exists()
+
+    def test_fresh_index_lock_not_removed(self, tmp_path: Path) -> None:
+        """Lock younger than the staleness window: original error
+        propagates without retry, lock is not touched."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_bytes(b"fresh")
+
+        mock_run = MagicMock(
+            side_effect=subprocess.CalledProcessError(
+                128,
+                "git",
+                stderr="fatal: Unable to create '.git/index.lock': File exists.",
+            )
+        )
+        with pytest.raises(subprocess.CalledProcessError):
+            Worker(tmp_path, MagicMock())._git(["add", "-A"], _run=mock_run)
+        assert lock.exists()
+        assert mock_run.call_count == 1
+
+    def test_non_lock_error_propagates_without_retry(self, tmp_path: Path) -> None:
+        """Other git failures must not trigger the lock self-heal."""
+        mock_run = MagicMock(
+            side_effect=subprocess.CalledProcessError(
+                128, "git", stderr="fatal: not a git repository"
+            )
+        )
+        with pytest.raises(subprocess.CalledProcessError):
+            Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
+        assert mock_run.call_count == 1
+
+
+class TestStaleIndexLockHelpers:
+    """Module-level helpers for #827 self-heal."""
+
+    def test_stderr_matches_standard_message(self) -> None:
+        from kennel.worker import _stderr_is_index_lock_error
+
+        assert _stderr_is_index_lock_error(
+            "fatal: Unable to create '/repo/.git/index.lock': File exists."
+        )
+
+    def test_stderr_matches_on_both_tokens(self) -> None:
+        from kennel.worker import _stderr_is_index_lock_error
+
+        assert _stderr_is_index_lock_error("Unable to create 'x/index.lock'")
+
+    def test_stderr_rejects_unrelated(self) -> None:
+        from kennel.worker import _stderr_is_index_lock_error
+
+        assert not _stderr_is_index_lock_error("fatal: not a git repository")
+        assert not _stderr_is_index_lock_error("")
+
+    def test_stderr_rejects_partial(self) -> None:
+        from kennel.worker import _stderr_is_index_lock_error
+
+        assert not _stderr_is_index_lock_error("Unable to create 'foo'")
+        assert not _stderr_is_index_lock_error("index.lock missing")
+
+    def test_remove_returns_false_when_missing(self, tmp_path: Path) -> None:
+        from kennel.worker import _remove_stale_index_lock
+
+        (tmp_path / ".git").mkdir()
+        assert _remove_stale_index_lock(tmp_path) is False
+
+    def test_remove_returns_false_when_fresh(self, tmp_path: Path) -> None:
+        from kennel.worker import _remove_stale_index_lock
+
+        (tmp_path / ".git").mkdir()
+        lock = tmp_path / ".git" / "index.lock"
+        lock.write_bytes(b"")
+        assert _remove_stale_index_lock(tmp_path) is False
+        assert lock.exists()
+
+    def test_remove_returns_true_when_stale(self, tmp_path: Path) -> None:
+        import os as _os
+
+        from kennel.worker import _remove_stale_index_lock
+
+        (tmp_path / ".git").mkdir()
+        lock = tmp_path / ".git" / "index.lock"
+        lock.write_bytes(b"")
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
+        _os.utime(lock, (old, old))
+        assert _remove_stale_index_lock(tmp_path) is True
+        assert not lock.exists()
+
+    def test_respects_custom_staleness_window(self, tmp_path: Path) -> None:
+        from kennel.worker import _remove_stale_index_lock
+
+        (tmp_path / ".git").mkdir()
+        lock = tmp_path / ".git" / "index.lock"
+        lock.write_bytes(b"")
+        assert _remove_stale_index_lock(tmp_path, stale_after_seconds=0.0) is True
+        assert not lock.exists()
+
+
+class TestLocalBranchExists:
+    """Tests for Worker._local_branch_exists (closes #828)."""
+
+    def _worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def test_returns_true_on_exit_zero(self, tmp_path: Path) -> None:
+        worker = self._worker(tmp_path)
+        with patch.object(worker, "_git", return_value=MagicMock(returncode=0)):
+            assert worker._local_branch_exists("my-branch") is True
+
+    def test_returns_false_on_exit_one(self, tmp_path: Path) -> None:
+        worker = self._worker(tmp_path)
+        with patch.object(
+            worker, "_git", side_effect=subprocess.CalledProcessError(1, "git")
+        ):
+            assert worker._local_branch_exists("ghost") is False
+
+    def test_propagates_other_exit_codes(self, tmp_path: Path) -> None:
+        worker = self._worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=subprocess.CalledProcessError(128, "git"),
+            ),
+            pytest.raises(subprocess.CalledProcessError) as excinfo,
+        ):
+            worker._local_branch_exists("any")
+        assert excinfo.value.returncode == 128
+
+    def test_queries_refs_heads_with_quiet_verify(self, tmp_path: Path) -> None:
+        worker = self._worker(tmp_path)
+        with patch.object(
+            worker, "_git", return_value=MagicMock(returncode=0)
+        ) as mock_git:
+            worker._local_branch_exists("feature/foo")
+        mock_git.assert_called_once_with(
+            ["rev-parse", "--verify", "--quiet", "refs/heads/feature/foo"]
+        )
+
 
 class TestGitClean:
     """Tests for Worker.git_clean."""
@@ -4307,7 +4475,9 @@ class TestFindOrCreatePr:
         mock_build.assert_not_called()
 
     def test_open_pr_checkout_fallback_on_error(self, tmp_path: Path) -> None:
-        """If git checkout slug fails, try checkout -b --track."""
+        """When rev-parse reports branch-missing (exit 1), fall back to
+        checkout -b --track.  The discrimination (exit 1 vs 128 = real
+        error) is covered by TestLocalBranchExists (closes #828)."""
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(slug="br")
         fido_dir = self._fido_dir(tmp_path)
@@ -4315,7 +4485,7 @@ class TestFindOrCreatePr:
 
         def side_effect(args, check=True):  # noqa: ARG001
             git_calls.append(args)
-            if args == ["checkout", "br"]:
+            if args == ["rev-parse", "--verify", "--quiet", "refs/heads/br"]:
                 raise subprocess.CalledProcessError(1, "git")
             return MagicMock()
 
@@ -4325,6 +4495,31 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["checkout", "-b", "br", "--track", "origin/br"] in git_calls
+        assert ["checkout", "br"] not in git_calls
+
+    def test_open_pr_propagates_exit_128_from_rev_parse(self, tmp_path: Path) -> None:
+        """A git error (stale index.lock → exit 128) on the
+        branch-existence check must propagate, NOT silently fall into
+        the create-branch recovery path (closes #828)."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(slug="br")
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(args)
+            if args == ["rev-parse", "--verify", "--quiet", "refs/heads/br"]:
+                raise subprocess.CalledProcessError(128, "git", stderr="fatal: bad cwd")
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.tasks.Tasks.list", return_value=["t"]),
+            pytest.raises(subprocess.CalledProcessError) as excinfo,
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert excinfo.value.returncode == 128
+        assert ["checkout", "-b", "br", "--track", "origin/br"] not in git_calls
 
     def test_open_pr_fetches_before_checkout(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

@@ -496,6 +496,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
+    _fn_kill_active_children = staticmethod(kill_active_children)
 
     def do_POST(self) -> None:
         try:
@@ -895,7 +896,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
         log.info(
             "self-restart: runner synced — stopping workers and re-execing (%s)", reason
         )
+        # Stop the merged repo's worker cleanly.
         self.registry.stop_and_join(repo_name)
+        # Tear down every remaining worker and SIGTERM all tracked claude
+        # subprocesses before execvp (closes #829).  execvp replaces the
+        # process image immediately; any subprocess not explicitly killed
+        # here gets reparented to init and keeps running after restart —
+        # accepting its still-open stdin, still writing to the workspace.
+        # We've seen this orphan a session that then committed + reset
+        # over an in-progress human edit hours after kennel was "stopped".
+        self.registry.stop_all()
+        type(self)._fn_kill_active_children()
         self.infra.os_proc.chdir(runner_dir)
         self.infra.os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
 
