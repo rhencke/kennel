@@ -12,7 +12,8 @@
       MTree/MForest — mutual non-parameterised tree / forest
       MyOpt A       — polymorphic option; option-of-option flatten
       Even/Odd      — mutual non-parameterised parity types + mutual fixpoint
-      NTree         — nested inductive (node carries a list of subtrees) *)
+      NTree         — nested inductive (node carries a list of subtrees)
+      STree/DTree   — mutual syntax-tree / decl-tree + mutual fixpoint *)
 
 Declare ML Module "rocq-python-extraction".
 
@@ -287,3 +288,55 @@ Definition ntree_is_leaf (t : NTree) : bool :=
   end.
 
 Python Extraction ntree_is_leaf.
+
+(* ------------------------------------------------------------------ *)
+(*  10. STree / DTree (mutual, non-parameterised)                       *)
+(*      — syntax-tree / decl-tree mutual group + mutual fixpoint        *)
+(*                                                                      *)
+(*  [STree] (syntax-tree node) and [DTree] (decl-tree / declaration    *)
+(*  list) are a pair of mutually-defined non-parameterised inductives   *)
+(*  modelling a tiny expression language:                               *)
+(*    SLit n   : a literal nat node                                     *)
+(*    SSeq d s : a block — run declarations [d] then evaluate body [s] *)
+(*    DEnd     : empty declaration list                                  *)
+(*    DDecl s d: prepend syntax node [s] to declaration list [d]        *)
+(*                                                                      *)
+(*  The two types cross-reference one another:                          *)
+(*    SSeq   carries a DTree  (declarations precede the body)           *)
+(*    DDecl  carries an STree (each declaration is a syntax node)       *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a mutual inductive group different from the rose/M-tree        *)
+(*        families — here neither type is a "list of the other";        *)
+(*        STree references DTree as a sub-tree, not as a container,    *)
+(*    (b) a Dfix mutual fixpoint that accumulates a remapped nat across *)
+(*        both packets.                                                  *)
+(* ------------------------------------------------------------------ *)
+
+Inductive STree :=
+  | SLit : nat -> STree
+  | SSeq : DTree -> STree -> STree
+with DTree :=
+  | DEnd  : DTree
+  | DDecl : STree -> DTree -> DTree.
+
+(** [stree_size]: count the number of [SLit] leaf nodes in an [STree].
+    The mutual partner [dtree_size] accumulates the same count across
+    all declarations in a [DTree].  Together they form a Dfix block
+    that pattern-matches on both packets.
+    With nat → int remapping:
+      stree_size (SLit 42)                                = 1
+      stree_size (SSeq DEnd (SLit 0))                    = 1
+      stree_size (SSeq (DDecl (SLit 1) (DDecl (SLit 2) DEnd)) (SLit 3)) = 3 *)
+Fixpoint stree_size (s : STree) : nat :=
+  match s with
+  | SLit _   => 1
+  | SSeq d b => dtree_size d + stree_size b
+  end
+with dtree_size (d : DTree) : nat :=
+  match d with
+  | DEnd      => 0
+  | DDecl s t => stree_size s + dtree_size t
+  end.
+
+Python Extraction stree_size.

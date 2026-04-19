@@ -245,6 +245,26 @@ print('Phase 4 NTree nested inductive round-trip: OK')\
 \""
   )))
 
+; STree / DTree (mutual, non-parameterised): stree_size counts SLit leaf nodes.
+; Exercises: (a) a mutual inductive where SSeq carries a DTree sub-tree and
+; DDecl carries an STree (not a simple list-of-the-other pattern),
+; (b) a Dfix mutual fixpoint accumulating a remapped nat across both packets.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('stree_size.py').read()); \
+assert stree_size(SLit(42)) == 1,  'stree_size(SLit(42)): got ' + repr(stree_size(SLit(42))); \
+assert stree_size(SSeq(DEnd(), SLit(0))) == 1, 'stree_size(SSeq(DEnd(), SLit(0))): got ' + repr(stree_size(SSeq(DEnd(), SLit(0)))); \
+assert stree_size(SSeq(DDecl(SLit(1), DDecl(SLit(2), DEnd())), SLit(3))) == 3, 'stree_size nested: got ' + repr(stree_size(SSeq(DDecl(SLit(1), DDecl(SLit(2), DEnd())), SLit(3)))); \
+assert isinstance(SLit(0), STree), 'SLit(0) must be instance of STree'; \
+assert isinstance(DEnd(), DTree), 'DEnd() must be instance of DTree'; \
+print('Phase 4 STree/DTree round-trip: OK')\
+\""
+  )))
+
 ; color: lowercase Rocq inductive → capitalized Python base class.
 ; Verifies that the extraction plugin capitalizes the base class name
 ; (color → Color) per PEP 8.  The isinstance check confirms the name
