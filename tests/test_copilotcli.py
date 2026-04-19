@@ -381,7 +381,11 @@ class TestTerminalManager:
             popen=lambda *args, **kwargs: FakeProcess("hello", " world", 0)
         )
         terminal_id = manager.create("echo", args=["hi"], output_byte_limit=4)
-        time.sleep(0.05)
+        # Join reader threads explicitly rather than sleeping so the test is
+        # deterministic on loaded CI runners (free-threaded Python, no GIL).
+        record = manager._terminals[terminal_id]
+        for t in record.readers:
+            t.join()
         output, truncated, exit_code, signal_name = manager.output(terminal_id)
         assert output in {"orld", "ello"}
         assert truncated is True
