@@ -11,7 +11,8 @@
       RoseTree A    — mutual parameterised rose tree / forest
       MTree/MForest — mutual non-parameterised tree / forest
       MyOpt A       — polymorphic option; option-of-option flatten
-      Even/Odd      — mutual non-parameterised parity types + mutual fixpoint *)
+      Even/Odd      — mutual non-parameterised parity types + mutual fixpoint
+      NTree         — nested inductive (node carries a list of subtrees) *)
 
 Declare ML Module "rocq-python-extraction".
 
@@ -236,3 +237,53 @@ with is_odd (n : nat) : bool :=
   end.
 
 Python Extraction is_even.
+
+(* ------------------------------------------------------------------ *)
+(*  9. Nested inductive — tree carrying a list of subtrees             *)
+(*                                                                      *)
+(*  [NTree] is a "nested" inductive: the [NNode] constructor stores   *)
+(*  its children as [list NTree] — an inductive type nested inside     *)
+(*  the standard [list] container.  Unlike a fully mutual definition,  *)
+(*  [NTree] only mentions itself through the pre-existing [list]       *)
+(*  parameter rather than through another simultaneously-defined type. *)
+(*                                                                      *)
+(*  Rocq's [list] is remapped to Python's native [list] via an         *)
+(*  [Extract Inductive list] directive so that [NNode] carries a plain *)
+(*  Python list in the generated code.                                  *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a constructor whose field type is a remapped generic          *)
+(*        container ([list NTree] → Python [list[NTree]]),              *)
+(*    (b) a type annotation involving both a remapped and a non-        *)
+(*        remapped type ([list[NTree]]),                                 *)
+(*    (c) pattern matching on the nested inductive returning a          *)
+(*        remapped primitive (bool → Python bool).                      *)
+(* ------------------------------------------------------------------ *)
+
+(* Remap Rocq's standard [list] to Python's built-in [list].
+   Constructor remappings:
+     nil  → []
+     cons → lambda h, t: [h] + t
+   Match function: inspect the Python list and dispatch to the
+   zero-arg [fnil] thunk or the two-arg [fcons] with head/tail. *)
+Extract Inductive list =>
+  "list"
+  [ "[]" "(lambda h, t: [h] + t)" ]
+  "(lambda fnil, fcons, xs: fnil() if not xs else fcons(xs[0], xs[1:]))".
+
+Inductive NTree :=
+  | NLeaf : NTree
+  | NNode : list NTree -> NTree.
+
+(** [ntree_is_leaf]: [True] iff the tree is a bare [NLeaf] node.
+    Exercises: (a) constructing an [NLeaf()] and an [NNode(children)]
+    in Python where [children] is a native Python list of [NTree]
+    instances, and (b) pattern-matching on a nested inductive returning
+    a remapped bool. *)
+Definition ntree_is_leaf (t : NTree) : bool :=
+  match t with
+  | NLeaf   => true
+  | NNode _ => false
+  end.
+
+Python Extraction ntree_is_leaf.

@@ -24,7 +24,8 @@ PY_ARTIFACTS := \
 	_build/default/mforest_is_empty.py \
 	_build/default/myopt_flatten.py \
 	_build/default/even_depth.py \
-	_build/default/is_even.py
+	_build/default/is_even.py \
+	_build/default/ntree_is_leaf.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \
@@ -51,6 +52,14 @@ assert is_even(2) is True,  'is_even(2): got ' + repr(is_even(2)); \
 assert is_even(3) is False, 'is_even(3): got ' + repr(is_even(3)); \
 assert is_even(4) is True,  'is_even(4): got ' + repr(is_even(4)); \
 print('Phase 4 is_even round-trip: OK')"
+	@python3 -c "\
+exec(open('_build/default/ntree_is_leaf.py').read()); \
+assert ntree_is_leaf(NLeaf()) is True,  'ntree_is_leaf(NLeaf()): got ' + repr(ntree_is_leaf(NLeaf())); \
+assert ntree_is_leaf(NNode([])) is False, 'ntree_is_leaf(NNode([])): got ' + repr(ntree_is_leaf(NNode([]))); \
+assert ntree_is_leaf(NNode([NLeaf()])) is False, 'ntree_is_leaf(NNode([NLeaf()])): got ' + repr(ntree_is_leaf(NNode([NLeaf()]))); \
+assert isinstance(NLeaf(), NTree), 'NLeaf() must be instance of NTree'; \
+assert isinstance(NNode([]), NTree), 'NNode([]) must be instance of NTree'; \
+print('Phase 4 NTree nested inductive round-trip: OK')"
 
 clean:
 	dune clean
