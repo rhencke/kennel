@@ -54,16 +54,19 @@ jobs:
       # (especially the opam install step, which takes most of the build time)
       # are restored from the GHA cache so only changed layers are rebuilt.
       # Dockerfile changes in a PR still take effect immediately because the
-      # cache is content-addressed per layer.
+      # cache is content-addressed per layer.  The scope key isolates this
+      # workflow's cache from the publish workflow's so the two don't clobber
+      # each other.
       - name: Build container image
         if: steps.changes.outputs.relevant == 'true'
-        run: |
-          docker buildx build \
-            --cache-from type=gha \
-            --cache-to   type=gha,mode=max \
-            --load \
-            -t rocq-python-extraction:ci \
-            rocq-python-extraction
+        uses: docker/build-push-action@v6
+        with:
+          context: rocq-python-extraction
+          push: false
+          load: true
+          cache-from: type=gha,scope=rocq-python-extraction
+          cache-to: type=gha,mode=max,scope=rocq-python-extraction
+          tags: rocq-python-extraction:ci
 
       - name: Build and test extraction plugin
         if: steps.changes.outputs.relevant == 'true'
