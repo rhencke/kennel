@@ -158,9 +158,14 @@ def _translate_sub_issues(
     child_number = sub.get("number")
     if parent_number is None or child_number is None:
         return None
-    timestamp = _parse_ts(
-        parent.get("updated_at") or sub.get("updated_at") or parent.get("created_at")
-    )
+    # Sub-issue link mutations don't bump either end's ``updated_at`` —
+    # that field tracks issue-body edits, which are unrelated to
+    # relationship changes.  Using it as the event timestamp caused the
+    # cache to drop legit mutations as stale whenever the parent or
+    # child hadn't been edited recently (#819).  The mutation is
+    # happening now from our perspective, so use now() — correct for
+    # the cache's last_applied_at monotonicity check.
+    timestamp = datetime.now(tz=timezone.utc)
     base = {
         "issue_number": parent_number,
         "child": child_number,
