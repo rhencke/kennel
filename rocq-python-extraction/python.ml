@@ -91,6 +91,16 @@ let pp_float_lit f =
 let pp_pyid id =
   str (String.map (function '\'' -> '_' | c -> c) (Id.to_string id))
 
+(** Capitalize the first character of [s] for Python class names.
+    Rocq type names are lowercased by the extraction framework (OCaml
+    convention); Python expects PascalCase for class names (PEP 8). *)
+let capitalize_first s =
+  if String.length s = 0 then s
+  else
+    let b = Bytes.of_string s in
+    Bytes.set b 0 (Char.uppercase_ascii (Bytes.get b 0));
+    Bytes.to_string b
+
 (*s Global reference printer.  Honours [Extract Constant ... => "..."]
     inline-custom declarations. *)
 
@@ -517,10 +527,17 @@ let rec pp_type state = function
       (* Look up the Python name: prefer the custom string if present
          (e.g. [nat → "int"]), otherwise use the mangled global name.
          An empty custom string signals singleton/transparent erasure
-         (e.g. [option → ""]); fall back to [object] in that case. *)
+         (e.g. [option → ""]); fall back to [object] in that case.
+         Inductive type names are capitalized to match the class names
+         emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
       let name =
         if is_inline_custom r then find_custom r
-        else pp_global state Term r
+        else
+          let n = pp_global state Term r in
+          let open GlobRef in
+          match r.glob with
+          | IndRef _ -> capitalize_first n
+          | _        -> n
       in
       if String.equal "" name then str "object"
       else if List.is_empty args then str name
@@ -648,7 +665,7 @@ let pp_ind_decl state (ind : ml_ind) =
           str "# " ++ Id.print p.ip_typename ++
           str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
         else
-          let tname = pp_global state Term p.ip_typename_ref in
+          let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
           let n = Array.length p.ip_types in
           (* Shared base class.  For parameterised inductives it inherits
              [Generic[_A, …]] so that type-checkers can track type arguments. *)
