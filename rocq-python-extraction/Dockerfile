@@ -1,6 +1,9 @@
 FROM ocaml/opam:debian-12-ocaml-5.3
 
-# Install system build tools and Python 3 (needed for .py syntax validation)
+# Install system build tools.  Python is installed via uv below; we do NOT
+# use Debian's python3 package because we target Python 3.14t exclusively
+# (free-threaded, no-GIL build) and that version is not in the Debian 12
+# package archive.
 RUN sudo apt-get update \
     && sudo apt-get install -y --no-install-recommends \
         make \
@@ -8,8 +11,18 @@ RUN sudo apt-get update \
         pkg-config \
         libgmp-dev \
         linux-libc-dev \
-        python3 \
+        curl \
     && sudo rm -rf /var/lib/apt/lists/*
+
+# Install uv, then use it to fetch CPython 3.14t (free-threaded, no-GIL).
+# Symlink the interpreter to /usr/local/bin/python3 so that Makefile and
+# dune test rules can invoke it as plain [python3].  This is the sole Python
+# runtime in the image — no system Python is installed.
+ENV PATH="/home/opam/.local/bin:${PATH}"
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv python install 3.14t \
+    && sudo ln -sf "$(uv python find 3.14t)" /usr/local/bin/python3 \
+    && python3 --version
 
 # Add the rocq-prover opam repository, which carries rocq-stdlib.9.1.0 (not
 # yet in the default opam repository).  Then install Rocq 9.2.0, rocq-stdlib

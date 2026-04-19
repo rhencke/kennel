@@ -10,7 +10,10 @@
       BinTree       — non-parameterised binary tree carrying nat values
       RoseTree A    — mutual parameterised rose tree / forest
       MTree/MForest — mutual non-parameterised tree / forest
-      MyOpt A       — polymorphic option; option-of-option flatten *)
+      MyOpt A       — polymorphic option; option-of-option flatten
+      Even/Odd      — mutual non-parameterised parity types + mutual fixpoint
+      NTree         — nested inductive (node carries a list of subtrees)
+      STree/DTree   — mutual syntax-tree / decl-tree + mutual fixpoint *)
 
 Declare ML Module "rocq-python-extraction".
 
@@ -175,3 +178,165 @@ Definition color_is_red (c : color) : bool :=
   end.
 
 Python Extraction color_is_red.
+
+(* ------------------------------------------------------------------ *)
+(*  7. Even/Odd mutual inductive — mutual types + mutual fixpoint       *)
+(*                                                                      *)
+(*  [Even] and [Odd] are a pair of mutually defined types encoding      *)
+(*  parity witnesses:                                                   *)
+(*    EvenO      : zero is even                                         *)
+(*    EvenS o    : if o : Odd  then the successor is even               *)
+(*    OddS  e    : if e : Even then the successor is odd                *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a mutual inductive group whose constructors cross-reference   *)
+(*        one another (EvenS carries an Odd; OddS carries an Even),     *)
+(*    (b) a mutually-recursive fixpoint (Dfix) that pattern-matches on  *)
+(*        both packets in alternation.                                   *)
+(* ------------------------------------------------------------------ *)
+
+Inductive Even :=
+  | EvenO : Even
+  | EvenS : Odd -> Even
+with Odd :=
+  | OddS : Even -> Odd.
+
+(** [even_depth]: count the number of constructor alternations.
+    With nat → int remapping:
+      even_depth EvenO                          = 0
+      even_depth (EvenS (OddS EvenO))           = 2
+      even_depth (EvenS (OddS (EvenS (OddS EvenO)))) = 4 *)
+Fixpoint even_depth (e : Even) : nat :=
+  match e with
+  | EvenO   => O
+  | EvenS o => S (odd_depth o)
+  end
+with odd_depth (o : Odd) : nat :=
+  match o with
+  | OddS e => S (even_depth e)
+  end.
+
+Python Extraction even_depth.
+
+(** [is_even]: Boolean parity check via mutual fixpoint over nat.
+    [is_even] and [is_odd] are mutually recursive: each pattern-matches
+    on nat and delegates the successor case to the other.
+    With nat → int and bool → Python bool remappings:
+      is_even 0 = True    is_odd 0 = False
+      is_even 1 = False   is_odd 1 = True
+      is_even 2 = True    is_odd 2 = False
+    Exercises a Dfix mutual fixpoint entirely over remapped types. *)
+Fixpoint is_even (n : nat) : bool :=
+  match n with
+  | O    => true
+  | S n' => is_odd n'
+  end
+with is_odd (n : nat) : bool :=
+  match n with
+  | O    => false
+  | S n' => is_even n'
+  end.
+
+Python Extraction is_even.
+
+(* ------------------------------------------------------------------ *)
+(*  9. Nested inductive — tree carrying a list of subtrees             *)
+(*                                                                      *)
+(*  [NTree] is a "nested" inductive: the [NNode] constructor stores   *)
+(*  its children as [list NTree] — an inductive type nested inside     *)
+(*  the standard [list] container.  Unlike a fully mutual definition,  *)
+(*  [NTree] only mentions itself through the pre-existing [list]       *)
+(*  parameter rather than through another simultaneously-defined type. *)
+(*                                                                      *)
+(*  Rocq's [list] is remapped to Python's native [list] via an         *)
+(*  [Extract Inductive list] directive so that [NNode] carries a plain *)
+(*  Python list in the generated code.                                  *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a constructor whose field type is a remapped generic          *)
+(*        container ([list NTree] → Python [list[NTree]]),              *)
+(*    (b) a type annotation involving both a remapped and a non-        *)
+(*        remapped type ([list[NTree]]),                                 *)
+(*    (c) pattern matching on the nested inductive returning a          *)
+(*        remapped primitive (bool → Python bool).                      *)
+(* ------------------------------------------------------------------ *)
+
+(* Remap Rocq's standard [list] to Python's built-in [list].
+   Constructor remappings:
+     nil  → []
+     cons → lambda h, t: [h] + t
+   Match function: inspect the Python list and dispatch to the
+   zero-arg [fnil] thunk or the two-arg [fcons] with head/tail. *)
+Extract Inductive list =>
+  "list"
+  [ "[]" "(lambda h, t: [h] + t)" ]
+  "(lambda fnil, fcons, xs: fnil() if not xs else fcons(xs[0], xs[1:]))".
+
+Inductive NTree :=
+  | NLeaf : NTree
+  | NNode : list NTree -> NTree.
+
+(** [ntree_is_leaf]: [True] iff the tree is a bare [NLeaf] node.
+    Exercises: (a) constructing an [NLeaf()] and an [NNode(children)]
+    in Python where [children] is a native Python list of [NTree]
+    instances, and (b) pattern-matching on a nested inductive returning
+    a remapped bool. *)
+Definition ntree_is_leaf (t : NTree) : bool :=
+  match t with
+  | NLeaf   => true
+  | NNode _ => false
+  end.
+
+Python Extraction ntree_is_leaf.
+
+(* ------------------------------------------------------------------ *)
+(*  10. STree / DTree (mutual, non-parameterised)                       *)
+(*      — syntax-tree / decl-tree mutual group + mutual fixpoint        *)
+(*                                                                      *)
+(*  [STree] (syntax-tree node) and [DTree] (decl-tree / declaration    *)
+(*  list) are a pair of mutually-defined non-parameterised inductives   *)
+(*  modelling a tiny expression language:                               *)
+(*    SLit n   : a literal nat node                                     *)
+(*    SSeq d s : a block — run declarations [d] then evaluate body [s] *)
+(*    DEnd     : empty declaration list                                  *)
+(*    DDecl s d: prepend syntax node [s] to declaration list [d]        *)
+(*                                                                      *)
+(*  The two types cross-reference one another:                          *)
+(*    SSeq   carries a DTree  (declarations precede the body)           *)
+(*    DDecl  carries an STree (each declaration is a syntax node)       *)
+(*                                                                      *)
+(*  This exercises:                                                      *)
+(*    (a) a mutual inductive group different from the rose/M-tree        *)
+(*        families — here neither type is a "list of the other";        *)
+(*        STree references DTree as a sub-tree, not as a container,    *)
+(*    (b) a Dfix mutual fixpoint that accumulates a remapped nat across *)
+(*        both packets.                                                  *)
+(* ------------------------------------------------------------------ *)
+
+Inductive STree :=
+  | SLit : nat -> STree
+  | SSeq : DTree -> STree -> STree
+with DTree :=
+  | DEnd  : DTree
+  | DDecl : STree -> DTree -> DTree.
+
+(** [stree_size]: count the number of [SLit] leaf nodes in an [STree].
+    The mutual partner [dtree_size] accumulates the same count across
+    all declarations in a [DTree].  Together they form a Dfix block
+    that pattern-matches on both packets.
+    With nat → int remapping:
+      stree_size (SLit 42)                                = 1
+      stree_size (SSeq DEnd (SLit 0))                    = 1
+      stree_size (SSeq (DDecl (SLit 1) (DDecl (SLit 2) DEnd)) (SLit 3)) = 3 *)
+Fixpoint stree_size (s : STree) : nat :=
+  match s with
+  | SLit _   => 1
+  | SSeq d b => dtree_size d + stree_size b
+  end
+with dtree_size (d : DTree) : nat :=
+  match d with
+  | DEnd      => 0
+  | DDecl s t => stree_size s + dtree_size t
+  end.
+
+Python Extraction stree_size.

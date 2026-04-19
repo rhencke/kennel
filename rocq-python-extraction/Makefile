@@ -3,33 +3,11 @@
 build:
 	dune build
 
-# After dune builds the test theory, Python Extraction side-effects land in
-# _build/default/.  Validate each one is syntactically valid Python.
-PY_ARTIFACTS := \
-	_build/default/nat_add.py \
-	_build/default/mk_pair_r.py \
-	_build/default/zeros.py \
-	_build/default/uint_val.py \
-	_build/default/float_val.py \
-	_build/default/str_val.py \
-	_build/default/todo_val.py \
-	_build/default/bool_not.py \
-	_build/default/nat_double.py \
-	_build/default/option_inc.py \
-	_build/default/pair_swap.py \
-	_build/default/list_add_one.py \
-	_build/default/mylist_is_empty.py \
-	_build/default/bintree_is_leaf.py \
-	_build/default/roseforest_is_empty.py \
-	_build/default/mforest_is_empty.py \
-	_build/default/myopt_flatten.py
-
-test: build
-	@for f in $(PY_ARTIFACTS); do \
-	  echo "checking $$f ..."; \
-	  python3 -m py_compile $$f || exit 1; \
-	done
-	@echo "All extracted .py files are syntactically valid."
+# Round-trip assertions and syntax checks live in the dune runtest rules
+# (see the dune file) so that each test is defined in exactly one place.
+# This target delegates entirely to dune — do NOT add assertions here.
+test:
+	dune runtest
 
 clean:
 	dune clean
