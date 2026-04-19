@@ -186,3 +186,22 @@ assert isinstance(r3, MySome) and r3.arg0 == 42, 'myopt_flatten(MySome(MySome(42
 print('Phase 4 MyOpt round-trip: OK')\
 \""
   )))
+
+; color: lowercase Rocq inductive → capitalized Python base class.
+; Verifies that the extraction plugin capitalizes the base class name
+; (color → Color) per PEP 8.  The isinstance check confirms the name
+; is correct in the emitted class hierarchy, not just in a comment.
+(rule
+ (alias runtest)
+ (deps test/phase4.vo)
+ (action
+  (bash "\
+python3 -c \"\
+exec(open('color_is_red.py').read()); \
+assert color_is_red(Red()) is True,    'color_is_red(Red()): got '   + repr(color_is_red(Red())); \
+assert color_is_red(Green()) is False, 'color_is_red(Green()): got ' + repr(color_is_red(Green())); \
+assert color_is_red(Blue()) is False,  'color_is_red(Blue()): got '  + repr(color_is_red(Blue())); \
+assert isinstance(Red(), Color), 'Red() must be instance of Color (capitalized base class)'; \
+print('Phase 4 color capitalization: OK')\
+\""
+  )))

@@ -147,3 +147,31 @@ Definition myopt_flatten {A : Set} (o : MyOpt (MyOpt A)) : MyOpt A :=
   end.
 
 Python Extraction myopt_flatten.
+
+(* ------------------------------------------------------------------ *)
+(*  6. Lowercase-first inductive — capitalization smoke test           *)
+(*                                                                      *)
+(*  Rocq convention uses lowercase for type names (e.g. [color]);      *)
+(*  the extraction framework follows OCaml and also lowercases them.   *)
+(*  This section verifies that [python.ml] re-capitalizes the base     *)
+(*  class to [Color] in the emitted Python (PEP 8 PascalCase).         *)
+(* ------------------------------------------------------------------ *)
+
+Inductive color :=
+  | Red   : color
+  | Green : color
+  | Blue  : color.
+
+(** [color_is_red]: [True] iff the color is [Red].
+    The generated file must contain [class Color:] (capitalized) as the
+    shared base class; constructors [Red], [Green], [Blue] inherit from
+    it.  The dune rule asserts [isinstance(Red(), Color)] to confirm the
+    capitalized name is present and correct. *)
+Definition color_is_red (c : color) : bool :=
+  match c with
+  | Red   => true
+  | Green => false
+  | Blue  => false
+  end.
+
+Python Extraction color_is_red.

@@ -32,7 +32,7 @@ from kennel.models_generated.transition import (
     transition,
 )
 from kennel.models_generated.transition import (
-    state as FsmState,
+    State as FsmState,
 )
 
 # ---------------------------------------------------------------------------
