@@ -25,9 +25,9 @@ from kennel.models_generated.transition import Free as _FsmFree
 from kennel.models_generated.transition import HandlerAcquire as _FsmHandlerAcquire
 from kennel.models_generated.transition import HandlerRelease as _FsmHandlerRelease
 from kennel.models_generated.transition import OwnedByWorker as _FsmOwnedByWorker
+from kennel.models_generated.transition import State as _FsmState
 from kennel.models_generated.transition import WorkerAcquire as _FsmWorkerAcquire
 from kennel.models_generated.transition import WorkerRelease as _FsmWorkerRelease
-from kennel.models_generated.transition import state as _FsmState
 from kennel.models_generated.transition import transition as _fsm_transition
 
 

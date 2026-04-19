@@ -8,58 +8,58 @@ _A = TypeVar("_A")
 # option: remapped to Python primitive via Extract Inductive
 
 
-class state:
+class State:
     pass
 
 
 @dataclass(frozen=True)
-class Free(state):
+class Free(State):
     pass
 
 
 @dataclass(frozen=True)
-class OwnedByWorker(state):
+class OwnedByWorker(State):
     pass
 
 
 @dataclass(frozen=True)
-class OwnedByHandler(state):
+class OwnedByHandler(State):
     pass
 
 
-stateT = Free | OwnedByWorker | OwnedByHandler
+StateT = Free | OwnedByWorker | OwnedByHandler
 
 
-class event:
-    pass
-
-
-@dataclass(frozen=True)
-class WorkerAcquire(event):
+class Event:
     pass
 
 
 @dataclass(frozen=True)
-class HandlerAcquire(event):
+class WorkerAcquire(Event):
     pass
 
 
 @dataclass(frozen=True)
-class WorkerRelease(event):
+class HandlerAcquire(Event):
     pass
 
 
 @dataclass(frozen=True)
-class HandlerRelease(event):
+class WorkerRelease(Event):
     pass
 
 
 @dataclass(frozen=True)
-class Preempt(event):
+class HandlerRelease(Event):
     pass
 
 
-eventT = WorkerAcquire | HandlerAcquire | WorkerRelease | HandlerRelease | Preempt
+@dataclass(frozen=True)
+class Preempt(Event):
+    pass
+
+
+EventT = WorkerAcquire | HandlerAcquire | WorkerRelease | HandlerRelease | Preempt
 
 
 def transition(current, event0):
