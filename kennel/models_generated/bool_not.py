@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Callable, Generic, TypeVar
 
 __ = None  # erased logical argument
+# bool: remapped to Python primitive via Extract Inductive
 
 
 def bool_not(b):

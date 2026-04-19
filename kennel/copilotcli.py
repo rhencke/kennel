@@ -1043,6 +1043,7 @@ class CopilotCLISession(OwnedSession):
             self._owner = threading.current_thread().name
         self._register_talker_kind()
         self._bump_entry_depth()
+        self._oracle_on_acquire(provider.current_thread_kind())
         return self
 
     def _register_talker_kind(self) -> None:
@@ -1086,6 +1087,7 @@ class CopilotCLISession(OwnedSession):
             self._registered_talker_kind = None
         with self._owner_lock:
             self._owner = None
+        self._oracle_on_release()
         self._lock.release()
         if getattr(self._thread_state, "waited", False):
             with self._preempt_condition:

@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pyright", "ruff", "pytest", "pytest-cov", "pytest-xdist"]
+dev = ["pyright", "ruff", "pytest", "pytest-cov", "pytest-xdist", "hypothesis"]
 
 [build-system]
 requires = ["hatchling"]

@@ -21,6 +21,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
 
+from kennel.models_generated.transition import Free as _FsmFree
+from kennel.models_generated.transition import HandlerAcquire as _FsmHandlerAcquire
+from kennel.models_generated.transition import HandlerRelease as _FsmHandlerRelease
+from kennel.models_generated.transition import OwnedByWorker as _FsmOwnedByWorker
+from kennel.models_generated.transition import WorkerAcquire as _FsmWorkerAcquire
+from kennel.models_generated.transition import WorkerRelease as _FsmWorkerRelease
+from kennel.models_generated.transition import state as _FsmState
+from kennel.models_generated.transition import transition as _fsm_transition
+
 
 class ProviderID(StrEnum):
     """Supported LLM providers for kennel."""
@@ -540,13 +549,16 @@ class OwnedSession:
 
     _reentry_tls: threading.local
     _repo_name: str | None
+    _oracle_state: _FsmState
 
     def _init_handler_reentry(self) -> None:
         """Subclasses call this from their ``__init__`` to set up the
-        thread-local reentrance counter.  Separate method (not
-        ``__init__``) so the base doesn't compete with the subclass
-        constructor signature."""
+        thread-local reentrance counter and the session-lock FSM oracle.
+        Separate method (not ``__init__``) so the base doesn't compete
+        with the subclass constructor signature."""
         self._reentry_tls = threading.local()
+        # Oracle initial state: nobody holds the session lock.
+        self._oracle_state: _FsmState = _FsmFree()
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at
@@ -561,6 +573,61 @@ class OwnedSession:
         depth = self._reentry_tls.depth - 1
         self._reentry_tls.depth = depth
         return depth
+
+    def _oracle_on_acquire(self, kind: str) -> None:
+        """Assert the session-lock FSM oracle accepts an outermost acquire.
+
+        Called by subclasses from ``__enter__`` when the entry depth
+        transitions 0 → 1.  *kind* is ``"worker"`` for the background
+        worker thread or ``"webhook"`` for a webhook handler holding the
+        session via :meth:`hold_for_handler`.
+
+        Crashes with theorem name ``no_dual_ownership`` if the model
+        rejects the event — i.e. the session is already owned and a
+        second acquire arrived without an intervening release.
+
+        The session RLock is held by the caller, so the oracle state
+        update is implicitly serialized.
+        """
+        ev = _FsmWorkerAcquire() if kind == "worker" else _FsmHandlerAcquire()
+        new_state = _fsm_transition(self._oracle_state, ev)
+        if new_state is None:
+            raise RuntimeError(
+                f"session-lock FSM oracle: no_dual_ownership violated — "
+                f"{type(ev).__name__} rejected in state "
+                f"{type(self._oracle_state).__name__}"
+            )
+        self._oracle_state = new_state
+
+    def _oracle_on_release(self) -> None:
+        """Assert the session-lock FSM oracle accepts the outermost release.
+
+        Called by subclasses from ``__exit__`` when the entry depth
+        transitions 1 → 0.  Derives the release event from the current
+        FSM state so the caller does not need to track the holder kind
+        separately: :class:`_FsmOwnedByWorker` → ``WorkerRelease``,
+        anything else → ``HandlerRelease``.
+
+        Crashes with theorem name ``release_only_by_owner`` if the
+        model rejects the event — i.e. the session is not owned by the
+        releasing role (cross-release or spurious release from Free).
+
+        The session RLock is held by the caller, so the oracle state
+        update is implicitly serialized.
+        """
+        ev = (
+            _FsmWorkerRelease()
+            if isinstance(self._oracle_state, _FsmOwnedByWorker)
+            else _FsmHandlerRelease()
+        )
+        new_state = _fsm_transition(self._oracle_state, ev)
+        if new_state is None:
+            raise RuntimeError(
+                f"session-lock FSM oracle: release_only_by_owner violated — "
+                f"{type(ev).__name__} rejected in state "
+                f"{type(self._oracle_state).__name__}"
+            )
+        self._oracle_state = new_state
 
     def _fire_worker_cancel(self) -> None:
         """Abort the current lock-holder's turn.  Subclasses override

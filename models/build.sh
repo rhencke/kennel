@@ -42,8 +42,10 @@ docker run --rm \
     # Build the unified workspace: dune handles plugin → theory ordering.
     opam exec -- dune build models/
 
-    # Python Extraction side-effects land in _build/default/models/.
-    find _build/default/models -maxdepth 1 -name "*.py" -exec cp {} /out/ \;
+    # Python Extraction side-effects land in _build/default/ (dune sets
+    # cwd to the workspace build root when running Rocq compilation, so
+    # the side-effect files appear one level above the theory directory).
+    find _build/default -maxdepth 1 -name "*.py" -exec cp {} /out/ \;
   '
 
 echo "==> applying ruff format to extracted Python"

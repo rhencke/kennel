@@ -760,6 +760,7 @@ class ClaudeSession(OwnedSession):
                     self._drop_entry_depth()
                     self._lock.release()
                     raise
+            self._oracle_on_acquire(kind)
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -768,8 +769,10 @@ class ClaudeSession(OwnedSession):
         can race in and see our stale talker entry.
         """
         depth = self._drop_entry_depth()
-        if depth == 0 and self._repo_name is not None:
-            provider.unregister_talker(self._repo_name, threading.get_ident())
+        if depth == 0:
+            if self._repo_name is not None:
+                provider.unregister_talker(self._repo_name, threading.get_ident())
+            self._oracle_on_release()
         self._lock.release()
 
     def send(self, content: str) -> None:
