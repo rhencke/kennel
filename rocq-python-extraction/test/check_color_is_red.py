@@ -1,5 +1,20 @@
-# ruff: noqa: F821
-exec(open("color_is_red.py").read())
+# ruff: noqa: E402
+import os
+import sys
+
+# The extracted .py files always land in the dune workspace build root (_build/default/).
+# Walk up from __file__ to find it — works whether or not dune-workspace is present.
+_d = os.path.dirname(os.path.abspath(__file__))
+while not (
+    os.path.basename(_d) == "default"
+    and os.path.basename(os.path.dirname(_d)) == "_build"
+):
+    _d = os.path.dirname(_d)
+sys.path.insert(0, _d)
+del _d
+
+from color_is_red import Blue, Color, Green, Red, color_is_red
+
 assert color_is_red(Red()) is True, "color_is_red(Red()): got " + repr(
     color_is_red(Red())
 )
