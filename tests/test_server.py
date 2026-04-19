@@ -663,6 +663,369 @@ class TestGetEndpoint:
         data = json.loads(resp.read())
         assert data["activities"][0]["rescoping"] is False
 
+    def test_status_endpoint_includes_fido_state_defaults_when_no_files(
+        self, server: tuple
+    ) -> None:
+        """With no state.json or tasks.json on disk, fido_state fields default."""
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        entry = data["activities"][0]
+        assert entry["fido_running"] is False
+        assert entry["issue"] is None
+        assert entry["issue_title"] is None
+        assert entry["issue_elapsed_seconds"] is None
+        assert entry["pr_number"] is None
+        assert entry["pr_title"] is None
+        assert entry["pending"] == 0
+        assert entry["completed"] == 0
+        assert entry["current_task"] is None
+        assert entry["task_number"] is None
+        assert entry["task_total"] is None
+
+    def test_status_endpoint_includes_fido_state_from_files(
+        self, server: tuple, tmp_path: Path
+    ) -> None:
+        """state.json and tasks.json on disk are surfaced in the activity entry."""
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        # Write state.json
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        state = {
+            "issue": 42,
+            "issue_title": "Fix the thing",
+            "issue_started_at": "2026-04-01T00:00:00+00:00",
+            "pr_number": 99,
+            "pr_title": "Fixes the thing",
+        }
+        (fido_dir / "state.json").write_text(json.dumps(state))
+
+        # Write tasks.json
+        tasks_path = fido_dir / "tasks.json"
+        tasks = [
+            {
+                "id": "1",
+                "title": "first task",
+                "type": "spec",
+                "status": "completed",
+                "description": "",
+            },
+            {
+                "id": "2",
+                "title": "active task",
+                "type": "spec",
+                "status": "in_progress",
+                "description": "",
+            },
+            {
+                "id": "3",
+                "title": "later task",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+        ]
+        tasks_path.write_text(json.dumps(tasks))
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #42",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        entry = data["activities"][0]
+        assert entry["issue"] == 42
+        assert entry["issue_title"] == "Fix the thing"
+        assert entry["issue_elapsed_seconds"] is not None
+        assert entry["issue_elapsed_seconds"] >= 0
+        assert entry["pr_number"] == 99
+        assert entry["pr_title"] == "Fixes the thing"
+        assert entry["pending"] == 1
+        assert entry["completed"] == 1
+        assert entry["current_task"] == "active task"
+        assert entry["task_number"] == 1
+        assert entry["task_total"] == 2
+
+    def test_status_endpoint_fido_state_defaults_when_repo_cfg_missing(
+        self, server: tuple
+    ) -> None:
+        """When a repo has no config entry, fido_state fields are all defaults."""
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        # Report an activity for a repo not in config
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="unknown/repo",
+                what="idle",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        entry = data["activities"][0]
+        assert entry["fido_running"] is False
+        assert entry["issue"] is None
+        assert entry["pending"] == 0
+        assert entry["task_number"] is None
+
+
+class TestCollectFidoState:
+    """Unit tests for _collect_fido_state covering edge-case branches."""
+
+    def _now(self) -> Any:
+        from datetime import datetime, timezone
+
+        return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_defaults_when_no_files(self, tmp_path: Path) -> None:
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["fido_running"] is False
+        assert result["issue"] is None
+        assert result["issue_title"] is None
+        assert result["issue_elapsed_seconds"] is None
+        assert result["pr_number"] is None
+        assert result["pr_title"] is None
+        assert result["pending"] == 0
+        assert result["completed"] == 0
+        assert result["current_task"] is None
+        assert result["task_number"] is None
+        assert result["task_total"] is None
+
+    def test_lock_file_exists_not_held(self, tmp_path: Path) -> None:
+        """Lock file exists but is not held by another process → fido_running=False."""
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        (fido_dir / "lock").touch()
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["fido_running"] is False
+
+    def test_lock_file_held(self, tmp_path: Path) -> None:
+        """Lock file held by another thread → fido_running=True."""
+        import fcntl
+        import threading
+
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        lock_path = fido_dir / "lock"
+        lock_path.touch()
+
+        ready = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with open(lock_path) as fd:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                ready.set()
+                release.wait(timeout=5)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        t = threading.Thread(target=hold_lock, daemon=True)
+        t.start()
+        ready.wait(timeout=5)
+        try:
+            result = _collect_fido_state(tmp_path, self._now())
+            assert result["fido_running"] is True
+        finally:
+            release.set()
+            t.join(timeout=5)
+
+    def test_lock_file_oserror(self, tmp_path: Path) -> None:
+        """If opening the lock file raises OSError, fido_running stays False."""
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        # Create a directory at the lock path to cause OSError on open()
+        (fido_dir / "lock").mkdir()
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["fido_running"] is False
+
+    def test_state_load_exception(self, tmp_path: Path) -> None:
+        """If State.load() raises, state fields default gracefully."""
+        from unittest.mock import patch
+
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        with patch("kennel.server.State") as mock_state_cls:
+            mock_state_cls.return_value.load.side_effect = RuntimeError("disk error")
+            result = _collect_fido_state(tmp_path, self._now())
+        assert result["issue"] is None
+        assert result["issue_title"] is None
+        assert result["pr_number"] is None
+
+    def test_invalid_issue_started_at(self, tmp_path: Path) -> None:
+        """Malformed issue_started_at is silently ignored."""
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        (fido_dir / "state.json").write_text(
+            json.dumps({"issue": 1, "issue_started_at": "not-a-date"})
+        )
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["issue"] == 1
+        assert result["issue_elapsed_seconds"] is None
+
+    def test_tasks_load_exception(self, tmp_path: Path) -> None:
+        """If Tasks.list() raises, task fields default gracefully."""
+        from unittest.mock import patch
+
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        with patch("kennel.server.Tasks") as mock_tasks_cls:
+            mock_tasks_cls.return_value.list.side_effect = RuntimeError("disk error")
+            result = _collect_fido_state(tmp_path, self._now())
+        assert result["pending"] == 0
+        assert result["current_task"] is None
+        assert result["task_number"] is None
+
+    def test_current_task_from_pending_when_no_in_progress(
+        self, tmp_path: Path
+    ) -> None:
+        """current_task comes from the first pending task when none are in_progress."""
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        tasks = [
+            {
+                "id": "1",
+                "title": "do this",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+            {
+                "id": "2",
+                "title": "then that",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+        ]
+        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["current_task"] == "do this"
+        assert result["task_number"] == 1
+        assert result["task_total"] == 2
+
+    def test_task_number_from_in_progress(self, tmp_path: Path) -> None:
+        """task_number correctly reflects the in_progress task's position."""
+        from kennel.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        tasks = [
+            {
+                "id": "1",
+                "title": "done",
+                "type": "spec",
+                "status": "completed",
+                "description": "",
+            },
+            {
+                "id": "2",
+                "title": "first pending",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+            {
+                "id": "3",
+                "title": "active",
+                "type": "spec",
+                "status": "in_progress",
+                "description": "",
+            },
+            {
+                "id": "4",
+                "title": "later",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+        ]
+        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
+        result = _collect_fido_state(tmp_path, self._now())
+        assert result["current_task"] == "active"
+        assert result["task_number"] == 2  # position in non-completed list
+        assert result["task_total"] == 3
+
 
 class TestRepoStatus:
     @pytest.mark.parametrize(
