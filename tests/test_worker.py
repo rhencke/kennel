@@ -16,6 +16,7 @@ import kennel.worker as worker_module
 from kennel import provider
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig, RepoMembership
+from kennel.issue_cache import IssueNode, IssueTreeCache
 from kennel.prompts import Prompts
 from kennel.provider import (
     ProviderID,
@@ -46,6 +47,7 @@ from kennel.worker import (
     RepoNameFilter,
     WorkerContext,
     _is_leaked_task_comment,
+    _node_to_dict,
     _pick_next_task,
     _sanitize_slug,
     _sanitize_status_text,
@@ -2501,6 +2503,258 @@ class TestPickNextIssue:
             issue_index=issue_index,
         )
         assert choice is not None and choice.number == 711
+
+
+class TestNodeToDict:
+    """``_node_to_dict`` adapts cached ``IssueNode`` data to the dict shape
+    the existing GraphQL-driven picker helpers expect."""
+
+    def _node(
+        self,
+        number: int,
+        *,
+        title: str = "",
+        assignees: set[str] | None = None,
+        parent: int | None = None,
+        sub_issues: list[int] | None = None,
+        milestone: str | None = None,
+        created_at: datetime | None = None,
+    ) -> IssueNode:
+        ts = created_at or datetime(2026, 4, 19, tzinfo=timezone.utc)
+        return IssueNode(
+            number=number,
+            title=title or f"issue {number}",
+            assignees=assignees or set(),
+            parent=parent,
+            sub_issues=sub_issues or [],
+            milestone=milestone,
+            created_at=ts,
+            last_applied_at=ts,
+        )
+
+    def test_minimal_node_has_open_state_and_empty_collections(self) -> None:
+        node = self._node(1)
+        d = _node_to_dict(node, {1: node})
+        assert d["number"] == 1
+        assert d["title"] == "issue 1"
+        assert d["state"] == "OPEN"
+        assert d["createdAt"].startswith("2026-04-19")
+        assert d["milestone"] is None
+        assert d["parent"] is None
+        assert d["assignees"] == {"nodes": []}
+        assert d["subIssues"] == {"nodes": []}
+
+    def test_assignees_are_sorted_for_stability(self) -> None:
+        node = self._node(2, assignees={"zoe", "alice", "marshall"})
+        d = _node_to_dict(node, {2: node})
+        logins = [a["login"] for a in d["assignees"]["nodes"]]
+        assert logins == ["alice", "marshall", "zoe"]
+
+    def test_parent_only_emitted_when_present(self) -> None:
+        node = self._node(3, parent=99)
+        d = _node_to_dict(node, {3: node})
+        assert d["parent"] == {"number": 99}
+
+    def test_milestone_wrapped_in_title_dict_when_present(self) -> None:
+        node = self._node(4, milestone="v1")
+        d = _node_to_dict(node, {4: node})
+        assert d["milestone"] == {"title": "v1"}
+
+    def test_sub_issue_state_open_when_in_index(self) -> None:
+        parent = self._node(10, sub_issues=[20])
+        child = self._node(20)
+        d = _node_to_dict(parent, {10: parent, 20: child})
+        assert d["subIssues"]["nodes"] == [{"number": 20, "state": "OPEN"}]
+
+    def test_sub_issue_state_closed_when_absent_from_index(self) -> None:
+        parent = self._node(11, sub_issues=[21])
+        d = _node_to_dict(parent, {11: parent})
+        assert d["subIssues"]["nodes"] == [{"number": 21, "state": "CLOSED"}]
+
+    def test_sub_issue_order_preserved(self) -> None:
+        parent = self._node(12, sub_issues=[40, 30, 50])
+        d = _node_to_dict(parent, {12: parent, 30: self._node(30), 40: self._node(40)})
+        numbers = [c["number"] for c in d["subIssues"]["nodes"]]
+        assert numbers == [40, 30, 50]
+
+
+class TestWorkerVerifyCachedIssueStillOpen:
+    """``Worker._verify_cached_issue_still_open`` is the cheap REST guard
+    against cache → ``add_assignee`` races (closes #812)."""
+
+    def _worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE
+        )
+        return Worker(tmp_path, gh, provider=provider), gh
+
+    def test_returns_true_when_state_open(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.view_issue.return_value = {"state": "OPEN", "title": "t"}
+        assert worker._verify_cached_issue_still_open("o/r", 5) is True
+        gh.view_issue.assert_called_once_with("o/r", 5)
+
+    def test_returns_false_when_state_closed(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.view_issue.return_value = {"state": "CLOSED", "title": "t"}
+        assert worker._verify_cached_issue_still_open("o/r", 6) is False
+
+    def test_returns_false_when_view_issue_raises(self, tmp_path: Path) -> None:
+        worker, gh = self._worker(tmp_path)
+        gh.view_issue.side_effect = RuntimeError("boom")
+        assert worker._verify_cached_issue_still_open("o/r", 7) is False
+
+
+class TestWorkerPickFromCache:
+    """``Worker._pick_from_cache`` is the cache-driven picker entry point."""
+
+    def _worker_with_cache(
+        self, tmp_path: Path, cache: IssueTreeCache
+    ) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE
+        )
+        return Worker(tmp_path, gh, provider=provider, issue_cache=cache), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    def test_loads_inventory_when_not_yet_loaded(self, tmp_path: Path) -> None:
+        cache = IssueTreeCache("owner/repo")
+        worker, gh = self._worker_with_cache(tmp_path, cache)
+        gh.find_all_open_issues.return_value = [
+            {
+                "number": 1,
+                "title": "Solo",
+                "createdAt": "2026-04-01T00:00:00Z",
+                "assignees": {"nodes": [{"login": "fido"}]},
+                "subIssues": {"nodes": []},
+            }
+        ]
+        gh.view_issue.return_value = {"state": "OPEN"}
+        choice = worker._pick_from_cache(self._repo_ctx())
+        assert choice is not None and choice.number == 1
+        gh.find_all_open_issues.assert_called_once_with("owner", "repo")
+        assert cache.is_loaded
+
+    def test_does_not_reload_inventory_when_cache_already_loaded(
+        self, tmp_path: Path
+    ) -> None:
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 2,
+                    "title": "Cached",
+                    "createdAt": "2026-04-02T00:00:00Z",
+                    "assignees": {"nodes": [{"login": "fido"}]},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        worker, gh = self._worker_with_cache(tmp_path, cache)
+        gh.view_issue.return_value = {"state": "OPEN"}
+        choice = worker._pick_from_cache(self._repo_ctx())
+        assert choice is not None and choice.number == 2
+        gh.find_all_open_issues.assert_not_called()
+
+    def test_returns_none_when_no_candidates_for_login(self, tmp_path: Path) -> None:
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 9,
+                    "title": "Other",
+                    "createdAt": "2026-04-01T00:00:00Z",
+                    "assignees": {"nodes": [{"login": "someone-else"}]},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        worker, gh = self._worker_with_cache(tmp_path, cache)
+        choice = worker._pick_from_cache(self._repo_ctx())
+        assert choice is None
+        gh.view_issue.assert_not_called()
+
+    def test_returns_none_when_verify_says_closed(self, tmp_path: Path) -> None:
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 33,
+                    "title": "Race victim",
+                    "createdAt": "2026-04-01T00:00:00Z",
+                    "assignees": {"nodes": [{"login": "fido"}]},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        worker, gh = self._worker_with_cache(tmp_path, cache)
+        gh.view_issue.return_value = {"state": "CLOSED"}
+        choice = worker._pick_from_cache(self._repo_ctx())
+        assert choice is None
+        gh.view_issue.assert_called_once()
+
+
+class TestWorkerFindNextIssueCacheBranch:
+    """``Worker.find_next_issue`` selects the cache branch when an
+    :class:`IssueTreeCache` is injected (closes #812)."""
+
+    def test_cache_branch_picks_via_cache_not_graphql(self, tmp_path: Path) -> None:
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 77,
+                    "title": "From cache",
+                    "createdAt": "2026-04-10T00:00:00Z",
+                    "assignees": {"nodes": [{"login": "fido"}]},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        gh = MagicMock()
+        gh.view_issue.return_value = {"state": "OPEN"}
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE
+        )
+        worker = Worker(tmp_path, gh, provider=provider, issue_cache=cache)
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        repo_ctx = RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+        with (
+            patch.object(worker, "set_status"),
+            patch.object(worker, "post_pickup_comment"),
+        ):
+            result = worker.find_next_issue(fido_dir, repo_ctx)
+        assert result == 77
+        # Cache branch did not call find_issues at all
+        gh.find_issues.assert_not_called()
+        # And did not re-call find_all_open_issues since cache was loaded
+        gh.find_all_open_issues.assert_not_called()
 
 
 class TestWorkerPostPickupComment:
@@ -11392,8 +11646,9 @@ class TestWorkerThread:
             repo_cfg=None,
             provider_factory=None,
             first_iteration=False,
+            issue_cache=None,
         ):
-            del provider_factory, first_iteration
+            del provider_factory, first_iteration, issue_cache
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -11498,8 +11753,9 @@ class TestWorkerThread:
             repo_cfg=None,
             provider_factory=None,
             first_iteration=False,
+            issue_cache=None,
         ) -> None:
-            del provider_factory, first_iteration
+            del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -11551,8 +11807,9 @@ class TestWorkerThread:
             repo_cfg=None,
             provider_factory=None,
             first_iteration=False,
+            issue_cache=None,
         ) -> None:
-            del provider_factory, first_iteration
+            del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -11905,8 +12162,9 @@ class TestWorkerThread:
             repo_cfg=None,
             provider_factory=None,
             first_iteration=False,
+            issue_cache=None,
         ) -> None:
-            del provider_factory, first_iteration
+            del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task

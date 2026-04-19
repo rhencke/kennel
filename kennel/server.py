@@ -555,8 +555,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         translation = translate(event, payload)
         if translation is None:
+            log.debug(
+                "issue-cache[%s]: webhook %s/%s not picker-relevant — skipping",
+                repo_cfg.name,
+                event,
+                payload.get("action", "?"),
+            )
             return
         cache_event_type, cache_payload = translation
+        log.info(
+            "issue-cache[%s]: applying %s for #%s (from webhook %s/%s)",
+            repo_cfg.name,
+            cache_event_type,
+            cache_payload.get("issue_number"),
+            event,
+            payload.get("action", "?"),
+        )
         cache = self.registry.get_issue_cache(repo_cfg.name)
         cache.apply_event(cache_event_type, cache_payload)
 

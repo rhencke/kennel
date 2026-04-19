@@ -576,7 +576,9 @@ class TestMakeThread:
             session_issue=None,
             config=None,
             repo_cfg=cfg,
+            issue_cache=mock_registry.get_issue_cache.return_value,
         )
+        mock_registry.get_issue_cache.assert_called_once_with("foo/bar")
         assert result is mock_wt_cls.return_value
 
     def test_uses_repo_work_dir(self, tmp_path: Path) -> None:

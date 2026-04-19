@@ -415,7 +415,12 @@ def _make_thread(
     config: Config | None = None,
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
-    """Default factory: create a WorkerThread with the provided GitHub client."""
+    """Default factory: create a WorkerThread with the provided GitHub client.
+
+    Hands the per-repo :class:`IssueTreeCache` (created lazily by the
+    registry) into the worker so the picker reads from the cache and the
+    webhook handler can patch it (closes #812).
+    """
     return _WorkerThread(
         repo_cfg.work_dir,
         repo_cfg.name,
@@ -426,6 +431,7 @@ def _make_thread(
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
+        issue_cache=registry.get_issue_cache(repo_cfg.name),
     )
 
 

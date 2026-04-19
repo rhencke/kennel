@@ -235,12 +235,19 @@ class IssueTreeCache:
         with self._lock:
             if self._inventory_loaded_at is None:
                 self._pre_inventory_queue.append((timestamp, event_type, payload))
+                log.info(
+                    "issue-cache[%s]: queued %s for #%s pre-inventory (queue depth=%d)",
+                    self._repo,
+                    event_type,
+                    payload.get("issue_number"),
+                    len(self._pre_inventory_queue),
+                )
                 return
             number = payload["issue_number"]
             existing = self._nodes.get(number)
             if existing is not None and timestamp < existing.last_applied_at:
                 self._events_dropped_stale += 1
-                log.debug(
+                log.info(
                     "issue-cache[%s]: dropping stale %s for #%s "
                     "(event=%s, last_applied=%s)",
                     self._repo,
@@ -281,6 +288,16 @@ class IssueTreeCache:
                 after.last_applied_at = max(after.last_applied_at, timestamp)
             self._events_applied += 1
             self._last_event_at = timestamp
+            log.info(
+                "issue-cache[%s]: applied %s for #%s (open=%d, applied=%d, "
+                "stale_dropped=%d)",
+                self._repo,
+                event_type,
+                number,
+                len(self._nodes),
+                self._events_applied,
+                self._events_dropped_stale,
+            )
 
     # ── handlers (called under self._lock by apply_event) ────────────────
 
