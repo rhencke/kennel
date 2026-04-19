@@ -1445,6 +1445,25 @@ class TestGitHubClass:
         }
         assert result == nodes
 
+    def test_get_rate_limit(self) -> None:
+        gh, mock_s = self._gh()
+        resources = {
+            "core": {"used": 5, "limit": 5000, "reset": 1700000000, "remaining": 4995},
+            "graphql": {
+                "used": 12,
+                "limit": 5000,
+                "reset": 1700003600,
+                "remaining": 4988,
+            },
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"resources": resources}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_rate_limit()
+        url = mock_s.get.call_args.args[0]
+        assert url.endswith("/rate_limit")
+        assert result == resources
+
     def test_view_issue(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

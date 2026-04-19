@@ -41,6 +41,7 @@ from kennel.infra import (
     real_infra,
 )
 from kennel.provider_factory import DefaultProviderFactory
+from kennel.rate_limit import RateLimitMonitor
 from kennel.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
@@ -209,6 +210,36 @@ def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
         "level": status.level,
         "warning": status.warning,
         "paused": status.paused,
+    }
+
+
+def _serialize_rate_limit(monitor: Any) -> dict[str, Any] | None:
+    """Serialize the latest :class:`~kennel.rate_limit.RateLimitSnapshot`
+    for the ``/status.json`` payload (closes #812 follow-up).
+
+    Returns ``None`` when *monitor* is missing (tests with a MagicMock
+    registry omit it) or hasn't yet completed its first refresh.
+    """
+    from kennel.rate_limit import RateLimitMonitor
+
+    if not isinstance(monitor, RateLimitMonitor):
+        return None
+    snap = monitor.latest()
+    if snap is None:
+        return None
+    return {
+        "rest": _serialize_rate_window(snap.rest),
+        "graphql": _serialize_rate_window(snap.graphql),
+        "fetched_at": snap.fetched_at.isoformat(),
+    }
+
+
+def _serialize_rate_window(window: Any) -> dict[str, Any]:
+    return {
+        "name": window.name,
+        "used": window.used,
+        "limit": window.limit,
+        "resets_at": window.resets_at.isoformat(),
     }
 
 
@@ -448,6 +479,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
     provider_factory: DefaultProviderFactory | None = None
+    rate_limit_monitor: Any = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -872,12 +904,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
             body = _activities_to_xml(self._collect_activities())
             self._respond_body("application/xml; charset=utf-8", body)
         elif self.path == "/status.json":
-            body = json.dumps(self._collect_activities()).encode()
+            body = json.dumps(self._collect_status_payload()).encode()
             self._respond_body("application/json", body)
         elif self.path.startswith("/static/"):
             self._serve_static()
         else:
             self._respond(200, "kennel is running")
+
+    def _collect_status_payload(self) -> dict[str, Any]:
+        """Build the JSON payload for ``/status.json``.
+
+        Wraps the per-repo activity list and a global rate-limit snapshot
+        (closes #812 follow-up) under top-level keys so future global
+        signals can be added without churn — kennel status reads
+        ``activities`` and ``rate_limit`` independently.
+        """
+        return {
+            "activities": self._collect_activities(),
+            "rate_limit": _serialize_rate_limit(self.rate_limit_monitor),
+        }
 
     def _collect_activities(self) -> list[dict[str, Any]]:
         """Build the activity snapshot for all registered repos."""
@@ -1032,6 +1077,7 @@ def run(
     _startup_pull: Callable[..., None] = _startup_pull,
     _Watchdog: type[Watchdog] = Watchdog,
     _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
+    _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
     _preflight_tools: Callable[..., None] = preflight_tools,
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
@@ -1115,6 +1161,9 @@ def run(
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
     _ReconcileWatchdog(registry, config.repos, gh).start_thread()
+    rate_limit_monitor = _RateLimitMonitor(gh)
+    rate_limit_monitor.start_thread()
+    WebhookHandler.rate_limit_monitor = rate_limit_monitor
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

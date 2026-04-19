@@ -754,6 +754,18 @@ class GitHub:
         """
         self._post(f"/repos/{repo}/issues/{number}/assignees", assignees=[login])
 
+    def get_rate_limit(self) -> dict[str, Any]:
+        """Return GitHub's per-resource rate-limit snapshot.
+
+        Hits ``GET /rate_limit`` — per GitHub docs this endpoint does not
+        itself count against any quota, so it's safe to poll on a 60s
+        cadence (closes #812 follow-up).  Returns the raw ``resources``
+        dict; callers parse the windows they care about (``core``,
+        ``graphql``, etc.).
+        """
+        data = self._get("/rate_limit")
+        return data["resources"]
+
     def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
         """Return issue data (state, title, body, created_at)."""
         data = self._get(f"/repos/{repo}/issues/{number}")

@@ -225,8 +225,8 @@ class TestGetEndpoint:
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
         data = json.loads(resp.read())
-        assert len(data) == 1
-        entry = data[0]
+        assert len(data["activities"]) == 1
+        entry = data["activities"][0]
         assert entry["repo_name"] == "owner/repo"
         assert entry["what"] == "Working on: #1"
         assert entry["busy"] is True
@@ -263,8 +263,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["session_owner"] == "worker-home"
-        assert data[0]["session_dropped_count"] == 3
+        assert data["activities"][0]["session_owner"] == "worker-home"
+        assert data["activities"][0]["session_dropped_count"] == 3
 
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -290,8 +290,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["session_alive"] is True
-        assert data[0]["session_owner"] is None
+        assert data["activities"][0]["session_alive"] is True
+        assert data["activities"][0]["session_owner"] is None
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -321,15 +321,15 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["crash_count"] == 3
-        assert data[0]["last_crash_error"] == "RuntimeError: boom"
+        assert data["activities"][0]["crash_count"] == 3
+        assert data["activities"][0]["last_crash_error"] == "RuntimeError: boom"
 
     def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
-        assert json.loads(resp.read()) == []
+        assert json.loads(resp.read()) == {"activities": [], "rate_limit": None}
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
         url, _ = server
@@ -361,7 +361,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["is_stuck"] is True
+        assert data["activities"][0]["is_stuck"] is True
 
     def test_status_endpoint_includes_rescoping_flag(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -387,7 +387,123 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = True
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["rescoping"] is True
+        assert data["activities"][0]["rescoping"] is True
+
+    def test_status_endpoint_includes_rate_limit_when_monitor_present(
+        self, server: tuple
+    ) -> None:
+        """A real ``RateLimitMonitor`` with a refreshed snapshot serializes
+        into ``/status.json`` under the top-level ``rate_limit`` key
+        (closes #812 follow-up)."""
+        from datetime import datetime, timezone
+
+        from kennel.rate_limit import RateLimitMonitor
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="idle",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+
+        gh = MagicMock()
+        gh.get_rate_limit.return_value = {
+            "core": {"used": 5, "limit": 5000, "reset": 1700000000},
+            "graphql": {"used": 12, "limit": 5000, "reset": 1700003600},
+        }
+        monitor = RateLimitMonitor(gh)
+        monitor.refresh()
+        WebhookHandler.rate_limit_monitor = monitor
+        try:
+            resp = urllib.request.urlopen(f"{url}/status.json")
+            data = json.loads(resp.read())
+            rl = data["rate_limit"]
+            assert rl is not None
+            assert rl["rest"]["used"] == 5
+            assert rl["rest"]["limit"] == 5000
+            assert rl["graphql"]["used"] == 12
+            assert "fetched_at" in rl
+        finally:
+            WebhookHandler.rate_limit_monitor = None
+
+    def test_status_endpoint_omits_rate_limit_when_monitor_absent(
+        self, server: tuple
+    ) -> None:
+        """No monitor instance attached → ``rate_limit`` is ``None``."""
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="idle",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        WebhookHandler.rate_limit_monitor = None
+
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data["rate_limit"] is None
+
+    def test_status_endpoint_omits_rate_limit_before_first_refresh(
+        self, server: tuple
+    ) -> None:
+        """Monitor present but ``latest()`` returns None → rate_limit None."""
+        from datetime import datetime, timezone
+
+        from kennel.rate_limit import RateLimitMonitor
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="idle",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+
+        monitor = RateLimitMonitor(MagicMock())
+        WebhookHandler.rate_limit_monitor = monitor
+        try:
+            resp = urllib.request.urlopen(f"{url}/status.json")
+            data = json.loads(resp.read())
+            assert data["rate_limit"] is None
+        finally:
+            WebhookHandler.rate_limit_monitor = None
 
     def test_status_endpoint_serializes_loaded_issue_cache(self, server: tuple) -> None:
         """Wire a real loaded :class:`IssueTreeCache` through the registry
@@ -434,7 +550,7 @@ class TestGetEndpoint:
 
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        cache_blob = data[0]["issue_cache"]
+        cache_blob = data["activities"][0]["issue_cache"]
         assert cache_blob is not None
         assert cache_blob["loaded"] is True
         assert cache_blob["open_issues"] == 1
@@ -475,7 +591,7 @@ class TestGetEndpoint:
         # real IssueTreeCache — must serialize to None.
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["issue_cache"] is None
+        assert data["activities"][0]["issue_cache"] is None
 
     def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
         from datetime import UTC, datetime
@@ -517,9 +633,9 @@ class TestGetEndpoint:
         ):
             resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["provider"] == ProviderID.CLAUDE_CODE
-        assert data[0]["provider_status"]["level"] == "paused"
-        assert data[0]["provider_status"]["percent_used"] == 96
+        assert data["activities"][0]["provider"] == ProviderID.CLAUDE_CODE
+        assert data["activities"][0]["provider_status"]["level"] == "paused"
+        assert data["activities"][0]["provider_status"]["percent_used"] == 96
 
     def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -545,7 +661,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data[0]["rescoping"] is False
+        assert data["activities"][0]["rescoping"] is False
 
 
 class TestRepoStatus:
@@ -1933,7 +2049,7 @@ class TestProcessAction:
         with patch("kennel.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        talker_data = data[0]["claude_talker"]
+        talker_data = data["activities"][0]["claude_talker"]
         assert talker_data["repo_name"] == "owner/repo"
         assert talker_data["thread_id"] == 12321
         assert talker_data["kind"] == "worker"
@@ -2712,6 +2828,38 @@ class TestRun:
 
         mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
         mock_watchdog_cls.return_value.start_thread.assert_called_once()
+
+    def test_run_starts_rate_limit_monitor_with_gh(self, tmp_path: Path) -> None:
+        from kennel.server import WebhookHandler, run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_make_registry = MagicMock(return_value=MagicMock())
+        mock_rl_cls = MagicMock()
+        mock_gh_instance = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=mock_make_registry,
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+            _GitHub=lambda: mock_gh_instance,
+            _Watchdog=MagicMock(),
+            _ReconcileWatchdog=MagicMock(),
+            _RateLimitMonitor=mock_rl_cls,
+        )
+
+        mock_rl_cls.assert_called_once_with(mock_gh_instance)
+        mock_rl_cls.return_value.start_thread.assert_called_once()
+        assert WebhookHandler.rate_limit_monitor is mock_rl_cls.return_value
 
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
         self, tmp_path: Path
