@@ -23,7 +23,8 @@ PY_ARTIFACTS := \
 	_build/default/roseforest_is_empty.py \
 	_build/default/mforest_is_empty.py \
 	_build/default/myopt_flatten.py \
-	_build/default/even_depth.py
+	_build/default/even_depth.py \
+	_build/default/is_even.py
 
 test: build
 	@for f in $(PY_ARTIFACTS); do \
@@ -42,6 +43,14 @@ assert even_depth(EvenS(OddS(EvenS(OddS(EvenO()))))) == 4, \
 assert isinstance(EvenO(), Even), 'EvenO() must be instance of Even'; \
 assert isinstance(OddS(EvenO()), Odd), 'OddS() must be instance of Odd'; \
 print('Phase 4 Even/Odd round-trip: OK')"
+	@python3 -c "\
+exec(open('_build/default/is_even.py').read()); \
+assert is_even(0) is True,  'is_even(0): got ' + repr(is_even(0)); \
+assert is_even(1) is False, 'is_even(1): got ' + repr(is_even(1)); \
+assert is_even(2) is True,  'is_even(2): got ' + repr(is_even(2)); \
+assert is_even(3) is False, 'is_even(3): got ' + repr(is_even(3)); \
+assert is_even(4) is True,  'is_even(4): got ' + repr(is_even(4)); \
+print('Phase 4 is_even round-trip: OK')"
 
 clean:
 	dune clean

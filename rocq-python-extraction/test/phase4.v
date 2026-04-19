@@ -215,3 +215,24 @@ with odd_depth (o : Odd) : nat :=
   end.
 
 Python Extraction even_depth.
+
+(** [is_even]: Boolean parity check via mutual fixpoint over nat.
+    [is_even] and [is_odd] are mutually recursive: each pattern-matches
+    on nat and delegates the successor case to the other.
+    With nat → int and bool → Python bool remappings:
+      is_even 0 = True    is_odd 0 = False
+      is_even 1 = False   is_odd 1 = True
+      is_even 2 = True    is_odd 2 = False
+    Exercises a Dfix mutual fixpoint entirely over remapped types. *)
+Fixpoint is_even (n : nat) : bool :=
+  match n with
+  | O    => true
+  | S n' => is_odd n'
+  end
+with is_odd (n : nat) : bool :=
+  match n with
+  | O    => false
+  | S n' => is_even n'
+  end.
+
+Python Extraction is_even.
