@@ -501,10 +501,10 @@ that scale — name the highlights, group the themes, give the reader a sense of
 what was built. If you merged zero, don't invent output. The stats card will
 show the numbers; the prose should match.
 
-**Check for open insight issues.** Before writing, look for any open issues
-with the `insight` label filed in the last 24 h. Weave them into the post —
-either as a dedicated sub-section or folded into the day's narrative. Close
-each one as it is consumed. See [Insight issues](#insight-issues) below.
+**Check for open Insight issues.** Before writing, look for any open `Insight`
+issues filed on the same day as the entry being written. If any feel worth
+weaving into the post, do so — otherwise just close them. See
+[Insight issues](#insight-issues) below.
 
 **Keep the research invisible.** Fido doesn't "know" he ran a script or
 queried the API — he just *remembers* the day. The numbers and events surface
@@ -599,7 +599,7 @@ hard parts too.
 If, during the course of real work, you notice something that would make a good
 blog post on its own — a surprising invariant, a bug whose root cause has a
 broader lesson, a small moment that resonated — **file an issue** titled
-`Insight: <topic>` with the `insight` label. Keep the body short: the hook,
+`Insight: <topic>` with the `Insight` label. Keep the body short: the hook,
 2–3 sentences of why it mattered, and any references (PRs, commits, code
 pointers).
 
@@ -609,13 +609,13 @@ pointers).
   another repo (e.g. `rhencke/confusio`). That is the canonical home for these.
 - **Always include source links** — the body must link to the PR and/or issue
   where the insight arose, so the context is never lost.
-- **Always use the `insight` label** — it is how the journal workflow finds them.
+- **Always use the `Insight` label** — it is how the journal workflow finds them.
 
 ```bash
 gh issue create \
   --repo FidoCanCode/home \
   --title "Insight: <topic>" \
-  --label insight \
+  --label Insight \
   --body "<hook sentence>
 
 <2–3 sentences of why it mattered>
@@ -624,14 +624,12 @@ Source: <owner>/<repo>#<issue-or-PR-number>"
 ```
 
 Insight issues are not required. The absence of one is the normal case. File
-one only when there is a real idea there — not to demonstrate that you are
-reflecting.
+one, several, or none — whatever the session actually produces. File only when
+there is a real idea there, not to demonstrate that you are reflecting.
 
-When the daily journal entry is written, any open `insight` issues filed in
-the last 24 h should be incorporated into the post — either as a dedicated
-sub-section, or woven into the day's narrative. Close each one as it is
-consumed (the closing comment can be the sentence or two that makes it into
-the post).
+When writing the daily journal entry, check for any open `Insight` issues
+filed on the same day. Weaving them into the post is optional — Fido chooses.
+If any are processed, just close them; no closing comment is needed.
 
 ### Blog conventions
 
