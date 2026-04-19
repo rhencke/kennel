@@ -627,42 +627,6 @@ class GitHub:
         "parent{number}"
     )
 
-    def find_issues(self, owner: str, repo: str, login: str) -> list[dict[str, Any]]:
-        """Return open issues assigned to *login* (oldest first).
-
-        Each node carries ``number``, ``title``, ``createdAt``,
-        ``milestone.title``, ``assignees.nodes[].login``, ``parent.number``
-        (or None), and a paginated-and-hydrated ``subIssues.nodes`` list
-        in GitHub rank order.
-        """
-        issue_fields = self._ISSUE_NODE_FIELDS
-        query = (
-            "query($owner:String!,$repo:String!,$login:String!,$cursor:String){"
-            "repository(owner:$owner,name:$repo){"
-            "issues(first:50,after:$cursor,states:[OPEN],"
-            "filterBy:{assignee:$login},"
-            "orderBy:{field:CREATED_AT,direction:ASC}){"
-            f"nodes{{{issue_fields} state "
-            f"subIssues(first:50){{nodes{{state {issue_fields}}} "
-            "pageInfo{endCursor hasNextPage}}}"
-            "pageInfo{endCursor hasNextPage}"
-            "}}}"
-        )
-        issues: list[dict[str, Any]] = []
-        for node in self._graphql_paginate(
-            query,
-            ("repository", "issues"),
-            owner=owner,
-            repo=repo,
-            login=login,
-        ):
-            if node.get("subIssues", {}).get("pageInfo", {}).get("hasNextPage"):
-                node["subIssues"]["nodes"] = list(
-                    self.get_sub_issues(owner, repo, node["number"])
-                )
-            issues.append(node)
-        return issues
-
     def find_all_open_issues(self, owner: str, repo: str) -> list[dict[str, Any]]:
         """Return all open issues in the repo (oldest first).
 
@@ -697,55 +661,6 @@ class GitHub:
             issues.append(node)
         return issues
 
-    def get_issue_node(self, owner: str, repo: str, number: int) -> dict[str, Any]:
-        """Return one issue in the shape used by :meth:`find_issues`.
-
-        Used by the picker's upward walk: call with any issue number and
-        get back the same dict shape so descent code can keep walking.
-        """
-        issue_fields = self._ISSUE_NODE_FIELDS
-        query = (
-            "query($owner:String!,$repo:String!,$number:Int!){"
-            "repository(owner:$owner,name:$repo){"
-            "issue(number:$number){"
-            f"state {issue_fields} "
-            f"subIssues(first:50){{nodes{{state {issue_fields}}} "
-            "pageInfo{endCursor hasNextPage}}"
-            "}}}"
-        )
-        data = self._graphql(query, owner=owner, repo=repo, number=number)
-        node = data["data"]["repository"]["issue"]
-        if node.get("subIssues", {}).get("pageInfo", {}).get("hasNextPage"):
-            node["subIssues"]["nodes"] = list(self.get_sub_issues(owner, repo, number))
-        return node
-
-    def get_sub_issues(
-        self, owner: str, repo: str, number: int
-    ) -> Iterator[dict[str, Any]]:
-        """Yield the direct sub-issues of *number* in GitHub rank order.
-
-        Each node has the same shape as a node from :meth:`find_issues`
-        (``number``, ``title``, ``state``, ``createdAt``, ``milestone.title``,
-        ``assignees.nodes[].login``).
-        """
-        issue_fields = self._ISSUE_NODE_FIELDS
-        query = (
-            "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
-            "repository(owner:$owner,name:$repo){"
-            "issue(number:$number){"
-            "subIssues(first:50,after:$cursor){"
-            f"nodes{{state {issue_fields}}} "
-            "pageInfo{endCursor hasNextPage}"
-            "}}}}"
-        )
-        yield from self._graphql_paginate(
-            query,
-            ("repository", "issue", "subIssues"),
-            owner=owner,
-            repo=repo,
-            number=number,
-        )
-
     def add_assignee(self, repo: str, number: int | str, login: str) -> None:
         """Assign *login* to issue *number* in *repo*.
 
@@ -753,6 +668,18 @@ class GitHub:
         assignees are preserved.
         """
         self._post(f"/repos/{repo}/issues/{number}/assignees", assignees=[login])
+
+    def get_rate_limit(self) -> dict[str, Any]:
+        """Return GitHub's per-resource rate-limit snapshot.
+
+        Hits ``GET /rate_limit`` — per GitHub docs this endpoint does not
+        itself count against any quota, so it's safe to poll on a 60s
+        cadence (closes #812 follow-up).  Returns the raw ``resources``
+        dict; callers parse the windows they care about (``core``,
+        ``graphql``, etc.).
+        """
+        data = self._get("/rate_limit")
+        return data["resources"]
 
     def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
         """Return issue data (state, title, body, created_at)."""

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
+from kennel.issue_cache import IssueTreeCache
 from kennel.provider import PromptSession, Provider
 from kennel.worker import WorkerThread
 
@@ -106,6 +107,11 @@ class WorkerRegistry:
         self._webhook_lock = threading.Lock()
         self._rescoping: dict[str, bool] = {}
         self._rescoping_lock = threading.Lock()
+        # Per-repo issue tree caches shared between worker + webhook
+        # threads (closes #812).  Lazily created on first lookup so tests
+        # that don't exercise the cache path don't pay setup cost.
+        self._issue_caches: dict[str, IssueTreeCache] = {}
+        self._issue_cache_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*.
@@ -375,6 +381,29 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread._session if thread is not None else None  # pyright: ignore[reportPrivateUsage]
 
+    def get_issue_cache(self, repo_name: str) -> IssueTreeCache:
+        """Return (lazily creating) the per-repo issue tree cache (#812).
+
+        Cache is shared between the worker thread (picker reads) and the
+        webhook handler thread (event mutations).  Lifetime is tied to
+        the registry, not to any one worker thread — so a worker thread
+        crash + restart inherits the same cache.
+        """
+        with self._issue_cache_lock:
+            cache = self._issue_caches.get(repo_name)
+            if cache is None:
+                cache = IssueTreeCache(repo_name)
+                self._issue_caches[repo_name] = cache
+            return cache
+
+    def all_issue_caches(self) -> list[IssueTreeCache]:
+        """Snapshot list of every issue cache that has been created.
+
+        Used by ``kennel status`` to surface per-repo cache metrics.
+        """
+        with self._issue_cache_lock:
+            return list(self._issue_caches.values())
+
 
 def _make_thread(
     repo_cfg: RepoConfig,
@@ -386,7 +415,12 @@ def _make_thread(
     config: Config | None = None,
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
-    """Default factory: create a WorkerThread with the provided GitHub client."""
+    """Default factory: create a WorkerThread with the provided GitHub client.
+
+    Hands the per-repo :class:`IssueTreeCache` (created lazily by the
+    registry) into the worker so the picker reads from the cache and the
+    webhook handler can patch it (closes #812).
+    """
     return _WorkerThread(
         repo_cfg.work_dir,
         repo_cfg.name,
@@ -397,6 +431,7 @@ def _make_thread(
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
+        issue_cache=registry.get_issue_cache(repo_cfg.name),
     )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +18,10 @@ from kennel.provider import (
 )
 from kennel.status import (
     ClaudeTalkerInfo,
+    IssueCacheInfo,
     KennelStatus,
+    RateLimitInfo,
+    RateLimitWindowInfo,
     RepoStatus,
     WebhookActivityInfo,
     _claude_pid,
@@ -26,12 +29,20 @@ from kennel.status import (
     _fetch_activities,
     _fido_running,
     _format_agent_line,
+    _format_cache_line,
+    _format_duration_until,
+    _format_rate_limit_line,
+    _format_rate_limit_window,
     _format_uptime,
     _git_dir,
     _kennel_pid,
+    _parse_iso_datetime,
+    _parse_issue_cache,
+    _parse_rate_limit,
     _pgrep,
     _port_from_pid,
     _process_uptime_seconds,
+    _rate_limit_color,
     _read_state,
     _repos_from_pid,
     collect,
@@ -460,7 +471,7 @@ class TestCollectWebhookPropagation:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": activity},
+                return_value=({"owner/repo": activity}, None),
             ),
             patch("kennel.status.repo_status", return_value=fake_status) as mock_rs,
         ):
@@ -480,119 +491,141 @@ class TestFetchActivities:
         mock_resp.read.return_value = data
         return MagicMock(return_value=mock_resp)
 
+    def _wrap(self, activities: list) -> bytes:
+        """Wrap an activities list in the new ``/status.json`` envelope."""
+        return json.dumps({"activities": activities, "rate_limit": None}).encode()
+
     def test_returns_repo_what_map(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "owner/repo",
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                    }
+                ],
+                "rate_limit": None,
+            }
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result == (
+            {
+                "owner/repo": {
                     "what": "Working on: #1",
-                    "busy": True,
                     "crash_count": 0,
                     "last_crash_error": None,
                     "is_stuck": False,
+                    "worker_uptime_seconds": None,
+                    "webhook_activities": [],
+                    "session_owner": None,
+                    "session_alive": False,
+                    "session_pid": None,
+                    "session_dropped_count": 0,
+                    "claude_talker": None,
+                    "provider_status": None,
+                    "rescoping": False,
+                    "issue_cache": None,
                 }
-            ]
-        ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result == {
-            "owner/repo": {
-                "what": "Working on: #1",
-                "crash_count": 0,
-                "last_crash_error": None,
-                "is_stuck": False,
-                "worker_uptime_seconds": None,
-                "webhook_activities": [],
-                "session_owner": None,
-                "session_alive": False,
-                "session_pid": None,
-                "session_dropped_count": 0,
-                "claude_talker": None,
-                "provider_status": None,
-                "rescoping": False,
-            }
-        }
+            },
+            None,
+        )
 
     def test_returns_multiple_repos(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "a/b",
+            {
+                "activities": [
+                    {
+                        "repo_name": "a/b",
+                        "what": "Napping",
+                        "busy": False,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                    },
+                    {
+                        "repo_name": "c/d",
+                        "what": "Fixing CI",
+                        "busy": True,
+                        "crash_count": 2,
+                        "last_crash_error": "RuntimeError: boom",
+                        "is_stuck": True,
+                    },
+                ],
+                "rate_limit": None,
+            }
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result == (
+            {
+                "a/b": {
                     "what": "Napping",
-                    "busy": False,
                     "crash_count": 0,
                     "last_crash_error": None,
                     "is_stuck": False,
+                    "worker_uptime_seconds": None,
+                    "webhook_activities": [],
+                    "session_owner": None,
+                    "session_alive": False,
+                    "session_pid": None,
+                    "session_dropped_count": 0,
+                    "claude_talker": None,
+                    "provider_status": None,
+                    "rescoping": False,
+                    "issue_cache": None,
                 },
-                {
-                    "repo_name": "c/d",
+                "c/d": {
                     "what": "Fixing CI",
-                    "busy": True,
                     "crash_count": 2,
                     "last_crash_error": "RuntimeError: boom",
                     "is_stuck": True,
+                    "worker_uptime_seconds": None,
+                    "webhook_activities": [],
+                    "session_owner": None,
+                    "session_alive": False,
+                    "session_pid": None,
+                    "session_dropped_count": 0,
+                    "claude_talker": None,
+                    "provider_status": None,
+                    "rescoping": False,
+                    "issue_cache": None,
                 },
-            ]
-        ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result == {
-            "a/b": {
-                "what": "Napping",
-                "crash_count": 0,
-                "last_crash_error": None,
-                "is_stuck": False,
-                "worker_uptime_seconds": None,
-                "webhook_activities": [],
-                "session_owner": None,
-                "session_alive": False,
-                "session_pid": None,
-                "session_dropped_count": 0,
-                "claude_talker": None,
-                "provider_status": None,
-                "rescoping": False,
             },
-            "c/d": {
-                "what": "Fixing CI",
-                "crash_count": 2,
-                "last_crash_error": "RuntimeError: boom",
-                "is_stuck": True,
-                "worker_uptime_seconds": None,
-                "webhook_activities": [],
-                "session_owner": None,
-                "session_alive": False,
-                "session_pid": None,
-                "session_dropped_count": 0,
-                "claude_talker": None,
-                "provider_status": None,
-                "rescoping": False,
-            },
-        }
+            None,
+        )
 
     def test_parses_provider_status_from_json(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "owner/repo",
-                    "what": "Working on: #1",
-                    "busy": True,
-                    "crash_count": 0,
-                    "last_crash_error": None,
-                    "is_stuck": False,
-                    "provider_status": {
-                        "provider": "claude-code",
-                        "window_name": "five_hour",
-                        "pressure": 0.96,
-                        "percent_used": 96,
-                        "resets_at": "2026-04-16T07:00:00+00:00",
-                        "unavailable_reason": None,
-                        "level": "paused",
-                        "warning": False,
-                        "paused": True,
-                    },
-                }
-            ]
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                        "provider_status": {
+                            "provider": "claude-code",
+                            "window_name": "five_hour",
+                            "pressure": 0.96,
+                            "percent_used": 96,
+                            "resets_at": "2026-04-16T07:00:00+00:00",
+                            "unavailable_reason": None,
+                            "level": "paused",
+                            "warning": False,
+                            "paused": True,
+                        },
+                    }
+                ],
+                "rate_limit": None,
+            }
         ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result["owner/repo"]["provider_status"] == ProviderPressureStatus(
+        assert result[0]["owner/repo"]["provider_status"] == ProviderPressureStatus(
             provider=ProviderID.CLAUDE_CODE,
             window_name="five_hour",
             pressure=0.96,
@@ -601,77 +634,90 @@ class TestFetchActivities:
 
     def test_invalid_provider_status_defaults_to_none(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "owner/repo",
-                    "what": "Working on: #1",
-                    "busy": True,
-                    "crash_count": 0,
-                    "last_crash_error": None,
-                    "is_stuck": False,
-                    "provider_status": {"provider": "nope"},
-                }
-            ]
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                        "provider_status": {"provider": "nope"},
+                    }
+                ],
+                "rate_limit": None,
+            }
         ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result["owner/repo"]["provider_status"] is None
+        assert result[0]["owner/repo"]["provider_status"] is None
 
     def test_bad_provider_status_reset_time_defaults_to_none(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "owner/repo",
-                    "what": "Working on: #1",
-                    "busy": True,
-                    "crash_count": 0,
-                    "last_crash_error": None,
-                    "is_stuck": False,
-                    "provider_status": {
-                        "provider": "claude-code",
-                        "pressure": 0.5,
-                        "resets_at": "not-a-date",
-                    },
-                }
-            ]
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                        "provider_status": {
+                            "provider": "claude-code",
+                            "pressure": 0.5,
+                            "resets_at": "not-a-date",
+                        },
+                    }
+                ],
+                "rate_limit": None,
+            }
         ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result["owner/repo"]["provider_status"] == ProviderPressureStatus(
+        assert result[0]["owner/repo"]["provider_status"] == ProviderPressureStatus(
             provider=ProviderID.CLAUDE_CODE,
             pressure=0.5,
         )
 
     def test_returns_empty_on_exception(self) -> None:
         mock_urlopen = MagicMock(side_effect=OSError("refused"))
-        assert _fetch_activities(9000, _urlopen=mock_urlopen) == {}
+        assert _fetch_activities(9000, _urlopen=mock_urlopen) == ({}, None)
 
     def test_skips_items_without_repo_name(self) -> None:
-        data = json.dumps([{"what": "something", "busy": True}]).encode()
+        data = json.dumps(
+            {"activities": [{"what": "something", "busy": True}], "rate_limit": None}
+        ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result == {}
+        assert result == ({}, None)
 
     def test_skips_items_without_what(self) -> None:
-        data = json.dumps([{"repo_name": "a/b", "busy": True}]).encode()
+        data = json.dumps(
+            {"activities": [{"repo_name": "a/b", "busy": True}], "rate_limit": None}
+        ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result == {}
+        assert result == ({}, None)
 
     def test_is_stuck_defaults_to_false_when_absent(self) -> None:
         data = json.dumps(
-            [
-                {
-                    "repo_name": "owner/repo",
-                    "what": "Napping",
-                    "busy": False,
-                    "crash_count": 0,
-                    "last_crash_error": None,
-                    # no "is_stuck" key — older server version
-                }
-            ]
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Napping",
+                        "busy": False,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        # no "is_stuck" key — older server version
+                    }
+                ],
+                "rate_limit": None,
+            }
         ).encode()
         result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
-        assert result["owner/repo"]["is_stuck"] is False
+        assert result[0]["owner/repo"]["is_stuck"] is False
 
     def test_calls_correct_url(self) -> None:
-        mock_urlopen = self._make_urlopen(b"[]")
+        mock_urlopen = self._make_urlopen(b'{"activities": [], "rate_limit": null}')
         _fetch_activities(8888, _urlopen=mock_urlopen)
         mock_urlopen.assert_called_once_with(
             "http://localhost:8888/status.json", timeout=2
@@ -1026,9 +1072,14 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={
-                    "owner/repo": self._activity_info(provider_status=provider_status)
-                },
+                return_value=(
+                    {
+                        "owner/repo": self._activity_info(
+                            provider_status=provider_status
+                        )
+                    },
+                    None,
+                ),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1072,7 +1123,7 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": self._activity_info()},
+                return_value=({"owner/repo": self._activity_info()}, None),
             ) as mock_fetch,
             patch("kennel.status.repo_status", return_value=self._fake_repo_status()),
         ):
@@ -1101,7 +1152,10 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": self._activity_info("Fixing CI: tests")},
+                return_value=(
+                    {"owner/repo": self._activity_info("Fixing CI: tests")},
+                    None,
+                ),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1123,6 +1177,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -1134,11 +1189,16 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={
-                    "owner/repo": self._activity_info(
-                        "Napping", crash_count=3, last_crash_error="ValueError: oops"
-                    )
-                },
+                return_value=(
+                    {
+                        "owner/repo": self._activity_info(
+                            "Napping",
+                            crash_count=3,
+                            last_crash_error="ValueError: oops",
+                        )
+                    },
+                    None,
+                ),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1160,6 +1220,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -1169,7 +1230,7 @@ class TestCollect:
             patch("kennel.status._repos_from_pid", return_value=[rc]),
             patch("kennel.status._process_uptime_seconds", return_value=0),
             patch("kennel.status._port_from_pid", return_value=9000),
-            patch("kennel.status._fetch_activities", return_value={}),
+            patch("kennel.status._fetch_activities", return_value=({}, None)),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
             ) as mock_rs,
@@ -1190,6 +1251,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
@@ -1221,7 +1283,7 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": activity_info},
+                return_value=({"owner/repo": activity_info}, None),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1246,7 +1308,7 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": self._activity_info(is_stuck=True)},
+                return_value=({"owner/repo": self._activity_info(is_stuck=True)}, None),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1268,6 +1330,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_rescoping_true_to_repo_status(self, tmp_path: Path) -> None:
@@ -1279,7 +1342,10 @@ class TestCollect:
             patch("kennel.status._port_from_pid", return_value=9000),
             patch(
                 "kennel.status._fetch_activities",
-                return_value={"owner/repo": self._activity_info(rescoping=True)},
+                return_value=(
+                    {"owner/repo": self._activity_info(rescoping=True)},
+                    None,
+                ),
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -1297,7 +1363,7 @@ class TestCollect:
             patch("kennel.status._repos_from_pid", return_value=[rc]),
             patch("kennel.status._process_uptime_seconds", return_value=0),
             patch("kennel.status._port_from_pid", return_value=9000),
-            patch("kennel.status._fetch_activities", return_value={}),
+            patch("kennel.status._fetch_activities", return_value=({}, None)),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
             ) as mock_rs,
@@ -2497,3 +2563,402 @@ class TestProviderColoredStatus:
         expected = rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
+
+
+# ── Issue cache display (closes #812) ────────────────────────────────────────
+
+
+class TestParseIsoDatetime:
+    def test_returns_none_for_non_string(self) -> None:
+        assert _parse_iso_datetime(None) is None
+        assert _parse_iso_datetime(123) is None
+
+    def test_returns_none_for_invalid_string(self) -> None:
+        assert _parse_iso_datetime("not a timestamp") is None
+
+    def test_parses_valid_iso_string(self) -> None:
+        d = _parse_iso_datetime("2026-04-19T12:00:00+00:00")
+        assert d is not None
+        assert d.year == 2026
+
+
+class TestParseIssueCache:
+    def test_returns_none_for_non_dict(self) -> None:
+        assert _parse_issue_cache(None) is None
+        assert _parse_issue_cache("oops") is None
+
+    def test_parses_minimal_payload(self) -> None:
+        info = _parse_issue_cache(
+            {
+                "loaded": True,
+                "open_issues": 5,
+                "events_applied": 10,
+                "events_dropped_stale": 2,
+                "last_event_at": "2026-04-19T12:00:00+00:00",
+                "last_reconcile_at": None,
+                "last_reconcile_drift": 0,
+            }
+        )
+        assert info is not None
+        assert info.loaded is True
+        assert info.open_issues == 5
+        assert info.events_applied == 10
+        assert info.events_dropped_stale == 2
+        assert info.last_event_at is not None
+        assert info.last_reconcile_at is None
+        assert info.last_reconcile_drift == 0
+
+    def test_defaults_when_keys_missing(self) -> None:
+        info = _parse_issue_cache({})
+        assert info is not None
+        assert info.loaded is False
+        assert info.open_issues == 0
+
+
+class TestFormatCacheLine:
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_returns_none_when_no_cache(self) -> None:
+        assert _format_cache_line(self._repo(issue_cache=None)) is None
+
+    def test_returns_none_when_cache_unloaded(self) -> None:
+        info = IssueCacheInfo(
+            loaded=False,
+            open_issues=0,
+            events_applied=0,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        assert _format_cache_line(self._repo(issue_cache=info)) is None
+
+    def test_renders_basic_loaded_cache(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=42,
+            events_applied=7,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "42 open" in line
+        assert "applied 7" in line
+        assert "stale-dropped" not in line
+        assert "reconciled" not in line
+
+    def test_includes_stale_dropped_when_nonzero(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=10,
+            events_applied=20,
+            events_dropped_stale=3,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "stale-dropped 3" in line
+
+    def test_includes_reconcile_when_present(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=10,
+            events_applied=20,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=datetime(2026, 4, 19, tzinfo=UTC),
+            last_reconcile_drift=2,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "reconciled drift 2" in line
+
+
+class TestFormatStatusCacheLineIntegration:
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_format_status_includes_cache_line_when_loaded(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=99,
+            events_applied=1,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        repo = self._repo(issue_cache=info)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        out = format_status(status)
+        assert "Cache:" in out
+        assert "99 open" in out
+
+    def test_format_status_omits_cache_line_when_absent(self) -> None:
+        repo = self._repo(issue_cache=None)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        out = format_status(status)
+        assert "Cache:" not in out
+
+
+# ── GitHub rate-limit display (closes #812 follow-up) ─────────────────────────
+
+
+def _window(
+    name: str = "core",
+    used: int = 100,
+    limit: int = 5000,
+    reset_offset_seconds: int = 3600,
+) -> RateLimitWindowInfo:
+    """Build a RateLimitWindowInfo with reset time relative to now."""
+    return RateLimitWindowInfo(
+        name=name,
+        used=used,
+        limit=limit,
+        resets_at=datetime.now(tz=timezone.utc).replace(microsecond=0)
+        + timedelta(seconds=reset_offset_seconds),
+    )
+
+
+class TestParseRateLimit:
+    def test_returns_none_for_non_dict(self) -> None:
+        assert _parse_rate_limit(None) is None
+        assert _parse_rate_limit("nope") is None
+
+    def test_returns_none_when_rest_missing(self) -> None:
+        raw = {"graphql": {}, "fetched_at": "2026-04-19T12:00:00+00:00"}
+        assert _parse_rate_limit(raw) is None
+
+    def test_returns_none_when_graphql_missing(self) -> None:
+        raw = {"rest": {}, "fetched_at": "2026-04-19T12:00:00+00:00"}
+        assert _parse_rate_limit(raw) is None
+
+    def test_returns_none_when_fetched_at_missing(self) -> None:
+        raw = {"rest": {}, "graphql": {}}
+        assert _parse_rate_limit(raw) is None
+
+    def test_parses_full_payload(self) -> None:
+        raw = {
+            "rest": {
+                "name": "core",
+                "used": 5,
+                "limit": 5000,
+                "resets_at": "2026-04-19T13:00:00+00:00",
+            },
+            "graphql": {
+                "name": "graphql",
+                "used": 12,
+                "limit": 5000,
+                "resets_at": "2026-04-19T14:00:00+00:00",
+            },
+            "fetched_at": "2026-04-19T12:00:00+00:00",
+        }
+        info = _parse_rate_limit(raw)
+        assert info is not None
+        assert info.rest.used == 5
+        assert info.graphql.used == 12
+        assert info.fetched_at.year == 2026
+
+    def test_window_falls_back_to_epoch_when_resets_at_invalid(self) -> None:
+        raw = {
+            "rest": {"name": "core", "used": 0, "limit": 5000, "resets_at": "garbage"},
+            "graphql": {"name": "graphql", "used": 0, "limit": 5000},
+            "fetched_at": "2026-04-19T12:00:00+00:00",
+        }
+        info = _parse_rate_limit(raw)
+        assert info is not None
+        assert info.rest.resets_at == datetime.fromtimestamp(0, tz=timezone.utc)
+        assert info.graphql.resets_at == datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+class TestFormatDurationUntil:
+    def test_past_target_renders_now(self) -> None:
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        assert _format_duration_until(past) == "now"
+
+    def test_future_seconds(self) -> None:
+        now = datetime(2026, 4, 19, tzinfo=timezone.utc)
+        assert _format_duration_until(now.replace(second=30), now=now) == "30s"
+
+    def test_future_minutes(self) -> None:
+        now = datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc)
+        assert _format_duration_until(now.replace(minute=10), now=now) == "10m"
+
+    def test_future_hours(self) -> None:
+        now = datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc)
+        target = datetime(2026, 4, 19, 16, 23, tzinfo=timezone.utc)
+        assert _format_duration_until(target, now=now) == "4h23m"
+
+
+class TestRateLimitColor:
+    def test_dim_when_plenty_remaining(self) -> None:
+        from kennel.color import DIM
+
+        assert _rate_limit_color(_window(used=100, limit=5000)) == DIM
+
+    def test_yellow_when_at_or_below_25_percent(self) -> None:
+        from kennel.color import YELLOW
+
+        # 25% remaining (75% used)
+        assert _rate_limit_color(_window(used=3750, limit=5000)) == YELLOW
+
+    def test_red_when_at_or_below_5_percent(self) -> None:
+        from kennel.color import RED_BOLD
+
+        # 5% remaining (95% used)
+        assert _rate_limit_color(_window(used=4750, limit=5000)) == RED_BOLD
+
+    def test_dim_when_zero_limit(self) -> None:
+        # zero-limit (no data yet) — pct_remaining is 0.0, which is ≤ 5
+        # so it actually goes RED. That's fine — it signals "no data".
+        from kennel.color import RED_BOLD
+
+        assert _rate_limit_color(_window(used=0, limit=0)) == RED_BOLD
+
+
+class TestFormatRateLimitWindow:
+    def test_includes_label_used_limit_and_reset_text(self) -> None:
+        w = _window(used=12, limit=5000)
+        out = _format_rate_limit_window(w, "REST")
+        assert "REST" in out
+        assert "12/5000" in out
+        assert "to reset" in out
+
+
+class TestFormatRateLimitLine:
+    def test_returns_none_when_no_rate_limit(self) -> None:
+        assert _format_rate_limit_line(None) is None
+
+    def test_renders_both_windows(self) -> None:
+        info = RateLimitInfo(
+            rest=_window("core", used=5, limit=5000),
+            graphql=_window("graphql", used=10, limit=5000),
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        out = _format_rate_limit_line(info)
+        assert out is not None
+        assert "GitHub:" in out
+        assert "REST" in out
+        assert "GraphQL" in out
+        assert "5/5000" in out
+        assert "10/5000" in out
+
+
+class TestFormatStatusRateLimitIntegration:
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_format_status_includes_github_line_when_present(self) -> None:
+        info = RateLimitInfo(
+            rest=_window("core", used=5, limit=5000),
+            graphql=_window("graphql", used=12, limit=5000),
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[self._repo()],
+            rate_limit=info,
+        )
+        out = format_status(status)
+        assert "GitHub:" in out
+
+    def test_format_status_omits_github_line_when_absent(self) -> None:
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[self._repo()],
+            rate_limit=None,
+        )
+        out = format_status(status)
+        assert "GitHub:" not in out
+
+
+class TestFetchActivitiesRateLimit:
+    def _wrap(self, activities: list, rate_limit: dict | None) -> bytes:
+        return json.dumps({"activities": activities, "rate_limit": rate_limit}).encode()
+
+    def _make_urlopen(self, data: bytes) -> MagicMock:
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = data
+        return MagicMock(return_value=mock_resp)
+
+    def test_returns_none_when_rate_limit_missing(self) -> None:
+        data = self._wrap([], None)
+        _, info = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert info is None
+
+    def test_parses_rate_limit_payload(self) -> None:
+        rate = {
+            "rest": {
+                "name": "core",
+                "used": 7,
+                "limit": 5000,
+                "resets_at": "2026-04-19T13:00:00+00:00",
+            },
+            "graphql": {
+                "name": "graphql",
+                "used": 22,
+                "limit": 5000,
+                "resets_at": "2026-04-19T14:00:00+00:00",
+            },
+            "fetched_at": "2026-04-19T12:00:00+00:00",
+        }
+        data = self._wrap([], rate)
+        _, info = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert info is not None
+        assert info.rest.used == 7
+        assert info.graphql.used == 22

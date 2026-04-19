@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 
 from kennel.config import RepoConfig
+from kennel.github import GitHub
 from kennel.registry import WorkerRegistry
 
 log = logging.getLogger(__name__)
@@ -16,6 +18,9 @@ _WATCHDOG_INTERVAL: float = 30.0
 # long as "stuck" in the UI.  Not used for restart decisions (see class
 # docstring).
 _STALE_THRESHOLD: float = 600.0
+# Hourly reconcile cadence (closes #812) — webhooks keep the cache fresh
+# in steady state; this catches drift from any lost events.
+_RECONCILE_INTERVAL: float = 3600.0
 
 
 class Watchdog:
@@ -72,3 +77,72 @@ class Watchdog:
 def run(registry: WorkerRegistry, repos: dict[str, RepoConfig]) -> int:
     """Module-level entry point: create a Watchdog and run it."""
     return Watchdog(registry, repos).run()
+
+
+class ReconcileWatchdog:
+    """Hourly cache reconcile to heal drift from missed webhooks (#812).
+
+    For each repo, fetches a fresh ``find_all_open_issues`` snapshot and
+    calls :meth:`~kennel.issue_cache.IssueTreeCache.reconcile_with_inventory`
+    to apply any divergence.  Skips repos whose cache hasn't been
+    bootstrapped yet — the worker thread does that on its first
+    ``find_next_issue`` iteration.
+
+    A failed ``find_all_open_issues`` (rate limit, transient network
+    blip) logs the exception and continues to the next repo — the next
+    hourly tick will retry.
+    """
+
+    def __init__(
+        self,
+        registry: WorkerRegistry,
+        repos: dict[str, RepoConfig],
+        gh: GitHub,
+    ) -> None:
+        self.registry = registry
+        self.repos = repos
+        self.gh = gh
+
+    def run(self) -> int:
+        """Run one reconcile pass across every repo with a loaded cache.
+
+        Returns 0 (parallels :class:`Watchdog.run` for symmetry).
+        """
+        for repo_name in self.repos:
+            cache = self.registry.get_issue_cache(repo_name)
+            if not cache.is_loaded:
+                log.info(
+                    "reconcile-watchdog[%s]: cache not yet loaded — skipping",
+                    repo_name,
+                )
+                continue
+            owner, name = repo_name.split("/", 1)
+            snapshot_started_at = datetime.now(tz=timezone.utc)
+            try:
+                inventory = self.gh.find_all_open_issues(owner, name)
+            except Exception:
+                log.exception(
+                    "reconcile-watchdog[%s]: find_all_open_issues failed — "
+                    "next hourly tick will retry",
+                    repo_name,
+                )
+                continue
+            drift = cache.reconcile_with_inventory(
+                inventory, snapshot_started_at=snapshot_started_at
+            )
+            log.info("reconcile-watchdog[%s]: applied %d corrections", repo_name, drift)
+        return 0
+
+    def start_thread(
+        self, *, _interval: float = _RECONCILE_INTERVAL
+    ) -> threading.Thread:
+        """Start a single daemon thread that reconciles every *_interval* seconds."""
+
+        def _loop() -> None:
+            while True:
+                time.sleep(_interval)
+                self.run()
+
+        t = threading.Thread(target=_loop, daemon=True, name="reconcile-watchdog")
+        t.start()
+        return t

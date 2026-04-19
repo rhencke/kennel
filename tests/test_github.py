@@ -1250,123 +1250,6 @@ class TestGitHubClass:
             == "CUR1"
         )
 
-    def test_get_sub_issues_paginates(self) -> None:
-        gh, mock_s = self._gh()
-        resp = MagicMock()
-        resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "subIssues": {
-                            "nodes": [{"number": 10, "title": "child"}],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        }
-                    }
-                }
-            }
-        }
-        mock_s.post.return_value = resp
-        result = list(gh.get_sub_issues("owner", "repo", 5))
-        assert result == [{"number": 10, "title": "child"}]
-        assert mock_s.post.call_args.kwargs["json"]["variables"]["number"] == 5
-
-    def test_get_issue_node_returns_full_shape(self) -> None:
-        gh, mock_s = self._gh()
-        node = {
-            "number": 99,
-            "title": "parent",
-            "state": "OPEN",
-            "subIssues": {
-                "nodes": [{"number": 100, "title": "child"}],
-                "pageInfo": {"hasNextPage": False},
-            },
-        }
-        resp = MagicMock()
-        resp.json.return_value = {"data": {"repository": {"issue": node}}}
-        mock_s.post.return_value = resp
-        result = gh.get_issue_node("owner", "repo", 99)
-        assert result["number"] == 99
-        assert result["subIssues"]["nodes"] == [{"number": 100, "title": "child"}]
-
-    def test_get_issue_node_hydrates_paginated_sub_issues(self) -> None:
-        """When the embedded sub-issues page has more, refetch with get_sub_issues."""
-        gh, mock_s = self._gh()
-        first_resp = MagicMock()
-        first_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "number": 99,
-                        "title": "parent",
-                        "state": "OPEN",
-                        "subIssues": {
-                            "nodes": [{"number": 100}],
-                            "pageInfo": {"hasNextPage": True, "endCursor": None},
-                        },
-                    }
-                }
-            }
-        }
-        hydrate_resp = MagicMock()
-        hydrate_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "subIssues": {
-                            "nodes": [{"number": 100}, {"number": 101}],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        }
-                    }
-                }
-            }
-        }
-        mock_s.post.side_effect = [first_resp, hydrate_resp]
-        result = gh.get_issue_node("owner", "repo", 99)
-        # Hydrated list replaces the paginated stub.
-        assert [n["number"] for n in result["subIssues"]["nodes"]] == [100, 101]
-
-    def test_find_issues_hydrates_paginated_sub_issues(self) -> None:
-        gh, mock_s = self._gh()
-        first_resp = MagicMock()
-        first_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issues": {
-                        "nodes": [
-                            {
-                                "number": 1,
-                                "title": "parent",
-                                "subIssues": {
-                                    "nodes": [{"number": 10}],
-                                    "pageInfo": {
-                                        "hasNextPage": True,
-                                        "endCursor": None,
-                                    },
-                                },
-                            }
-                        ],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        }
-        hydrate_resp = MagicMock()
-        hydrate_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "subIssues": {
-                            "nodes": [{"number": 10}, {"number": 11}],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        }
-                    }
-                }
-            }
-        }
-        mock_s.post.side_effect = [first_resp, hydrate_resp]
-        result = gh.find_issues("owner", "repo", "fido")
-        assert [n["number"] for n in result[0]["subIssues"]["nodes"]] == [10, 11]
-
     def test_add_assignee_posts_to_rest_endpoint(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
@@ -1375,37 +1258,6 @@ class TestGitHubClass:
         gh.add_assignee("owner/repo", 42, "fido")
         assert "/repos/owner/repo/issues/42/assignees" in mock_s.post.call_args.args[0]
         assert mock_s.post.call_args.kwargs["json"] == {"assignees": ["fido"]}
-
-    def test_find_issues_graphql(self) -> None:
-        gh, mock_s = self._gh()
-        nodes = [
-            {
-                "number": 1,
-                "title": "bug",
-                "subIssues": {"nodes": [], "pageInfo": {"hasNextPage": False}},
-            }
-        ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issues": {
-                        "nodes": nodes,
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        }
-        mock_s.post.return_value = mock_resp
-        result = gh.find_issues("owner", "repo", "fido")
-        body = mock_s.post.call_args.kwargs["json"]
-        assert body["variables"] == {
-            "owner": "owner",
-            "repo": "repo",
-            "login": "fido",
-            "cursor": None,
-        }
-        assert result == nodes
 
     def test_find_all_open_issues_returns_all_issues(self) -> None:
         gh, mock_s = self._gh()
@@ -1444,6 +1296,25 @@ class TestGitHubClass:
             "cursor": None,
         }
         assert result == nodes
+
+    def test_get_rate_limit(self) -> None:
+        gh, mock_s = self._gh()
+        resources = {
+            "core": {"used": 5, "limit": 5000, "reset": 1700000000, "remaining": 4995},
+            "graphql": {
+                "used": 12,
+                "limit": 5000,
+                "reset": 1700003600,
+                "remaining": 4988,
+            },
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"resources": resources}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_rate_limit()
+        url = mock_s.get.call_args.args[0]
+        assert url.endswith("/rate_limit")
+        assert result == resources
 
     def test_view_issue(self) -> None:
         gh, mock_s = self._gh()

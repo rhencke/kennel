@@ -1,0 +1,156 @@
+"""GitHub rate-limit monitor for ``kennel status`` (closes #812 follow-up).
+
+Polls ``GET /rate_limit`` once per minute (per GitHub docs, this endpoint
+itself does not count against any quota), keeps the latest snapshot in a
+lock-protected slot, and exposes it to the server's ``/rate_limit.json``
+endpoint so ``kennel status`` can show REST-core and GraphQL pressure.
+
+Thread-safe under Python 3.14t (free-threaded, no GIL): every read and
+write of ``_snapshot`` happens under :attr:`_lock`.  The poller thread
+treats fetch failures as soft errors — the previous snapshot stays put
+until the next successful refresh.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from kennel.github import GitHub
+
+log = logging.getLogger(__name__)
+
+_REFRESH_INTERVAL: float = 60.0
+
+
+@dataclass(frozen=True)
+class RateLimitWindow:
+    """One resource window from ``GET /rate_limit``.
+
+    *resets_at* is the tz-aware datetime when *used* drops back to zero
+    (parsed from GitHub's epoch-seconds ``reset`` field).
+    """
+
+    name: str
+    used: int
+    limit: int
+    resets_at: datetime
+
+    @property
+    def remaining(self) -> int:
+        return max(self.limit - self.used, 0)
+
+    @property
+    def percent_remaining(self) -> float:
+        if self.limit <= 0:
+            return 0.0
+        return 100.0 * self.remaining / self.limit
+
+
+@dataclass(frozen=True)
+class RateLimitSnapshot:
+    """One full ``/rate_limit`` response, parsed for the windows we display."""
+
+    rest: RateLimitWindow
+    graphql: RateLimitWindow
+    fetched_at: datetime
+
+
+class RateLimitMonitor:
+    """Lock-protected holder for the latest ``GET /rate_limit`` snapshot.
+
+    Construct with a :class:`~kennel.github.GitHub` client (constructor
+    DI per CLAUDE.md), then either call :meth:`refresh` directly or hand
+    the monitor to :meth:`start_thread` for the 60s poller.
+
+    A failed refresh logs the exception and leaves the prior snapshot in
+    place — ``kennel status`` keeps showing the last known good numbers
+    rather than blanking.
+    """
+
+    def __init__(self, gh: GitHub) -> None:
+        self._gh = gh
+        self._lock = threading.Lock()
+        self._snapshot: RateLimitSnapshot | None = None
+
+    def latest(self) -> RateLimitSnapshot | None:
+        """Snapshot copy of the latest reading, or ``None`` before the
+        first successful refresh."""
+        with self._lock:
+            return self._snapshot
+
+    def refresh(self) -> RateLimitSnapshot | None:
+        """Hit ``GET /rate_limit`` and update the cached snapshot.
+
+        Returns the new snapshot on success, ``None`` on failure (the
+        prior snapshot remains in :attr:`_snapshot`).
+        """
+        try:
+            resources = self._gh.get_rate_limit()
+        except Exception:
+            log.exception("rate-limit monitor: refresh failed — keeping prior snapshot")
+            return None
+        snapshot = RateLimitSnapshot(
+            rest=_parse_window("core", resources.get("core") or {}),
+            graphql=_parse_window("graphql", resources.get("graphql") or {}),
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        with self._lock:
+            self._snapshot = snapshot
+        log.info(
+            "rate-limit: rest %d/%d, graphql %d/%d",
+            snapshot.rest.used,
+            snapshot.rest.limit,
+            snapshot.graphql.used,
+            snapshot.graphql.limit,
+        )
+        return snapshot
+
+    def start_thread(self, *, _interval: float = _REFRESH_INTERVAL) -> threading.Thread:
+        """Start a daemon thread that calls :meth:`refresh` every
+        *_interval* seconds.
+
+        Does an initial refresh inline before sleeping so ``kennel
+        status`` can show numbers as soon as the server is up.
+        """
+        self.refresh()
+
+        def _loop() -> None:
+            while True:
+                time.sleep(_interval)
+                self.refresh()
+
+        t = threading.Thread(target=_loop, daemon=True, name="rate-limit-monitor")
+        t.start()
+        return t
+
+
+def _parse_window(name: str, raw: dict[str, Any]) -> RateLimitWindow:
+    """Convert one ``resources.<name>`` entry into a :class:`RateLimitWindow`.
+
+    Defaults to ``0/0`` and the unix epoch when fields are missing — the
+    poller never raises just because GitHub omitted a field; the caller
+    will see a zero-limit window and can ignore it.
+    """
+    reset_epoch = raw.get("reset", 0)
+    try:
+        resets_at = datetime.fromtimestamp(int(reset_epoch), tz=timezone.utc)
+    except TypeError, ValueError, OverflowError, OSError:
+        resets_at = datetime.fromtimestamp(0, tz=timezone.utc)
+    return RateLimitWindow(
+        name=name,
+        used=int(raw.get("used", 0)),
+        limit=int(raw.get("limit", 0)),
+        resets_at=resets_at,
+    )
+
+
+__all__ = [
+    "RateLimitMonitor",
+    "RateLimitSnapshot",
+    "RateLimitWindow",
+]

@@ -41,12 +41,14 @@ from kennel.infra import (
     real_infra,
 )
 from kennel.provider_factory import DefaultProviderFactory
+from kennel.rate_limit import RateLimitMonitor
 from kennel.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
 from kennel.tasks import unblock_tasks
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+    ReconcileWatchdog,
     Watchdog,
 )
 from kennel.worker import RepoContextFilter, RepoNameFilter
@@ -208,6 +210,63 @@ def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
         "level": status.level,
         "warning": status.warning,
         "paused": status.paused,
+    }
+
+
+def _serialize_rate_limit(monitor: Any) -> dict[str, Any] | None:
+    """Serialize the latest :class:`~kennel.rate_limit.RateLimitSnapshot`
+    for the ``/status.json`` payload (closes #812 follow-up).
+
+    Returns ``None`` when *monitor* is missing (tests with a MagicMock
+    registry omit it) or hasn't yet completed its first refresh.
+    """
+    from kennel.rate_limit import RateLimitMonitor
+
+    if not isinstance(monitor, RateLimitMonitor):
+        return None
+    snap = monitor.latest()
+    if snap is None:
+        return None
+    return {
+        "rest": _serialize_rate_window(snap.rest),
+        "graphql": _serialize_rate_window(snap.graphql),
+        "fetched_at": snap.fetched_at.isoformat(),
+    }
+
+
+def _serialize_rate_window(window: Any) -> dict[str, Any]:
+    return {
+        "name": window.name,
+        "used": window.used,
+        "limit": window.limit,
+        "resets_at": window.resets_at.isoformat(),
+    }
+
+
+def _serialize_issue_cache(cache: Any) -> dict[str, Any] | None:
+    """Serialize an :class:`~kennel.issue_cache.IssueTreeCache` snapshot for
+    the /status.json payload (#812).  Returns ``None`` when the cache has
+    not been bootstrapped yet (or when *cache* isn't a real cache, which
+    happens in tests that hand the server a MagicMock registry) — fido
+    status hides the line in that case.
+    """
+    from kennel.issue_cache import IssueTreeCache
+
+    if not isinstance(cache, IssueTreeCache):
+        return None
+    metrics = cache.metrics()
+    return {
+        "loaded": metrics.inventory_loaded_at is not None,
+        "open_issues": metrics.open_issue_count,
+        "events_applied": metrics.events_applied,
+        "events_dropped_stale": metrics.events_dropped_stale,
+        "last_event_at": metrics.last_event_at.isoformat()
+        if metrics.last_event_at
+        else None,
+        "last_reconcile_at": metrics.last_reconcile_at.isoformat()
+        if metrics.last_reconcile_at
+        else None,
+        "last_reconcile_drift": metrics.last_reconcile_drift,
     }
 
 
@@ -420,6 +479,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
     provider_factory: DefaultProviderFactory | None = None
+    rate_limit_monitor: Any = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -515,6 +575,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(500, "dispatch error")
             return
 
+        # Patch the issue tree cache before ACK too — failure here is
+        # recoverable (hourly reconcile heals drift), so log and continue
+        # rather than 500-ing the webhook (#812).
+        try:
+            self._patch_issue_cache(event, payload, repo_cfg)
+        except Exception:
+            log.exception(
+                "issue-cache patch failed for %s — hourly reconcile will heal",
+                repo_name,
+            )
+
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")
 
@@ -527,6 +598,41 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Process in background thread so we don't block the server.
         if action:
             type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+
+    def _patch_issue_cache(
+        self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
+    ) -> None:
+        """Translate the webhook to a cache event and apply it to the
+        per-repo :class:`~kennel.issue_cache.IssueTreeCache` (#812).
+
+        No-op when the event isn't picker-relevant (translator returns
+        ``None``).  No-op also when the cache hasn't been initialized —
+        the worker thread bootstraps the cache on its first iteration,
+        and any events arriving before that get queued by the cache
+        itself and drained when the inventory load completes.
+        """
+        from kennel.cache_webhooks import translate
+
+        translation = translate(event, payload)
+        if translation is None:
+            log.debug(
+                "issue-cache[%s]: webhook %s/%s not picker-relevant — skipping",
+                repo_cfg.name,
+                event,
+                payload.get("action", "?"),
+            )
+            return
+        cache_event_type, cache_payload = translation
+        log.info(
+            "issue-cache[%s]: applying %s for #%s (from webhook %s/%s)",
+            repo_cfg.name,
+            cache_event_type,
+            cache_payload.get("issue_number"),
+            event,
+            payload.get("action", "?"),
+        )
+        cache = self.registry.get_issue_cache(repo_cfg.name)
+        cache.apply_event(cache_event_type, cache_payload)
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
@@ -798,12 +904,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
             body = _activities_to_xml(self._collect_activities())
             self._respond_body("application/xml; charset=utf-8", body)
         elif self.path == "/status.json":
-            body = json.dumps(self._collect_activities()).encode()
+            body = json.dumps(self._collect_status_payload()).encode()
             self._respond_body("application/json", body)
         elif self.path.startswith("/static/"):
             self._serve_static()
         else:
             self._respond(200, "kennel is running")
+
+    def _collect_status_payload(self) -> dict[str, Any]:
+        """Build the JSON payload for ``/status.json``.
+
+        Wraps the per-repo activity list and a global rate-limit snapshot
+        (closes #812 follow-up) under top-level keys so future global
+        signals can be added without churn — kennel status reads
+        ``activities`` and ``rate_limit`` independently.
+        """
+        return {
+            "activities": self._collect_activities(),
+            "rate_limit": _serialize_rate_limit(self.rate_limit_monitor),
+        }
 
     def _collect_activities(self) -> list[dict[str, Any]]:
         """Build the activity snapshot for all registered repos."""
@@ -853,6 +972,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         provider.get_talker(a.repo_name)
                     ),
                     "rescoping": self.registry.is_rescoping(a.repo_name),
+                    "issue_cache": _serialize_issue_cache(
+                        self.registry.get_issue_cache(a.repo_name)
+                    ),
                 }
             )
         return activities
@@ -954,6 +1076,8 @@ def run(
     _kill_active_children: Callable[..., None] = kill_active_children,
     _startup_pull: Callable[..., None] = _startup_pull,
     _Watchdog: type[Watchdog] = Watchdog,
+    _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
+    _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
     _preflight_tools: Callable[..., None] = preflight_tools,
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
@@ -1036,6 +1160,10 @@ def run(
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
+    _ReconcileWatchdog(registry, config.repos, gh).start_thread()
+    rate_limit_monitor = _RateLimitMonitor(gh)
+    rate_limit_monitor.start_thread()
+    WebhookHandler.rate_limit_monitor = rate_limit_monitor
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

@@ -239,6 +239,38 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session("foo/bar") is fake_session
 
+    # ── issue tree cache (fix #812) ──────────────────────────────────────
+
+    def test_get_issue_cache_creates_lazily(self) -> None:
+        from kennel.issue_cache import IssueTreeCache
+
+        reg, _ = self._make_registry()
+        cache = reg.get_issue_cache("foo/bar")
+        assert isinstance(cache, IssueTreeCache)
+
+    def test_get_issue_cache_returns_same_instance(self) -> None:
+        reg, _ = self._make_registry()
+        a = reg.get_issue_cache("foo/bar")
+        b = reg.get_issue_cache("foo/bar")
+        assert a is b
+
+    def test_get_issue_cache_per_repo(self) -> None:
+        reg, _ = self._make_registry()
+        a = reg.get_issue_cache("foo/bar")
+        b = reg.get_issue_cache("foo/baz")
+        assert a is not b
+
+    def test_all_issue_caches_returns_snapshot(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.all_issue_caches() == []
+        reg.get_issue_cache("a/1")
+        reg.get_issue_cache("b/2")
+        all_caches = reg.all_issue_caches()
+        assert len(all_caches) == 2
+        # Mutating the snapshot doesn't affect future calls.
+        all_caches.clear()
+        assert len(reg.all_issue_caches()) == 2
+
     def test_get_thread_crash_error_returns_thread_crash_error(
         self, tmp_path: Path
     ) -> None:
@@ -544,7 +576,9 @@ class TestMakeThread:
             session_issue=None,
             config=None,
             repo_cfg=cfg,
+            issue_cache=mock_registry.get_issue_cache.return_value,
         )
+        mock_registry.get_issue_cache.assert_called_once_with("foo/bar")
         assert result is mock_wt_cls.return_value
 
     def test_uses_repo_work_dir(self, tmp_path: Path) -> None:

@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.provider import ProviderID
 from kennel.watchdog import (
+    _RECONCILE_INTERVAL,  # noqa: PLC2701
     _STALE_THRESHOLD,  # noqa: PLC2701
+    ReconcileWatchdog,
     Watchdog,
     run,
 )
@@ -205,3 +207,97 @@ class TestModuleLevelRun:
 
     def test_returns_zero(self) -> None:
         assert run(_registry(), {"owner/repo": _repo()}) == 0
+
+
+# ── ReconcileWatchdog (closes #812) ───────────────────────────────────────────
+
+
+def _reconcile(
+    repos: dict[str, RepoConfig] | None = None,
+    *,
+    cache_loaded: bool = True,
+) -> tuple[ReconcileWatchdog, MagicMock, MagicMock, MagicMock]:
+    if repos is None:
+        repos = {"owner/repo": _repo()}
+    registry = MagicMock()
+    cache = MagicMock()
+    cache.is_loaded = cache_loaded
+    registry.get_issue_cache.return_value = cache
+    gh = MagicMock()
+    return ReconcileWatchdog(registry, repos, gh), registry, cache, gh
+
+
+class TestReconcileWatchdogRun:
+    def test_returns_zero(self) -> None:
+        rw, _registry, _cache, gh = _reconcile(cache_loaded=False)
+        assert rw.run() == 0
+        gh.find_all_open_issues.assert_not_called()
+
+    def test_skips_repo_when_cache_not_loaded(self) -> None:
+        rw, _registry, cache, gh = _reconcile(cache_loaded=False)
+        rw.run()
+        gh.find_all_open_issues.assert_not_called()
+        cache.reconcile_with_inventory.assert_not_called()
+
+    def test_reconciles_loaded_cache(self) -> None:
+        rw, _registry, cache, gh = _reconcile()
+        gh.find_all_open_issues.return_value = [{"number": 1}]
+        cache.reconcile_with_inventory.return_value = 0
+        rw.run()
+        gh.find_all_open_issues.assert_called_once_with("owner", "repo")
+        cache.reconcile_with_inventory.assert_called_once()
+        args, kwargs = cache.reconcile_with_inventory.call_args
+        assert args[0] == [{"number": 1}]
+        assert "snapshot_started_at" in kwargs
+
+    def test_continues_to_next_repo_when_inventory_call_raises(self) -> None:
+        repo_a = _repo("org/a")
+        repo_b = _repo("org/b")
+        rw, _registry, cache, gh = _reconcile({"org/a": repo_a, "org/b": repo_b})
+
+        def side_effect(owner: str, _name: str) -> list:
+            if owner == "org" and _name == "a":
+                raise RuntimeError("rate limited")
+            return [{"number": 9}]
+
+        gh.find_all_open_issues.side_effect = side_effect
+        rw.run()
+        # b succeeded even though a raised
+        cache.reconcile_with_inventory.assert_called_once()
+
+    def test_handles_multiple_repos_independently(self) -> None:
+        repo_a = _repo("org/a")
+        repo_b = _repo("org/b")
+        rw, _registry, cache, gh = _reconcile({"org/a": repo_a, "org/b": repo_b})
+        gh.find_all_open_issues.return_value = []
+        cache.reconcile_with_inventory.return_value = 0
+        rw.run()
+        assert gh.find_all_open_issues.call_count == 2
+
+
+class TestReconcileWatchdogStartThread:
+    def test_returns_daemon_thread(self) -> None:
+        rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
+        t = rw.start_thread(_interval=60.0)
+        assert t.daemon
+
+    def test_thread_name_is_reconcile_watchdog(self) -> None:
+        rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
+        t = rw.start_thread(_interval=60.0)
+        assert t.name == "reconcile-watchdog"
+
+    def test_thread_is_alive(self) -> None:
+        rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
+        t = rw.start_thread(_interval=60.0)
+        assert t.is_alive()
+
+    def test_calls_run_periodically(self) -> None:
+        rw, registry, _cache, _gh = _reconcile(cache_loaded=False)
+        rw.start_thread(_interval=0.01)
+        time.sleep(0.1)
+        registry.get_issue_cache.assert_called()
+
+
+class TestReconcileInterval:
+    def test_default_interval_is_one_hour(self) -> None:
+        assert _RECONCILE_INTERVAL == 3600.0

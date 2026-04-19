@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from kennel.github import GitHub
+from kennel.issue_cache import IssueTreeCache
 from kennel.worker import Worker
 
 
@@ -25,7 +26,7 @@ def _init_repo(tmp_path: Path) -> None:
 
 def _worker(tmp_path: Path) -> Worker:
     gh = MagicMock(spec=GitHub)
-    return Worker(tmp_path, gh)
+    return Worker(tmp_path, gh, issue_cache=IssueTreeCache("test/repo"))
 
 
 def _head(tmp_path: Path) -> str:

@@ -8,11 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from kennel.github import GitHub
+from kennel.issue_cache import IssueTreeCache
 from kennel.worker import WorkerThread
 
 
 def _make_thread(tmp_path: Path, **kwargs) -> WorkerThread:
     gh = MagicMock(spec=GitHub)
+    kwargs.setdefault("issue_cache", IssueTreeCache("owner/repo"))
     return WorkerThread(
         tmp_path,
         "owner/repo",

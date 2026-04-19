@@ -22,6 +22,7 @@ from kennel.color import (
     MAGENTA,
     RED,
     RED_BOLD,
+    YELLOW,
     YELLOW_BG,
     color,
     color_enabled,
@@ -66,6 +67,45 @@ class ClaudeTalkerInfo:
 
 
 @dataclass
+class RateLimitWindowInfo:
+    """One ``/rate_limit`` resource window for ``kennel status`` display."""
+
+    name: str
+    used: int
+    limit: int
+    resets_at: datetime
+
+
+@dataclass
+class RateLimitInfo:
+    """Latest GitHub rate-limit snapshot for ``kennel status`` display
+    (closes #812 follow-up)."""
+
+    rest: RateLimitWindowInfo
+    graphql: RateLimitWindowInfo
+    fetched_at: datetime
+
+
+@dataclass
+class IssueCacheInfo:
+    """Snapshot of the per-repo issue tree cache for ``kennel status`` display
+    (closes #812).
+
+    Mirrors the fields on :class:`~kennel.issue_cache.CacheMetrics` but
+    keeps display-only here so the status module does not depend on the
+    cache module's class identity.
+    """
+
+    loaded: bool
+    open_issues: int
+    events_applied: int
+    events_dropped_stale: int
+    last_event_at: datetime | None
+    last_reconcile_at: datetime | None
+    last_reconcile_drift: int
+
+
+@dataclass
 class RepoStatus:
     name: str
     fido_running: bool
@@ -95,6 +135,7 @@ class RepoStatus:
     session_dropped_count: int = 0
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
+    issue_cache: IssueCacheInfo | None = None
 
 
 @dataclass
@@ -103,6 +144,7 @@ class KennelStatus:
     kennel_uptime: int | None  # seconds
     repos: list[RepoStatus]
     provider_statuses: list[ProviderPressureStatus] = field(default_factory=list)
+    rate_limit: RateLimitInfo | None = None
 
 
 def _format_uptime(seconds: int) -> str:
@@ -291,6 +333,31 @@ def _parse_provider_status(raw: object) -> ProviderPressureStatus | None:
     )
 
 
+def _parse_iso_datetime(raw: object) -> datetime | None:
+    """Parse an ISO-8601 string into a tz-aware datetime, or ``None``."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _parse_issue_cache(raw: object) -> IssueCacheInfo | None:
+    """Parse one serialized issue-cache record from /status.json (#812)."""
+    if not isinstance(raw, dict):
+        return None
+    return IssueCacheInfo(
+        loaded=bool(raw.get("loaded", False)),
+        open_issues=int(raw.get("open_issues", 0)),
+        events_applied=int(raw.get("events_applied", 0)),
+        events_dropped_stale=int(raw.get("events_dropped_stale", 0)),
+        last_event_at=_parse_iso_datetime(raw.get("last_event_at")),
+        last_reconcile_at=_parse_iso_datetime(raw.get("last_reconcile_at")),
+        last_reconcile_drift=int(raw.get("last_reconcile_drift", 0)),
+    )
+
+
 def _port_from_pid(pid: int) -> int | None:
     """Extract the --port value from kennel's /proc/<pid>/cmdline, or None."""
     try:
@@ -309,12 +376,19 @@ def _port_from_pid(pid: int) -> int | None:
 
 def _fetch_activities(
     port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
-) -> dict[str, dict[str, Any]]:
-    """Query GET /status.json for live worker activity and provider pressure."""
+) -> tuple[dict[str, dict[str, Any]], RateLimitInfo | None]:
+    """Query GET /status.json for live worker activity, provider pressure,
+    and the global GitHub rate-limit snapshot (closes #812 follow-up).
+
+    Returns ``({}, None)`` on any fetch/parse failure — ``kennel status``
+    treats empty as "kennel down" and renders accordingly.
+    """
     try:
         with _urlopen(f"http://localhost:{port}/status.json", timeout=2) as resp:
             data = json.loads(resp.read())
-        return {
+        activities_raw = data.get("activities", [])
+        rate_limit_raw = data.get("rate_limit")
+        activities = {
             item["repo_name"]: {
                 "what": item["what"],
                 "crash_count": item["crash_count"],
@@ -329,12 +403,45 @@ def _fetch_activities(
                 "claude_talker": item.get("claude_talker"),
                 "provider_status": _parse_provider_status(item.get("provider_status")),
                 "rescoping": item.get("rescoping", False),
+                "issue_cache": item.get("issue_cache"),
             }
-            for item in data
+            for item in activities_raw
             if "repo_name" in item and "what" in item
         }
+        return activities, _parse_rate_limit(rate_limit_raw)
     except Exception:  # noqa: BLE001
-        return {}
+        return {}, None
+
+
+def _parse_rate_limit(raw: object) -> RateLimitInfo | None:
+    """Parse the ``rate_limit`` field from /status.json into a
+    :class:`RateLimitInfo`, or ``None`` when missing/malformed."""
+    if not isinstance(raw, dict):
+        return None
+    rest_raw = raw.get("rest")
+    graphql_raw = raw.get("graphql")
+    fetched_at = _parse_iso_datetime(raw.get("fetched_at"))
+    if not isinstance(rest_raw, dict) or not isinstance(graphql_raw, dict):
+        return None
+    if fetched_at is None:
+        return None
+    return RateLimitInfo(
+        rest=_parse_rate_window(rest_raw),
+        graphql=_parse_rate_window(graphql_raw),
+        fetched_at=fetched_at,
+    )
+
+
+def _parse_rate_window(raw: dict[str, Any]) -> RateLimitWindowInfo:
+    resets_at = _parse_iso_datetime(raw.get("resets_at"))
+    if resets_at is None:
+        resets_at = datetime.fromtimestamp(0, tz=timezone.utc)
+    return RateLimitWindowInfo(
+        name=str(raw.get("name", "")),
+        used=int(raw.get("used", 0)),
+        limit=int(raw.get("limit", 0)),
+        resets_at=resets_at,
+    )
 
 
 def _claude_pid(fido_dir: Path) -> int | None:
@@ -449,6 +556,7 @@ def repo_status(
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
+    issue_cache: IssueCacheInfo | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -482,6 +590,7 @@ def repo_status(
             session_dropped_count=session_dropped_count,
             claude_talker=claude_talker,
             rescoping=rescoping,
+            issue_cache=issue_cache,
         )
 
     fido_dir = git_dir / "fido"
@@ -537,6 +646,7 @@ def repo_status(
         session_dropped_count=session_dropped_count,
         claude_talker=claude_talker,
         rescoping=rescoping,
+        issue_cache=issue_cache,
     )
 
 
@@ -547,10 +657,11 @@ def collect() -> KennelStatus:
     repo_configs = _repos_from_pid(pid) if pid is not None else []
 
     activities: dict[str, Any] = {}
+    rate_limit_info: RateLimitInfo | None = None
     if pid is not None:
         port = _port_from_pid(pid)
         if port is not None:
-            activities = _fetch_activities(port)
+            activities, rate_limit_info = _fetch_activities(port)
 
     provider_statuses: dict[ProviderID, ProviderPressureStatus] = {}
     repos = []
@@ -581,6 +692,7 @@ def collect() -> KennelStatus:
                 )
             sp = info.get("session_pid")
             session_pid_val = int(sp) if sp is not None else None
+        cache_info = _parse_issue_cache(info.get("issue_cache")) if info else None
         provider_status = info.get("provider_status") if info else None
         if (
             isinstance(provider_status, ProviderPressureStatus)
@@ -605,6 +717,7 @@ def collect() -> KennelStatus:
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
+                issue_cache=cache_info,
             )
         )
     return KennelStatus(
@@ -612,6 +725,7 @@ def collect() -> KennelStatus:
         kennel_uptime=uptime,
         repos=repos,
         provider_statuses=list(provider_statuses.values()),
+        rate_limit=rate_limit_info,
     )
 
 
@@ -661,6 +775,83 @@ def _format_agent_line(repo: RepoStatus) -> str | None:
 def _format_reset_at(resets_at: datetime) -> str:
     """Format provider reset times in a compact UTC form."""
     return resets_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_duration_until(target: datetime, *, now: datetime | None = None) -> str:
+    """Render the gap between *now* and *target* as a compact ``Xh Ym`` /
+    ``Ym`` / ``Ns`` string (closes #812 follow-up).
+
+    Past times render as ``now`` — rate-limit windows that already reset
+    aren't worth a negative-duration display.
+    """
+    current = now if now is not None else datetime.now(tz=timezone.utc)
+    delta = (target - current).total_seconds()
+    if delta <= 0:
+        return "now"
+    return _format_uptime(int(delta))
+
+
+def _rate_limit_color(window: RateLimitWindowInfo) -> str:
+    """Pick a color style for a rate-limit window (closes #812 follow-up).
+
+    - Red when ≤ 5% remaining (danger — about to be throttled).
+    - Yellow when ≤ 25% remaining (orange-ish in most terminals).
+    - DIM otherwise (steady state, no warning needed).
+    """
+    pct_remaining = (
+        100.0 * max(window.limit - window.used, 0) / window.limit
+        if window.limit > 0
+        else 0.0
+    )
+    if pct_remaining <= 5.0:
+        return RED_BOLD
+    if pct_remaining <= 25.0:
+        return YELLOW
+    return DIM
+
+
+def _format_rate_limit_window(window: RateLimitWindowInfo, label: str) -> str:
+    """Format one rate-limit window as ``LABEL used/limit (Xh Ym to reset)``
+    with color coding by remaining percentage."""
+    style = _rate_limit_color(window)
+    rest_str = f"{window.used}/{window.limit}"
+    reset_str = _format_duration_until(window.resets_at)
+    body = f"{label} {rest_str} ({reset_str} to reset)"
+    return color(style, body)
+
+
+def _format_rate_limit_line(rate_limit: RateLimitInfo | None) -> str | None:
+    """Top-of-status one-liner for the GitHub rate-limit snapshot.
+
+    Hidden when the monitor hasn't yet completed its first refresh —
+    avoids showing an empty placeholder during the few seconds between
+    kennel boot and the first poll.
+    """
+    if rate_limit is None:
+        return None
+    rest_part = _format_rate_limit_window(rate_limit.rest, "REST")
+    gql_part = _format_rate_limit_window(rate_limit.graphql, "GraphQL")
+    label = color(BOLD, "GitHub:")
+    return f"{label} {rest_part}, {gql_part}"
+
+
+def _format_cache_line(repo: RepoStatus) -> str | None:
+    """One-line picker-cache summary (#812).
+
+    Hidden when the cache hasn't been bootstrapped — the line would just
+    be noise for a repo that hasn't run a worker iteration yet.
+    """
+    cache = repo.issue_cache
+    if cache is None or not cache.loaded:
+        return None
+    parts: list[str] = [color(DIM, f"{cache.open_issues} open")]
+    parts.append(color(DIM, f"applied {cache.events_applied}"))
+    if cache.events_dropped_stale:
+        parts.append(color(DIM, f"stale-dropped {cache.events_dropped_stale}"))
+    if cache.last_reconcile_at is not None:
+        parts.append(color(DIM, f"reconciled drift {cache.last_reconcile_drift}"))
+    label = color(BOLD, "Cache:")
+    return f"  {label}  {', '.join(parts)}"
 
 
 def _worker_is_agent_talker(repo: RepoStatus) -> bool:
@@ -784,6 +975,10 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
     agent_line = _format_agent_line(repo)
     if agent_line is not None:
         body.append(agent_line)
+
+    cache_line = _format_cache_line(repo)
+    if cache_line is not None:
+        body.append(cache_line)
 
     if repo.issue is None:
         body.append("  no assigned issues")
@@ -926,6 +1121,10 @@ def format_status(status: KennelStatus) -> str:
     provider_summary = _format_provider_summary_line(status.provider_statuses)
     if provider_summary is not None:
         lines.append(provider_summary)
+
+    rate_limit_line = _format_rate_limit_line(status.rate_limit)
+    if rate_limit_line is not None:
+        lines.append(rate_limit_line)
 
     for repo in status.repos:
         section = [_format_repo_header(repo), *_format_repo_body(repo)]
