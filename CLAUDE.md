@@ -603,8 +603,24 @@ broader lesson, a small moment that resonated — **file an issue** titled
 2–3 sentences of why it mattered, and any references (PRs, commits, code
 pointers).
 
+**Three hard rules:**
+
+- **Always file against `FidoCanCode/home`** — even when the current work is in
+  another repo (e.g. `rhencke/confusio`). That is the canonical home for these.
+- **Always include source links** — the body must link to the PR and/or issue
+  where the insight arose, so the context is never lost.
+- **Always use the `insight` label** — it is how the journal workflow finds them.
+
 ```bash
-gh issue create --title "Insight: <topic>" --label insight --body "<body>"
+gh issue create \
+  --repo FidoCanCode/home \
+  --title "Insight: <topic>" \
+  --label insight \
+  --body "<hook sentence>
+
+<2–3 sentences of why it mattered>
+
+Source: <owner>/<repo>#<issue-or-PR-number>"
 ```
 
 Insight issues are not required. The absence of one is the normal case. File
