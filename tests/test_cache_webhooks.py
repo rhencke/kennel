@@ -373,28 +373,41 @@ class TestSubIssuesEvent:
     def test_returns_none_for_unknown_action(self) -> None:
         assert translate("sub_issues", _sub_issues_payload("nonsense")) is None
 
-    def test_falls_back_through_timestamp_sources(self) -> None:
-        """When parent.updated_at is absent the translator falls back to
-        sub.updated_at, then parent.created_at."""
+    def test_timestamp_is_now_not_payload_updated_at(self) -> None:
+        """Sub-issue relationship mutations don't bump either end's
+        ``updated_at``; using that field caused the cache to drop legit
+        mutations as stale (#819).  Translator must use ``now()`` so the
+        cache's last_applied_at monotonicity check accepts them."""
         payload: dict[str, object] = {
             "action": "sub_issue_added",
-            "parent_issue": {"number": 1, "created_at": "2026-04-15T00:00:00Z"},
-            "sub_issue": {"number": 2, "updated_at": "2026-04-19T01:00:00Z"},
+            "parent_issue": {
+                "number": 1,
+                "updated_at": "2020-01-01T00:00:00Z",
+                "created_at": "2020-01-01T00:00:00Z",
+            },
+            "sub_issue": {
+                "number": 2,
+                "updated_at": "2020-01-01T00:00:00Z",
+                "created_at": "2020-01-01T00:00:00Z",
+            },
         }
+        before = datetime.now(tz=timezone.utc)
         result = translate("sub_issues", payload)
+        after = datetime.now(tz=timezone.utc)
         assert result is not None
-        assert result[1]["timestamp"] == datetime(
-            2026, 4, 19, 1, 0, 0, tzinfo=timezone.utc
-        )
+        ts = result[1]["timestamp"]
+        assert isinstance(ts, datetime)
+        assert before <= ts <= after
 
-    def test_falls_back_to_parent_created_at_when_no_updated_at(self) -> None:
+    def test_timestamp_works_without_any_issue_timestamps(self) -> None:
+        """Payload with no updated_at / created_at on either end must
+        still produce a usable timestamp (closes #819)."""
         payload: dict[str, object] = {
-            "action": "sub_issue_added",
-            "parent_issue": {"number": 1, "created_at": "2026-04-15T00:00:00Z"},
-            "sub_issue": {"number": 2, "created_at": "2026-04-15T00:00:00Z"},
+            "action": "sub_issue_removed",
+            "parent_issue": {"number": 1},
+            "sub_issue": {"number": 2},
         }
         result = translate("sub_issues", payload)
         assert result is not None
-        assert result[1]["timestamp"] == datetime(
-            2026, 4, 15, 0, 0, 0, tzinfo=timezone.utc
-        )
+        assert isinstance(result[1]["timestamp"], datetime)
+        assert result[1]["timestamp"].tzinfo is not None
