@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import hmac
 import json
@@ -43,9 +44,10 @@ from kennel.infra import (
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.rate_limit import RateLimitMonitor
 from kennel.registry import WebhookActivityHandle, WorkerRegistry, make_registry
+from kennel.state import State
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
-from kennel.tasks import unblock_tasks
+from kennel.tasks import Tasks, unblock_tasks
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     ReconcileWatchdog,
@@ -135,8 +137,8 @@ def _repo_status(act: dict[str, Any]) -> str:
     return act.get("what") or "waiting"
 
 
-def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
-    """Serialize activity dicts to namespaced structural XML with an XSLT PI.
+def _activities_to_xml(payload: dict[str, Any]) -> bytes:
+    """Serialize the full status payload to namespaced structural XML with an XSLT PI.
 
     Pure function — transforms data, no I/O.  The server emits this structural
     XML in the ``https://fidocancode.dog/kennel`` namespace.  The browser
@@ -145,9 +147,33 @@ def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
     is then styled by ``status.css`` via a CSS processing instruction.
 
     Three-layer pipeline: structural XML → XSLT → display XML → CSS.
+
+    The root ``<kennel>`` element carries kennel-level metadata (uptime, rate
+    limits) before the per-repo ``<repo>`` children so XSLT can render a
+    dashboard header without reaching into any individual repo card.
     """
     root = Element(f"{{{_NS_KENNEL}}}kennel")
-    for act in activities:
+
+    # Kennel-level metadata — emitted before per-repo elements.
+    kennel_uptime = payload.get("kennel_uptime_seconds")
+    if kennel_uptime is not None:
+        el = SubElement(root, f"{{{_NS_KENNEL}}}kennel_uptime_seconds")
+        el.text = _xml_text(kennel_uptime)
+
+    rate_limit = payload.get("rate_limit")
+    if rate_limit is not None:
+        rl_el = SubElement(root, f"{{{_NS_KENNEL}}}rate_limit")
+        for rl_key, rl_val in rate_limit.items():
+            if isinstance(rl_val, dict):
+                child_el = SubElement(rl_el, f"{{{_NS_KENNEL}}}{rl_key}")
+                for k, v in rl_val.items():
+                    sub_el = SubElement(child_el, f"{{{_NS_KENNEL}}}{k}")
+                    sub_el.text = _xml_text(v)
+            else:
+                child_el = SubElement(rl_el, f"{{{_NS_KENNEL}}}{rl_key}")
+                child_el.text = _xml_text(rl_val)
+
+    for act in payload.get("activities", []):
         repo = SubElement(root, f"{{{_NS_KENNEL}}}repo")
         repo.set(f"{{{_NS_DOG}}}status", _repo_status(act))
         for key, value in act.items():
@@ -170,6 +196,12 @@ def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
                     for pk, pv in value.items():
                         el = SubElement(ps_el, f"{{{_NS_KENNEL}}}{pk}")
                         el.text = _xml_text(pv)
+            elif key == "issue_cache":
+                ic_el = SubElement(repo, f"{{{_NS_KENNEL}}}issue_cache")
+                if value is not None:
+                    for ik, iv in value.items():
+                        el = SubElement(ic_el, f"{{{_NS_KENNEL}}}{ik}")
+                        el.text = _xml_text(iv)
             else:
                 el = SubElement(repo, f"{{{_NS_KENNEL}}}{key}")
                 el.text = _xml_text(value)
@@ -267,6 +299,96 @@ def _serialize_issue_cache(cache: Any) -> dict[str, Any] | None:
         if metrics.last_reconcile_at
         else None,
         "last_reconcile_drift": metrics.last_reconcile_drift,
+    }
+
+
+def _collect_fido_state(work_dir: Path, now: datetime) -> dict[str, Any]:
+    """Read fido filesystem state (issue, PR, tasks, lock) for the status endpoint.
+
+    Best-effort: returns safe defaults on any I/O or parse error so that a
+    missing or partially-written state file never breaks the status endpoint.
+    """
+    fido_dir = work_dir / ".git" / "fido"
+
+    # Check whether the fido sub-process lock is held.
+    fido_running = False
+    lock_path = fido_dir / "lock"
+    if lock_path.exists():
+        try:
+            fd = open(lock_path)  # noqa: SIM115
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BlockingIOError:
+                fido_running = True
+            finally:
+                fd.close()
+        except OSError:
+            pass
+
+    # Load state.json (issue / PR metadata).
+    try:
+        state = State(fido_dir).load()
+    except Exception:  # noqa: BLE001
+        log.warning("_collect_fido_state: failed to load state for %s", work_dir)
+        state = {}
+    issue: int | None = state.get("issue")
+    issue_title: str | None = state.get("issue_title")
+    issue_elapsed_seconds: int | None = None
+    issue_started_at: str | None = state.get("issue_started_at")
+    if issue_started_at:
+        try:
+            started = datetime.fromisoformat(issue_started_at)
+            issue_elapsed_seconds = max(0, int((now - started).total_seconds()))
+        except TypeError, ValueError:
+            pass
+    pr_number: int | None = state.get("pr_number")
+    pr_title: str | None = state.get("pr_title")
+
+    # Load tasks.json.
+    try:
+        task_list = Tasks(work_dir).list()
+    except Exception:  # noqa: BLE001
+        log.warning("_collect_fido_state: failed to load tasks for %s", work_dir)
+        task_list = []
+    pending = sum(1 for t in task_list if t.get("status") == "pending")
+    completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+    current_task: str | None = None
+    for t in task_list:
+        if t.get("status") == "in_progress":
+            current_task = t.get("title")
+            break
+    if current_task is None:
+        for t in task_list:
+            if t.get("status") == "pending":
+                current_task = t.get("title")
+                break
+
+    non_completed = [t for t in task_list if t.get("status") != "completed"]
+    task_number: int | None = None
+    task_total: int | None = None
+    if non_completed:
+        task_total = len(non_completed)
+        for idx, t in enumerate(non_completed, start=1):
+            if t.get("status") == "in_progress":
+                task_number = idx
+                break
+        if task_number is None:
+            task_number = 1
+
+    return {
+        "fido_running": fido_running,
+        "issue": issue,
+        "issue_title": issue_title,
+        "issue_elapsed_seconds": issue_elapsed_seconds,
+        "pr_number": pr_number,
+        "pr_title": pr_title,
+        "pending": pending,
+        "completed": completed,
+        "current_task": current_task,
+        "task_number": task_number,
+        "task_total": task_total,
     }
 
 
@@ -480,6 +602,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     registry: WorkerRegistry
     provider_factory: DefaultProviderFactory | None = None
     rate_limit_monitor: Any = None
+    # Set by run() to record when the server came up, used for kennel uptime.
+    kennel_started_at: datetime | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -912,7 +1036,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/status":
-            body = _activities_to_xml(self._collect_activities())
+            body = _activities_to_xml(self._collect_status_payload())
             self._respond_body("application/xml; charset=utf-8", body)
         elif self.path == "/status.json":
             body = json.dumps(self._collect_status_payload()).encode()
@@ -923,16 +1047,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(200, "kennel is running")
 
     def _collect_status_payload(self) -> dict[str, Any]:
-        """Build the JSON payload for ``/status.json``.
+        """Build the status payload shared by ``/status.json`` and ``/status`` XML.
 
-        Wraps the per-repo activity list and a global rate-limit snapshot
-        (closes #812 follow-up) under top-level keys so future global
-        signals can be added without churn — kennel status reads
-        ``activities`` and ``rate_limit`` independently.
+        Wraps the per-repo activity list, a global rate-limit snapshot, and
+        kennel-level metadata (uptime) under top-level keys.  Both endpoints
+        call this method so they always render the same data.
         """
+        now = datetime.now(tz=timezone.utc)
+        started = self.kennel_started_at
+        kennel_uptime = (now - started).total_seconds() if started is not None else None
         return {
             "activities": self._collect_activities(),
             "rate_limit": _serialize_rate_limit(self.rate_limit_monitor),
+            "kennel_uptime_seconds": kennel_uptime,
         }
 
     def _collect_activities(self) -> list[dict[str, Any]]:
@@ -959,6 +1086,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 }
                 for w in self.registry.get_webhook_activities(a.repo_name)
             ]
+            fido_state = (
+                _collect_fido_state(repo_cfg.work_dir, now)
+                if repo_cfg is not None
+                else {
+                    "fido_running": False,
+                    "issue": None,
+                    "issue_title": None,
+                    "issue_elapsed_seconds": None,
+                    "pr_number": None,
+                    "pr_title": None,
+                    "pending": 0,
+                    "completed": 0,
+                    "current_task": None,
+                    "task_number": None,
+                    "task_total": None,
+                }
+            )
             activities.append(
                 {
                     "repo_name": a.repo_name,
@@ -986,6 +1130,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "issue_cache": _serialize_issue_cache(
                         self.registry.get_issue_cache(a.repo_name)
                     ),
+                    **fido_state,
                 }
             )
         return activities
@@ -1214,6 +1359,7 @@ def run(
     rate_limit_monitor = _RateLimitMonitor(gh)
     rate_limit_monitor.start_thread()
     WebhookHandler.rate_limit_monitor = rate_limit_monitor
+    WebhookHandler.kennel_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 
