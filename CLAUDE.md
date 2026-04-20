@@ -640,7 +640,7 @@ make docker-test   # run the full suite inside the CI Docker image
 `make docker-build` rebuilds the Docker image locally (needed after Dockerfile changes).
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/check_*.py`; `uv run tests` is the
+tests under `rocq-python-extraction/test/test_*.py`; `uv run tests` is the
 canonical assertion path.  `make test` is only the Rocq-side build.
 
 ### Building

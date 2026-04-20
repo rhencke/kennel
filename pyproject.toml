@@ -33,7 +33,7 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "rocq-python-extraction/test"]
 addopts = "-n auto"
-python_files = ["test_*.py", "check_*.py"]
+python_files = ["test_*.py"]
 
 [tool.coverage.run]
 source = ["kennel", "rocq-python-extraction/test"]
@@ -41,7 +41,7 @@ source = ["kennel", "rocq-python-extraction/test"]
 # Docker-backed CI build, not by the Python test suite.
 omit = [
     "kennel/models_generated/*",
-    "rocq-python-extraction/test/check_support.py",
+    "rocq-python-extraction/test/test_support.py",
     "rocq-python-extraction/test/conftest.py",
     "rocq-python-extraction/test/pyright_*.py",
 ]

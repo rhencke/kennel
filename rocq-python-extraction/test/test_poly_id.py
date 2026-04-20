@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 from pathlib import Path
 
-from check_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath, run_as_script
 
 build_default = add_build_default_to_syspath()
 
