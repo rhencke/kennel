@@ -1,5 +1,5 @@
 (** Rocq → Python extraction backend.
-    Phase 2: expression printer — all [ml_ast] nodes.
+    MiniML printer for extracted Python modules.
 
     Target: Python 3.14t (free-threaded build, no GIL).
     Generated code uses [match]/[case] (3.10+), PEP 604 union syntax (3.10+),

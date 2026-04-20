@@ -660,6 +660,6 @@ style of `python.ml` and `g_python_extraction.mlg`).
 |------|---------|
 | `python.ml` | The extraction backend — MiniML → Python pretty-printer |
 | `g_python_extraction.mlg` | Vernacular registration (`Python Extraction`) |
-| `test/phase*.v` | Acceptance tests; each phase covers one IR feature |
+| `test/python.v` + `test/*.v` feature files | Acceptance tests; `python.v` is the umbrella entrypoint over feature-scoped theories |
 | `Dockerfile` | CI image — OCaml + Rocq + Python 3.14t via uv |
 | `DESIGN.md` | Full MiniML → Python mapping contract |
