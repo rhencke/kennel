@@ -43,6 +43,7 @@ class Config:
     allowed_bots: frozenset[str]
     log_level: str
     sub_dir: Path  # path to sub/ skill files
+    no_startup_pull: bool = False
 
     @classmethod
     def from_args(cls, argv: list[str] | None = None) -> Config:
@@ -67,6 +68,11 @@ class Config:
             "--log-level",
             default="DEBUG",
             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        )
+        parser.add_argument(
+            "--no-startup-pull",
+            action="store_true",
+            help="Do not sync the runner clone from origin/main on startup",
         )
         parser.add_argument(
             "repos",
@@ -114,4 +120,5 @@ class Config:
             ),
             log_level=args.log_level.upper(),
             sub_dir=Path(__file__).resolve().parent.parent / "sub",
+            no_startup_pull=args.no_startup_pull,
         )
