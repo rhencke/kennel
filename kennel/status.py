@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import subprocess
 import urllib.request
 from collections.abc import Callable
@@ -40,6 +41,8 @@ from kennel.provider import (
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import State
 from kennel.tasks import Tasks
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
