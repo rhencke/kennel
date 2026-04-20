@@ -1,14 +1,9 @@
-# ruff: noqa: E402
 import inspect
-
-from test_support import add_build_default_to_syspath
-
-build_default = add_build_default_to_syspath()
 
 from wf_countdown import wf_countdown
 
 
-def test_wf_countdown_round_trip() -> None:
+def test_wf_countdown_round_trip(build_default) -> None:
     assert wf_countdown(0) == 0, "wf_countdown(0): got " + repr(wf_countdown(0))
     assert wf_countdown(1) == 1, "wf_countdown(1): got " + repr(wf_countdown(1))
     assert wf_countdown(4) == 4, "wf_countdown(4): got " + repr(wf_countdown(4))

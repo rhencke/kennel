@@ -1,9 +1,4 @@
-# ruff: noqa: E402
 from itertools import islice
-
-from test_support import add_build_default_to_syspath
-
-add_build_default_to_syspath()
 
 from repeat_tree import CNode, coforce, repeat_tree
 from repeat_tree import O as TreeO

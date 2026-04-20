@@ -14,5 +14,6 @@ From PyExtractTest Require Export
   polymorphism
   universe_erasure
   prop_set_discipline
+  monads
   coinductives
   modules.

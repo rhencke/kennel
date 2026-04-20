@@ -41,7 +41,6 @@ source = ["kennel", "rocq-python-extraction/test"]
 # Docker-backed CI build, not by the Python test suite.
 omit = [
     "kennel/models_generated/*",
-    "rocq-python-extraction/test/test_support.py",
     "rocq-python-extraction/test/conftest.py",
     "rocq-python-extraction/test/pyright_*.py",
 ]

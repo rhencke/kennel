@@ -51,7 +51,8 @@ if [ -n "$OUT_DIR" ]; then
   CID=$(
     docker create -v "$PWD:/src:ro" rocq-python-extraction:ci \
       bash -euo pipefail -c '
-        cp -r /src /tmp/work
+        mkdir -p /tmp/work
+        tar -C /src --exclude=.git --exclude=.ruff_cache --exclude=.pytest_cache -cf - . | tar -C /tmp/work -xf -
         chmod -R u+w /tmp/work
         if [ "$1" = 0 ]; then
           rm -f /tmp/work/dune-workspace
@@ -74,7 +75,8 @@ if [ -n "$OUT_DIR" ]; then
 else
   docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
     bash -euo pipefail -c '
-      cp -r /src /tmp/work
+      mkdir -p /tmp/work
+      tar -C /src --exclude=.git --exclude=.ruff_cache --exclude=.pytest_cache -cf - . | tar -C /tmp/work -xf -
       chmod -R u+w /tmp/work
       if [ "$1" = 0 ]; then
         rm -f /tmp/work/dune-workspace

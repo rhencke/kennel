@@ -54,14 +54,60 @@ let preamble _state _name comment _used_modules _safe =
   str "# pyright: reportUnusedImport=false, reportUnusedVariable=false, reportUnknownLambdaType=false, reportRedeclaration=false" ++ fnl () ++
   str "from itertools import islice" ++ fnl () ++
   str "from dataclasses import dataclass" ++ fnl () ++
-  str "from typing import Any, Callable, Generic, Iterable, Iterator, Never, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
+  str "from typing import Any, Awaitable, Callable, Generic, Iterable, Iterator, Never, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
   str "_CoForceT = TypeVar(\"_CoForceT\")" ++ fnl () ++
   str "_ModuleArgT = TypeVar(\"_ModuleArgT\")" ++ fnl () ++
   str "_ModuleRetT = TypeVar(\"_ModuleRetT\")" ++ fnl () ++
+  str "_StateTState = TypeVar(\"_StateTState\")" ++ fnl () ++
+  str "_StateTValue = TypeVar(\"_StateTValue\")" ++ fnl () ++
+  str "_StateTNext = TypeVar(\"_StateTNext\")" ++ fnl () ++
+  str "_IOValue = TypeVar(\"_IOValue\")" ++ fnl () ++
+  str "_IONext = TypeVar(\"_IONext\")" ++ fnl () ++
   str "class _Impossible(RuntimeError):" ++ fnl () ++
   str "    pass" ++ fnl () ++
   str "def _impossible() -> Never:" ++ fnl () ++
   str "    raise _Impossible()" ++ fnl () ++
+  str "class StateT(Generic[_StateTState, _StateTValue]):" ++ fnl () ++
+  str "    def __init__(self, step: Callable[[_StateTState], tuple[_StateTValue, _StateTState]], state: _StateTState | None = None) -> None:" ++ fnl () ++
+  str "        self._step = step" ++ fnl () ++
+  str "        self.state = state" ++ fnl () ++
+  str "    def run(self, state: _StateTState) -> _StateTValue:" ++ fnl () ++
+  str "        value, next_state = self._step(state)" ++ fnl () ++
+  str "        self.state = next_state" ++ fnl () ++
+  str "        return value" ++ fnl () ++
+  str "    def run_with_state(self, state: _StateTState) -> tuple[_StateTValue, _StateTState]:" ++ fnl () ++
+  str "        result = self._step(state)" ++ fnl () ++
+  str "        self.state = result[1]" ++ fnl () ++
+  str "        return result" ++ fnl () ++
+  str "    def bind(self, f: Callable[[_StateTValue], StateT[_StateTState, _StateTNext]]) -> StateT[_StateTState, _StateTNext]:" ++ fnl () ++
+  str "        def run_bound(state: _StateTState) -> tuple[_StateTNext, _StateTState]:" ++ fnl () ++
+  str "            value, next_state = self._step(state)" ++ fnl () ++
+  str "            return f(value).run_with_state(next_state)" ++ fnl () ++
+  str "        return StateT(run_bound, self.state)" ++ fnl () ++
+  str "    @classmethod" ++ fnl () ++
+  str "    def pure(cls, value: _StateTValue) -> StateT[_StateTState, _StateTValue]:" ++ fnl () ++
+  str "        return StateT(lambda state: (value, state))" ++ fnl () ++
+  str "    @classmethod" ++ fnl () ++
+  str "    def get_state(cls) -> StateT[_StateTState, _StateTState]:" ++ fnl () ++
+  str "        return StateT(lambda state: (state, state))" ++ fnl () ++
+  str "    @classmethod" ++ fnl () ++
+  str "    def put_state(cls, new_state: _StateTState) -> StateT[_StateTState, None]:" ++ fnl () ++
+  str "        return StateT(lambda _state: (None, new_state))" ++ fnl () ++
+  str "class IO(Generic[_IOValue]):" ++ fnl () ++
+  str "    def __init__(self, thunk: Callable[[], Awaitable[_IOValue]]) -> None:" ++ fnl () ++
+  str "        self._thunk = thunk" ++ fnl () ++
+  str "    async def run(self) -> _IOValue:" ++ fnl () ++
+  str "        return await self._thunk()" ++ fnl () ++
+  str "    def bind(self, f: Callable[[_IOValue], IO[_IONext]]) -> IO[_IONext]:" ++ fnl () ++
+  str "        async def run_bound() -> _IONext:" ++ fnl () ++
+  str "            value = await self.run()" ++ fnl () ++
+  str "            return await f(value).run()" ++ fnl () ++
+  str "        return IO(run_bound)" ++ fnl () ++
+  str "    @classmethod" ++ fnl () ++
+  str "    def pure(cls, value: _IOValue) -> IO[_IOValue]:" ++ fnl () ++
+  str "        async def run_pure() -> _IOValue:" ++ fnl () ++
+  str "            return value" ++ fnl () ++
+  str "        return IO(run_pure)" ++ fnl () ++
   str "def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:" ++ fnl () ++
   str "    return value()" ++ fnl () ++
   str "def coprefix_eq(n: int, left: Iterable[object], right: Iterable[object]) -> bool:" ++ fnl () ++
@@ -201,6 +247,34 @@ let pp_impossible_stmt () =
 
 let prop_extraction_error detail =
   user_err Pp.(str "Python ExtractionError: " ++ str detail)
+
+let marker_state_type = "__PYMONAD_STATE_TYPE__"
+let marker_state_pure = "__PYMONAD_STATE_PURE__"
+let marker_state_bind = "__PYMONAD_STATE_BIND__"
+let marker_state_get = "__PYMONAD_STATE_GET__"
+let marker_state_put = "__PYMONAD_STATE_PUT__"
+let marker_option_bind = "__PYMONAD_OPTION_BIND__"
+let marker_reader_pure = "__PYMONAD_READER_PURE__"
+let marker_reader_bind = "__PYMONAD_READER_BIND__"
+let marker_reader_ask = "__PYMONAD_READER_ASK__"
+let marker_io_type = "__PYMONAD_IO_TYPE__"
+let marker_io_pure = "__PYMONAD_IO_PURE__"
+let marker_io_bind = "__PYMONAD_IO_BIND__"
+
+let is_monad_marker_string s =
+  let prefix = "__PYMONAD_" in
+  let prefix_len = String.length prefix in
+  String.length s >= prefix_len &&
+  String.equal prefix (String.sub s 0 prefix_len)
+
+let is_monad_marker_ref r =
+  is_custom r && is_monad_marker_string (find_custom r)
+
+let marker_of_ast = function
+  | MLglob r when is_custom r ->
+      Some (find_custom r)
+  | _ ->
+      None
 
 let rec validate_prop_discipline_expr context = function
   | MLdummy Kprop ->
@@ -455,6 +529,10 @@ let record_proj_info state branches =
     [env] carries de Bruijn binder names (innermost first). *)
 
 let rec pp_expr state env = function
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
+      str "StateT.get_state()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
+      str "lambda __reader_env: __reader_env"
   | MLrel n ->
       (* De Bruijn variable: look up the binder name.  The dummy name [_]
          signals an erased binder; emit [__] (the module-level sentinel). *)
@@ -491,18 +569,62 @@ let rec pp_expr state env = function
       in
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
-      (* Parenthesise the function if it is itself a lambda expression,
-         since [lambda x: e] has very low precedence in Python. *)
-      let pp_head =
-        match head with
-        | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-        | _       -> pp_expr state env head
-      in
-      if List.is_empty all_args then pp_head
-      else
-        pp_head ++ str "(" ++
-        prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+      let pp_option_bind_expr opt_expr fn_expr =
+        str "(lambda __option_value: None if __option_value is None else (" ++
+        pp_expr state env fn_expr ++ str ")(__option_value))(" ++
+        pp_expr state env opt_expr ++
         str ")"
+      in
+      let pp_reader_pure_expr value =
+        str "lambda __reader_env: " ++ pp_expr state env value
+      in
+      let pp_reader_bind_expr reader_expr fn_expr =
+        str "lambda __reader_env: (" ++
+        pp_expr state env fn_expr ++
+        str ")(" ++
+        pp_expr state env reader_expr ++
+        str "(__reader_env))(__reader_env)"
+      in
+      let pp_monad_expr =
+        match marker_of_ast head, all_args with
+        | Some marker, [value] when String.equal marker marker_state_pure ->
+            Some (str "StateT.pure(" ++ pp_expr state env value ++ str ")")
+        | Some marker, [m; f] when String.equal marker marker_state_bind ->
+            Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+        | Some marker, [] when String.equal marker marker_state_get ->
+            Some (str "StateT.get_state()")
+        | Some marker, [new_state] when String.equal marker marker_state_put ->
+            Some (str "StateT.put_state(" ++ pp_expr state env new_state ++ str ")")
+        | Some marker, [value] when String.equal marker marker_reader_pure ->
+            Some (pp_reader_pure_expr value)
+        | Some marker, [reader_expr; fn_expr] when String.equal marker marker_reader_bind ->
+            Some (pp_reader_bind_expr reader_expr fn_expr)
+        | Some marker, [] when String.equal marker marker_reader_ask ->
+            Some (str "lambda __reader_env: __reader_env")
+        | Some marker, [value] when String.equal marker marker_io_pure ->
+            Some (str "IO.pure(" ++ pp_expr state env value ++ str ")")
+        | Some marker, [m; f] when String.equal marker marker_io_bind ->
+            Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+        | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
+            Some (pp_option_bind_expr opt_expr fn_expr)
+        | _ ->
+            None
+      in
+      (match pp_monad_expr with
+       | Some pp -> pp
+       | None ->
+           (* Parenthesise the function if it is itself a lambda expression,
+              since [lambda x: e] has very low precedence in Python. *)
+           let pp_head =
+             match head with
+             | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
+             | _       -> pp_expr state env head
+           in
+           if List.is_empty all_args then pp_head
+           else
+             pp_head ++ str "(" ++
+             prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+             str ")")
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
@@ -971,7 +1093,7 @@ let rec pp_type_with state pp_tvar = function
          Inductive type names are capitalized to match the class names
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
       let name =
-        if is_inline_custom r then find_custom r
+        if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
           let open GlobRef in
@@ -1421,9 +1543,11 @@ let pp_ind_decl state (ind : ml_ind) =
 
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
+  | Dtype (r, _, _) when is_custom r -> mt ()
   | Dtype _     -> str "# UNIMPL Dtype" ++ fnl ()
   | Dterm (r, a, typ) ->
       if is_prop_type typ then mt ()
+      else if is_monad_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
@@ -1438,6 +1562,7 @@ let pp_decl state = function
       let env = empty_env state () in
       let pp_one i =
         if is_prop_type typs.(i) then mt ()
+        else if is_monad_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
         else if is_custom rv.(i) then
           str (pp_global state Term rv.(i)) ++ str " = " ++
@@ -1474,16 +1599,17 @@ let rec module_type_annotation state = function
 
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
-      if is_prop_type typ || is_inline_custom r then []
+      if is_prop_type typ || is_inline_custom r || is_monad_marker_ref r then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
       |> List.filter (fun i ->
            not (is_prop_type typs.(i)) &&
+           not (is_monad_marker_ref rv.(i)) &&
            not (is_inline_custom rv.(i)))
       |> List.map (fun i -> pp_global state Term rv.(i))
   | Dtype (r, _, _) ->
-      [pp_global state Type r]
+      if is_custom r then [] else [pp_global state Type r]
   | Dind ind ->
       let packet_names packet =
         let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in

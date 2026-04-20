@@ -1,8 +1,3 @@
-# ruff: noqa: E402
-from test_support import add_build_default_to_syspath
-
-add_build_default_to_syspath()
-
 from get_p5_v import get_p5_v
 from get_p5_w import get_p5_w
 from get_p5_x import MkPoint5, get_p5_x

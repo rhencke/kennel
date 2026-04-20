@@ -1,8 +1,3 @@
-# ruff: noqa: E402
-from test_support import add_build_default_to_syspath
-
-add_build_default_to_syspath()
-
 from proj_first import MkPairR as MkPairR_pf
 from proj_first import proj_first
 from proj_second import MkPairR as MkPairR_ps

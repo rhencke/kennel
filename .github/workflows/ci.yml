@@ -30,4 +30,4 @@ jobs:
         run: |
           docker pull ghcr.io/fidocancode/rocq-python-extraction:latest
           docker tag ghcr.io/fidocancode/rocq-python-extraction:latest rocq-python-extraction:ci
-      - run: uv run tests
+      - run: ./.githooks/pre-commit

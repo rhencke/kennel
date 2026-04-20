@@ -10,6 +10,12 @@ uv run ruff check .
 echo "==> checking types"
 uv run pyright
 
+echo "==> checking generated extraction types"
+GENERATED_PYRIGHT_DIR=$(mktemp -d)
+trap 'rm -rf "$GENERATED_PYRIGHT_DIR"' EXIT
+./rocq-python-extraction/export_generated_python.sh "$GENERATED_PYRIGHT_DIR"
+./rocq-python-extraction/run_generated_pyright.sh "$GENERATED_PYRIGHT_DIR"
+
 echo "==> running tests"
 uv run tests
 

@@ -1,8 +1,3 @@
-# ruff: noqa: E402
-from test_support import add_build_default_to_syspath
-
-add_build_default_to_syspath()
-
 from even_depth import Even, EvenO, EvenS, Odd, OddS, even_depth
 
 
