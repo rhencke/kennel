@@ -32,6 +32,7 @@ get_p5_w.py
 get_p5_v.py
 wf_countdown.py
 list_map.py
+poly_id.py
 zeros_pair.py
 repeat_tree.py
 tree_root_of_repeat.py

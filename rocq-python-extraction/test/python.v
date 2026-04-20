@@ -12,5 +12,6 @@ From PyExtractTest Require Export
   records
   wf_recursion
   polymorphism
+  universe_erasure
   coinductives
   modules.

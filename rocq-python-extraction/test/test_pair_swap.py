@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from check_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath, run_as_script
 
 add_build_default_to_syspath()
 
