@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -29,7 +29,3 @@ def test_has_left3_round_trip() -> None:
     assert isinstance(Node(0, Leaf(), Leaf()), Tree), (
         "Node(...) must be instance of Tree"
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_has_left3_round_trip, "has_left3 round-trip: OK")

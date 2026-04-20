@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -16,7 +16,3 @@ def test_pair_swap_round_trip() -> None:
     assert pair_swap((5, 5)) == (5, 5), "pair_swap((5, 5)): got " + repr(
         pair_swap((5, 5))
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_pair_swap_round_trip, "prod round-trip: OK")

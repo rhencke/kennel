@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -19,7 +19,3 @@ def test_color_is_red_round_trip() -> None:
     assert isinstance(Red(), Color), (
         "Red() must be instance of Color (capitalized base class)"
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_color_is_red_round_trip, "color capitalization: OK")

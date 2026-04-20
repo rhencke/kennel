@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 from pathlib import Path
 
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 build_default = add_build_default_to_syspath()
 
@@ -16,7 +16,3 @@ def test_poly_id_universe_erasure() -> None:
     assert "Erased universe variables:" in source
     assert "u" in source
     assert "@{" not in source
-
-
-if __name__ == "__main__":
-    run_as_script(test_poly_id_universe_erasure, "universe erasure round-trip: OK")

@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -15,10 +15,3 @@ def test_module_functor_round_trip() -> None:
     assert phase10.FreshLookupA.run == 0
     assert phase10.FreshLookupB.run == 0
     assert phase10.FreshLookupA is not phase10.FreshLookupB
-
-
-if __name__ == "__main__":
-    run_as_script(
-        test_module_functor_round_trip,
-        "Module/functor round-trip: OK",
-    )

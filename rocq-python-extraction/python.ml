@@ -14,6 +14,7 @@ open Mlutil
 open Modutil
 open Table
 open Common
+open CErrors
 
 (*s Keywords that may not be used as Python identifiers. *)
 
@@ -53,10 +54,14 @@ let preamble _state _name comment _used_modules _safe =
   str "# pyright: reportUnusedImport=false, reportUnusedVariable=false, reportUnknownLambdaType=false, reportRedeclaration=false" ++ fnl () ++
   str "from itertools import islice" ++ fnl () ++
   str "from dataclasses import dataclass" ++ fnl () ++
-  str "from typing import Any, Callable, Generic, Iterable, Iterator, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
+  str "from typing import Any, Callable, Generic, Iterable, Iterator, Never, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
   str "_CoForceT = TypeVar(\"_CoForceT\")" ++ fnl () ++
   str "_ModuleArgT = TypeVar(\"_ModuleArgT\")" ++ fnl () ++
   str "_ModuleRetT = TypeVar(\"_ModuleRetT\")" ++ fnl () ++
+  str "class _Impossible(RuntimeError):" ++ fnl () ++
+  str "    pass" ++ fnl () ++
+  str "def _impossible() -> Never:" ++ fnl () ++
+  str "    raise _Impossible()" ++ fnl () ++
   str "def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:" ++ fnl () ++
   str "    return value()" ++ fnl () ++
   str "def coprefix_eq(n: int, left: Iterable[object], right: Iterable[object]) -> bool:" ++ fnl () ++
@@ -178,6 +183,69 @@ let rec type_has_typevars = function
       true
   | Tdummy _ | Tunknown | Taxiom | Tmeta _ ->
       false
+
+type prop_context =
+  | PropIrrelevant
+  | PropValue
+  | PropControl
+
+let is_prop_type = function
+  | Tdummy Kprop -> true
+  | _ -> false
+
+let pp_impossible_expr () =
+  str "_impossible()"
+
+let pp_impossible_stmt () =
+  str "raise _Impossible()"
+
+let prop_extraction_error detail =
+  user_err Pp.(str "Python ExtractionError: " ++ str detail)
+
+let rec validate_prop_discipline_expr context = function
+  | MLdummy Kprop ->
+      (match context with
+       | PropControl ->
+           prop_extraction_error
+             "Prop-typed term used in computational control position"
+       | PropIrrelevant | PropValue -> ())
+  | MLrel _ | MLglob _ | MLdummy _ | MLexn _ | MLaxiom _
+  | MLuint _ | MLfloat _ | MLstring _ | MLparray _ ->
+      ()
+  | MLmagic a ->
+      validate_prop_discipline_expr context a
+  | MLapp (f, args) ->
+      validate_prop_discipline_expr PropControl f;
+      List.iter (validate_prop_discipline_expr PropValue) args
+  | MLlam (_, body) ->
+      validate_prop_discipline_expr PropValue body
+  | MLletin (_, a1, a2) ->
+      validate_prop_discipline_expr PropValue a1;
+      validate_prop_discipline_expr PropValue a2
+  | MLcons (_, _, args) ->
+      List.iter (validate_prop_discipline_expr PropValue) args
+  | MLtuple args ->
+      List.iter (validate_prop_discipline_expr PropValue) args
+  | MLcase (_, scrutinee, branches) ->
+      validate_prop_discipline_expr PropControl scrutinee;
+      Array.iter
+        (fun (_, _, body) -> validate_prop_discipline_expr PropValue body)
+        branches
+  | MLfix (_, _, defs) ->
+      Array.iter (validate_prop_discipline_expr PropValue) defs
+
+let validate_prop_discipline_decl = function
+  | Dterm (_, body, typ) ->
+      if not (is_prop_type typ) then
+        validate_prop_discipline_expr PropValue body
+  | Dfix (_, defs, typs) ->
+      Array.iteri
+        (fun i body ->
+           if not (is_prop_type typs.(i)) then
+             validate_prop_discipline_expr PropValue body)
+        defs
+  | Dind _ | Dtype _ ->
+      ()
 
 let pp_unreachable_fallback ty indent =
   let pfx = String.make indent ' ' in
@@ -394,6 +462,8 @@ let rec pp_expr state env = function
       if Id.equal id dummy_name then str "__" else pp_pyid id
   | MLglob r ->
       pp_glob state r
+  | MLdummy Kprop ->
+      pp_impossible_expr ()
   | MLdummy _ ->
       str "__"
   | MLexn s ->
@@ -701,6 +771,8 @@ let collect_app f args =
     leading whitespace — the caller is responsible for that. *)
 
 let rec pp_return_body state env indent = function
+  | MLdummy Kprop ->
+      pp_impossible_stmt ()
   | MLmagic a ->
       pp_return_body state env indent a
   | MLcase (ty, scrutinee, branches) as expr ->
@@ -1351,11 +1423,13 @@ let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
   | Dtype _     -> str "# UNIMPL Dtype" ++ fnl ()
   | Dterm (r, a, typ) ->
-      if is_inline_custom r then mt ()
+      if is_prop_type typ then mt ()
+      else if is_inline_custom r then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
         str (find_custom r) ++ fnl ()
       else
+        let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
         let env = empty_env state () in
         pp_term_decl state env (pp_global state Term r) a typ
   | Dfix (rv, defs, typs) ->
@@ -1363,11 +1437,16 @@ let pp_decl state = function
          [MLglob] references for mutual recursion, so [empty_env] suffices. *)
       let env = empty_env state () in
       let pp_one i =
-        if is_inline_custom rv.(i) then mt ()
+        if is_prop_type typs.(i) then mt ()
+        else if is_inline_custom rv.(i) then mt ()
         else if is_custom rv.(i) then
           str (pp_global state Term rv.(i)) ++ str " = " ++
           str (find_custom rv.(i)) ++ fnl ()
         else
+          let () =
+            validate_prop_discipline_decl
+              (Dterm (rv.(i), defs.(i), typs.(i)))
+          in
           pp_term_decl state env (pp_global state Term rv.(i)) defs.(i) typs.(i)
       in
       prlist_with_sep mt pp_one (List.init (Array.length rv) (fun i -> i))
@@ -1394,13 +1473,15 @@ let rec module_type_annotation state = function
       str "]"
 
 let decl_export_names state = function
-  | Dterm (r, _, _) ->
-      if is_inline_custom r then []
+  | Dterm (r, _, typ) ->
+      if is_prop_type typ || is_inline_custom r then []
       else [pp_global state Term r]
-  | Dfix (rv, _, _) ->
-      Array.to_list rv
-      |> List.filter (fun r -> not (is_inline_custom r))
-      |> List.map (pp_global state Term)
+  | Dfix (rv, _, typs) ->
+      List.init (Array.length rv) Fun.id
+      |> List.filter (fun i ->
+           not (is_prop_type typs.(i)) &&
+           not (is_inline_custom rv.(i)))
+      |> List.map (fun i -> pp_global state Term rv.(i))
   | Dtype (r, _, _) ->
       [pp_global state Type r]
   | Dind ind ->

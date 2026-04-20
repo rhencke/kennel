@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -18,7 +18,3 @@ def test_even_depth_round_trip() -> None:
     )
     assert isinstance(EvenO(), Even), "EvenO() must be instance of Even"
     assert isinstance(OddS(EvenO()), Odd), "OddS() must be instance of Odd"
-
-
-if __name__ == "__main__":
-    run_as_script(test_even_depth_round_trip, "Even/Odd round-trip: OK")

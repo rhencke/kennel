@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 import py_compile
 
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 build_default = add_build_default_to_syspath()
 
@@ -17,10 +17,3 @@ def test_core_terms_syntax() -> None:
         "todo_val.py",
     ]:
         py_compile.compile(str(build_default / filename), doraise=True)
-
-
-if __name__ == "__main__":
-    run_as_script(
-        test_core_terms_syntax,
-        "Core-terms extracted .py files are syntactically valid Python.",
-    )

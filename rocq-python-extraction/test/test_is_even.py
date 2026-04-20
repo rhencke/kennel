@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -12,7 +12,3 @@ def test_is_even_round_trip() -> None:
     assert is_even(2) is True, "is_even(2): got " + repr(is_even(2))
     assert is_even(3) is False, "is_even(3): got " + repr(is_even(3))
     assert is_even(4) is True, "is_even(4): got " + repr(is_even(4))
-
-
-if __name__ == "__main__":
-    run_as_script(test_is_even_round_trip, "is_even round-trip: OK")

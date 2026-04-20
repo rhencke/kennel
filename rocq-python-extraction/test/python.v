@@ -13,5 +13,6 @@ From PyExtractTest Require Export
   wf_recursion
   polymorphism
   universe_erasure
+  prop_set_discipline
   coinductives
   modules.

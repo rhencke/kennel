@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -18,9 +18,3 @@ def test_ntree_is_leaf_round_trip() -> None:
     )
     assert isinstance(NLeaf(), NTree), "NLeaf() must be instance of NTree"
     assert isinstance(NNode([]), NTree), "NNode([]) must be instance of NTree"
-
-
-if __name__ == "__main__":
-    run_as_script(
-        test_ntree_is_leaf_round_trip, "NTree nested inductive round-trip: OK"
-    )

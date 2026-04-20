@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -36,7 +36,3 @@ def test_expr_is_num_pair_round_trip() -> None:
     assert isinstance(ENum(0), Expr), "ENum(0) must be instance of Expr"
     assert isinstance(VNum(0), Val), "VNum(0) must be instance of Val"
     assert isinstance(ELift(VNum(0)), Expr), "ELift(VNum(0)) must be instance of Expr"
-
-
-if __name__ == "__main__":
-    run_as_script(test_expr_is_num_pair_round_trip, "expr_is_num_pair round-trip: OK")

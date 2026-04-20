@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -14,7 +14,3 @@ def test_roseforest_is_empty_round_trip() -> None:
         "roseforest_is_empty(RFCons(...)): got "
         + repr(roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())))
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_roseforest_is_empty_round_trip, "RoseForest round-trip: OK")

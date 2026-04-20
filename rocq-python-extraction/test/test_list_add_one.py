@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -12,7 +12,3 @@ def test_list_add_one_round_trip() -> None:
         list_add_one([0, 1, 2])
     )
     assert list_add_one([5]) == [6], "list_add_one([5]): got " + repr(list_add_one([5]))
-
-
-if __name__ == "__main__":
-    run_as_script(test_list_add_one_round_trip, "list round-trip: OK")

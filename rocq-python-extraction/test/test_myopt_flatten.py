@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -15,7 +15,3 @@ def test_myopt_flatten_round_trip() -> None:
     assert isinstance(r3, MySome) and r3.arg0 == 42, (
         "myopt_flatten(MySome(MySome(42))): got " + repr(r3)
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_myopt_flatten_round_trip, "MyOpt round-trip: OK")

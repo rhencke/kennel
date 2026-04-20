@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -20,7 +20,3 @@ def test_stree_size_round_trip() -> None:
     )
     assert isinstance(SLit(0), STree), "SLit(0) must be instance of STree"
     assert isinstance(DEnd(), DTree), "DEnd() must be instance of DTree"
-
-
-if __name__ == "__main__":
-    run_as_script(test_stree_size_round_trip, "STree/DTree round-trip: OK")

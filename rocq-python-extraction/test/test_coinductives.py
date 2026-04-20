@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 from itertools import islice
 
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -34,10 +34,3 @@ def test_coinductive_round_trip() -> None:
     assert step.arg0 == TreeO()
 
     assert tree_root_of_repeat == RootO()
-
-
-if __name__ == "__main__":
-    run_as_script(
-        test_coinductive_round_trip,
-        "Coinductive stream and forcing round-trip: OK",
-    )

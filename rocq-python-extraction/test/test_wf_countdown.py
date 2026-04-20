@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 import inspect
 
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 build_default = add_build_default_to_syspath()
 
@@ -19,10 +19,3 @@ def test_wf_countdown_round_trip() -> None:
     source = (build_default / "wf_countdown.py").read_text()
     for forbidden in ("_acc", "_dummy", "Acc", "accessibility", "recproof"):
         assert forbidden not in source, forbidden + " leaked into wf_countdown.py"
-
-
-if __name__ == "__main__":
-    run_as_script(
-        test_wf_countdown_round_trip,
-        "wf_countdown Program Fixpoint round-trip: OK",
-    )

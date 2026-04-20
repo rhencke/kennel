@@ -33,6 +33,8 @@ get_p5_v.py
 wf_countdown.py
 list_map.py
 poly_id.py
+eq_dec_bool.py
+proof_pair_zero.py
 zeros_pair.py
 repeat_tree.py
 tree_root_of_repeat.py

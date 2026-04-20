@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Callable
 
 
 def add_build_default_to_syspath() -> Path:
@@ -34,8 +33,3 @@ def add_build_default_to_syspath() -> Path:
         )
     except ImportError as exc:
         raise RuntimeError("generated extraction artifacts are not present") from exc
-
-
-def run_as_script(test_fn: Callable[[], None], success_message: str) -> None:
-    test_fn()
-    print(success_message)

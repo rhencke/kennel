@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -30,7 +30,3 @@ def test_point5_round_trip() -> None:
     assert get_p5_v(zero) == 0, "get_p5_v(zero)"
 
     assert isinstance(p, MkPoint5), "p must be instance of MkPoint5"
-
-
-if __name__ == "__main__":
-    run_as_script(test_point5_round_trip, "point5 projection round-trip: OK")

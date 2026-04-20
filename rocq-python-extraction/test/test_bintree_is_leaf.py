@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-from test_support import add_build_default_to_syspath, run_as_script
+from test_support import add_build_default_to_syspath
 
 add_build_default_to_syspath()
 
@@ -14,7 +14,3 @@ def test_bintree_is_leaf_round_trip() -> None:
         "bintree_is_leaf(BNode(...)): got "
         + repr(bintree_is_leaf(BNode(BLeaf(), 42, BLeaf())))
     )
-
-
-if __name__ == "__main__":
-    run_as_script(test_bintree_is_leaf_round_trip, "BinTree round-trip: OK")
