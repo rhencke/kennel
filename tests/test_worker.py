@@ -12497,6 +12497,25 @@ class TestWorkerThread:
         assert received_config == [config]
         assert received_repo_cfg == [cfg]
 
+    def test_run_eager_provider_initialization_failure_swallowed(
+        self, tmp_path: Path
+    ) -> None:
+        """Exceptions during eager background initialization are logged but swallowed."""
+        wt = self._make_thread(tmp_path)
+        wt._stop = True
+
+        with (
+            patch.object(
+                WorkerThread, "_ensure_provider", side_effect=RuntimeError("boom")
+            ),
+            patch("kennel.worker.log") as mock_log,
+        ):
+            wt.run()
+
+        mock_log.exception.assert_called_once_with(
+            "WORKER: [%s] failed eager provider initialization", "owner/repo"
+        )
+
 
 class TestIsLeakedTaskComment:
     """Fix for #669 — detect improvised BLOCKED comments fido posts during a task turn."""

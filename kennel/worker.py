@@ -3304,6 +3304,17 @@ class WorkerThread(threading.Thread):
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
         set_thread_repo(self._repo_name)
         set_thread_kind("worker")
+
+        # Eagerly initialize the provider in the background thread.
+        # This warms up the LLM process immediately without blocking the
+        # main server thread during startup (closes #862 follow-up).
+        try:
+            self._ensure_provider()
+        except Exception:
+            log.exception(
+                "WORKER: [%s] failed eager provider initialization", self._repo_name
+            )
+
         try:
             while not self._stop:
                 if self._registry is not None:
