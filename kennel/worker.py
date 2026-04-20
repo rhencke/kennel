@@ -3083,7 +3083,7 @@ class WorkerThread(threading.Thread):
         self._abort_task = threading.Event()
         self._stop = False
         self.crash_error: str | None = None
-        self._provider_lock = threading.Lock()
+        self._provider_lock = threading.RLock()
         # Per-repo issue tree cache (closes #812).  Required — hands the
         # same cache to every Worker iteration so it survives Worker
         # crashes; only a kennel restart wipes it (which then

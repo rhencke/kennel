@@ -488,6 +488,9 @@ class ACPRuntime:
             daemon=True,
         )
         self._thread.start()
+
+    def _ensure_loop_ready(self) -> None:
+        """Wait for the background event loop to be fully initialized."""
         self._loop_ready.wait()
 
     def _default_client_factory(self, runtime: ACPRuntime) -> ACPClientBase:
@@ -803,6 +806,7 @@ class ACPRuntime:
     def _run_async(self, coro: Any) -> Any:
         if self._stopped:
             raise RuntimeError(f"{self.provider_id} ACP runtime is stopped")
+        self._ensure_loop_ready()
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 

@@ -1326,7 +1326,8 @@ def run(
     WebhookHandler.infra = infra
 
     gh = _GitHub()
-    _startup_pull(infra.proc, infra.clock, infra.os_proc)
+    if not config.no_startup_pull:
+        _startup_pull(infra.proc, infra.clock, infra.os_proc)
     try:
         _preflight_tools(infra.fs)
         _preflight_sub_dir(config, infra.fs)
