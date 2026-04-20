@@ -14,6 +14,25 @@ open Python
 (** [python_mode] is set to [true] by [Extraction Language Python.] *)
 let python_mode = ref false
 
+let universe_trace_comment gr =
+  let env = Global.env () in
+  let binders, _ =
+    Printer.universe_binders_with_opt_names
+      (Environ.universes_of_global env gr)
+      None
+  in
+  let qbinders, lbinders = binders in
+  let names =
+    List.map (fun (id, _) -> Id.to_string id) (Id.Map.bindings qbinders) @
+    List.map (fun (id, _) -> Id.to_string id) (Id.Map.bindings lbinders)
+  in
+  match names with
+  | [] -> None
+  | _ ->
+      Some
+        (str "Erased universe variables: " ++
+         str (String.concat ", " names))
+
 (** Python-specific file emission copied from Rocq's extraction driver, but
     bound directly to [Python.python_descr] so we do not depend on Rocq's
     closed built-in extraction language enum. *)
@@ -31,7 +50,7 @@ let python_formatter file =
        Format.pp_set_max_indent ft (i - 10));
   ft
 
-let python_print_structure_to_file state (fname, mo) struc =
+let python_print_structure_to_file state (fname, mo) comment struc =
   let d = Python.python_descr in
   let unsafe_needs = {
     mldummy = struct_ast_search Mlutil.isMLdummy struc;
@@ -48,7 +67,7 @@ let python_print_structure_to_file state (fname, mo) struc =
   begin
     try
       let state = State.set_phase state Impl in
-      pp_with ft (d.preamble state mo None opened unsafe_needs);
+      pp_with ft (d.preamble state mo comment opened unsafe_needs);
       pp_with ft (d.pp_struct state struc);
       Format.pp_print_flush ft ();
       close_out cout
@@ -78,8 +97,9 @@ let python_extract ~opaque_access qid =
                  tunknown = false; magic    = false } in
   let base   = Id.to_string (Nametab.basename_of_global gr) in
   let name   = Id.of_string base in
+  let comment = universe_trace_comment gr in
   let pp     =
-    Python.python_descr.preamble state name None DirPath.Set.empty safe ++
+    Python.python_descr.preamble state name comment DirPath.Set.empty safe ++
     Python.python_descr.pp_struct state struc
   in
   let fname  = base ^ ".py" in
@@ -107,7 +127,7 @@ let python_extract_module ~opaque_access qid =
     | MPbound mbid -> Id.to_string (MBId.to_id mbid)
   in
   let fname = base ^ ".py" in
-  python_print_structure_to_file state (fname, Id.of_string base) struc
+  python_print_structure_to_file state (fname, Id.of_string base) None struc
 
 }
 
