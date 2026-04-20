@@ -627,8 +627,9 @@ annotations`.  Forward references in `@dataclass` field annotations are handled
 natively by PEP 649 deferred annotation evaluation, which is the default on
 3.14t.
 
-The Docker CI image is pinned to Python 3.14t via uv.  Do not downgrade it or
-add a fallback to a system Python.
+Python tooling runs on the host through `uv run ...`.  The Rocq Docker CI image
+is intentionally Rocq-only; do not add Python back to it unless Docker-side
+tests genuinely need a Python interpreter.
 
 ### Testing
 
@@ -661,5 +662,5 @@ style of `python.ml` and `g_python_extraction.mlg`).
 | `python.ml` | The extraction backend — MiniML → Python pretty-printer |
 | `g_python_extraction.mlg` | Vernacular registration (`Python Extraction`) |
 | `test/python.v` + `test/*.v` feature files | Acceptance tests; `python.v` is the umbrella entrypoint over feature-scoped theories |
-| `Dockerfile` | CI image — OCaml + Rocq + Python 3.14t via uv |
+| `Dockerfile` | CI image — OCaml + Rocq toolchain |
 | `DESIGN.md` | Full MiniML → Python mapping contract |

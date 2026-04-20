@@ -18,8 +18,8 @@ clean:
 #
 #   make docker-build   — build the image from the local Dockerfile (uses
 #                          Docker's own layer cache; no GHA credentials needed)
-#   make docker-test    — build the image then run the full test suite inside
-#                          the container, mounting the repo root read-only
+#   make docker-test    — build the image then run the Rocq acceptance build
+#                          inside the container, mounting the repo root read-only
 # ---------------------------------------------------------------------------
 
 # Build the image from the Dockerfile in this directory.  The build context is

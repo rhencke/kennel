@@ -1,9 +1,7 @@
-FROM ocaml/opam:debian-12-ocaml-5.3
+FROM ocaml/opam:debian-12-ocaml-5.3 AS builder
 
-# Install system build tools.  Python is installed via uv below; we do NOT
-# use Debian's python3 package because we target Python 3.14t exclusively
-# (free-threaded, no-GIL build) and that version is not in the Debian 12
-# package archive.
+# Install system build tools needed to build Rocq packages. Python tooling runs
+# on the host via uv; this image only needs the Rocq toolchain.
 RUN sudo apt-get update \
     && sudo apt-get install -y --no-install-recommends \
         make \
@@ -11,18 +9,7 @@ RUN sudo apt-get update \
         pkg-config \
         libgmp-dev \
         linux-libc-dev \
-        curl \
     && sudo rm -rf /var/lib/apt/lists/*
-
-# Install uv, then use it to fetch CPython 3.14t (free-threaded, no-GIL).
-# Symlink the interpreter to /usr/local/bin/python3 so that Makefile and
-# dune test rules can invoke it as plain [python3].  This is the sole Python
-# runtime in the image — no system Python is installed.
-ENV PATH="/home/opam/.local/bin:${PATH}"
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && uv python install 3.14t \
-    && sudo ln -sf "$(uv python find 3.14t)" /usr/local/bin/python3 \
-    && python3 --version
 
 # Add the rocq-prover opam repository, which carries rocq-stdlib.9.1.0 (not
 # yet in the default opam repository).  Then install Rocq 9.2.0, rocq-stdlib
@@ -61,6 +48,48 @@ RUN opam repo add rocq-released https://rocq-prover.org/opam/released \
          sleep 20; \
        done \
     && opam clean --all
+
+FROM debian:12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        gcc \
+        libc6-dev \
+        libgmp-dev \
+        linux-libc-dev \
+        make \
+        pkg-config \
+        tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf \
+        /usr/share/doc/* \
+        /usr/share/info/* \
+        /usr/share/locale/* \
+        /usr/share/man/* \
+    && useradd -m -s /bin/bash opam
+
+COPY --from=builder --chown=opam:opam /home/opam/.opam/5.3 /home/opam/.opam/5.3
+
+ENV OPAM_SWITCH_PREFIX="/home/opam/.opam/5.3"
+ENV CAML_LD_LIBRARY_PATH="/home/opam/.opam/5.3/lib/stublibs"
+ENV OCAML_TOPLEVEL_PATH="/home/opam/.opam/5.3/lib/toplevel"
+ENV OCAMLTOP_INCLUDE_PATH="/home/opam/.opam/5.3/lib/toplevel"
+ENV PATH="/home/opam/.opam/5.3/bin:${PATH}"
+
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      'if [ "$#" -ge 1 ] && [ "$1" = "exec" ]; then' \
+      '  shift' \
+      '  if [ "$#" -ge 1 ] && [ "$1" = "--" ]; then shift; fi' \
+      '  exec "$@"' \
+      'fi' \
+      'echo "minimal opam shim only supports: opam exec -- <command>" >&2' \
+      'exit 2' \
+      > /usr/local/bin/opam \
+    && chmod +x /usr/local/bin/opam
 
 WORKDIR /workspace
 USER opam
