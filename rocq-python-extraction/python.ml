@@ -90,6 +90,30 @@ let pp_float_lit f =
 let pp_pyid id =
   str (String.map (function '\'' -> '_' | c -> c) (Id.to_string id))
 
+let is_dummy_id id =
+  Id.equal id dummy_name
+
+let visible_params ids =
+  List.filter (fun id -> not (is_dummy_id id)) ids
+
+let pp_param id =
+  pp_pyid id
+
+let pp_param_list ids =
+  prlist_with_sep (fun () -> str ", ") pp_param (visible_params ids)
+
+let pp_lambda ids body =
+  let params = visible_params ids in
+  if List.is_empty params then str "lambda: " ++ body
+  else
+    str "lambda " ++
+    prlist_with_sep (fun () -> str ", ") pp_param params ++
+    str ": " ++ body
+
+let is_erased_arg = function
+  | MLdummy _ -> true
+  | _         -> false
+
 (** Capitalize the first character of [s] for Python class names.
     Rocq type names are lowercased by the extraction framework (OCaml
     convention); Python expects PascalCase for class names (PEP 8). *)
@@ -280,6 +304,7 @@ let rec pp_expr state env = function
         | head            -> (head, acc)
       in
       let (head, all_args) = collect args f in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       (* Parenthesise the function if it is itself a lambda expression,
          since [lambda x: e] has very low precedence in Python. *)
       let pp_head =
@@ -287,23 +312,20 @@ let rec pp_expr state env = function
         | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
         | _       -> pp_expr state env head
       in
-      pp_head ++ str "(" ++
-      prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-      str ")"
+      if List.is_empty all_args then pp_head
+      else
+        pp_head ++ str "(" ++
+        prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+        str ")"
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
       let ids, body = collect_lams a in
       let params = List.map id_of_mlid ids in
       let params, env' = push_vars params env in
-      let pp_param id =
-        (* Erased binders use [_] (Python's throwaway) in binder position. *)
-        if Id.equal id dummy_name then str "_" else pp_pyid id
-      in
-      str "lambda " ++
-      prlist_with_sep (fun () -> str ", ") pp_param (List.rev params) ++
-      str ": " ++
-      pp_expr state env' body
+      let params = List.rev params in
+      if List.is_empty (visible_params params) then pp_expr state env' body
+      else pp_lambda params (pp_expr state env' body)
   | MLletin (id, a1, a2) ->
       (* Let binding in expression context: lambda-lift to [(lambda x: a2)(a1)].
          This is safe in pure functional code and avoids statement–expression
@@ -481,11 +503,8 @@ let rec pp_expr state env = function
         let lam_ids, body = collect_lams defs.(j) in
         let params = List.map id_of_mlid lam_ids in
         let params', env'' = push_vars params env' in
-        let pp_param id =
-          if Id.equal id dummy_name then str "_" else pp_pyid id
-        in
         str "def " ++ pp_pyid name_arr.(j) ++ str "(" ++
-        prlist_with_sep (fun () -> str ", ") pp_param (List.rev params') ++
+        pp_param_list (List.rev params') ++
         str "):" ++ fnl () ++
         str "    return " ++ pp_expr state env'' body
       in
@@ -522,17 +541,25 @@ and pp_custom_match_expr state env s scrutinee branches =
         (* No binders: unit thunk. *)
         str "lambda: " ++ pp_expr state env' body
     | _  ->
-        let pp_p id = if Id.equal id dummy_name then str "_" else pp_pyid id in
-        str "lambda " ++
-        prlist_with_sep (fun () -> str ", ") pp_p params ++
-        str ": " ++
-        pp_expr state env' body
+        pp_lambda params (pp_expr state env' body)
   in
   str "(" ++ str s ++ str ")(" ++
   prlist_with_sep (fun () -> str ", ") pp_arm (Array.to_list branches) ++
   str ", " ++
   pp_expr state env scrutinee ++
   str ")"
+
+let rec unwrap_fix = function
+  | MLfix (i, ids, defs) -> Some (i, ids, defs)
+  | MLmagic a            -> unwrap_fix a
+  | _                    -> None
+
+let collect_app f args =
+  let rec collect acc = function
+    | MLapp (g, more) -> collect (more @ acc) g
+    | head            -> (head, acc)
+  in
+  collect args f
 
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
@@ -548,6 +575,8 @@ and pp_custom_match_expr state env s scrutinee branches =
     leading whitespace — the caller is responsible for that. *)
 
 let rec pp_return_body state env indent = function
+  | MLmagic a ->
+      pp_return_body state env indent a
   | MLcase (_, scrutinee, branches) as expr ->
       let is_bool =
         Array.length branches = 2 &&
@@ -597,8 +626,72 @@ let rec pp_return_body state env indent = function
       (* These emit [raise …], which is a valid Python statement but NOT a
          valid expression.  Emit bare — no [return] prefix. *)
       pp_expr state env expr
+  | MLletin (id, a1, a2) -> (
+      (* Let-bound local fixpoint inside a function body:
+           let f = fix ... in body
+         becomes nested [def] statements followed by the returned body.  This
+         is the shape produced by Program Fixpoint's [Fix_sub] helper. *)
+      match unwrap_fix a1 with
+      | None ->
+          str "return " ++ pp_expr state env (MLletin (id, a1, a2))
+      | Some (i, ids, defs) ->
+      let params, env' = push_vars [id_of_mlid id] env in
+      let bname = List.hd params in
+      let def_pfx = String.make indent ' ' in
+      let pp_defs, selected = pp_fix_statement state env indent i ids defs in
+      let pp_alias =
+        if Id.equal bname selected then mt ()
+        else
+          fnl () ++ str def_pfx ++ pp_pyid bname ++
+          str " = " ++ pp_pyid selected
+      in
+      pp_defs ++ pp_alias ++ fnl () ++ str def_pfx ++
+      pp_return_body state env' indent a2 )
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | head, all_args -> (
+          match unwrap_fix head with
+          | None ->
+              str "return " ++ pp_expr state env (MLapp (f, args))
+          | Some (i, ids, defs) ->
+              let def_pfx = String.make indent ' ' in
+              let pp_defs, selected = pp_fix_statement state env indent i ids defs in
+              let visible_args =
+                List.filter (fun a -> not (is_erased_arg a)) all_args
+              in
+              pp_defs ++ fnl () ++ str def_pfx ++ str "return " ++
+              pp_pyid selected ++ str "(" ++
+              prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
+              str ")" ) )
+  | MLfix (i, ids, defs) ->
+      (* Local fixpoint inside a function body.  Python [def] is a statement,
+         so emit nested defs followed by [return selected_name] instead of
+         trying to put [def] after [return]. *)
+      let def_pfx = String.make indent ' ' in
+      let pp_defs, selected = pp_fix_statement state env indent i ids defs in
+      pp_defs ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
   | expr ->
       str "return " ++ pp_expr state env expr
+
+and pp_fix_statement state env indent i ids defs =
+  let n = Array.length ids in
+  let id_list = List.rev (Array.to_list ids) in
+  let names_rev, env' = push_vars id_list env in
+  let name_arr = Array.of_list (List.rev names_rev) in
+  let def_pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let pp_one j =
+    let lam_ids, body = collect_lams defs.(j) in
+    let params = List.map id_of_mlid lam_ids in
+    let params', env'' = push_vars params env' in
+    str "def " ++ pp_pyid name_arr.(j) ++ str "(" ++
+    pp_param_list (List.rev params') ++
+    str "):" ++ fnl () ++
+    str body_pfx ++ pp_return_body state env'' (indent + 4) body
+  in
+  prlist_with_sep (fun () -> fnl () ++ str def_pfx) pp_one
+    (List.init n (fun j -> j)),
+  name_arr.(i)
 
 (*s Python term declaration emitter.
     Detects a lambda-headed RHS and promotes it to a [def]; non-lambda
@@ -606,7 +699,46 @@ let rec pp_return_body state env indent = function
 
 (** Emit either [def name(p1,…): return body] or [name = expr], choosing
     based on whether [a] has leading lambdas. *)
-let pp_term_decl state env name a =
+let pp_function_wrapper state env name a typ =
+  let args, _ret = type_decomp typ in
+  let n = List.length args in
+  if Int.equal n 0 then None
+  else
+    let arg_names =
+      if Int.equal n 1 then ["x"]
+      else List.init n (fun i -> "arg" ^ string_of_int i)
+    in
+    let pp_arg s = str s in
+    let pp_call =
+      match a with
+      | MLapp (f, app_args) ->
+          let head, all_args = collect_app f app_args in
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          let pp_head =
+            match head with
+            | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
+            | _       -> pp_expr state env head
+          in
+          pp_head ++ str "(" ++
+          prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
+          (if List.is_empty visible_args then mt () else str ", ") ++
+          prlist_with_sep (fun () -> str ", ") pp_arg arg_names ++
+          str ")"
+      | _ ->
+          str "(" ++ pp_expr state env a ++ str ")(" ++
+          prlist_with_sep (fun () -> str ", ") pp_arg arg_names ++
+          str ")"
+    in
+    Some (
+      str "def " ++ str name ++ str "(" ++
+      prlist_with_sep (fun () -> str ", ") pp_arg arg_names ++
+      str "):" ++ fnl () ++
+      str "    return " ++ pp_call ++ fnl ()
+    )
+
+let pp_term_decl state env name a typ =
   let lam_ids, body = collect_lams a in
   if List.is_empty lam_ids then
     (* Non-function value: simple assignment — unless the body is a [raise]
@@ -616,15 +748,14 @@ let pp_term_decl state env name a =
       | MLaxiom _ | MLexn _ | MLparray _ ->
           pp_expr state env a ++ fnl ()
       | _ ->
-          str name ++ str " = " ++ pp_expr state env a ++ fnl () )
+          (match pp_function_wrapper state env name a typ with
+          | Some pp -> pp
+          | None -> str name ++ str " = " ++ pp_expr state env a ++ fnl ()) )
   else
     let params = List.map id_of_mlid lam_ids in
     let params', env' = push_vars params env in
-    let pp_param id =
-      if Id.equal id dummy_name then str "_" else pp_pyid id
-    in
     str "def " ++ str name ++ str "(" ++
-    prlist_with_sep (fun () -> str ", ") pp_param (List.rev params') ++
+    pp_param_list (List.rev params') ++
     str "):" ++ fnl () ++
     (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
        at 8, case bodies at 12.  The "    " prefix handles the first line only;
@@ -842,15 +973,15 @@ let pp_ind_decl state (ind : ml_ind) =
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
   | Dtype _     -> str "# UNIMPL Dtype" ++ fnl ()
-  | Dterm (r, a, _) ->
+  | Dterm (r, a, typ) ->
       if is_inline_custom r then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
         str (find_custom r) ++ fnl ()
       else
         let env = empty_env state () in
-        pp_term_decl state env (pp_global state Term r) a
-  | Dfix (rv, defs, _) ->
+        pp_term_decl state env (pp_global state Term r) a typ
+  | Dfix (rv, defs, typs) ->
       (* Each function in the fix block is named globally; the bodies use
          [MLglob] references for mutual recursion, so [empty_env] suffices. *)
       let env = empty_env state () in
@@ -860,7 +991,7 @@ let pp_decl state = function
           str (pp_global state Term rv.(i)) ++ str " = " ++
           str (find_custom rv.(i)) ++ fnl ()
         else
-          pp_term_decl state env (pp_global state Term rv.(i)) defs.(i)
+          pp_term_decl state env (pp_global state Term rv.(i)) defs.(i) typs.(i)
       in
       prlist_with_sep mt pp_one (List.init (Array.length rv) (fun i -> i))
 

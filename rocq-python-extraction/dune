@@ -99,3 +99,11 @@
   (progn
    (run python3 %{dep:test/check_proj_pair_r.py})
    (run python3 %{dep:test/check_point5.py}))))
+
+; Phase 7 round-trip test: Program Fixpoint / well-founded recursion should
+; extract without visible accessibility/proof scaffolding (issue #721).
+(rule
+ (alias runtest)
+ (deps test/phase7.vo
+       test/check_wf_countdown.py)
+ (action (run python3 %{dep:test/check_wf_countdown.py})))
