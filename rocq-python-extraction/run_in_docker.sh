@@ -47,24 +47,40 @@ fi
 WORKDIR=$1
 shift
 
-docker_args="--rm -v $PWD:/src:ro"
 if [ -n "$OUT_DIR" ]; then
-  docker_args="$docker_args -v $OUT_DIR:/out -v $TARGETS_FILE:/targets.txt:ro"
+  CID=$(
+    docker create -v "$PWD:/src:ro" rocq-python-extraction:ci \
+      bash -euo pipefail -c '
+        cp -r /src /tmp/work
+        chmod -R u+w /tmp/work
+        if [ "$1" = 0 ]; then
+          rm -f /tmp/work/dune-workspace
+        fi
+        cd "/tmp/work/$2"
+        shift 2
+        "$@"
+      ' bash "$KEEP_WORKSPACE" "$WORKDIR" "$@"
+  )
+  cleanup() {
+    docker rm -f "$CID" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT HUP INT TERM
+  docker start -a "$CID"
+  while IFS= read -r name; do
+    docker cp "$CID:/tmp/work/$WORKDIR/_build/default/$name" "$OUT_DIR/$name"
+  done < "$TARGETS_FILE"
+  cleanup
+  trap - EXIT HUP INT TERM
+else
+  docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
+    bash -euo pipefail -c '
+      cp -r /src /tmp/work
+      chmod -R u+w /tmp/work
+      if [ "$1" = 0 ]; then
+        rm -f /tmp/work/dune-workspace
+      fi
+      cd "/tmp/work/$2"
+      shift 2
+      "$@"
+    ' bash "$KEEP_WORKSPACE" "$WORKDIR" "$@"
 fi
-
-docker run $docker_args rocq-python-extraction:ci \
-  bash -euo pipefail -c '
-    cp -r /src /tmp/work
-    chmod -R u+w /tmp/work
-    if [ "$1" = 0 ]; then
-      rm -f /tmp/work/dune-workspace
-    fi
-    cd "/tmp/work/$2"
-    shift 2
-    "$@"
-    if [ -f /targets.txt ]; then
-      while IFS= read -r name; do
-        cp "_build/default/$name" /out/
-      done < /targets.txt
-    fi
-  ' bash "$KEEP_WORKSPACE" "$WORKDIR" "$@"
