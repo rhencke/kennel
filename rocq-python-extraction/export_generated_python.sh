@@ -14,4 +14,4 @@ mkdir -p "$OUT_DIR"
   --output-dir "$OUT_DIR" \
   --targets-file "$PWD/rocq-python-extraction/test/generated_pyright_targets.txt" \
   rocq-python-extraction \
-  opam exec -- dune build test/phase4.vo test/phase8.vo
+  opam exec -- dune build test/phase4.vo test/phase8.vo test/phase9.vo

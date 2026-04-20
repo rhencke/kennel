@@ -115,3 +115,11 @@
  (deps test/phase8.vo
        test/check_list_map.py)
  (action (run python3 %{dep:test/check_list_map.py})))
+
+; Phase 9 round-trip test: coinductive streams should expose an iterator
+; surface while non-stream coinductives stay lazily forceable (issue #723).
+(rule
+ (alias runtest)
+ (deps test/phase9.vo
+       test/check_phase9.py)
+ (action (run python3 %{dep:test/check_phase9.py})))

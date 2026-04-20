@@ -2,3 +2,7 @@ myopt_flatten.py
 mylist_is_empty.py
 roseforest_is_empty.py
 list_map.py
+zeros.py
+zeros_pair.py
+repeat_tree.py
+tree_root_of_repeat.py

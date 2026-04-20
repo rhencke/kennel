@@ -15,7 +15,12 @@ cat >"$OUT_DIR/pyrightconfig.json" <<'EOF'
     "mylist_is_empty.py",
     "roseforest_is_empty.py",
     "list_map.py",
-    "pyright_list_map_check.py"
+    "zeros.py",
+    "zeros_pair.py",
+    "repeat_tree.py",
+    "tree_root_of_repeat.py",
+    "pyright_list_map_check.py",
+    "pyright_coinductive_check.py"
   ],
   "executionEnvironments": [
     {
@@ -28,5 +33,7 @@ EOF
 
 cp rocq-python-extraction/test/pyright_list_map_check.py \
   "$OUT_DIR/pyright_list_map_check.py"
+cp rocq-python-extraction/test/pyright_coinductive_check.py \
+  "$OUT_DIR/pyright_coinductive_check.py"
 
 uv run pyright -p "$OUT_DIR/pyrightconfig.json"
