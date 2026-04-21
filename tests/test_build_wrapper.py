@@ -175,27 +175,28 @@ class TestModelsBuildScript:
         assert "steps.build-cache.outputs.bucket" not in workflow
         assert "github.run_id" not in workflow
         assert "github.run_attempt" not in workflow
-        assert "Compute build input cache key" in workflow
-        assert "tar --sort=name --mtime='UTC 1970-01-01'" in workflow
-        assert "sha256sum" in workflow
+        assert "Compute build input cache key" not in workflow
+        assert "tar --sort=name --mtime='UTC 1970-01-01'" not in workflow
+        assert "sha256sum" not in workflow
+        assert "hashFiles(" in workflow
+        assert "id: build-input" not in workflow
+        assert "steps.build-input.outputs" not in workflow
         assert "steps.build-input.outputs.key" not in workflow
-        assert "steps.build-input.outputs.rocq_image" in workflow
-        assert "steps.build-input.outputs.rocq_models" in workflow
-        assert "steps.build-input.outputs.buildkit_mounts" in workflow
         assert "parse_dockerfile" in generator
         assert "target_inputs" in generator
+        assert "hashfiles_expression" in generator
         assert "rocq_cache_paths" in generator
         assert '"rocq-model-image":' not in generator
         assert '".cache/rocq-models/image"' not in generator
-        rocq_image_key = workflow.split("mapfile -d '' rocq_image_files", maxsplit=1)[
+        rocq_image_key = workflow.split("key: buildx-rocq-model-image-", maxsplit=1)[
             1
-        ].split("mapfile -d '' rocq_models_files", maxsplit=1)[0]
-        rocq_models_key = workflow.split("mapfile -d '' rocq_models_files", maxsplit=1)[
+        ].split("      - name: Restore rocq-model-buildx", maxsplit=1)[0]
+        rocq_models_key = workflow.split("key: buildx-rocq-model-buildx-", maxsplit=1)[
             1
-        ].split("mapfile -d '' buildkit_mounts_files", maxsplit=1)[0]
-        buildkit_mounts_key = workflow.split(
-            "mapfile -d '' buildkit_mounts_files", maxsplit=1
-        )[1].split("      - name: Restore rocq-model-image", maxsplit=1)[0]
+        ].split("      - name: Restore rocq-model-context", maxsplit=1)[0]
+        buildkit_mounts_key = workflow.split("key: buildkit-mounts-", maxsplit=1)[
+            1
+        ].split("      - name: Inject buildkit cache mounts", maxsplit=1)[0]
         assert "uv.lock" not in rocq_image_key
         assert "uv.lock" not in rocq_models_key
         assert "package-lock.json" not in rocq_image_key
@@ -218,13 +219,11 @@ class TestModelsBuildScript:
         for cache in ("image", "buildx", "context"):
             assert f"path: .cache/rocq-models/{cache}" in workflow
         assert (
-            "key: buildx-rocq-model-image-${{ runner.os }}-"
-            "${{ steps.build-input.outputs.rocq_image }}"
+            "key: buildx-rocq-model-image-${{ runner.os }}-${{ hashFiles("
         ) in workflow
         for cache in ("buildx", "context"):
             assert (
-                f"key: buildx-rocq-model-{cache}-${{{{ runner.os }}}}-"
-                "${{ steps.build-input.outputs.rocq_models }}"
+                f"key: buildx-rocq-model-{cache}-${{{{ runner.os }}}}-${{{{ hashFiles("
             ) in workflow
             assert f"buildx-rocq-model-{cache}-${{{{ runner.os }}}}-" in workflow
             assert (
@@ -232,10 +231,7 @@ class TestModelsBuildScript:
                 f"steps.restore-rocq_model_{cache}.outputs.cache-hit != 'true'"
             ) in workflow
         assert "path: .cache/buildkit-mounts" in workflow
-        assert (
-            "key: buildkit-mounts-${{ runner.os }}-"
-            "${{ steps.build-input.outputs.buildkit_mounts }}"
-        ) in workflow
+        assert ("key: buildkit-mounts-${{ runner.os }}-${{ hashFiles(") in workflow
         assert "buildkit-mounts-${{ runner.os }}-" in workflow
         assert "reproducible-containers/buildkit-cache-dance@v3.3.2" in workflow
 

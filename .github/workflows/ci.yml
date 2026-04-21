@@ -20,94 +20,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
-      - name: Compute build input cache key
-        id: build-input
-        shell: bash
-        run: |
-          mapfile -d '' rocq_image_files < <(
-            git ls-files -z -- \
-              rocq-python-extraction/Dockerfile \
-              rocq-python-extraction/dune-project \
-              rocq-python-extraction/rocq-python-extraction.opam
-          )
-          rocq_image="$(
-            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${rocq_image_files[@]}" \
-              | sha256sum \
-              | awk '{print $1}'
-          )"
-          echo "rocq_image=$rocq_image" >> "$GITHUB_OUTPUT"
-          mapfile -d '' rocq_models_files < <(
-            git ls-files -z -- \
-              dune-workspace \
-              models/*.v \
-              models/Dockerfile \
-              models/dune \
-              models/dune-project \
-              rocq-python-extraction/Dockerfile \
-              rocq-python-extraction/META.rocq-python-extraction.template \
-              rocq-python-extraction/dune \
-              rocq-python-extraction/dune-project \
-              rocq-python-extraction/g_python_extraction.mlg \
-              rocq-python-extraction/python.ml \
-              rocq-python-extraction/rocq-python-extraction.opam
-          )
-          rocq_models="$(
-            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${rocq_models_files[@]}" \
-              | sha256sum \
-              | awk '{print $1}'
-          )"
-          echo "rocq_models=$rocq_models" >> "$GITHUB_OUTPUT"
-          mapfile -d '' buildkit_mounts_files < <(
-            git ls-files -z -- \
-              .dockerignore \
-              .githooks/pre-commit \
-              .github/workflows/ci.yml \
-              .python-version \
-              docker-bake.hcl \
-              dune-workspace \
-              fido \
-              models/*.v \
-              models/Dockerfile \
-              models/dune \
-              models/dune-project \
-              package-lock.json \
-              package.json \
-              pyproject.toml \
-              pyrightconfig.json \
-              rocq-python-extraction/DIAGNOSTICS.md \
-              rocq-python-extraction/Dockerfile \
-              rocq-python-extraction/META.rocq-python-extraction.template \
-              rocq-python-extraction/dune \
-              rocq-python-extraction/dune-project \
-              rocq-python-extraction/export_pytest_generated.sh \
-              rocq-python-extraction/g_python_extraction.mlg \
-              rocq-python-extraction/python.ml \
-              rocq-python-extraction/rocq-python-extraction.opam \
-              rocq-python-extraction/run_generated_pyright.sh \
-              rocq-python-extraction/run_in_docker.sh \
-              rocq-python-extraction/test/*.py \
-              rocq-python-extraction/test/*.v \
-              rocq-python-extraction/test/dune \
-              rocq-python-extraction/test/generated_pyright_targets.txt \
-              rocq-python-extraction/test/generated_pytest_targets.txt \
-              src \
-              tests \
-              tools/gen_workflows.py \
-              uv.lock
-          )
-          buildkit_mounts="$(
-            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${buildkit_mounts_files[@]}" \
-              | sha256sum \
-              | awk '{print $1}'
-          )"
-          echo "buildkit_mounts=$buildkit_mounts" >> "$GITHUB_OUTPUT"
-
       - name: Restore rocq-model-image build cache
         id: restore-rocq_model_image
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/image
-          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-input.outputs.rocq_image }}
+          key: buildx-rocq-model-image-${{ runner.os }}-${{ hashFiles('rocq-python-extraction/Dockerfile', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/rocq-python-extraction.opam') }}
           restore-keys: |
             buildx-rocq-model-image-${{ runner.os }}-
       - name: Restore rocq-model-buildx build cache
@@ -115,7 +33,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/buildx
-          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-input.outputs.rocq_models }}
+          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ hashFiles('dune-workspace', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam') }}
           restore-keys: |
             buildx-rocq-model-buildx-${{ runner.os }}-
       - name: Restore rocq-model-context build cache
@@ -123,7 +41,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/context
-          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-input.outputs.rocq_models }}
+          key: buildx-rocq-model-context-${{ runner.os }}-${{ hashFiles('dune-workspace', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam') }}
           restore-keys: |
             buildx-rocq-model-context-${{ runner.os }}-
       - name: Restore buildkit cache mounts
@@ -131,7 +49,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{ runner.os }}-${{ steps.build-input.outputs.buildkit_mounts }}
+          key: buildkit-mounts-${{ runner.os }}-${{ hashFiles('.dockerignore', '.githooks/pre-commit', '.github/workflows/ci.yml', '.python-version', 'docker-bake.hcl', 'dune-workspace', 'fido', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'package-lock.json', 'package.json', 'pyproject.toml', 'pyrightconfig.json', 'rocq-python-extraction/DIAGNOSTICS.md', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/export_pytest_generated.sh', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam', 'rocq-python-extraction/run_generated_pyright.sh', 'rocq-python-extraction/run_in_docker.sh', 'rocq-python-extraction/test/*.py', 'rocq-python-extraction/test/*.v', 'rocq-python-extraction/test/dune', 'rocq-python-extraction/test/generated_pyright_targets.txt', 'rocq-python-extraction/test/generated_pytest_targets.txt', 'src/**', 'tests/**', 'tools/gen_workflows.py', 'uv.lock') }}
           restore-keys: |
             buildkit-mounts-${{ runner.os }}-
       - name: Inject buildkit cache mounts
@@ -150,16 +68,16 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/image
-          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-input.outputs.rocq_image }}
+          key: buildx-rocq-model-image-${{ runner.os }}-${{ hashFiles('rocq-python-extraction/Dockerfile', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/rocq-python-extraction.opam') }}
       - name: Save rocq-model-buildx build cache
         if: success() && steps.restore-rocq_model_buildx.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/buildx
-          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-input.outputs.rocq_models }}
+          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ hashFiles('dune-workspace', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam') }}
       - name: Save rocq-model-context build cache
         if: success() && steps.restore-rocq_model_context.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/context
-          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-input.outputs.rocq_models }}
+          key: buildx-rocq-model-context-${{ runner.os }}-${{ hashFiles('dune-workspace', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam') }}

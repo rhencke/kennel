@@ -285,64 +285,57 @@ def cache_key_inputs(plan: dict[str, object]) -> dict[str, list[str]]:
     }
 
 
-def hash_step(keys: dict[str, list[str]]) -> str:
-    blocks = []
-    for key, paths in keys.items():
-        shell_name = key.replace("-", "_")
-        output_name = key.replace("-", "_")
-        path_lines = " \\\n".join(f"              {path}" for path in paths)
-        blocks.append(
-            f"""\
-          mapfile -d '' {shell_name}_files < <(
-            git ls-files -z -- \\
-{path_lines}
-          )
-          {shell_name}="$(
-            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${{{shell_name}_files[@]}}" \\
-              | sha256sum \\
-              | awk '{{print $1}}'
-          )"
-          echo "{output_name}=${shell_name}" >> "$GITHUB_OUTPUT"
-"""
-        )
-    return "".join(blocks)
+def hashfiles_pattern(path: str) -> str:
+    if any(char in path for char in "*?["):
+        return path
+    full_path = ROOT / path
+    if full_path.is_dir():
+        return f"{path.rstrip('/')}/**"
+    return path
 
 
-def restore_step(name: str, path: str, key: str) -> str:
+def hashfiles_expression(paths: list[str]) -> str:
+    patterns = (hashfiles_pattern(path).replace("'", "''") for path in paths)
+    quoted = ", ".join(f"'{pattern}'" for pattern in patterns)
+    return f"${{{{ hashFiles({quoted}) }}}}"
+
+
+def restore_step(name: str, path: str, key_expression: str) -> str:
     step_id = "restore-" + name.replace("-", "_")
-    output_name = key.replace("-", "_")
     return f"""\
       - name: Restore {name} build cache
         id: {step_id}
         uses: actions/cache/restore@v4
         with:
           path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.{output_name} }}}}
+          key: buildx-{name}-${{{{ runner.os }}}}-{key_expression}
           restore-keys: |
             buildx-{name}-${{{{ runner.os }}}}-
 """
 
 
-def save_step(name: str, path: str, key: str) -> str:
+def save_step(name: str, path: str, key_expression: str) -> str:
     restore_id = "restore-" + name.replace("-", "_")
-    output_name = key.replace("-", "_")
     return f"""\
       - name: Save {name} build cache
         if: success() && steps.{restore_id}.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.{output_name} }}}}
+          key: buildx-{name}-${{{{ runner.os }}}}-{key_expression}
 """
 
 
 def render(plan: dict[str, object]) -> str:
     keys = cache_key_inputs(plan)
+    key_expressions = {key: hashfiles_expression(paths) for key, paths in keys.items()}
     restores = "".join(
-        restore_step(name, path, key) for name, path, key in cache_entries(plan)
+        restore_step(name, path, key_expressions[key])
+        for name, path, key in cache_entries(plan)
     )
     saves = "".join(
-        save_step(name, path, key) for name, path, key in cache_entries(plan)
+        save_step(name, path, key_expressions[key])
+        for name, path, key in cache_entries(plan)
     )
     scopes = ", ".join(cache_scopes(plan))
     return f"""\
@@ -368,17 +361,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
-      - name: Compute build input cache key
-        id: build-input
-        shell: bash
-        run: |
-{hash_step(keys)}
 {restores}      - name: Restore buildkit cache mounts
         id: restore-buildkit-mounts
         uses: actions/cache@v4
         with:
           path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.buildkit_mounts }}}}
+          key: buildkit-mounts-${{{{ runner.os }}}}-{key_expressions["buildkit-mounts"]}
           restore-keys: |
             buildkit-mounts-${{{{ runner.os }}}}-
       - name: Inject buildkit cache mounts
