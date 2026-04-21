@@ -20,10 +20,12 @@ Use the root launcher to run project commands inside the buildx uv image:
 `./fido` builds the `fido` bake target from `docker-bake.hcl` with `docker
 buildx bake`, loads it as `fido:local`, then runs it with Docker.
 `./fido help` lists the project commands. `./fido up` runs the Fido server,
-then supervises it in the foreground with `docker run --rm`. On update exits
-from the app, `./fido up` syncs the runner clone, rebuilds the image, and
-starts again. It exits normally on ordinary shutdown signals. `./fido down`
-still removes any named container left behind by a previous run.
+then supervises it in the foreground with `docker run --rm`. `./fido up`
+appends supervisor and container stdout/stderr to `~/log/fido.log`; override
+with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
+clone, rebuilds the image, and starts again. It exits normally on ordinary
+shutdown signals. `./fido down` stops the named container gracefully, falling
+back to forced removal only for leftovers.
 `./fido warm` builds the `warm` bake group, which depends on full CI, the
 production runtime image, and the dev check image, so local and CI runs
 populate those cache families through one command.

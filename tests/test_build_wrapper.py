@@ -186,10 +186,14 @@ class TestFidoLauncher:
         assert removed_flag not in script
         assert "supervise_up()" in script
         assert "--rm" in script
+        assert "fido_log=${FIDO_LOG:-$HOME/log/fido.log}" in script
+        assert "redirect_up_logs()" in script
+        assert 'exec >>"$fido_log" 2>&1' in script
         assert "named_run=0" in script
         assert "named_run=1" in script
         assert 'if [ "$named_run" = "1" ]; then' in script
         assert 'docker rm -f "$container"' in script
+        assert 'docker stop "$container"' in script
         assert 'run_args=(--name "$container" "${run_args[@]}")' in script
         assert 'restart_codes=" 3 75 "' in script
         assert 'stop_codes=" 0 130 137 143 "' in script

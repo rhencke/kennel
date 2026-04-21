@@ -13,8 +13,8 @@ right Docker buildx target, runs the command in the container, and avoids host
 | Command | Purpose |
 |---------|---------|
 | `./fido help` | Print the command list. |
-| `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
-| `./fido down` | Remove any named leftover server container. Normal operation is foreground `docker run --rm`, so this is mostly cleanup. |
+| `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
+| `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
 | `./fido warm` | Build the buildx `warm` group: format, lint, typecheck, generated typecheck, tests, production runtime image, and dev image. This is what CI and pre-commit use. |
 | `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
 | `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |

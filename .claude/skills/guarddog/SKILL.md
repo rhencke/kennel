@@ -73,46 +73,11 @@ Update the status again after each major step (diagnosis, fix, PR, restart) — 
 Do NOT clear the status when done. Fido handles that on restart.
 
 ### Step 2: Stop Fido
-Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Instead, look up Fido's PID from its own status and kill only Fido plus its descendant tree.
+Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Fido runs as a named foreground Docker container, so stop that container and let the launcher observe the clean exit.
 
 ```bash
-# Parse Fido PID from status output.
-FIDO_PID=$(cd /home/rhencke/home-runner && ./fido status 2>/dev/null \
-    | awk '/^fido: UP/ { for (i=1; i<=NF; i++) if ($i == "pid") { gsub(/[^0-9]/,"",$(i+1)); print $(i+1); exit } }')
-
-if [ -z "$FIDO_PID" ]; then
-    echo "fido: not running (no PID in status) — nothing to stop"
-else
-    # Safety: refuse if Fido is somehow an ancestor of this shell.
-    _pid=$$
-    while [ -n "$_pid" ] && [ "$_pid" != "1" ] && [ "$_pid" != "0" ]; do
-        if [ "$_pid" = "$FIDO_PID" ]; then
-            echo "refusing: fido PID $FIDO_PID is an ancestor of this shell" >&2
-            exit 1
-        fi
-        _pid=$(awk '{print $4}' "/proc/$_pid/stat" 2>/dev/null)
-    done
-
-    # Recursively collect descendants (leaf-first).
-    _descendants() {
-        for child in $(pgrep -P "$1" 2>/dev/null); do
-            _descendants "$child"
-            echo "$child"
-        done
-    }
-    pids=$(_descendants "$FIDO_PID")
-
-    # TERM children first, then Fido itself; give it up to 5s; then KILL stragglers.
-    for p in $pids; do kill -TERM "$p" 2>/dev/null; done
-    kill -TERM "$FIDO_PID" 2>/dev/null
-    for _ in 1 2 3 4 5; do
-        kill -0 "$FIDO_PID" 2>/dev/null || break
-        sleep 1
-    done
-    for p in $pids; do kill -KILL "$p" 2>/dev/null; done
-    kill -KILL "$FIDO_PID" 2>/dev/null
-    echo "fido stopped (pid $FIDO_PID)"
-fi
+cd /home/rhencke/home-runner
+./fido down
 ```
 
 ### Step 3: Diagnose
