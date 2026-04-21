@@ -51,7 +51,7 @@ class TestProviderLimitSnapshot:
         assert snapshot.closest_to_exhaustion() is first
 
     def test_closest_to_exhaustion_returns_none_for_empty_snapshot(self) -> None:
-        snapshot = ProviderLimitSnapshot(provider=ProviderID.GEMINI)
+        snapshot = ProviderLimitSnapshot(provider=ProviderID.CODEX)
         assert snapshot.closest_to_exhaustion() is None
 
 

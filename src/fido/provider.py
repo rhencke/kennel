@@ -37,7 +37,6 @@ class ProviderID(StrEnum):
     CLAUDE_CODE = "claude-code"
     COPILOT_CLI = "copilot-cli"
     CODEX = "codex"
-    GEMINI = "gemini"
 
 
 @dataclass(frozen=True)
@@ -75,10 +74,6 @@ PROVIDER_PALETTES: dict[ProviderID, ProviderPalette] = {
         dim_bg=(40, 20, 60),  # obvious plum tint, still dark
         bright_fg=(180, 130, 255),  # Copilot-purple, legible on dark terminals
     ),
-    ProviderID.GEMINI: ProviderPalette(
-        dim_bg=(10, 40, 60),  # distinctive blue tint, still dark
-        bright_fg=(100, 200, 255),  # Gemini-blue, legible on dark terminals
-    ),
 }
 
 
@@ -86,8 +81,8 @@ def palette_for(provider: ProviderID) -> ProviderPalette | None:
     """Return the :class:`ProviderPalette` for *provider*, or ``None``.
 
     Returns ``None`` for providers without a registered palette (e.g.
-    ``CODEX`` / ``GEMINI`` today).  Callers treat ``None`` as "render
-    without provider-specific color", not as an error.
+    ``CODEX`` today).  Callers treat ``None`` as "render without
+    provider-specific color", not as an error.
     """
     return PROVIDER_PALETTES.get(provider)
 

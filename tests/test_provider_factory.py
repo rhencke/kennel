@@ -39,40 +39,6 @@ class TestDefaultProviderFactory:
         )
         assert api.provider_id == ProviderID.COPILOT_CLI
 
-    def test_create_api_builds_gemini(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "persona.md"
-        system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
-        repo_cfg = RepoConfig(
-            name="owner/repo",
-            work_dir=tmp_path,
-            provider=ProviderID.GEMINI,
-        )
-        api = factory.create_api(repo_cfg)
-        from fido.gemini import GeminiAPI
-
-        assert isinstance(api, GeminiAPI)
-        assert factory.create_api(repo_cfg) is api
-
-    def test_create_provider_builds_gemini(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "persona.md"
-        system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
-        repo_cfg = RepoConfig(
-            name="owner/repo",
-            work_dir=tmp_path,
-            provider=ProviderID.GEMINI,
-        )
-        provider = factory.create_provider(
-            repo_cfg,
-            work_dir=tmp_path,
-            repo_name="owner/repo",
-            session=None,
-        )
-        from fido.gemini import Gemini
-
-        assert isinstance(provider, Gemini)
-
     def test_create_api_rejects_unknown_provider(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")

@@ -17,24 +17,22 @@ import pytest
 from acp.exceptions import RequestError
 
 from fido import provider
-from fido.acp import (
-    _ACP_STREAM_LIMIT,
-    _is_cancel_sentinel,
-    _is_line_limit_overrun_error,
-    _preview_log_value,
-    _TerminalManager,
-    _tool_input_preview,
-    combine_prompt,
-)
 from fido.copilotcli import (
+    _ACP_STREAM_LIMIT,
     _COPILOT_CANCEL_SENTINEL,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
     CopilotCLIClient,
     CopilotCLISession,
+    _combine_prompt,
     _CopilotACPClient,
+    _is_cancel_sentinel,
+    _is_line_limit_overrun_error,
     _normalize_model,
+    _preview_log_value,
+    _TerminalManager,
+    _tool_input_preview,
     extract_result_text,
     extract_session_id,
 )
@@ -98,7 +96,6 @@ class FakeProcess:
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.provider_id = ProviderID.COPILOT_CLI
         self.ensure_calls: list[tuple[str | None, str | None]] = []
         self.recover_calls: list[tuple[str | None, str | None]] = []
         self.reset_calls: list[str | None] = []
@@ -304,7 +301,7 @@ class TestHelpers:
     def test_is_cancel_sentinel_matches_bare_string(self) -> None:
         # #666: bare sentinel that leaked onto
         # rhencke/orly#52 comment 4269109566.
-        assert _is_cancel_sentinel(_COPILOT_CANCEL_SENTINEL, _COPILOT_CANCEL_SENTINEL)
+        assert _is_cancel_sentinel(_COPILOT_CANCEL_SENTINEL)
 
     def test_is_cancel_sentinel_matches_trailing_sentinel(self) -> None:
         # #666: some cancelled turns stream narration then append the
@@ -314,20 +311,18 @@ class TestHelpers:
             "I found the clean seam...\n"
             "Info: Operation cancelled by user"
         )
-        assert _is_cancel_sentinel(narration, _COPILOT_CANCEL_SENTINEL)
+        assert _is_cancel_sentinel(narration)
 
     def test_is_cancel_sentinel_rejects_real_reply(self) -> None:
-        assert not _is_cancel_sentinel("", _COPILOT_CANCEL_SENTINEL)
-        assert not _is_cancel_sentinel(
-            "Info: Operation completed successfully", _COPILOT_CANCEL_SENTINEL
-        )
-        assert not _is_cancel_sentinel(
-            "Info: Operation cancelled by user internally", _COPILOT_CANCEL_SENTINEL
-        )
+        assert not _is_cancel_sentinel("")
+        assert not _is_cancel_sentinel("Info: Operation completed successfully")
+        assert not _is_cancel_sentinel("Info: Operation cancelled by user internally")
 
     def test_combine_prompt_joins_sections(self) -> None:
         assert (
-            combine_prompt("task", base_system_prompt="persona", system_prompt="system")
+            _combine_prompt(
+                "task", base_system_prompt="persona", system_prompt="system"
+            )
             == "persona\n\n---\n\nsystem\n\n---\n\ntask"
         )
 
@@ -511,10 +506,9 @@ class TestCopilotACPClient:
 
     def test_on_connect_is_noop(self) -> None:
         runtime = MagicMock()
-        runtime.provider_id = ProviderID.COPILOT_CLI
         client = _CopilotACPClient(runtime)
         assert client.on_connect(MagicMock()) is None
-        runtime.log_info.assert_called_once_with("copilot-cli system: connected")
+        runtime.log_info.assert_called_once_with("copilot system: connected")
 
 
 class TestCopilotACPRuntime:
@@ -657,7 +651,7 @@ class TestCopilotACPRuntime:
             session_id = runtime.ensure_session("persisted", None)
             runtime.prompt(session_id, "hello", None)
             prompt_block = connection.prompt_calls[0][1][0]
-            assert "previous persistent copilot-cli session was unexpectedly lost" in (
+            assert "previous persistent Copilot session was unexpectedly lost" in (
                 prompt_block.text
             )
             assert prompt_block.text.endswith("hello")
@@ -788,9 +782,9 @@ class TestCopilotACPRuntime:
                         raw_output={"stdout": "ok"},
                     ),
                 )
-            assert "copilot-cli tool: run shell command — make test" in caplog.text
+            assert "copilot tool: run shell command — make test" in caplog.text
             assert (
-                'copilot-cli tool result: run shell command — {"stdout": "ok"}'
+                'copilot tool result: run shell command — {"stdout": "ok"}'
                 in caplog.text
             )
             assert all(record.repo_name == "orly" for record in caplog.records)
@@ -845,11 +839,11 @@ class TestCopilotACPRuntime:
                         raw_output={"stderr": "boom"},
                     ),
                 )
-            assert "copilot-cli tool: bare tool" in caplog.text
-            assert "copilot-cli tool result: bare tool" in caplog.text
-            assert "copilot-cli tool failed: failed tool" in caplog.text
+            assert "copilot tool: bare tool" in caplog.text
+            assert "copilot tool result: bare tool" in caplog.text
+            assert "copilot tool failed: failed tool" in caplog.text
             assert (
-                'copilot-cli tool failed: failed tool with output — {"stderr": "boom"}'
+                'copilot tool failed: failed tool with output — {"stderr": "boom"}'
                 in caplog.text
             )
         finally:
@@ -1204,9 +1198,9 @@ class TestCopilotCLISession:
                 )
                 == "done"
             )
-        assert "copilot-cli prompt >>>" in caplog.text
+        assert "copilot prompt >>>" in caplog.text
         assert "persona\n\n---\n\nsystem\n\n---\n\ntask" in caplog.text
-        assert "copilot-cli result >>>\ndone\n<<< copilot-cli result" in caplog.text
+        assert "copilot result >>>\ndone\n<<< copilot result" in caplog.text
 
 
 class TestCopilotCLIAPI:
