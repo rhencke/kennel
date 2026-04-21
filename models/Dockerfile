@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG ROCQ_IMAGE=ghcr.io/fidocancode/rocq-python-extraction:latest
+ARG ROCQ_IMAGE=rocq-python-extraction:ci
 FROM ${ROCQ_IMAGE} AS extract
 
 WORKDIR /workspace

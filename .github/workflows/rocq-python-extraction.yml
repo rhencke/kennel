@@ -114,7 +114,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         uses: actions/cache@v4
         with:
-          path: .cache/rocq-models/context
+          path: .cache/rocq-models
           key: rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-${{ hashFiles('models/**', 'rocq-python-extraction/**', 'dune-workspace', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore') }}
           restore-keys: |
             rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-

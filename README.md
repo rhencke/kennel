@@ -17,9 +17,12 @@ an Astral `uv` Python image, and writes the committed output to
 
 The helper keeps build work inside buildx:
 
-- Rocq/Dune run in `ghcr.io/fidocancode/rocq-python-extraction:latest` by
-  default. Set `ROCQ_IMAGE=...` to test another image.
+- Rocq/Dune run in an internal `rocq-python-extraction:ci` image that `./build`
+  builds with buildx from `rocq-python-extraction/Dockerfile`. Set
+  `ROCQ_IMAGE=...` to test another image and skip the internal image build.
 - Python formatting runs in `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`.
+- The Rocq image build cache is exported through buildx to
+  `.cache/rocq-models/image`.
 - The Dune `_build` cache is exported through buildx to
   `.cache/rocq-models/context/_build`.
 - A manifest in `.cache/rocq-models/manifest.sha` gives unchanged local runs a

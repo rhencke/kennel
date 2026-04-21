@@ -128,6 +128,9 @@ class TestModelsBuildScript:
         assert '--build-context "rocq_models_cache=$cache_context"' in script
         assert "--output type=local,dest=." in script
         assert "--smart-output kennel/models_generated" in script
+        assert "--file rocq-python-extraction/Dockerfile" in script
+        assert '--cache-to "type=local,dest=$image_cache_next,mode=max"' in script
+        assert '--build-arg "ROCQ_IMAGE=$rocq_image"' in script
 
     def test_scripts_are_executable(self) -> None:
         assert os.access(BUILD, os.X_OK)

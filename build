@@ -65,7 +65,10 @@ fingerprint() {
 
 run_models_build() {
   local cache_context=.cache/rocq-models/context
+  local image_cache=.cache/rocq-models/image
+  local image_cache_next=.cache/rocq-models/image-next
   local manifest=.cache/rocq-models/manifest.sha
+  local rocq_image=${ROCQ_IMAGE:-rocq-python-extraction:ci}
   mkdir -p "$cache_context/_build"
 
   local current
@@ -75,12 +78,37 @@ run_models_build() {
     return
   fi
 
+  if [ -z "${ROCQ_IMAGE+x}" ]; then
+    local driver
+    driver=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
+    local image_cache_args=()
+    local image_cache_export_args=()
+    if [ "$driver" != "docker" ] && [ -d "$image_cache" ]; then
+      image_cache_args+=(--cache-from "type=local,src=$image_cache")
+    fi
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$image_cache_next"
+      image_cache_export_args+=(--cache-to "type=local,dest=$image_cache_next,mode=max")
+    fi
+    docker buildx build \
+      --file rocq-python-extraction/Dockerfile \
+      --load \
+      --tag "$rocq_image" \
+      "${image_cache_args[@]}" \
+      "${image_cache_export_args[@]}" \
+      rocq-python-extraction
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$image_cache"
+      mv "$image_cache_next" "$image_cache"
+    fi
+  fi
+
   ./build \
     --smart-output kennel/models_generated \
     -- \
     docker buildx build \
       --file models/Dockerfile \
-      --build-arg "ROCQ_IMAGE=${ROCQ_IMAGE:-ghcr.io/fidocancode/rocq-python-extraction:latest}" \
+      --build-arg "ROCQ_IMAGE=$rocq_image" \
       --build-context "rocq_models_cache=$cache_context" \
       --output type=local,dest=. \
       "$@" \
