@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 image=${FIDO_IMAGE:-fido:local}
-dev_image=${FIDO_DEV_IMAGE:-fido-dev:local}
+test_image=${FIDO_TEST_IMAGE:-fido-test:local}
 run_image=$image
 container=${FIDO_CONTAINER:-fido}
 secret=${FIDO_SECRET:-$HOME/.fido-secret}
@@ -55,7 +55,7 @@ buildx_driver() {
   awk -F': *' '/^Driver:/{print $2; exit}' <<<"$inspect_output"
 }
 
-warm_targets=(rocq-image format lint typecheck generated-typecheck test fido fido-dev)
+warm_targets=(rocq-image format lint typecheck generated-typecheck test fido)
 
 ensure_buildx_builder() {
   local driver
@@ -75,7 +75,6 @@ ensure_buildx_builder() {
 
 warm_input_hash() {
   local paths=(
-    build
     .dockerignore
     .githooks
     .github
@@ -145,26 +144,296 @@ image_input_hash() {
 }
 
 image_cache_ready() {
-  local target=$1
   local tag=$2
-  local driver=$3
-  docker image inspect "$tag" >/dev/null 2>&1 || return 1
-  if [ "$driver" = "docker" ]; then
-    return 0
-  fi
-  [ -d "$repo_root/.cache/rocq-models/$target" ]
+  docker image inspect "$tag" >/dev/null 2>&1
 }
 
 warm_cache_ready() {
-  local driver=$1
-  local target
-  docker image inspect "$image" "$dev_image" >/dev/null 2>&1 || return 1
-  if [ "$driver" = "docker" ]; then
+  return 0
+}
+
+buildx_cache_backend() {
+  if [ -n "${FIDO_BUILDX_CACHE_BACKEND:-}" ]; then
+    printf '%s\n' "$FIDO_BUILDX_CACHE_BACKEND"
+  elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    printf 'gha\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+make_rocq_usage() {
+  cat >&2 <<'EOF'
+usage:
+  ./fido make-rocq [docker buildx build args...]
+  ./fido make-rocq --smart-output DIR -- <command> [args...]
+
+With no mode flag, builds Rocq models through buildx and writes generated
+Python to src/fido/rocq/.
+
+With --smart-output, runs the command and removes stale files from DIR only
+after the command produces a fresh output manifest or fresh files.
+EOF
+}
+
+hash_paths() {
+  local existing=()
+  local path
+  for path in "$@"; do
+    if [ -f "$path" ]; then
+      existing+=("$path")
+    fi
+  done
+  if [ "${#existing[@]}" -eq 0 ]; then
+    printf 'empty\n'
+    return
+  fi
+  sha256sum "${existing[@]}" | LC_ALL=C sort -k 2 | sha256sum | awk '{print $1}'
+}
+
+make_rocq_input_hash() {
+  local paths=()
+  mapfile -t paths < <(
+    git -C "$repo_root" ls-files --cached --others --exclude-standard \
+      .dockerignore \
+      .githooks/pre-commit \
+      .python-version \
+      dune-workspace \
+      docker-bake.hcl \
+      fido \
+      package-lock.json \
+      package.json \
+      pyproject.toml \
+      uv.lock \
+      models \
+      rocq-python-extraction \
+      | LC_ALL=C sort
+  )
+  (
+    cd "$repo_root"
+    hash_paths "${paths[@]}"
+  )
+}
+
+make_rocq_generated_hash() {
+  local paths=()
+  mapfile -t paths < <(
+    find "$repo_root/src/fido/rocq" \
+      -type f \
+      ! -name ".build-files" \
+      ! -name "*.pyc" \
+      ! -path "*/__pycache__/*" \
+      -print \
+      | LC_ALL=C sort
+  )
+  hash_paths "${paths[@]}"
+}
+
+make_rocq_fingerprint() {
+  printf 'inputs %s\n' "$(make_rocq_input_hash)"
+  printf 'generated %s\n' "$(make_rocq_generated_hash)"
+}
+
+make_rocq_smart_output() {
+  local smart_output=
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --smart-output)
+        if [ "$#" -lt 2 ]; then
+          make_rocq_usage
+          return 2
+        fi
+        smart_output=$2
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        make_rocq_usage
+        return 2
+        ;;
+    esac
+  done
+
+  if [ -z "$smart_output" ] || [ "$#" -eq 0 ]; then
+    make_rocq_usage
+    return 2
+  fi
+
+  local marker
+  marker=$(mktemp)
+  trap 'rm -f "$marker"' RETURN
+
+  "$@"
+
+  if [ ! -d "$smart_output" ]; then
+    echo "smart output directory was not produced: $smart_output" >&2
+    return 1
+  fi
+
+  local manifest="$smart_output/.build-files"
+  if [ -f "$manifest" ]; then
+    if [ ! -s "$manifest" ]; then
+      echo "smart output manifest is empty: $manifest" >&2
+      return 1
+    fi
+
+    while IFS= read -r -d '' file; do
+      local rel=${file#"$smart_output"/}
+      if [ "$rel" = ".build-files" ]; then
+        continue
+      fi
+      if ! grep -Fxq "$rel" "$manifest"; then
+        rm -f "$file"
+      fi
+    done < <(find "$smart_output" -type f -print0)
+
+    rm -f "$manifest"
+    find "$smart_output" -depth -type d -empty -delete
     return 0
   fi
-  for target in "${warm_targets[@]}"; do
-    [ -d "$repo_root/.cache/rocq-models/$target" ] || return 1
+
+  if ! find "$smart_output" -type f -cnewer "$marker" -print -quit | grep -q .; then
+    echo "smart output directory has no newly produced files: $smart_output" >&2
+    return 1
+  fi
+
+  find "$smart_output" -type f ! -cnewer "$marker" -delete
+  rm -f "$manifest"
+  find "$smart_output" -depth -type d -empty -delete
+}
+
+make_rocq_models() {
+  local cache_context="$repo_root/.cache/rocq-models/context"
+  local image_cache="$repo_root/.cache/rocq-models/image"
+  local image_cache_next="$repo_root/.cache/rocq-models/image-next"
+  local image_oci="$repo_root/.cache/rocq-models/image-oci"
+  local image_oci_next="$repo_root/.cache/rocq-models/image-oci-next"
+  local image_oci_tar="$repo_root/.cache/rocq-models/image-oci.tar"
+  local build_cache="$repo_root/.cache/rocq-models/buildx"
+  local build_cache_next="$repo_root/.cache/rocq-models/buildx-next"
+  local manifest="$repo_root/.cache/rocq-models/manifest.sha"
+  local rocq_image=${ROCQ_IMAGE:-rocq-python-extraction:ci}
+  local rocq_context_args=()
+  local build_args=("$@")
+  local requested_target=
+  local driver
+  mkdir -p "$cache_context/_build"
+  driver=$(buildx_driver)
+
+  for ((i = 0; i < ${#build_args[@]}; i++)); do
+    case "${build_args[$i]}" in
+      --target=*|-t=*)
+        requested_target=${build_args[$i]#*=}
+        ;;
+      --target|-t)
+        requested_target=${build_args[$((i + 1))]:-}
+        ;;
+    esac
   done
+
+  local current
+  current=$(make_rocq_fingerprint)
+  if { [ -z "$requested_target" ] || [ "$requested_target" = "export" ]; } \
+    && [ -f "$manifest" ] \
+    && [ "$(cat "$manifest")" = "$current" ]; then
+    echo "models build cache hit"
+    return
+  fi
+
+  if [ -z "${ROCQ_IMAGE+x}" ]; then
+    local image_cache_args=()
+    local image_cache_export_args=()
+    if [ "$driver" != "docker" ] && [ -d "$image_cache" ]; then
+      image_cache_args+=(--cache-from "type=local,src=$image_cache")
+    fi
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$image_cache_next"
+      image_cache_export_args+=(--cache-to "type=local,dest=$image_cache_next,mode=max")
+    fi
+    if [ "$driver" = "docker" ]; then
+      docker buildx build \
+        --file "$repo_root/rocq-python-extraction/Dockerfile" \
+        --load \
+        --tag "$rocq_image" \
+        "$repo_root/rocq-python-extraction"
+    else
+      rm -rf "$image_oci_next"
+      rm -f "$image_oci_tar"
+      docker buildx build \
+        --file "$repo_root/rocq-python-extraction/Dockerfile" \
+        --output "type=oci,dest=$image_oci_tar" \
+        "${image_cache_args[@]}" \
+        "${image_cache_export_args[@]}" \
+        "$repo_root/rocq-python-extraction"
+      mkdir -p "$image_oci_next"
+      tar -xf "$image_oci_tar" -C "$image_oci_next"
+      rm -f "$image_oci_tar"
+      rm -rf "$image_oci"
+      mv "$image_oci_next" "$image_oci"
+      rocq_image=rocq_image
+      rocq_context_args+=(--build-context "rocq_image=oci-layout://$image_oci")
+    fi
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$image_cache"
+      mv "$image_cache_next" "$image_cache"
+    fi
+  fi
+
+  local build_cache_args=()
+  local build_cache_export_args=()
+  if [ "$driver" != "docker" ] && [ -d "$build_cache" ]; then
+    build_cache_args+=(--cache-from "type=local,src=$build_cache")
+  fi
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$build_cache_next"
+    build_cache_export_args+=(--cache-to "type=local,dest=$build_cache_next,mode=max")
+  fi
+
+  if [ -n "$requested_target" ] && [ "$requested_target" != "export" ]; then
+    (
+      cd "$repo_root"
+      docker buildx build \
+        --file models/Dockerfile \
+        --build-arg "ROCQ_IMAGE=$rocq_image" \
+        --build-context "rocq_models_cache=$cache_context" \
+        "${rocq_context_args[@]}" \
+        "${build_cache_args[@]}" \
+        "${build_cache_export_args[@]}" \
+        "${build_args[@]}" \
+        .
+    )
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$build_cache"
+      mv "$build_cache_next" "$build_cache"
+    fi
+    return
+  fi
+
+  "$repo_root/fido" make-rocq \
+    --smart-output "$repo_root/src/fido/rocq" \
+    -- \
+    docker buildx build \
+      --file "$repo_root/models/Dockerfile" \
+      --build-arg "ROCQ_IMAGE=$rocq_image" \
+      --build-context "rocq_models_cache=$cache_context" \
+      "${rocq_context_args[@]}" \
+      "${build_cache_args[@]}" \
+      "${build_cache_export_args[@]}" \
+      --target export \
+      --output "type=local,dest=$repo_root" \
+      "${build_args[@]}" \
+      "$repo_root"
+
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$build_cache"
+    mv "$build_cache_next" "$build_cache"
+  fi
+
+  make_rocq_fingerprint > "$manifest"
 }
 
 sync_runner() {
@@ -184,51 +453,33 @@ sync_runner() {
 build_image() {
   local target=$1
   local tag=$2
-  local driver
   ensure_buildx_builder
-  driver=$(buildx_driver)
   local manifest="$repo_root/.cache/rocq-models/$target.sha"
   local current
   current=$(image_input_hash "$target")
-  local cache_dir="$repo_root/.cache/rocq-models/$target"
-  local cache_next="$repo_root/.cache/rocq-models/$target-next"
-  local bake_args=()
   mkdir -p "$repo_root/.cache/rocq-models"
 
   if [ -f "$manifest" ] \
     && [ "$(cat "$manifest")" = "$current" ] \
-    && image_cache_ready "$target" "$tag" "$driver"; then
+    && image_cache_ready "$target" "$tag"; then
     log INFO "$target image cache hit $tag"
     run_image=$tag
     return
-  fi
-
-  if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
-    bake_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
-  fi
-  if [ "$driver" != "docker" ]; then
-    rm -rf "$cache_next"
-    bake_args+=(--set "$target.cache-to=type=local,dest=$cache_next,mode=max")
   fi
 
   log INFO "building $target image $tag"
   (
     cd "$repo_root"
     FIDO_IMAGE="$image" \
-      FIDO_DEV_IMAGE="$dev_image" \
+      FIDO_TEST_IMAGE="$test_image" \
       FIDO_UID="$(id -u)" \
       FIDO_GID="$(id -g)" \
       FIDO_USER="$(id -un)" \
       FIDO_HOME="$HOME" \
       docker buildx bake \
-        "${bake_args[@]}" \
         "$target"
   )
 
-  if [ "$driver" != "docker" ]; then
-    rm -rf "$cache_dir"
-    mv "$cache_next" "$cache_dir"
-  fi
   printf '%s\n' "$current" > "$manifest"
   run_image=$tag
 }
@@ -236,11 +487,13 @@ build_image() {
 warm_images() {
   local passthrough=("$@")
   local driver
+  local cache_backend
   local manifest="$repo_root/.cache/rocq-models/warm.sha"
   local current
   current=$(warm_input_hash)
   ensure_buildx_builder
   driver=$(buildx_driver)
+  cache_backend=$(buildx_cache_backend)
   local bake_args=()
   local target
   mkdir -p "$repo_root/.cache/rocq-models/context/_build"
@@ -254,17 +507,26 @@ warm_images() {
   fi
 
   for target in "${warm_targets[@]}"; do
-    local cache_dir="$repo_root/.cache/rocq-models/$target"
-    if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
-      bake_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
-    fi
+    case "$cache_backend" in
+      gha)
+        bake_args+=(--set "$target.cache-from=type=gha,scope=$target")
+        bake_args+=(--set "$target.cache-to=type=gha,scope=$target,mode=max")
+        ;;
+      none)
+        ;;
+      *)
+        echo "unsupported FIDO_BUILDX_CACHE_BACKEND: $cache_backend" >&2
+        return 2
+        ;;
+    esac
   done
+  bake_args+=(--set "fido.output=type=cacheonly")
 
-  log INFO "warming ci, runtime, and dev images"
+  log INFO "warming ci checks and runtime image cache"
   (
     cd "$repo_root"
     FIDO_IMAGE="$image" \
-      FIDO_DEV_IMAGE="$dev_image" \
+      FIDO_TEST_IMAGE="$test_image" \
       FIDO_UID="$(id -u)" \
       FIDO_GID="$(id -g)" \
       FIDO_USER="$(id -un)" \
@@ -274,35 +536,6 @@ warm_images() {
         "${passthrough[@]}" \
         warm
   )
-
-  if [ "$driver" != "docker" ]; then
-    for target in "${warm_targets[@]}"; do
-      local cache_dir="$repo_root/.cache/rocq-models/$target"
-      local cache_next="$repo_root/.cache/rocq-models/$target-next"
-      local export_args=()
-      if [ -d "$cache_dir" ]; then
-        export_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
-      fi
-      rm -rf "$cache_next"
-      log INFO "exporting buildx cache target=$target"
-      (
-        cd "$repo_root"
-        FIDO_IMAGE="$image" \
-          FIDO_DEV_IMAGE="$dev_image" \
-          FIDO_UID="$(id -u)" \
-          FIDO_GID="$(id -g)" \
-          FIDO_USER="$(id -un)" \
-          FIDO_HOME="$HOME" \
-          docker buildx bake \
-            "${export_args[@]}" \
-            --set "$target.cache-to=type=local,dest=$cache_next,mode=max" \
-            "${passthrough[@]}" \
-            "$target"
-      )
-      rm -rf "$cache_dir"
-      mv "$cache_next" "$cache_dir"
-    done
-  fi
 
   printf '%s\n' "$current" > "$manifest"
 }
@@ -388,6 +621,14 @@ case "$command" in
   warm)
     warm_images "${@:2}"
     ;;
+  make-rocq)
+    shift
+    if [ "${1:-}" = "--smart-output" ]; then
+      make_rocq_smart_output "$@"
+    else
+      make_rocq_models "$@"
+    fi
+    ;;
   status)
     build_image fido "$image"
     run_container fido-status "${@:2}"
@@ -409,7 +650,7 @@ case "$command" in
     run_container fido-sync-tasks "${@:2}"
     ;;
   tests)
-    build_image fido-dev "$dev_image"
+    build_image fido-test "$test_image"
     run_container tests "${@:2}"
     ;;
   traceback)
@@ -417,7 +658,7 @@ case "$command" in
     run_container traceback "${@:2}"
     ;;
   *)
-    build_image fido-dev "$dev_image"
+    build_image fido-test "$test_image"
     run_container "$@"
     ;;
 esac

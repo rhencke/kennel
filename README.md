@@ -26,13 +26,14 @@ with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
 clone, rebuilds the image, and starts again. It exits normally on ordinary
 shutdown signals. `./fido down` stops the named container gracefully; `--rm`
 lets Docker remove it after the stop.
-`./fido warm` builds the `warm` bake group, which depends on full CI, the
-production runtime image, and the dev check image, so local and CI runs
-populate those cache families through one command.
+`./fido warm` builds the `warm` bake group, which depends on full CI and the
+production runtime image cache, so local and CI runs populate those cache
+families through one command. The `fido-test` image is built on demand for ad hoc local
+commands.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
-Unknown commands, such as `./fido ruff format .`, run through the dev image and
+Unknown commands, such as `./fido ruff format .`, run through the `fido-test` image and
 are passed to containerized `uv run` unchanged; do not use host `uv` for normal
 project checks. The production runtime image installs only production Python
 dependencies, plus pinned Node CLI tools from
@@ -61,20 +62,20 @@ before syncing `origin/main`.
 
 ## Rocq model builds
 
-Use the root build helper:
+Use the Fido launcher:
 
 ```bash
-./build
+./fido make-rocq
 ```
 
-`./build` is the canonical Rocq model generation entry point. It runs
+`./fido make-rocq` is the canonical Rocq model generation entry point. It runs
 `docker buildx build`, extracts `models/*.v`, formats the generated Python in
 an Astral `uv` Python image, and writes the committed output to
 `src/fido/rocq/`.
 
 The helper keeps build work inside buildx:
 
-- Rocq/Dune run in an internal `rocq-python-extraction:ci` image that `./build`
+- Rocq/Dune run in an internal `rocq-python-extraction:ci` image that `./fido make-rocq`
   builds with buildx from `rocq-python-extraction/Dockerfile`. Set
   `ROCQ_IMAGE=...` to test another image and skip the internal image build.
 - Python formatting runs in `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`.
@@ -92,12 +93,12 @@ Extra arguments are passed through to `docker buildx build` before the final
 context argument:
 
 ```bash
-./build --no-cache
-./build --target format
-./build --target lint
-./build --target typecheck
-./build --target generated-typecheck
-./build --target test
+./fido make-rocq --no-cache
+./fido make-rocq --target format
+./fido make-rocq --target lint
+./fido make-rocq --target typecheck
+./fido make-rocq --target generated-typecheck
+./fido make-rocq --target test
 ```
 
 All Python checks run inside buildx bake targets. Rocq test artifacts are
@@ -112,7 +113,7 @@ inputs are copied. The pre-commit hook and CI both call `./fido warm`.
 The internal smart-output mode is available for buildx artifact producers:
 
 ```bash
-./build --smart-output DIR -- <command> [args...]
+./fido make-rocq --smart-output DIR -- <command> [args...]
 ```
 
 If the command emits `DIR/.build-files`, the helper removes files in `DIR` that

@@ -80,7 +80,7 @@ ENV HOME=$FIDO_HOME
 
 ENTRYPOINT ["uv", "run"]
 
-FROM fido-python-dev AS fido-dev
+FROM fido-python-dev AS fido-test
 
 ARG FIDO_UID=1000
 ARG FIDO_GID=1000
@@ -128,7 +128,7 @@ RUN targets="" \
     && printf '%s\n' \
         '"""Python extracted from Rocq models in models/.' \
         '' \
-        'Rebuild with:  ./build' \
+        'Rebuild with:  ./fido make-rocq' \
         'Source:        models/*.v (Rocq)' \
         'Generator:     rocq-python-extraction plugin' \
         '"""' \
@@ -178,8 +178,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python-deps AS python-check-base
 
 WORKDIR /workspace
-COPY .dockerignore build docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
+COPY .github/workflows/ci.yml .github/workflows/generate_ci.py .github/workflows/
 COPY models/Dockerfile models/Dockerfile
 COPY src src
 COPY tests tests

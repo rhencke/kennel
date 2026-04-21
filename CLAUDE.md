@@ -15,13 +15,14 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido help` | Print the command list. |
 | `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
 | `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
-| `./fido warm` | Build the buildx `warm` group: format, lint, typecheck, generated typecheck, tests, production runtime image, and dev image. This is what CI and pre-commit use. |
+| `./fido warm` | Build the buildx `warm` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
+| `./fido make-rocq [args...]` | Generate Rocq-extracted Python and run Rocq model buildx targets. |
 | `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
 | `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
 | `./fido gh-status ...` | Update the FidoCanCode GitHub profile status. |
 | `./fido chat [args...]` | Start an interactive persona session with runner-clone context. |
 | `./fido sync-tasks <work_dir>` | Sync a repo task list into its GitHub PR body. |
-| `./fido tests [pytest args...]` | Run the project pytest entry point inside the dev image. |
+| `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
 | `./fido <tool> [args...]` | Run any other command through containerized `uv run`, for example `./fido ruff format .`, `./fido pyright`, or `./fido pytest tests/test_status.py -q`. |
 
@@ -78,8 +79,8 @@ cd /home/rhencke/home-runner && ./fido up --port 9000 --secret-file /run/secrets
 ## Linting
 
 ```bash
-./build --target lint
-./build --target format
+./fido make-rocq --target lint
+./fido make-rocq --target format
 ```
 
 ## Module guide
@@ -664,20 +665,20 @@ and pytest.
 ### Testing
 
 ```bash
-./build --target test  # build Rocq artifacts, then run pytest in uv buildx
-./build --target ci    # format, lint, typecheck, generated typecheck, tests
+./fido make-rocq --target test  # build Rocq artifacts, then run pytest in uv buildx
+./fido make-rocq --target ci    # format, lint, typecheck, generated typecheck, tests
 ```
 
-`./build` rebuilds the Rocq image locally when its Dockerfile or inputs change.
+`./fido make-rocq` rebuilds the Rocq image locally when its Dockerfile or inputs change.
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/test_*.py`; `./build --target test`
+tests under `rocq-python-extraction/test/test_*.py`; `./fido make-rocq --target test`
 is the canonical assertion path.
 
 ### Building
 
 ```bash
-./build --target test-extract  # compile extraction theories in the Rocq image
+./fido make-rocq --target test-extract  # compile extraction theories in the Rocq image
 ```
 
 ### Linting / formatting

@@ -12,5 +12,6 @@ def test_help_lists_commands(capsys) -> None:  # type: ignore[no-untyped-def]
     assert "up" in out
     assert removed_flag not in out
     assert "down" in out
+    assert "make-rocq" in out
     assert "status" in out
     assert "task" in out

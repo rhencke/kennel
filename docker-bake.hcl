@@ -2,8 +2,8 @@ variable "FIDO_IMAGE" {
   default = "fido:local"
 }
 
-variable "FIDO_DEV_IMAGE" {
-  default = "fido-dev:local"
+variable "FIDO_TEST_IMAGE" {
+  default = "fido-test:local"
 }
 
 variable "FIDO_UID" {
@@ -36,11 +36,11 @@ target "fido" {
   }
 }
 
-target "fido-dev" {
+target "fido-test" {
   context = "."
   dockerfile = "models/Dockerfile"
-  target = "fido-dev"
-  tags = [FIDO_DEV_IMAGE]
+  target = "fido-test"
+  tags = [FIDO_TEST_IMAGE]
   output = ["type=docker"]
   args = {
     FIDO_UID = FIDO_UID
@@ -125,5 +125,5 @@ group "ci" {
 }
 
 group "warm" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido", "fido-dev"]
+  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido"]
 }

@@ -4,7 +4,7 @@ set -e
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-echo "==> warming buildx CI and runtime targets"
+echo "==> warming buildx CI checks and runtime image cache"
 ./fido warm
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the

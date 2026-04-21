@@ -31,7 +31,7 @@ packages = ["src/fido"]
 
 [tool.ruff]
 target-version = "py314"
-# Generated Python from Rocq extraction — formatted by build.sh, not by the
+# Generated Python from Rocq extraction — formatted by ./fido make-rocq, not by the
 # pre-commit hook.  ruff format is applied during generation; lint is skipped
 # because generated code has unused imports that are valid for richer models.
 exclude = ["src/fido/rocq"]
