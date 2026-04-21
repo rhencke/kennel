@@ -201,16 +201,11 @@ class TestModelsBuildScript:
         rocq_models_key = workflow.split("key: buildx-rocq-model-buildx-", maxsplit=1)[
             1
         ].split("      - name: Restore rocq-model-context", maxsplit=1)[0]
-        buildkit_mounts_key = workflow.split("key: buildkit-mounts-", maxsplit=1)[
-            1
-        ].split("      - name: Inject buildkit cache mounts", maxsplit=1)[0]
         assert "uv.lock" not in rocq_image_key
         assert "uv.lock" not in rocq_models_key
         assert "package-lock.json" not in rocq_image_key
         assert "package-lock.json" not in rocq_models_key
         assert "models/*.v" in rocq_models_key
-        assert "uv.lock" in buildkit_mounts_key
-        assert "package-lock.json" in buildkit_mounts_key
         assert "docker buildx" in generator
         assert "bake" in generator
         for target in (
@@ -237,10 +232,53 @@ class TestModelsBuildScript:
                 "if: success() && "
                 f"steps.restore-rocq_model_{cache}.outputs.cache-hit != 'true'"
             ) in workflow
-        assert "path: .cache/buildkit-mounts" in workflow
-        assert ("key: buildkit-mounts-${{ runner.os }}-${{ hashFiles(") in workflow
-        assert "buildkit-mounts-${{ runner.os }}-" in workflow
+        assert "Restore buildkit cache mounts" not in workflow
+        assert "key: buildkit-mounts-${{ runner.os }}-" not in workflow
+        assert "cache-dir: .cache/buildkit-mounts" not in workflow
+        assert "dockerfile: models/Dockerfile" not in workflow
         assert "reproducible-containers/buildkit-cache-dance@v3.3.2" in workflow
+        assert "parse_cache_mounts" in generator
+        assert "cache_mounts_for_targets" in generator
+        assert "cache_mount_key_inputs" in generator
+        expected_mounts = {
+            "fido-npm": ("/root/.npm", ("package-lock.json", "package.json")),
+            "fido-pyright": (
+                "/root/.cache/pyright-python",
+                ("pyrightconfig.json", "uv.lock"),
+            ),
+            "fido-uv-check": ("/root/.cache/uv", ("uv.lock",)),
+            "fido-uv-dev": ("/tmp/uv-cache", ("uv.lock",)),
+            "fido-uv-prod": ("/tmp/uv-cache", ("uv.lock",)),
+        }
+        for mount_id, (target, key_inputs) in expected_mounts.items():
+            step_id = mount_id.replace("-", "_")
+            assert f"name: Cache {mount_id} BuildKit mount" in workflow
+            assert f"id: cache-buildkit_mount_{step_id}" in workflow
+            assert f"path: .cache/buildkit-mounts/{mount_id}" in workflow
+            assert f"key: buildkit-mount-{mount_id}-${{{{ runner.os }}}}-" in workflow
+            assert f"buildkit-mount-{mount_id}-${{{{ runner.os }}}}-" in workflow
+            assert f"name: Inject {mount_id} BuildKit mount" in workflow
+            assert f'".cache/buildkit-mounts/{mount_id}": {{' in workflow
+            assert f'"id": "{mount_id}"' in workflow
+            assert f'"target": "{target}"' in workflow
+            assert f"scratch-dir: .cache/buildkit-mounts-scratch/{mount_id}" in workflow
+            assert (
+                "skip-extraction: "
+                f"${{{{ steps.cache-buildkit_mount_{step_id}.outputs.cache-hit }}}}"
+                in workflow
+            )
+            mount_key = workflow.split(
+                f"key: buildkit-mount-{mount_id}-${{{{ runner.os }}}}-",
+                maxsplit=1,
+            )[1].split("          restore-keys:", maxsplit=1)[0]
+            assert "models/Dockerfile" in mount_key
+            for key_input in key_inputs:
+                assert key_input in mount_key
+        npm_key = workflow.split(
+            "key: buildkit-mount-fido-npm-${{ runner.os }}-", maxsplit=1
+        )[1].split("          restore-keys:", maxsplit=1)[0]
+        assert "uv.lock" not in npm_key
+        assert "pyproject.toml" not in npm_key
 
 
 class TestFidoLauncher:

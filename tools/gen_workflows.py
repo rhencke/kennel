@@ -26,7 +26,17 @@ class CopyInstruction:
 
 @dataclass
 class RunInstruction:
-    uses_cache_mount: bool
+    cache_mounts: list["CacheMount"] = field(default_factory=list)
+
+    @property
+    def uses_cache_mount(self) -> bool:
+        return bool(self.cache_mounts)
+
+
+@dataclass(frozen=True)
+class CacheMount:
+    id: str
+    target: str
 
 
 Instruction = CopyInstruction | RunInstruction
@@ -142,10 +152,28 @@ def parse_dockerfile(path: Path) -> list[Stage]:
                     CopyInstruction(sources=args[:-1], from_name=from_name)
                 )
         elif keyword == "RUN":
-            stages[-1].instructions.append(
-                RunInstruction(uses_cache_mount="--mount=type=cache" in line)
-            )
+            stages[-1].instructions.append(RunInstruction(parse_cache_mounts(parts)))
     return stages
+
+
+def parse_cache_mounts(parts: list[str]) -> list[CacheMount]:
+    mounts: list[CacheMount] = []
+    for part in parts:
+        if not part.startswith("--mount="):
+            continue
+        options: dict[str, str] = {}
+        for option in part.removeprefix("--mount=").split(","):
+            key, separator, value = option.partition("=")
+            if separator:
+                options[key] = value
+        if options.get("type") != "cache":
+            continue
+        target = options.get("target")
+        if target is None:
+            continue
+        mount_id = options.get("id", target.strip("/").replace("/", "-"))
+        mounts.append(CacheMount(id=mount_id, target=target))
+    return mounts
 
 
 def stage_map(stages: list[Stage]) -> dict[str, Stage]:
@@ -277,18 +305,87 @@ def target_inputs(
 
 def cache_key_inputs(plan: dict[str, object]) -> dict[str, list[str]]:
     warm_targets = cache_scopes(plan)
-    mount_inputs: set[str] = {"docker-bake.hcl"}
-    for target in warm_targets:
-        mount_inputs.update(
-            target_inputs(plan, target, include_cache_mount_stages=True)
-        )
-    return {
+    keys = {
         "rocq-image": sorted(target_inputs(plan, "rocq-image")),
         "rocq-models": sorted(
             target_inputs(plan, "format", target_stage_override="extract")
         ),
-        "buildkit-mounts": sorted(mount_inputs),
     }
+    for mount in cache_mounts_for_targets(plan, warm_targets):
+        keys[f"buildkit-mount-{mount.id}"] = cache_mount_key_inputs(mount)
+    return keys
+
+
+def cache_mounts_for_targets(
+    plan: dict[str, object], bake_targets: list[str]
+) -> list[CacheMount]:
+    mounts: dict[str, CacheMount] = {}
+    visited: set[tuple[str, str]] = set()
+
+    def visit_stage(
+        context: str,
+        stages_by_name: dict[str, Stage],
+        bake_target: str,
+        stage_name: str,
+    ) -> None:
+        key = (bake_target, stage_name)
+        if key in visited:
+            return
+        visited.add(key)
+        stage = stages_by_name[stage_name]
+        if stage.base in stages_by_name:
+            visit_stage(context, stages_by_name, bake_target, stage.base)
+        elif stage.base.startswith("${") and stage.base.endswith("}"):
+            if target := arg_named_target(plan, bake_target, stage.base[2:-1]):
+                visit_target(target)
+        for instruction in stage.instructions:
+            if isinstance(instruction, CopyInstruction):
+                if instruction.from_name in stages_by_name:
+                    visit_stage(
+                        context,
+                        stages_by_name,
+                        bake_target,
+                        instruction.from_name,
+                    )
+                elif instruction.from_name is not None and (
+                    target := named_target(plan, bake_target, instruction.from_name)
+                ):
+                    visit_target(target)
+            elif isinstance(instruction, RunInstruction):
+                for mount in instruction.cache_mounts:
+                    existing = mounts.get(mount.id)
+                    if existing is not None and existing.target != mount.target:
+                        sys.exit(
+                            f"cache mount id {mount.id!r} has conflicting targets: "
+                            f"{existing.target!r} and {mount.target!r}"
+                        )
+                    mounts[mount.id] = mount
+
+    def visit_target(name: str) -> None:
+        context, dockerfile, target_stage = dockerfile_for_bake_target(plan, name)
+        stages = parse_dockerfile(dockerfile)
+        stages_by_name = stage_map(stages)
+        if not target_stage:
+            target_stage = stages[-1].name
+        visit_stage(context, stages_by_name, name, target_stage)
+
+    for target in bake_targets:
+        visit_target(target)
+    return [mounts[name] for name in sorted(mounts)]
+
+
+def cache_mount_key_inputs(mount: CacheMount) -> list[str]:
+    base = {"models/Dockerfile"}
+    if mount.id.startswith("fido-uv-"):
+        return sorted(base | {".python-version", "pyproject.toml", "uv.lock"})
+    if mount.id == "fido-npm":
+        return sorted(base | {"package.json", "package-lock.json"})
+    if mount.id == "fido-pyright":
+        return sorted(
+            base
+            | {".python-version", "pyproject.toml", "uv.lock", "pyrightconfig.json"}
+        )
+    return sorted(base)
 
 
 def hashfiles_pattern(path: str) -> str:
@@ -447,9 +544,53 @@ def save_step(name: str, path: str, key_expression: str) -> str:
 """
 
 
+def cache_step_id(name: str) -> str:
+    return "cache-" + name.replace("-", "_")
+
+
+def buildkit_mount_cache_step(mount: CacheMount, key_expression: str) -> str:
+    name = f"buildkit-mount-{mount.id}"
+    step_id = cache_step_id(name)
+    path = f".cache/buildkit-mounts/{mount.id}"
+    cache_map = json.dumps(
+        {path: {"target": mount.target, "id": mount.id}},
+        indent=2,
+        sort_keys=True,
+    )
+    indented_cache_map = "\n".join(
+        f"            {line}" for line in cache_map.splitlines()
+    )
+    return f"""\
+      - name: Cache {mount.id} BuildKit mount
+        id: {step_id}
+        uses: actions/cache@v4
+        with:
+          path: {path}
+          key: buildkit-mount-{mount.id}-${{{{ runner.os }}}}-{key_expression}
+          restore-keys: |
+            buildkit-mount-{mount.id}-${{{{ runner.os }}}}-
+      - name: Inject {mount.id} BuildKit mount
+        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        with:
+          builder: ${{{{ steps.setup-buildx.outputs.name }}}}
+          cache-map: |
+{indented_cache_map}
+          scratch-dir: .cache/buildkit-mounts-scratch/{mount.id}
+          skip-extraction: ${{{{ steps.{step_id}.outputs.cache-hit }}}}
+"""
+
+
 def render(plan: dict[str, object]) -> str:
     keys = cache_key_inputs(plan)
     key_expressions = {key: hashfiles_expression(paths) for key, paths in keys.items()}
+    buildkit_mounts = cache_mounts_for_targets(plan, cache_scopes(plan))
+    buildkit_mount_steps = "".join(
+        buildkit_mount_cache_step(
+            mount,
+            key_expressions[f"buildkit-mount-{mount.id}"],
+        )
+        for mount in buildkit_mounts
+    )
     restores = "".join(
         restore_step(name, path, key_expressions[key])
         for name, path, key in cache_entries(plan)
@@ -482,21 +623,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
-{restores}      - name: Restore buildkit cache mounts
-        id: restore-buildkit-mounts
-        uses: actions/cache@v4
-        with:
-          path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{{{ runner.os }}}}-{key_expressions["buildkit-mounts"]}
-          restore-keys: |
-            buildkit-mounts-${{{{ runner.os }}}}-
-      - name: Inject buildkit cache mounts
-        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
-        with:
-          builder: ${{{{ steps.setup-buildx.outputs.name }}}}
-          cache-dir: .cache/buildkit-mounts
-          dockerfile: models/Dockerfile
-      - run: ./.githooks/pre-commit
+{restores}{buildkit_mount_steps}      - run: ./.githooks/pre-commit
       - name: Check committed model mirrors
         run: |
           ./fido make-rocq

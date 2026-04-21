@@ -44,20 +44,111 @@ jobs:
           key: buildx-rocq-model-context-${{ runner.os }}-${{ hashFiles('dune-workspace', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam') }}
           restore-keys: |
             buildx-rocq-model-context-${{ runner.os }}-
-      - name: Restore buildkit cache mounts
-        id: restore-buildkit-mounts
+      - name: Cache fido-npm BuildKit mount
+        id: cache-buildkit_mount_fido_npm
         uses: actions/cache@v4
         with:
-          path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{ runner.os }}-${{ hashFiles('.dockerignore', '.githooks/pre-commit', '.github/workflows/ci.yml', '.python-version', 'docker-bake.hcl', 'dune-workspace', 'fido', 'models/*.v', 'models/Dockerfile', 'models/dune', 'models/dune-project', 'package-lock.json', 'package.json', 'pyproject.toml', 'pyrightconfig.json', 'rocq-python-extraction/DIAGNOSTICS.md', 'rocq-python-extraction/Dockerfile', 'rocq-python-extraction/META.rocq-python-extraction.template', 'rocq-python-extraction/dune', 'rocq-python-extraction/dune-project', 'rocq-python-extraction/export_pytest_generated.sh', 'rocq-python-extraction/g_python_extraction.mlg', 'rocq-python-extraction/python.ml', 'rocq-python-extraction/rocq-python-extraction.opam', 'rocq-python-extraction/run_generated_pyright.sh', 'rocq-python-extraction/run_in_docker.sh', 'rocq-python-extraction/test/*.py', 'rocq-python-extraction/test/*.v', 'rocq-python-extraction/test/dune', 'rocq-python-extraction/test/generated_pyright_targets.txt', 'rocq-python-extraction/test/generated_pytest_targets.txt', 'src/**', 'tests/**', 'tools/build_graph.sh', 'tools/gen_workflows.py', 'uv.lock') }}
+          path: .cache/buildkit-mounts/fido-npm
+          key: buildkit-mount-fido-npm-${{ runner.os }}-${{ hashFiles('models/Dockerfile', 'package-lock.json', 'package.json') }}
           restore-keys: |
-            buildkit-mounts-${{ runner.os }}-
-      - name: Inject buildkit cache mounts
+            buildkit-mount-fido-npm-${{ runner.os }}-
+      - name: Inject fido-npm BuildKit mount
         uses: reproducible-containers/buildkit-cache-dance@v3.3.2
         with:
           builder: ${{ steps.setup-buildx.outputs.name }}
-          cache-dir: .cache/buildkit-mounts
-          dockerfile: models/Dockerfile
+          cache-map: |
+            {
+              ".cache/buildkit-mounts/fido-npm": {
+                "id": "fido-npm",
+                "target": "/root/.npm"
+              }
+            }
+          scratch-dir: .cache/buildkit-mounts-scratch/fido-npm
+          skip-extraction: ${{ steps.cache-buildkit_mount_fido_npm.outputs.cache-hit }}
+      - name: Cache fido-pyright BuildKit mount
+        id: cache-buildkit_mount_fido_pyright
+        uses: actions/cache@v4
+        with:
+          path: .cache/buildkit-mounts/fido-pyright
+          key: buildkit-mount-fido-pyright-${{ runner.os }}-${{ hashFiles('.python-version', 'models/Dockerfile', 'pyproject.toml', 'pyrightconfig.json', 'uv.lock') }}
+          restore-keys: |
+            buildkit-mount-fido-pyright-${{ runner.os }}-
+      - name: Inject fido-pyright BuildKit mount
+        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-map: |
+            {
+              ".cache/buildkit-mounts/fido-pyright": {
+                "id": "fido-pyright",
+                "target": "/root/.cache/pyright-python"
+              }
+            }
+          scratch-dir: .cache/buildkit-mounts-scratch/fido-pyright
+          skip-extraction: ${{ steps.cache-buildkit_mount_fido_pyright.outputs.cache-hit }}
+      - name: Cache fido-uv-check BuildKit mount
+        id: cache-buildkit_mount_fido_uv_check
+        uses: actions/cache@v4
+        with:
+          path: .cache/buildkit-mounts/fido-uv-check
+          key: buildkit-mount-fido-uv-check-${{ runner.os }}-${{ hashFiles('.python-version', 'models/Dockerfile', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            buildkit-mount-fido-uv-check-${{ runner.os }}-
+      - name: Inject fido-uv-check BuildKit mount
+        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-map: |
+            {
+              ".cache/buildkit-mounts/fido-uv-check": {
+                "id": "fido-uv-check",
+                "target": "/root/.cache/uv"
+              }
+            }
+          scratch-dir: .cache/buildkit-mounts-scratch/fido-uv-check
+          skip-extraction: ${{ steps.cache-buildkit_mount_fido_uv_check.outputs.cache-hit }}
+      - name: Cache fido-uv-dev BuildKit mount
+        id: cache-buildkit_mount_fido_uv_dev
+        uses: actions/cache@v4
+        with:
+          path: .cache/buildkit-mounts/fido-uv-dev
+          key: buildkit-mount-fido-uv-dev-${{ runner.os }}-${{ hashFiles('.python-version', 'models/Dockerfile', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            buildkit-mount-fido-uv-dev-${{ runner.os }}-
+      - name: Inject fido-uv-dev BuildKit mount
+        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-map: |
+            {
+              ".cache/buildkit-mounts/fido-uv-dev": {
+                "id": "fido-uv-dev",
+                "target": "/tmp/uv-cache"
+              }
+            }
+          scratch-dir: .cache/buildkit-mounts-scratch/fido-uv-dev
+          skip-extraction: ${{ steps.cache-buildkit_mount_fido_uv_dev.outputs.cache-hit }}
+      - name: Cache fido-uv-prod BuildKit mount
+        id: cache-buildkit_mount_fido_uv_prod
+        uses: actions/cache@v4
+        with:
+          path: .cache/buildkit-mounts/fido-uv-prod
+          key: buildkit-mount-fido-uv-prod-${{ runner.os }}-${{ hashFiles('.python-version', 'models/Dockerfile', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            buildkit-mount-fido-uv-prod-${{ runner.os }}-
+      - name: Inject fido-uv-prod BuildKit mount
+        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-map: |
+            {
+              ".cache/buildkit-mounts/fido-uv-prod": {
+                "id": "fido-uv-prod",
+                "target": "/tmp/uv-cache"
+              }
+            }
+          scratch-dir: .cache/buildkit-mounts-scratch/fido-uv-prod
+          skip-extraction: ${{ steps.cache-buildkit_mount_fido_uv_prod.outputs.cache-hit }}
       - run: ./.githooks/pre-commit
       - name: Check committed model mirrors
         run: |
