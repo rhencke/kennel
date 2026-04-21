@@ -157,8 +157,9 @@ def set_gh_status(
     _gh.set_user_status(_choice(_FALLBACK_MESSAGES), ":sleeping:", busy=True)
 
 
-def main(argv: list[str], *, _GitHub: type[GitHub] = GitHub) -> None:
+def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> None:
+    argv = sys.argv[1:] if argv is None else argv
     if len(argv) < 2 or argv[0] != "set":
-        print("Usage: kennel gh-status set <message>", file=sys.stderr)
+        print("Usage: kennel-gh-status set <message>", file=sys.stderr)
         raise SystemExit(1)
     set_gh_status(" ".join(argv[1:]), _gh=_GitHub())

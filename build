@@ -35,7 +35,10 @@ input_hash() {
     git ls-files --cached --others --exclude-standard \
       build \
       .dockerignore \
+      .githooks/pre-commit \
+      .python-version \
       dune-workspace \
+      fido \
       pyproject.toml \
       uv.lock \
       models \
@@ -67,20 +70,37 @@ run_models_build() {
   local cache_context=.cache/rocq-models/context
   local image_cache=.cache/rocq-models/image
   local image_cache_next=.cache/rocq-models/image-next
+  local build_cache=.cache/rocq-models/buildx
+  local build_cache_next=.cache/rocq-models/buildx-next
   local manifest=.cache/rocq-models/manifest.sha
   local rocq_image=${ROCQ_IMAGE:-rocq-python-extraction:ci}
+  local build_args=("$@")
+  local requested_target=
+  local driver
   mkdir -p "$cache_context/_build"
+  driver=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
+
+  for ((i = 0; i < ${#build_args[@]}; i++)); do
+    case "${build_args[$i]}" in
+      --target=*|-t=*)
+        requested_target=${build_args[$i]#*=}
+        ;;
+      --target|-t)
+        requested_target=${build_args[$((i + 1))]:-}
+        ;;
+    esac
+  done
 
   local current
   current=$(fingerprint)
-  if [ -f "$manifest" ] && [ "$(cat "$manifest")" = "$current" ]; then
+  if { [ -z "$requested_target" ] || [ "$requested_target" = "export" ]; } \
+    && [ -f "$manifest" ] \
+    && [ "$(cat "$manifest")" = "$current" ]; then
     echo "models build cache hit"
     return
   fi
 
   if [ -z "${ROCQ_IMAGE+x}" ]; then
-    local driver
-    driver=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
     local image_cache_args=()
     local image_cache_export_args=()
     if [ "$driver" != "docker" ] && [ -d "$image_cache" ]; then
@@ -103,6 +123,32 @@ run_models_build() {
     fi
   fi
 
+  local build_cache_args=()
+  local build_cache_export_args=()
+  if [ "$driver" != "docker" ] && [ -d "$build_cache" ]; then
+    build_cache_args+=(--cache-from "type=local,src=$build_cache")
+  fi
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$build_cache_next"
+    build_cache_export_args+=(--cache-to "type=local,dest=$build_cache_next,mode=max")
+  fi
+
+  if [ -n "$requested_target" ] && [ "$requested_target" != "export" ]; then
+    docker buildx build \
+      --file models/Dockerfile \
+      --build-arg "ROCQ_IMAGE=$rocq_image" \
+      --build-context "rocq_models_cache=$cache_context" \
+      "${build_cache_args[@]}" \
+      "${build_cache_export_args[@]}" \
+      "${build_args[@]}" \
+      .
+    if [ "$driver" != "docker" ]; then
+      rm -rf "$build_cache"
+      mv "$build_cache_next" "$build_cache"
+    fi
+    return
+  fi
+
   ./build \
     --smart-output kennel/models_generated \
     -- \
@@ -110,9 +156,17 @@ run_models_build() {
       --file models/Dockerfile \
       --build-arg "ROCQ_IMAGE=$rocq_image" \
       --build-context "rocq_models_cache=$cache_context" \
+      "${build_cache_args[@]}" \
+      "${build_cache_export_args[@]}" \
+      --target export \
       --output type=local,dest=. \
-      "$@" \
+      "${build_args[@]}" \
       .
+
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$build_cache"
+    mv "$build_cache_next" "$build_cache"
+  fi
 
   fingerprint > "$manifest"
 }

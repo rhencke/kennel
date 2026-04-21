@@ -50,3 +50,7 @@ def run(
         *args,
     ]
     execvp(cmd[0], cmd)
+
+
+def main(argv: list[str] | None = None) -> None:
+    run(sys.argv[1:] if argv is None else argv)

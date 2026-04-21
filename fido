@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+image=${FIDO_IMAGE:-fido:local}
+container=${FIDO_CONTAINER:-fido}
+secret=${FIDO_SECRET:-$HOME/.kennel-secret}
+cache_dir="$repo_root/.cache/rocq-models/fido"
+cache_next="$repo_root/.cache/rocq-models/fido-next"
+command=${1:-help}
+daemon=
+
+case "$command" in
+  help)
+    set -- fido-help "${@:2}"
+    ;;
+  up)
+    daemon=1
+    shift
+    detach=
+    if [ "${1:-}" = "--detach" ]; then
+      detach=1
+      shift
+    fi
+    set -- kennel "$@"
+    ;;
+  down)
+    docker rm -f "$container" 2>/dev/null || true
+    exit 0
+    ;;
+  status)
+    set -- kennel-status "${@:2}"
+    ;;
+  task)
+    set -- kennel-task "${@:2}"
+    ;;
+  gh-status)
+    set -- kennel-gh-status "${@:2}"
+    ;;
+  chat)
+    set -- kennel-chat "${@:2}"
+    ;;
+  sync-tasks)
+    set -- kennel-sync-tasks "${@:2}"
+    ;;
+  tests)
+    set -- tests "${@:2}"
+    ;;
+  traceback)
+    set -- traceback "${@:2}"
+    ;;
+esac
+
+driver=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
+cache_args=()
+cache_export_args=()
+
+if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
+  cache_args+=(--cache-from "type=local,src=$cache_dir")
+fi
+if [ "$driver" != "docker" ]; then
+  rm -rf "$cache_next"
+  cache_export_args+=(--cache-to "type=local,dest=$cache_next,mode=max")
+fi
+
+docker buildx build \
+  --file "$repo_root/models/Dockerfile" \
+  --target fido \
+  --load \
+  --tag "$image" \
+  "${cache_args[@]}" \
+  "${cache_export_args[@]}" \
+  "$repo_root"
+
+if [ "$driver" != "docker" ]; then
+  rm -rf "$cache_dir"
+  mv "$cache_next" "$cache_dir"
+fi
+
+mkdir -p "$HOME/log" "$HOME/workspace"
+run_args=(
+  --user "$(id -u):$(id -g)"
+  --env "HOME=$HOME"
+  --network host
+  --volume "$repo_root:/workspace"
+  --volume "$HOME/log:$HOME/log"
+  --volume "$HOME/workspace:$HOME/workspace"
+  --workdir /workspace
+)
+if [ "$daemon" = 1 ]; then
+  if [ ! -f "$secret" ]; then
+    echo "secret file not found: $secret" >&2
+    exit 1
+  fi
+  chmod 600 "$secret"
+  run_args+=(
+    --volume "$secret:/run/secrets/kennel-secret:ro"
+  )
+fi
+if [ "${detach:-}" = 1 ]; then
+  run_args+=(--detach --name "$container")
+else
+  run_args+=(--rm)
+fi
+
+docker run "${run_args[@]}" "$image" "$@"

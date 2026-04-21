@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import textwrap
@@ -73,6 +74,9 @@ def test_structured_diagnostic_renderer_fields_are_present() -> None:
 
 
 def test_structured_diagnostic_output_from_failed_extraction() -> None:
+    if os.environ.get("KENNEL_SKIP_DOCKER_HELPER_TESTS") == "1":
+        pytest.skip("Docker helper is exercised outside the buildx pytest target")
+
     script = textwrap.dedent(
         """
         cat > test/diagnostics_negative_tmp.v <<'EOF'

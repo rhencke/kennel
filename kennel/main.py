@@ -19,25 +19,22 @@ def main(
 
         task_main(args[1:], _GitHub=_GitHub or GitHub)
     elif args and args[0] == "status":
-        from kennel.status import collect, format_status
+        from kennel.status import main as status_main
 
-        print(format_status(collect()))
+        status_main()
     elif args and args[0] == "gh-status":
         from kennel.gh_status import main as gh_status_main
 
         gh_status_main(args[1:])
     elif args and args[0] == "chat":
-        from kennel.chat import run as chat_run
+        from kennel.chat import main as chat_main
 
-        chat_run(args[1:])
+        chat_main(args[1:])
     elif args and args[0] == "sync-tasks":
-        from pathlib import Path
-
         from kennel.github import GitHub
-        from kennel.tasks import sync_tasks
+        from kennel.sync_tasks_cli import main as sync_tasks_main
 
-        work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
-        sync_tasks(work_dir, (_GitHub or GitHub)())
+        sync_tasks_main(args[1:], _GitHub=_GitHub or GitHub)
     else:
         from kennel.server import run as server_run
 

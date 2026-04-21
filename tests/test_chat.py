@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kennel.chat import main as chat_main
 from kennel.chat import run
 
 
@@ -165,6 +166,11 @@ class TestChat:
             )
             assert mock_env["CLAUDE_CODE_NO_FLICKER"] == "1"
 
+    def test_main_passes_argv_to_run(self) -> None:
+        with patch("kennel.chat.run") as mock_run:
+            chat_main(["hello"])
+        mock_run.assert_called_once_with(["hello"])
+
 
 class TestChatViaMain:
     def test_chat_subcommand_dispatches(self, tmp_path: Path) -> None:
@@ -172,18 +178,18 @@ class TestChatViaMain:
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("woof")
 
-        with patch("kennel.chat.run") as mock_run:
+        with patch("kennel.chat.main") as mock_main:
             from kennel.main import main
 
             main(["chat", "hello"])
 
-        mock_run.assert_called_once_with(["hello"])
+        mock_main.assert_called_once_with(["hello"])
 
     def test_chat_subcommand_no_extra_args(self, tmp_path: Path) -> None:
         """'kennel chat' with no extra args passes empty list."""
-        with patch("kennel.chat.run") as mock_run:
+        with patch("kennel.chat.main") as mock_main:
             from kennel.main import main
 
             main(["chat"])
 
-        mock_run.assert_called_once_with([])
+        mock_main.assert_called_once_with([])

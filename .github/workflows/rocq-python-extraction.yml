@@ -8,8 +8,10 @@ on:
       - 'models/**'
       - 'build'
       - 'dune-workspace'
+      - '.python-version'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.githooks/pre-commit'
       - '.dockerignore'
       - '.github/workflows/rocq-python-extraction.yml'
   pull_request:
@@ -38,7 +40,7 @@ jobs:
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
             CHANGED=$(git diff --name-only "$BASE" "$HEAD")
-            if echo "$CHANGED" | grep -qE '^(rocq-python-extraction/|models/|build$|dune-workspace$|pyproject\.toml$|uv\.lock$|\.dockerignore$|\.github/workflows/rocq-python-extraction\.yml$)'; then
+            if echo "$CHANGED" | grep -qE '^(rocq-python-extraction/|models/|build$|dune-workspace$|\.python-version$|pyproject\.toml$|uv\.lock$|\.githooks/pre-commit$|\.dockerignore$|\.github/workflows/rocq-python-extraction\.yml$)'; then
               echo "relevant=true"  >> "$GITHUB_OUTPUT"
             else
               echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -49,63 +51,33 @@ jobs:
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Set up buildx for both image builds and model extraction builds.
       - name: Set up Docker Buildx
         if: steps.changes.outputs.relevant == 'true'
         uses: docker/setup-buildx-action@v3
 
-      # Build from the local Dockerfile with layer caching.  Unchanged layers
-      # (especially the opam install step) are restored from the GHA cache.
-      - name: Build container image
+      - name: Compute build cache bucket
         if: steps.changes.outputs.relevant == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: rocq-python-extraction
-          push: false
-          load: true
-          cache-from: type=gha,scope=rocq-python-extraction
-          cache-to: type=gha,mode=max,scope=rocq-python-extraction
-          tags: rocq-python-extraction:ci
-
-      - name: Build extraction acceptance theory
-        if: steps.changes.outputs.relevant == 'true'
-        run: ./rocq-python-extraction/run_in_docker.sh rocq-python-extraction opam exec -- make test
-
-      - name: Set up host Python tooling
-        if: steps.changes.outputs.relevant == 'true'
-        uses: ./.github/actions/setup
-
-      - name: Export generated Python
-        if: steps.changes.outputs.relevant == 'true'
-        run: |
-          OUT="$RUNNER_TEMP/rocq-python-generated"
-          ./rocq-python-extraction/export_generated_python.sh "$OUT"
-
-      - name: Type-check generated Python
-        if: steps.changes.outputs.relevant == 'true'
-        run: |
-          OUT="$RUNNER_TEMP/rocq-python-generated"
-          ./rocq-python-extraction/run_generated_pyright.sh "$OUT"
-
-      - name: Compute model cache bucket
-        if: steps.changes.outputs.relevant == 'true'
-        id: model-cache
+        id: build-cache
         run: echo "bucket=$(( $(date +%s) / 518400 ))" >> "$GITHUB_OUTPUT"
 
-      - name: Restore model build cache
+      - name: Restore build cache
         if: steps.changes.outputs.relevant == 'true'
         uses: actions/cache@v4
         with:
           path: .cache/rocq-models
-          key: rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-${{ hashFiles('models/**', 'rocq-python-extraction/**', 'dune-workspace', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore') }}
+          key: buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ hashFiles('rocq-python-extraction/**', 'models/**', 'dune-workspace', '.python-version', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore', '.githooks/pre-commit') }}
           restore-keys: |
-            rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-
-            rocq-models-${{ runner.os }}-
+            buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
+            buildx-${{ runner.os }}-
 
-      # Build the models/ theory using the unified dune workspace.  dune
-      # resolves the plugin → theory dependency within the workspace so no
-      # separate install step is needed.  This verifies that every .v model
-      # extracts successfully whenever models/ or the plugin changes.
-      - name: Build models
+      - name: Run buildx CI checks
+        if: steps.changes.outputs.relevant == 'true'
+        run: ./.githooks/pre-commit
+
+      - name: Build committed model mirrors
         if: steps.changes.outputs.relevant == 'true'
         run: ./build
+
+      - name: Check committed model mirrors
+        if: steps.changes.outputs.relevant == 'true'
+        run: git diff --exit-code -- kennel/models_generated/

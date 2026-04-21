@@ -1,38 +1,21 @@
 #!/bin/sh
 set -e
 
-echo "==> checking format"
-uv run ruff format --check .
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
 
-echo "==> checking lint"
-uv run ruff check .
-
-echo "==> checking types"
-uv run pyright
-
-echo "==> checking generated extraction types"
-GENERATED_PYRIGHT_DIR=$(mktemp -d)
-trap 'rm -rf "$GENERATED_PYRIGHT_DIR"' EXIT
-./rocq-python-extraction/export_generated_python.sh "$GENERATED_PYRIGHT_DIR"
-./rocq-python-extraction/run_generated_pyright.sh "$GENERATED_PYRIGHT_DIR"
-
-echo "==> running tests"
-uv run tests
+echo "==> running buildx CI checks"
+./build --target ci
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the
 # working-tree copy of kennel/models_generated/ must match the index — a
-# diff here means 'make models' regenerated the .py files but they were not
-# staged.  Run 'git add kennel/models_generated/' then retry.
-#
-# This check is intentionally lightweight (no Docker build).  It catches the
-# most common mistake: regenerating but forgetting to stage.  Full extraction
-# correctness is validated by the 'rocq-python-extraction CI' GHA job.
+# diff here means './build' regenerated the .py files but they were not staged.
 if git diff --cached --name-only | grep -q '^models/.*\.v$'; then
   echo "==> checking model mirrors (models/*.v staged)"
   if ! git diff --quiet -- kennel/models_generated/; then
     echo ""
     echo "Error: kennel/models_generated/ has unstaged changes while models/*.v"
-    echo "is staged for commit.  Looks like 'make models' was run but the"
+    echo "is staged for commit.  Looks like './build' was run but the"
     echo "output was not staged.  Fix with:"
     echo ""
     echo "  git add kennel/models_generated/"

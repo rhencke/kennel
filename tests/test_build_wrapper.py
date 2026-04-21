@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BUILD = REPO / "build"
+FIDO = REPO / "fido"
 
 
 def run_build(
@@ -130,7 +131,76 @@ class TestModelsBuildScript:
         assert "--smart-output kennel/models_generated" in script
         assert "--file rocq-python-extraction/Dockerfile" in script
         assert '--cache-to "type=local,dest=$image_cache_next,mode=max"' in script
+        assert '--cache-to "type=local,dest=$build_cache_next,mode=max"' in script
         assert '--build-arg "ROCQ_IMAGE=$rocq_image"' in script
+
+    def test_explicit_check_targets_skip_local_output_export(self) -> None:
+        script = BUILD.read_text()
+
+        assert "requested_target=" in script
+        assert '[ "$requested_target" != "export" ]' in script
+        ci_branch = script.split(
+            'if [ -n "$requested_target" ] && [ "$requested_target" != "export" ]; then',
+            maxsplit=1,
+        )[1].split("return", maxsplit=1)[0]
+
+        assert "--output type=local,dest=." not in ci_branch
 
     def test_scripts_are_executable(self) -> None:
         assert os.access(BUILD, os.X_OK)
+        assert os.access(FIDO, os.X_OK)
+
+
+class TestFidoLauncher:
+    def test_maps_friendly_commands_to_project_scripts(self) -> None:
+        script = FIDO.read_text()
+
+        assert "help)" in script
+        assert "set -- fido-help" in script
+        assert "up)" in script
+        assert "set -- kennel" in script
+        assert "status)" in script
+        assert "set -- kennel-status" in script
+        assert "task)" in script
+        assert "set -- kennel-task" in script
+        assert "sync-tasks)" in script
+        assert "set -- kennel-sync-tasks" in script
+
+    def test_supports_detached_up_and_down(self) -> None:
+        script = FIDO.read_text()
+
+        assert '--detach --name "$container"' in script
+        assert 'docker rm -f "$container"' in script
+        assert "${FIDO_CONTAINER:-fido}" in script
+
+    def test_mounts_daemon_inputs_without_mounting_whole_home(self) -> None:
+        script = FIDO.read_text()
+
+        assert "--network host" in script
+        assert '--volume "$HOME:$HOME"' not in script
+        assert '--volume "$HOME/workspace:$HOME/workspace"' in script
+        assert '--volume "$HOME/log:$HOME/log"' in script
+        assert '--volume "$secret:/run/secrets/kennel-secret:ro"' in script
+        assert 'chmod 600 "$secret"' in script
+
+
+class TestModelDockerfile:
+    def test_ci_is_parallel_meta_target(self) -> None:
+        dockerfile = (REPO / "models" / "Dockerfile").read_text()
+
+        assert "FROM python-check-base AS format" in dockerfile
+        assert "FROM python-check-base AS lint" in dockerfile
+        assert "FROM python-check-base AS typecheck" in dockerfile
+        assert "FROM python-check-base AS generated-typecheck" in dockerfile
+        assert "FROM python-check-base AS test" in dockerfile
+        assert "FROM scratch AS ci" in dockerfile
+        assert "COPY --from=format /tmp/format-ready /format-ready" in dockerfile
+        assert "COPY --from=lint /tmp/lint-ready /lint-ready" in dockerfile
+        assert (
+            "COPY --from=typecheck /tmp/typecheck-ready /typecheck-ready" in dockerfile
+        )
+        assert (
+            "COPY --from=generated-typecheck /tmp/generated-typecheck-ready "
+            "/generated-typecheck-ready"
+        ) in dockerfile
+        assert "COPY --from=test /tmp/test-ready /test-ready" in dockerfile

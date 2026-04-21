@@ -1135,3 +1135,7 @@ def format_status(status: KennelStatus) -> str:
         lines.extend(section)
 
     return "\n".join(lines)
+
+
+def main() -> None:
+    print(format_status(collect()))

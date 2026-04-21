@@ -17,6 +17,12 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 kennel = "kennel.main:main"
+fido-help = "kennel.fido_help:main"
+kennel-chat = "kennel.chat:main"
+kennel-gh-status = "kennel.gh_status:main"
+kennel-status = "kennel.status:main"
+kennel-sync-tasks = "kennel.sync_tasks_cli:main"
+kennel-task = "kennel.cli:main"
 tests = "kennel.tests_main:main"
 traceback = "kennel.rocq_traceback:main"
 

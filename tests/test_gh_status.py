@@ -301,3 +301,17 @@ class TestMain:
     def test_unknown_subcommand(self) -> None:
         with pytest.raises(SystemExit, match="1"):
             main(["get"])
+
+    def test_argv_none_uses_sys_argv(self) -> None:
+        calls: list[str] = []
+
+        def fake_set(msg: str, **kw: object) -> None:
+            calls.append(msg)
+
+        with (
+            patch("sys.argv", ["kennel-gh-status", "set", "from", "argv"]),
+            patch("kennel.gh_status.set_gh_status", fake_set),
+        ):
+            main(_GitHub=MagicMock)
+
+        assert calls == ["from argv"]

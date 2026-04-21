@@ -6,48 +6,20 @@ on:
   pull_request:
 
 jobs:
-  lint:
+  pre-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-
-  typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - run: uv run pyright
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
       - uses: docker/setup-buildx-action@v3
-      - name: Restore Rocq image cache
+      - name: Compute build cache bucket
+        id: build-cache
+        run: echo "bucket=$(( $(date +%s) / 518400 ))" >> "$GITHUB_OUTPUT"
+      - name: Restore build cache
         uses: actions/cache@v4
         with:
-          path: .cache/rocq-image
-          key: rocq-image-${{ runner.os }}-${{ hashFiles('rocq-python-extraction/Dockerfile') }}
+          path: .cache/rocq-models
+          key: buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ hashFiles('rocq-python-extraction/**', 'models/**', 'dune-workspace', '.python-version', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore', '.githooks/pre-commit') }}
           restore-keys: |
-            rocq-image-${{ runner.os }}-
-      - name: Build Rocq extraction image
-        run: |
-          CACHE_ARGS=()
-          if [ -d .cache/rocq-image ]; then
-            CACHE_ARGS+=(--cache-from type=local,src=.cache/rocq-image)
-          fi
-          rm -rf .cache/rocq-image-next
-          docker buildx build \
-            --file rocq-python-extraction/Dockerfile \
-            --load \
-            --tag rocq-python-extraction:ci \
-            "${CACHE_ARGS[@]}" \
-            --cache-to type=local,dest=.cache/rocq-image-next,mode=max \
-            rocq-python-extraction
-          rm -rf .cache/rocq-image
-          mv .cache/rocq-image-next .cache/rocq-image
+            buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
+            buildx-${{ runner.os }}-
       - run: ./.githooks/pre-commit

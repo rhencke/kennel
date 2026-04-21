@@ -42,7 +42,7 @@ cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kenne
 ## Testing
 
 ```bash
-uv run tests
+./fido tests
 ```
 
 100% coverage is enforced by CI and pre-commit hook.
@@ -50,8 +50,8 @@ uv run tests
 ## Linting
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
+./build --target lint
+./build --target format
 ```
 
 ## Module guide
@@ -91,9 +91,9 @@ Tasks also use `TaskStatus` enum: `pending`, `completed`, `in_progress`.
 ### CLI syntax
 
 ```bash
-kennel task <work_dir> add <type> <title> [description]  # prints task JSON to stdout
-kennel task <work_dir> complete <task_id>                  # complete by ID, not title
-kennel task <work_dir> list                                # list all tasks as JSON
+./fido task <work_dir> add <type> <title> [description]  # prints task JSON to stdout
+./fido task <work_dir> complete <task_id>                  # complete by ID, not title
+./fido task <work_dir> list                                # list all tasks as JSON
 ```
 
 ### Priority order
@@ -127,7 +127,10 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   invocation and lean on the pre-commit hook: just attempt the commit (without
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
-- **One entry point** — `kennel` (heading toward all-threads architecture)
+- **Local entry point** — use `./fido help`. `kennel` remains the server
+  compatibility script; former `kennel <action>` commands also have dedicated
+  scripts (`kennel-task`, `kennel-status`, `kennel-gh-status`, `kennel-chat`,
+  `kennel-sync-tasks`) and are surfaced through `./fido`.
 - **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
 - **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
 - **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on
@@ -627,27 +630,27 @@ annotations`.  Forward references in `@dataclass` field annotations are handled
 natively by PEP 649 deferred annotation evaluation, which is the default on
 3.14t.
 
-Python tooling runs on the host through `uv run ...`.  The Rocq Docker CI image
-is intentionally Rocq-only; do not add Python back to it unless Docker-side
-tests genuinely need a Python interpreter.
+Python tooling runs through buildx uv targets.  The Rocq Docker CI image stays
+Rocq-only; generated Python is copied into uv stages for formatting, pyright,
+and pytest.
 
 ### Testing
 
 ```bash
-make test          # build the umbrella Rocq acceptance theory / extraction artifacts
-make docker-test   # run the full suite inside the CI Docker image
+./build --target test  # build Rocq artifacts, then run pytest in uv buildx
+./build --target ci    # format, lint, typecheck, generated typecheck, tests
 ```
 
-`make docker-build` rebuilds the Docker image locally (needed after Dockerfile changes).
+`./build` rebuilds the Rocq image locally when its Dockerfile or inputs change.
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/test_*.py`; `uv run tests` is the
-canonical assertion path.  `make test` is only the Rocq-side build.
+tests under `rocq-python-extraction/test/test_*.py`; `./build --target test`
+is the canonical assertion path.
 
 ### Building
 
 ```bash
-dune build         # compile the plugin and the test theories
+./build --target test-extract  # compile extraction theories in the Rocq image
 ```
 
 ### Linting / formatting
