@@ -248,7 +248,7 @@ class TestFidoLauncher:
         script = FIDO.read_text()
 
         assert "help)" in script
-        assert "run_container fido-help" in script
+        assert "run_fido_image fido-help" in script
         assert "up)" in script
         assert "supervise_up fido --secret-file /run/secrets/fido-secret" in script
         assert "make-rocq)" in script
@@ -261,15 +261,15 @@ class TestFidoLauncher:
             in script
         )
         assert (
-            "run_container python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
+            "run_fido_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
             in script
         )
         assert "status)" in script
-        assert "run_container fido-status" in script
+        assert "run_fido_image fido-status" in script
         assert "task)" in script
-        assert "run_container fido-task" in script
+        assert "run_fido_image fido-task" in script
         assert "sync-tasks)" in script
-        assert "run_container fido-sync-tasks" in script
+        assert "run_fido_image fido-sync-tasks" in script
 
     def test_supervises_foreground_container_and_down_stops_by_name(self) -> None:
         script = FIDO.read_text()
@@ -309,6 +309,7 @@ class TestFidoLauncher:
         script = FIDO.read_text()
 
         assert "docker buildx bake" in script
+        assert "run_with_bake_env()" in script
         assert "test_image=${FIDO_TEST_IMAGE:-fido-test:local}" in script
         assert "builder=${FIDO_BUILDX_BUILDER:-fido}" in script
         assert "ensure_buildx_builder()" in script
@@ -329,8 +330,8 @@ class TestFidoLauncher:
         assert 'FIDO_GID="$(id -g)"' in script
         assert 'FIDO_USER="$(id -un)"' in script
         assert 'FIDO_HOME="$HOME"' in script
-        assert 'build_image fido "$image"' in script
-        assert 'build_image fido-test "$test_image"' in script
+        assert "run_fido_image()" in script
+        assert "run_fido_test_image()" in script
         assert "warm_images()" in script
         assert "warm_targets=(" not in script
         assert "bake_target_names()" not in script
@@ -381,7 +382,7 @@ class TestFidoLauncher:
         help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
 
         assert "ruff|pyright|pytest)" in script
-        assert 'build_image fido-test "$test_image"\n    run_container "$@"' in script
+        assert 'run_fido_test_image "$@"' in script
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
         assert "ruff" in help_text

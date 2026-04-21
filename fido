@@ -109,7 +109,6 @@ require_build_graph() {
 target_input_files() {
   local target=$1
   local path
-  local full
   require_build_graph
   (
     cd "$repo_root"
@@ -145,6 +144,16 @@ target_input_hash() {
       printf 'home %s\n' "$HOME"
     } | sha256sum | awk '{print $1}'
   )
+}
+
+run_with_bake_env() {
+  FIDO_IMAGE="$image" \
+    FIDO_TEST_IMAGE="$test_image" \
+    FIDO_UID="$(id -u)" \
+    FIDO_GID="$(id -g)" \
+    FIDO_USER="$(id -un)" \
+    FIDO_HOME="$HOME" \
+    "$@"
 }
 
 make_rocq_usage() {
@@ -455,14 +464,7 @@ build_image() {
   log INFO "building $target image $tag"
   (
     cd "$repo_root"
-    FIDO_IMAGE="$image" \
-      FIDO_TEST_IMAGE="$test_image" \
-      FIDO_UID="$(id -u)" \
-      FIDO_GID="$(id -g)" \
-      FIDO_USER="$(id -un)" \
-      FIDO_HOME="$HOME" \
-      docker buildx bake \
-        "$target"
+    run_with_bake_env docker buildx bake "$target"
   )
 
   printf '%s\n' "$current" > "$manifest"
@@ -524,16 +526,10 @@ warm_images() {
   log INFO "warming ci checks and runtime image cache"
   (
     cd "$repo_root"
-    FIDO_IMAGE="$image" \
-      FIDO_TEST_IMAGE="$test_image" \
-      FIDO_UID="$(id -u)" \
-      FIDO_GID="$(id -g)" \
-      FIDO_USER="$(id -un)" \
-      FIDO_HOME="$HOME" \
-      docker buildx bake \
-        "${bake_args[@]}" \
-        "${passthrough[@]}" \
-        warm
+    run_with_bake_env docker buildx bake \
+      "${bake_args[@]}" \
+      "${passthrough[@]}" \
+      warm
   )
 
   for line in "${target_hashes[@]}"; do
@@ -584,6 +580,16 @@ run_container() {
   docker run "${run_args[@]}" "$run_image" "$@"
 }
 
+run_fido_image() {
+  build_image fido "$image"
+  run_container "$@"
+}
+
+run_fido_test_image() {
+  build_image fido-test "$test_image"
+  run_container "$@"
+}
+
 supervise_up() {
   while true; do
     sync_runner
@@ -607,8 +613,7 @@ supervise_up() {
 
 case "$command" in
   help)
-    build_image fido "$image"
-    run_container fido-help "${@:2}"
+    run_fido_image fido-help "${@:2}"
     ;;
   up)
     shift
@@ -629,16 +634,9 @@ case "$command" in
     mkdir -p "$repo_root/.cache"
     (
       cd "$repo_root"
-      FIDO_IMAGE="$image" \
-        FIDO_TEST_IMAGE="$test_image" \
-        FIDO_UID="$(id -u)" \
-        FIDO_GID="$(id -g)" \
-        FIDO_USER="$(id -un)" \
-        FIDO_HOME="$HOME" \
-        docker buildx bake --print warm fido-test > .cache/bake-plan.json
+      run_with_bake_env docker buildx bake --print warm fido-test > .cache/bake-plan.json
     )
-    build_image fido "$image"
-    run_container python3 tools/gen_workflows.py --plan .cache/bake-plan.json
+    run_fido_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json
     ;;
   make-rocq)
     shift
@@ -649,36 +647,28 @@ case "$command" in
     fi
     ;;
   status)
-    build_image fido "$image"
-    run_container fido-status "${@:2}"
+    run_fido_image fido-status "${@:2}"
     ;;
   task)
-    build_image fido "$image"
-    run_container fido-task "${@:2}"
+    run_fido_image fido-task "${@:2}"
     ;;
   gh-status)
-    build_image fido "$image"
-    run_container fido-gh-status "${@:2}"
+    run_fido_image fido-gh-status "${@:2}"
     ;;
   chat)
-    build_image fido "$image"
-    run_container fido-chat "${@:2}"
+    run_fido_image fido-chat "${@:2}"
     ;;
   sync-tasks)
-    build_image fido "$image"
-    run_container fido-sync-tasks "${@:2}"
+    run_fido_image fido-sync-tasks "${@:2}"
     ;;
   tests)
-    build_image fido-test "$test_image"
-    run_container tests "${@:2}"
+    run_fido_test_image tests "${@:2}"
     ;;
   traceback)
-    build_image fido "$image"
-    run_container traceback "${@:2}"
+    run_fido_image traceback "${@:2}"
     ;;
   ruff|pyright|pytest)
-    build_image fido-test "$test_image"
-    run_container "$@"
+    run_fido_test_image "$@"
     ;;
   *)
     echo "unsupported fido command: $command" >&2
