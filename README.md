@@ -15,6 +15,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido status
 ./fido tests  # focused pytest convenience; use ./fido warm before commits
 ./fido ruff format .
+./fido pyright
 ./fido pytest tests/test_build_wrapper.py -q
 ```
 
@@ -36,9 +37,10 @@ bake graph and Dockerfile input graph.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
-Unknown commands, such as `./fido ruff format .`, run through the `fido-test` image and
-are passed to containerized `uv run` unchanged; do not use host `uv` for normal
-project checks. The production runtime image installs only production Python
+Supported dev-tool commands, `./fido ruff ...`, `./fido pyright ...`, and
+`./fido pytest ...`, run through the `fido-test` image and are passed to
+containerized `uv run`; do not use host `uv` for normal project checks. The
+production runtime image installs only production Python
 dependencies, plus pinned Node CLI tools from
 `package-lock.json` (`claude` and
 `copilot`) and the GitHub CLI. Node dependencies are built in their own Docker

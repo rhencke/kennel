@@ -25,7 +25,9 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido sync-tasks <work_dir>` | Sync a repo task list into its GitHub PR body. |
 | `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
-| `./fido <tool> [args...]` | Run any other command through containerized `uv run`, for example `./fido ruff format .`, `./fido pyright`, or `./fido pytest tests/test_status.py -q`. |
+| `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
+| `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
+| `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |
 
 The internal Python package is `fido` because the repo-root launcher already
 owns the filesystem path `./fido`. Use lowercase `fido` for commands, package

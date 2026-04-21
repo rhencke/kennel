@@ -660,8 +660,13 @@ case "$command" in
     build_image fido "$image"
     run_container traceback "${@:2}"
     ;;
-  *)
+  ruff|pyright|pytest)
     build_image fido-test "$test_image"
     run_container "$@"
+    ;;
+  *)
+    echo "unsupported fido command: $command" >&2
+    echo "run ./fido help for supported commands" >&2
+    exit 2
     ;;
 esac

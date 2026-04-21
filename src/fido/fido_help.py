@@ -21,6 +21,7 @@ Commands:
   sync-tasks        Sync repo tasks to GitHub.
   tests             Run pytest through the project test entry point.
   traceback         Annotate extracted Python tracebacks.
-
-Any other command is passed through to `uv run` unchanged."""
+  ruff              Run ruff through containerized uv.
+  pyright           Run pyright through containerized uv.
+  pytest            Run pytest through containerized uv."""
     )

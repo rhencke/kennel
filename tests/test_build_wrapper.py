@@ -363,17 +363,17 @@ class TestFidoLauncher:
         assert 'elif [ "$need_secret" = "1" ]; then' in script
         assert "need_secret=1" in script
 
-    def test_arbitrary_commands_run_through_test_image(self) -> None:
+    def test_supported_dev_tools_run_through_test_image(self) -> None:
         script = FIDO.read_text()
+        help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
 
-        assert (
-            '*)\n    build_image fido-test "$test_image"\n    run_container "$@"'
-            in script
-        )
-        assert (
-            "Any other command is passed through to `uv run` unchanged."
-            in (REPO / "src" / "fido" / "fido_help.py").read_text()
-        )
+        assert "ruff|pyright|pytest)" in script
+        assert 'build_image fido-test "$test_image"\n    run_container "$@"' in script
+        assert 'echo "unsupported fido command: $command" >&2' in script
+        assert "Any other command is passed through" not in help_text
+        assert "ruff" in help_text
+        assert "pyright" in help_text
+        assert "pytest" in help_text
 
 
 class TestModelDockerfile:
