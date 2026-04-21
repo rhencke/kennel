@@ -81,10 +81,14 @@ run_models_build() {
   local cache_context=.cache/rocq-models/context
   local image_cache=.cache/rocq-models/image
   local image_cache_next=.cache/rocq-models/image-next
+  local image_oci=.cache/rocq-models/image-oci
+  local image_oci_next=.cache/rocq-models/image-oci-next
+  local image_oci_tar=.cache/rocq-models/image-oci.tar
   local build_cache=.cache/rocq-models/buildx
   local build_cache_next=.cache/rocq-models/buildx-next
   local manifest=.cache/rocq-models/manifest.sha
   local rocq_image=${ROCQ_IMAGE:-rocq-python-extraction:ci}
+  local rocq_context_args=()
   local build_args=("$@")
   local requested_target=
   local driver
@@ -121,13 +125,29 @@ run_models_build() {
       rm -rf "$image_cache_next"
       image_cache_export_args+=(--cache-to "type=local,dest=$image_cache_next,mode=max")
     fi
-    docker buildx build \
-      --file rocq-python-extraction/Dockerfile \
-      --load \
-      --tag "$rocq_image" \
-      "${image_cache_args[@]}" \
-      "${image_cache_export_args[@]}" \
-      rocq-python-extraction
+    if [ "$driver" = "docker" ]; then
+      docker buildx build \
+        --file rocq-python-extraction/Dockerfile \
+        --load \
+        --tag "$rocq_image" \
+        rocq-python-extraction
+    else
+      rm -rf "$image_oci_next"
+      rm -f "$image_oci_tar"
+      docker buildx build \
+        --file rocq-python-extraction/Dockerfile \
+        --output "type=oci,dest=$image_oci_tar" \
+        "${image_cache_args[@]}" \
+        "${image_cache_export_args[@]}" \
+        rocq-python-extraction
+      mkdir -p "$image_oci_next"
+      tar -xf "$image_oci_tar" -C "$image_oci_next"
+      rm -f "$image_oci_tar"
+      rm -rf "$image_oci"
+      mv "$image_oci_next" "$image_oci"
+      rocq_image=rocq_image
+      rocq_context_args+=(--build-context "rocq_image=oci-layout://$image_oci")
+    fi
     if [ "$driver" != "docker" ]; then
       rm -rf "$image_cache"
       mv "$image_cache_next" "$image_cache"
@@ -149,6 +169,7 @@ run_models_build() {
       --file models/Dockerfile \
       --build-arg "ROCQ_IMAGE=$rocq_image" \
       --build-context "rocq_models_cache=$cache_context" \
+      "${rocq_context_args[@]}" \
       "${build_cache_args[@]}" \
       "${build_cache_export_args[@]}" \
       "${build_args[@]}" \
@@ -167,6 +188,7 @@ run_models_build() {
       --file models/Dockerfile \
       --build-arg "ROCQ_IMAGE=$rocq_image" \
       --build-context "rocq_models_cache=$cache_context" \
+      "${rocq_context_args[@]}" \
       "${build_cache_args[@]}" \
       "${build_cache_export_args[@]}" \
       --target export \

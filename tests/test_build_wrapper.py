@@ -129,6 +129,8 @@ class TestModelsBuildScript:
         assert "buildx_driver()" in script
         assert "warning: docker buildx inspect failed" in script
         assert '--build-context "rocq_models_cache=$cache_context"' in script
+        assert '--build-context "rocq_image=oci-layout://$image_oci"' in script
+        assert '--output "type=oci,dest=$image_oci_tar"' in script
         assert "--output type=local,dest=." in script
         assert "--smart-output kennel/models_generated" in script
         assert "--file rocq-python-extraction/Dockerfile" in script
