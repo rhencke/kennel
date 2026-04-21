@@ -23,3 +23,7 @@ jobs:
             buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildx-${{ runner.os }}-
       - run: ./.githooks/pre-commit
+      - name: Check committed model mirrors
+        run: |
+          ./build
+          git diff --exit-code -- kennel/models_generated/
