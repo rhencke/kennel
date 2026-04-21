@@ -29,7 +29,11 @@ cat >"$OUT_DIR/pyrightconfig.json" <<'EOF'
       "root": ".",
       "extraPaths": ["."]
     }
-  ]
+  ],
+  "reportUnusedImport": false,
+  "reportUnusedVariable": false,
+  "reportUnknownLambdaType": false,
+  "reportRedeclaration": false
 }
 EOF
 

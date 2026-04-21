@@ -38,6 +38,10 @@ EXPLICIT_TARGETS = {
         "proj_second.py",
         "swap_pair_r.py",
     ],
+    "test_source_maps.py": [
+        "source_map_runtime_error.py",
+        "source_map_runtime_error.pymap",
+    ],
 }
 
 
