@@ -48,7 +48,7 @@ Multi-repo: one Fido process handles multiple repos. Each repo has its own tasks
 
 **Concurrency model**: one Fido worker per repo, one issue per worker, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two workers max, running in parallel, each on their own issue.
 
-**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. It does *not* survive a full Fido restart: the foreground container exits and the launcher starts a fresh process, so the new Fido process starts with `_session = None` and creates a fresh session on its first iteration.
+**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. A full Fido restart or Docker image upgrade still kills the live subprocess, but the worker persists the provider session id in the repo's bind-mounted `.git/fido/state.json`; the next container seeds its new provider session from that id so Claude can resume the same conversation.
 
 ## Runner vs workspace clones
 
