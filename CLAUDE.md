@@ -54,7 +54,7 @@ Multi-repo: one Fido process handles multiple repos. Each repo has its own tasks
 
 Fido runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
 
-- **Runner clone** — always on `main`, never dirty, never has feature branches. Fido imports its Python code from here. Self-restart does `git pull` here.
+- **Runner clone** — always on `main`, never dirty, never has feature branches. Fido imports his Python code from here. Self-restart does `git pull` here.
 - **Workspace clone** — where Fido edits source files, commits, and pushes feature branches. Never used to run the server.
 
 Launching: `/home/rhencke/start-fido.sh` (local, outside git) execs `./fido up ...` from the runner clone.
