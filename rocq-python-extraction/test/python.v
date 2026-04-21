@@ -16,4 +16,5 @@ From PyExtractTest Require Export
   prop_set_discipline
   monads
   coinductives
-  modules.
+  modules
+  source_maps.

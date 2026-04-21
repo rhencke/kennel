@@ -11,6 +11,14 @@ open Common
 open Modutil
 open Python
 
+type source_span = {
+  source_file : string;
+  source_start_line : int;
+  source_start_col : int;
+  source_end_line : int;
+  source_end_col : int;
+}
+
 (** [python_mode] is set to [true] by [Extraction Language Python.] *)
 let python_mode = ref false
 
@@ -32,6 +40,102 @@ let universe_trace_comment gr =
       Some
         (str "Erased universe variables: " ++
          str (String.concat ", " names))
+
+let json_escape s =
+  let buf = Buffer.create (String.length s + 8) in
+  String.iter
+    (function
+      | '"' -> Buffer.add_string buf "\\\""
+      | '\\' -> Buffer.add_string buf "\\\\"
+      | '\b' -> Buffer.add_string buf "\\b"
+      | '\012' -> Buffer.add_string buf "\\f"
+      | '\n' -> Buffer.add_string buf "\\n"
+      | '\r' -> Buffer.add_string buf "\\r"
+      | '\t' -> Buffer.add_string buf "\\t"
+      | c ->
+          let code = Char.code c in
+          if code < 0x20 then Buffer.add_string buf (Printf.sprintf "\\u%04x" code)
+          else Buffer.add_char buf c)
+    s;
+  Buffer.contents buf
+
+let json_string s = "\"" ^ json_escape s ^ "\""
+
+let source_file_of_loc loc =
+  match loc.Loc.fname with
+  | Loc.InFile { file; _ } -> Filename.basename file
+  | Loc.ToplevelInput -> "ToplevelInput.v"
+
+let source_span_of_loc loc =
+  {
+    source_file = source_file_of_loc loc;
+    source_start_line = loc.Loc.line_nb;
+    source_start_col = max 0 (loc.Loc.bp - loc.Loc.bol_pos);
+    source_end_line = loc.Loc.line_nb_last;
+    source_end_col = max 0 (loc.Loc.ep - loc.Loc.bol_pos_last);
+  }
+
+let source_span_of_global gr =
+  Option.map source_span_of_loc (Nametab.cci_src_loc (Globnames.TrueGlobal gr))
+
+let fallback_source_span name =
+  {
+    source_file = name ^ ".v";
+    source_start_line = 1;
+    source_start_col = 0;
+    source_end_line = 1;
+    source_end_col = 0;
+  }
+
+let source_comment span =
+  Printf.sprintf "# From %s:%d:%d"
+    span.source_file span.source_start_line span.source_start_col
+
+let annotate_python_source span source =
+  let comment = source_comment span in
+  let lines = String.split_on_char '\n' source in
+  let annotated =
+    List.map
+      (fun line ->
+        if String.equal line "" then line else line ^ "  " ^ comment)
+      lines
+  in
+  String.concat "\n" annotated
+
+let count_lines source =
+  if String.equal source "" then 0
+  else List.length (String.split_on_char '\n' source)
+
+let write_pymap ~python_file ~span ~source =
+  let entries =
+    if count_lines source = 0 then "[]"
+    else
+      Printf.sprintf
+        "[\n    {\n      \"python_start_line\": 1,\n      \"python_end_line\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }\n  ]"
+        (count_lines source)
+        (json_string span.source_file)
+        span.source_start_line
+        span.source_start_col
+        span.source_end_line
+        span.source_end_col
+        (json_string (Filename.remove_extension (Filename.basename python_file)))
+  in
+  let map_file = Filename.remove_extension python_file ^ ".pymap" in
+  let oc = open_out map_file in
+  output_string oc
+    (Printf.sprintf
+       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
+       (json_string (Filename.basename python_file))
+       entries);
+  close_out oc
+
+let write_python_with_source_map ~fname ~span pp =
+  let source = Pp.string_of_ppcmds pp in
+  let annotated = annotate_python_source span source in
+  let oc = open_out fname in
+  output_string oc annotated;
+  close_out oc;
+  write_pymap ~python_file:fname ~span ~source:annotated
 
 (** Python-specific file emission copied from Rocq's extraction driver, but
     bound directly to [Python.python_descr] so we do not depend on Rocq's
@@ -62,18 +166,16 @@ let python_print_structure_to_file state (fname, mo) comment struc =
   let state = State.set_phase state Pre in
   ignore (d.pp_struct state struc);
   let opened = opened_libraries state in
-  let cout = open_out fname in
-  let ft = python_formatter (Some cout) in
+  let span = fallback_source_span (Id.to_string mo) in
   begin
     try
       let state = State.set_phase state Impl in
-      pp_with ft (d.preamble state mo comment opened unsafe_needs);
-      pp_with ft (d.pp_struct state struc);
-      Format.pp_print_flush ft ();
-      close_out cout
+      let pp =
+        d.preamble state mo comment opened unsafe_needs ++
+        d.pp_struct state struc
+      in
+      write_python_with_source_map ~fname ~span pp
     with reraise ->
-      Format.pp_print_flush ft ();
-      close_out cout;
       raise reraise
   end;
   Feedback.msg_notice (str "Extracted to " ++ str fname)
@@ -103,9 +205,12 @@ let python_extract ~opaque_access qid =
     Python.python_descr.pp_struct state struc
   in
   let fname  = base ^ ".py" in
-  let oc     = open_out fname in
-  output_string oc (Pp.string_of_ppcmds pp);
-  close_out oc;
+  let span =
+    match source_span_of_global gr with
+    | Some span -> span
+    | None -> fallback_source_span base
+  in
+  write_python_with_source_map ~fname ~span pp;
   Feedback.msg_notice (str "Extracted to " ++ str fname)
 
 (** Build a monolithic .py file for the given module reference. *)
