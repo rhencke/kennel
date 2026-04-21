@@ -1,6 +1,6 @@
 # Fido
 
-GitHub webhook listener and Fido runner.
+Fido is a dog that accidentally learned to code and now blogs about it.
 
 ## Fido launcher
 

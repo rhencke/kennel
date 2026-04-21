@@ -1,8 +1,8 @@
 # Fido
 
-GitHub webhook listener and Fido runner. It receives GitHub events, triages
-comments, manages per-repo task lists, and launches Fido workers to implement
-code changes.
+Fido is a dog that accidentally learned to code and now blogs about it. It
+receives GitHub events, triages comments, manages per-repo task lists, and
+launches Fido workers to implement code changes.
 
 ## Command Surface
 
