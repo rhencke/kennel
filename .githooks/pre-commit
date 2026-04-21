@@ -9,14 +9,14 @@ echo "==> warming buildx CI and runtime targets"
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the
 # working-tree copy of src/fido/rocq/ must match the index — a
-# diff here means './build' regenerated the .py files but they were not staged.
+# diff here means generated Python changed but was not staged.
 if git diff --cached --name-only | grep -q '^models/.*\.v$'; then
   echo "==> checking model mirrors (models/*.v staged)"
   if ! git diff --quiet -- src/fido/rocq/; then
     echo ""
     echo "Error: src/fido/rocq/ has unstaged changes while models/*.v"
-    echo "is staged for commit.  Looks like './build' was run but the"
-    echo "output was not staged.  Fix with:"
+    echo "is staged for commit.  Generated Python changed but was not"
+    echo "staged.  Fix with:"
     echo ""
     echo "  git add src/fido/rocq/"
     echo ""
