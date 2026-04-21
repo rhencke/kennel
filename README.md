@@ -12,7 +12,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido down
 ./fido warm
 ./fido status
-./fido tests
+./fido tests  # focused pytest convenience; use ./fido warm before commits
 ./fido ruff format .
 ./fido pytest tests/test_build_wrapper.py -q
 ```

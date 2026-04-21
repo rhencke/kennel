@@ -71,17 +71,20 @@ cd /home/rhencke/home-runner && ./fido up --port 9000 --secret-file /run/secrets
 ## Testing
 
 ```bash
-./fido tests
+./fido warm
 ```
 
-100% coverage is enforced by CI and pre-commit hook.
+Use `./fido warm` for the same full validation path as CI and the pre-commit
+hook. Use `./fido tests [pytest args...]` only for focused pytest reruns.
 
 ## Linting
 
 ```bash
-./fido make-rocq --target lint
-./fido make-rocq --target format
+./fido warm
 ```
+
+Use focused commands such as `./fido ruff check .` or `./fido ruff format .`
+only while iterating. The commit path is `./fido warm`.
 
 ## Module guide
 
