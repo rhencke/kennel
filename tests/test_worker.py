@@ -3008,6 +3008,7 @@ class TestSetupHooks:
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert "kennel-sync-tasks" in sync_cmd
+        assert "uv run" not in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
