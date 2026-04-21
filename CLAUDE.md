@@ -672,20 +672,21 @@ and pytest.
 ### Testing
 
 ```bash
-./fido make-rocq --target test  # build Rocq artifacts, then run pytest in uv buildx
-./fido make-rocq --target ci    # format, lint, typecheck, generated typecheck, tests
+./fido make-rocq  # regenerate committed Rocq-extracted Python
+./fido ci         # format, lint, typecheck, generated typecheck, tests
 ```
 
-`./fido make-rocq` rebuilds the Rocq image locally when its Dockerfile or inputs change.
+`./fido make-rocq` runs the `make-rocq` buildx bake target. BuildKit rebuilds
+the Rocq image and dependent layers when their Dockerfile or inputs change.
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/test_*.py`; `./fido make-rocq --target test`
-is the canonical assertion path.
+tests under `rocq-python-extraction/test/test_*.py`; `./fido ci` is the
+canonical assertion path.
 
 ### Building
 
 ```bash
-./fido make-rocq --target test-extract  # compile extraction theories in the Rocq image
+./fido ci  # compile extraction theories, then run the Python checks
 ```
 
 ### Linting / formatting

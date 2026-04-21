@@ -4,10 +4,10 @@
 fido_build_targets_for_group() {
   case "$1" in
     ci)
-      printf '%s\n' fido format generated-typecheck lint rocq-image rocq-repl test-rocq-generated test-unit typecheck
+      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl test-rocq-generated test-unit typecheck
       ;;
     default)
-      printf '%s\n' ci fido-test
+      printf '%s\n' ci fido-test make-rocq
       ;;
     *)
       return 2

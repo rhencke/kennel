@@ -73,6 +73,20 @@ target "rocq-image" {
   dockerfile = "Dockerfile"
 }
 
+target "make-rocq" {
+  context = "."
+  dockerfile = "models/Dockerfile"
+  target = "export"
+  output = ["type=local,dest=."]
+  args = {
+    ROCQ_IMAGE = "rocq_image"
+  }
+  contexts = {
+    rocq_image = "target:rocq-image"
+    rocq_models_cache = ".cache/rocq-models/context"
+  }
+}
+
 target "format" {
   context = "."
   dockerfile = "models/Dockerfile"

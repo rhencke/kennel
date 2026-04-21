@@ -74,37 +74,26 @@ Use the Fido launcher:
 ```
 
 `./fido make-rocq` is the canonical Rocq model generation entry point. It runs
-`docker buildx build`, extracts `models/*.v`, formats the generated Python in
-an Astral `uv` Python image, and writes the committed output to
-`src/fido/rocq/`.
+the `make-rocq` buildx bake target, extracts `models/*.v`, formats the
+generated Python in an Astral `uv` Python image, and writes the committed
+output to `src/fido/rocq/`.
 
 The helper keeps build work inside buildx:
 
-- Rocq/Dune run in an internal `rocq-python-extraction:ci` image that `./fido make-rocq`
-  builds with buildx from `rocq-python-extraction/Dockerfile`. Set
-  `ROCQ_IMAGE=...` to test another image and skip the internal image build.
+- Rocq/Dune run through the `rocq-image` bake target from
+  `rocq-python-extraction/Dockerfile`.
 - Python formatting runs in `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`.
-- The Rocq image build cache is exported through buildx to
-  `.cache/rocq-models/image`.
-- The model Dockerfile build cache is exported through buildx to
-  `.cache/rocq-models/buildx` when the active builder supports external cache
-  export. This includes uv cache mounts used by the `ci` target.
+- BuildKit owns the image and layer cache in the active builder.
 - The Dune `_build` cache is exported through buildx to
   `.cache/rocq-models/context/_build`.
 - A manifest in `.cache/rocq-models/manifest.sha` gives unchanged local runs a
   fast pre-build exit.
 
-Extra arguments are passed through to `docker buildx build` before the final
-context argument:
+Extra arguments are passed through to `docker buildx bake` before the
+`make-rocq` target:
 
 ```bash
 ./fido make-rocq --no-cache
-./fido make-rocq --target format
-./fido make-rocq --target lint
-./fido make-rocq --target typecheck
-./fido make-rocq --target generated-typecheck
-./fido make-rocq --target test-unit
-./fido make-rocq --target test-rocq-generated
 ```
 
 All Python checks run inside buildx bake targets. Rocq test artifacts are
