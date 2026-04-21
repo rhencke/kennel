@@ -80,6 +80,7 @@ run_models_build() {
     -- \
     docker buildx build \
       --file models/Dockerfile \
+      --build-arg "ROCQ_IMAGE=${ROCQ_IMAGE:-ghcr.io/fidocancode/rocq-python-extraction:latest}" \
       --build-context "rocq_models_cache=$cache_context" \
       --output type=local,dest=. \
       "$@" \

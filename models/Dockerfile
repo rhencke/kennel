@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM rocq-python-extraction:ci AS extract
+ARG ROCQ_IMAGE=ghcr.io/fidocancode/rocq-python-extraction:latest
+FROM ${ROCQ_IMAGE} AS extract
 
 WORKDIR /workspace
 COPY --chown=opam:opam . .
