@@ -129,3 +129,6 @@ Remediation: Rename one Rocq declaration or extract through a module namespace.
 
 ## PYEX040 Unclassified Extraction Failure
 Remediation: Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure.
+
+## PYEX041 Unsupported Real Number Extraction
+Remediation: Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping.

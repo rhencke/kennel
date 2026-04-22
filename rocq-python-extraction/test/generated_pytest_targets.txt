@@ -51,3 +51,15 @@ first_ascii_or_A.py
 tail_or_empty.py
 ascii_roundtrip.py
 byte_label.py
+nat_three.py
+nat_pred_or_zero.py
+nat_roundtrip.py
+positive_five.py
+positive_case.py
+n_seven.py
+n_case.py
+z_neg_three.py
+z_sign_code.py
+q_half.py
+q_num.py
+q_den.py

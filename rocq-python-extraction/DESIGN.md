@@ -605,13 +605,18 @@ available without local pragmas:
 | `Stdlib.Strings.Ascii.ascii` | `int` | Byte value in `0..255`; `Ascii b0 ... b7` packs least-significant bit first. |
 | `Stdlib.Init.Byte.byte` | `int` | Byte constructors `x00` through `xff` lower to integer literals. |
 | primitive `%pstring` / `MLstring` | `bytes` | Byte strings are emitted as Python `bytes` literals. |
+| `Stdlib.Init.Datatypes.nat` | `int` | Non-negative integer; pattern matching rejects negative Python inputs. |
+| `Stdlib.Numbers.BinNums.positive` | `int` | Strictly positive integer; pattern matching rejects zero and negative Python inputs. |
+| `Stdlib.Numbers.BinNums.N` | `int` | Non-negative binary natural; pattern matching rejects negative Python inputs. |
+| `Stdlib.Numbers.BinNums.Z` | `int` | Arbitrary precision signed integer. |
+| `Stdlib.QArith.QArith_base.Q` | `fractions.Fraction` | Rational values use Python's normalized numerator and denominator on destructuring. |
+| `Stdlib.Reals.Rdefinitions.R` | unsupported | Raises `PYEX041`; no `float` mapping is provided for classical reals. |
 
 Other remappings currently covered by acceptance tests:
 
 | Rocq type | Python target |
 |-----------|---------------|
 | `Coq.Init.Datatypes.bool` | `bool` (`True`/`False`) |
-| `Coq.Init.Datatypes.nat` | `int` (non-negative) |
 | `Coq.Init.Datatypes.list` | `list` |
 | `Coq.Init.Datatypes.option` | `T \| None` |
 | `Coq.Init.Datatypes.prod` | `tuple[A, B]` |

@@ -1,17 +1,17 @@
 {
   "version": 1,
-  "python_file": "first_char_or_newline.py",
+  "python_file": "backoff_ratio.py",
   "entries": [
     {
       "python_start_line": 1,
-      "python_end_line": 121,
-      "source_file": "payload_text.v",
+      "python_end_line": 108,
+      "source_file": "retry_budget.v",
       "source_start_line": 25,
       "source_start_col": 11,
       "source_end_line": 25,
-      "source_end_col": 32,
+      "source_end_col": 24,
       "kind": "extraction",
-      "symbol": "first_char_or_newline"
+      "symbol": "backoff_ratio"
     }
   ]
 }

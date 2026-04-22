@@ -191,7 +191,14 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
     done < rocq-python-extraction/test/generated_pytest_targets.txt \
     && while IFS= read -r name; do \
         cp "/workspace/_build/default/$name" "/tmp/pyright-artifacts/$name"; \
-    done < rocq-python-extraction/test/generated_pyright_targets.txt
+    done < rocq-python-extraction/test/generated_pyright_targets.txt \
+    && if opam exec -- dune build rocq-python-extraction/test/reals_unsupported.vo > /tmp/reals-unsupported.log 2>&1; then \
+        cat /tmp/reals-unsupported.log; \
+        echo "expected reals_unsupported.v extraction to fail with PYEX041" >&2; \
+        exit 1; \
+    fi \
+    && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/reals-unsupported.log \
+    && grep -F '"code": "PYEX041"' /tmp/reals-unsupported.log
 
 FROM python-base AS python-deps
 

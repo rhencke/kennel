@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "python_file": "retry_budget.py",
+  "entries": [
+    {
+      "python_start_line": 1,
+      "python_end_line": 106,
+      "source_file": "retry_budget.v",
+      "source_start_line": 17,
+      "source_start_col": 11,
+      "source_end_line": 17,
+      "source_end_col": 23,
+      "kind": "extraction",
+      "symbol": "retry_budget"
+    }
+  ]
+}

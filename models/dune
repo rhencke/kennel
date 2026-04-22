@@ -3,4 +3,4 @@
  (synopsis "Fido coordination models — extracted to src/fido/rocq/")
  (plugins rocq-python-extraction)
  (theories Stdlib)
- (modules seed session_lock payload_text))
+ (modules seed session_lock payload_text retry_budget))

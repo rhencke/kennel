@@ -18,4 +18,5 @@ From PyExtractTest Require Export
   coinductives
   modules
   source_maps
-  strings_bytes.
+  strings_bytes
+  numbers.

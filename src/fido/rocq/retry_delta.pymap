@@ -1,17 +1,17 @@
 {
   "version": 1,
-  "python_file": "event_name.py",
+  "python_file": "retry_delta.py",
   "entries": [
     {
       "python_start_line": 1,
-      "python_end_line": 120,
-      "source_file": "payload_text.v",
+      "python_end_line": 109,
+      "source_file": "retry_budget.v",
       "source_start_line": 19,
       "source_start_col": 11,
       "source_end_line": 19,
-      "source_end_col": 21,
+      "source_end_col": 22,
       "kind": "extraction",
-      "symbol": "event_name"
+      "symbol": "retry_delta"
     }
   ]
 }

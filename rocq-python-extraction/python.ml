@@ -53,6 +53,7 @@ let preamble _state _name comment _used_modules _safe =
   comment ++
   str "from itertools import islice" ++ fnl () ++
   str "from dataclasses import dataclass" ++ fnl () ++
+  str "from fractions import Fraction" ++ fnl () ++
   str "from typing import Any, Awaitable, Callable, Generic, Iterable, Iterator, Never, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
   str "_CoForceT = TypeVar(\"_CoForceT\")" ++ fnl () ++
   str "_ModuleArgT = TypeVar(\"_ModuleArgT\")" ++ fnl () ++
@@ -68,6 +69,10 @@ let preamble _state _name comment _used_modules _safe =
   str "    raise _Impossible()" ++ fnl () ++
   str "class _RocqUtf8BoundaryError(UnicodeError):" ++ fnl () ++
   str "    pass" ++ fnl () ++
+  str "class _RocqNumericDomainError(ValueError):" ++ fnl () ++
+  str "    pass" ++ fnl () ++
+  str "def _rocq_numeric_domain_error(kind: str, value: object) -> Never:" ++ fnl () ++
+  str "    raise _RocqNumericDomainError(f\"Rocq {kind} value out of domain: {value!r}\")" ++ fnl () ++
   str "def _rocq_string_cons(head: int, tail: str) -> str:" ++ fnl () ++
   str "    try:" ++ fnl () ++
   str "        return bytes([head]).decode(\"utf-8\") + tail" ++ fnl () ++
@@ -321,6 +326,58 @@ let is_std_byte_type_ref r =
 let is_prim_string_type_ref r =
   global_path_has_suffix r ".Strings.PrimString.string"
 
+let is_std_nat_type_ref r =
+  global_path_has_suffix r ".Init.Datatypes.nat"
+
+let is_std_nat_zero_ref r =
+  global_path_has_suffix r ".Init.Datatypes.O"
+
+let is_std_nat_succ_ref r =
+  global_path_has_suffix r ".Init.Datatypes.S"
+
+let is_std_positive_type_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.positive"
+
+let is_std_positive_xh_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.xH"
+
+let is_std_positive_xo_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.xO"
+
+let is_std_positive_xi_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.xI"
+
+let is_std_N_type_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.N"
+
+let is_std_N_zero_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.N0"
+
+let is_std_N_pos_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.Npos"
+
+let is_std_Z_type_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.Z"
+
+let is_std_Z_zero_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.Z0"
+
+let is_std_Z_pos_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.Zpos"
+
+let is_std_Z_neg_ref r =
+  global_path_has_suffix r ".Numbers.BinNums.Zneg"
+
+let is_std_Q_type_ref r =
+  global_path_has_suffix r ".QArith.QArith_base.Q"
+
+let is_std_Q_make_ref r =
+  global_path_has_suffix r ".QArith.QArith_base.Qmake"
+
+let is_std_real_type_ref r =
+  global_path_has_suffix r ".Reals.Rdefinitions.R" ||
+  global_path_has_suffix r ".Reals.Rdefinitions.RbaseSymbolsImpl.R"
+
 let std_byte_constructor_value r =
   let name = global_basename r in
   if String.length name = 3 && name.[0] = 'x' then
@@ -335,7 +392,9 @@ let is_std_byte_cons_ref r =
 
 let is_std_remapped_type_ref r =
   is_std_string_type_ref r || is_std_ascii_type_ref r || is_std_byte_type_ref r ||
-  is_prim_string_type_ref r
+  is_prim_string_type_ref r || is_std_nat_type_ref r ||
+  is_std_positive_type_ref r || is_std_N_type_ref r || is_std_Z_type_ref r ||
+  is_std_Q_type_ref r
 
 let is_std_string_type = function
   | Tglob (r, _) -> is_std_string_type_ref r
@@ -347,6 +406,26 @@ let is_std_ascii_type = function
 
 let is_std_byte_type = function
   | Tglob (r, _) -> is_std_byte_type_ref r
+  | _ -> false
+
+let is_std_nat_type = function
+  | Tglob (r, _) -> is_std_nat_type_ref r
+  | _ -> false
+
+let is_std_positive_type = function
+  | Tglob (r, _) -> is_std_positive_type_ref r
+  | _ -> false
+
+let is_std_N_type = function
+  | Tglob (r, _) -> is_std_N_type_ref r
+  | _ -> false
+
+let is_std_Z_type = function
+  | Tglob (r, _) -> is_std_Z_type_ref r
+  | _ -> false
+
+let is_std_Q_type = function
+  | Tglob (r, _) -> is_std_Q_type_ref r
   | _ -> false
 
 let is_std_bool_true_ref r =
@@ -409,6 +488,7 @@ let diagnostic_catalogue = [
   { code = "PYEX038"; title = "Generated Python identifier is invalid"; category = "naming"; remediation = "Rename the Rocq identifier or add an extraction rename before Python extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex038-generated-python-identifier-is-invalid" };
   { code = "PYEX039"; title = "Generated Python name collision"; category = "naming"; remediation = "Rename one Rocq declaration or extract through a module namespace."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex039-generated-python-name-collision" };
   { code = "PYEX040"; title = "Unclassified extraction failure"; category = "internal"; remediation = "Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex040-unclassified-extraction-failure" };
+  { code = "PYEX041"; title = "Unsupported real number extraction"; category = "numeric"; remediation = "Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex041-unsupported-real-number-extraction" };
 ]
 
 let diagnostic_prefix = "PYTHON_EXTRACTION_DIAGNOSTIC_JSON: "
@@ -899,6 +979,29 @@ let rec pp_expr state env = function
       str "(" ++
       prlist_with_sep (fun () -> str ", ") (pp_expr state env) l ++
       str ")"
+  | MLcons (_, r, []) when is_std_nat_zero_ref r ->
+      str "0"
+  | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
+      str "(" ++ pp_expr state env n ++ str " + 1)"
+  | MLcons (_, r, []) when is_std_positive_xh_ref r ->
+      str "1"
+  | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
+      str "(" ++ pp_expr state env p ++ str " * 2)"
+  | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
+      str "(" ++ pp_expr state env p ++ str " * 2 + 1)"
+  | MLcons (_, r, []) when is_std_N_zero_ref r ->
+      str "0"
+  | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
+      pp_expr state env p
+  | MLcons (_, r, []) when is_std_Z_zero_ref r ->
+      str "0"
+  | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
+      pp_expr state env p
+  | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
+      str "(-" ++ pp_expr state env p ++ str ")"
+  | MLcons (_, r, [num; den]) when is_std_Q_make_ref r ->
+      str "Fraction(" ++ pp_expr state env num ++ str ", " ++
+      pp_expr state env den ++ str ")"
   | MLcons (_, r, []) when is_std_string_empty_ref r ->
       str "\"\""
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
@@ -983,6 +1086,16 @@ let rec pp_expr state env = function
         pp_std_string_match_expr state env scrutinee branches
       else if is_std_ascii_type ty then
         pp_std_ascii_match_expr state env scrutinee branches
+      else if is_std_nat_type ty then
+        pp_std_nat_match_expr state env scrutinee branches
+      else if is_std_positive_type ty then
+        pp_std_positive_match_expr state env scrutinee branches
+      else if is_std_N_type ty then
+        pp_std_N_match_expr state env scrutinee branches
+      else if is_std_Z_type ty then
+        pp_std_Z_match_expr state env scrutinee branches
+      else if is_std_Q_type ty then
+        pp_std_Q_match_expr state env scrutinee branches
       else if is_bool then
         let (_, _, body_true)  = branches.(0) in
         let (_, _, body_false) = branches.(1) in
@@ -1189,6 +1302,208 @@ and pp_std_ascii_match_expr state env scrutinee branches =
            str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
        | None -> pp_impossible_expr ())
 
+and pp_std_nat_match_expr state env scrutinee branches =
+  let zero_arm = ref None in
+  let succ_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_nat_zero_ref r ->
+        set_once zero_arm (ids, body)
+    | Pcons (r, _) when is_std_nat_succ_ref r ->
+        set_once succ_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported nat pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_zero =
+    match !zero_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_succ =
+    match !succ_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__n - 1)"
+    | None -> fallback ()
+  in
+  str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
+  pp_succ ++ str " if __n > 0 else _rocq_numeric_domain_error(\"nat\", __n))(" ++
+  pp_expr state env scrutinee ++ str ")"
+
+and pp_std_positive_match_expr state env scrutinee branches =
+  let xh_arm = ref None in
+  let xo_arm = ref None in
+  let xi_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_positive_xh_ref r ->
+        set_once xh_arm (ids, body)
+    | Pcons (r, _) when is_std_positive_xo_ref r ->
+        set_once xo_arm (ids, body)
+    | Pcons (r, _) when is_std_positive_xi_ref r ->
+        set_once xi_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error
+          ~detail:"unsupported positive pattern shape"
+          "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_xh =
+    match !xh_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_xo =
+    match !xo_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__p // 2)"
+    | None -> fallback ()
+  in
+  let pp_xi =
+    match !xi_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")((__p - 1) // 2)"
+    | None -> fallback ()
+  in
+  str "(lambda __p: _rocq_numeric_domain_error(\"positive\", __p) if __p <= 0 else " ++
+  pp_xh ++ str " if __p == 1 else " ++
+  pp_xo ++ str " if __p % 2 == 0 else " ++ pp_xi ++ str ")(" ++
+  pp_expr state env scrutinee ++ str ")"
+
+and pp_std_N_match_expr state env scrutinee branches =
+  let zero_arm = ref None in
+  let pos_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_N_zero_ref r ->
+        set_once zero_arm (ids, body)
+    | Pcons (r, _) when is_std_N_pos_ref r ->
+        set_once pos_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported N pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_zero =
+    match !zero_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_pos =
+    match !pos_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(__n)"
+    | None -> fallback ()
+  in
+  str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
+  pp_pos ++ str " if __n > 0 else _rocq_numeric_domain_error(\"N\", __n))(" ++
+  pp_expr state env scrutinee ++ str ")"
+
+and pp_std_Z_match_expr state env scrutinee branches =
+  let zero_arm = ref None in
+  let pos_arm = ref None in
+  let neg_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_Z_zero_ref r ->
+        set_once zero_arm (ids, body)
+    | Pcons (r, _) when is_std_Z_pos_ref r ->
+        set_once pos_arm (ids, body)
+    | Pcons (r, _) when is_std_Z_neg_ref r ->
+        set_once neg_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported Z pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_zero =
+    match !zero_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_pos =
+    match !pos_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(__z)"
+    | None -> fallback ()
+  in
+  let pp_neg =
+    match !neg_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(-__z)"
+    | None -> fallback ()
+  in
+  str "(lambda __z: " ++ pp_zero ++ str " if __z == 0 else " ++
+  pp_pos ++ str " if __z > 0 else " ++ pp_neg ++ str ")(" ++
+  pp_expr state env scrutinee ++ str ")"
+
+and pp_std_Q_match_expr state env scrutinee branches =
+  let q_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, _) when is_std_Q_make_ref r ->
+        set_once q_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported Q pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  match !q_arm with
+  | Some (ids, body) ->
+      str "(lambda __q: (" ++
+      pp_branch_lambda state env ids body ++
+      str ")(__q.numerator, __q.denominator))(" ++
+      pp_expr state env scrutinee ++ str ")"
+  | None ->
+      (match !wildcard_arm with
+       | Some (ids, body) ->
+           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+       | None -> pp_impossible_expr ())
+
 (*s Custom-match expression emitter.
     When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
     function, case analysis on [T] cannot use Python [match]/[case] (the
@@ -1264,7 +1579,9 @@ let rec pp_return_body state env indent = function
           let (_, p1, _) = branches.(1) in
           is_bool_patt p0 "True" && is_bool_patt p1 "False" )
       in
-      if is_std_string_type ty || is_std_ascii_type ty then
+      if is_std_string_type ty || is_std_ascii_type ty ||
+         is_std_nat_type ty || is_std_positive_type ty ||
+         is_std_N_type ty || is_std_Z_type ty || is_std_Q_type ty then
         str "return " ++ pp_expr state env expr
       else if is_bool then
         (* Ternary — valid expression; a single [return] suffices. *)
@@ -1455,9 +1772,13 @@ let rec pp_type_with state pp_tvar = function
          Inductive type names are capitalized to match the class names
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
       let name =
-        if is_std_string_type_ref r then "str"
+        if is_std_real_type_ref r then extraction_diagnostic_error "PYEX041"
+        else if is_std_string_type_ref r then "str"
         else if is_prim_string_type_ref r then "bytes"
         else if is_std_ascii_type_ref r || is_std_byte_type_ref r then "int"
+        else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
+                is_std_N_type_ref r || is_std_Z_type_ref r then "int"
+        else if is_std_Q_type_ref r then "Fraction"
         else if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
@@ -1908,6 +2229,8 @@ let pp_ind_decl state (ind : ml_ind) =
 
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
+  | Dtype (r, _, _) when is_std_real_type_ref r ->
+      extraction_diagnostic_error "PYEX041"
   | Dtype (r, _, _) when is_custom r || is_std_remapped_type_ref r -> mt ()
   | Dtype _     -> diagnostic_comment "PYEX003"
   | Dterm (r, a, typ) ->
