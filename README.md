@@ -14,6 +14,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido gen-workflows
 ./fido prune
 ./fido status
+./fido lsp hover models/session_lock.v --line 67 --column 12 --json
 ./fido tests  # focused pytest convenience; use ./fido ci before commits
 ./fido ruff format .
 ./fido pyright
@@ -42,6 +43,12 @@ the speed path.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
+Rocq navigation commands use the Rocq-capable image: `./fido rocq-lsp` serves
+stdio LSP for `.v` files through `.lsp.json`, and `./fido lsp ... --json`
+returns hover, definition, reference, caller, signature, completion, symbol,
+semantic-token, code-lens, code-action, dependency-graph, explanation, rename,
+and diagnostic data for shell agents. Both routes refresh extracted Python
+through `./fido make-rocq` before answering.
 Supported dev-tool commands, `./fido ruff ...`, `./fido pyright ...`, and
 `./fido pytest ...`, run through the `fido-test` image and are passed to
 containerized `uv run`; do not use host `uv` for normal project checks. The

@@ -23,6 +23,8 @@ Commands:
   tests             Run pytest through the project test entry point.
   traceback         Annotate extracted Python tracebacks.
   repl              Open a Python REPL for a Rocq model with OCaml compare.
+  rocq-lsp          Run a stdio LSP server for Rocq model files.
+  lsp               Query Rocq navigation, actions, graph, rename, and tokens.
   ruff              Run ruff through containerized uv.
   pyright           Run pyright through containerized uv.
   pytest            Run pytest through containerized uv."""

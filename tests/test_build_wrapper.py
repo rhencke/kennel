@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -11,6 +12,7 @@ BAKE = REPO / "docker-bake.hcl"
 PRE_COMMIT = REPO / ".githooks" / "pre-commit"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 CI_GENERATOR = REPO / "tools" / "gen_workflows.py"
+LSP_CONFIG = REPO / ".lsp.json"
 
 
 def run_build(
@@ -146,6 +148,14 @@ class TestModelsBuildScript:
     def test_scripts_are_executable(self) -> None:
         assert os.access(FIDO, os.X_OK)
 
+    def test_lsp_config_points_to_fido_rocq_lsp(self) -> None:
+        config = json.loads(LSP_CONFIG.read_text())
+
+        rocq = config["languageServers"]["rocq"]
+        assert rocq["command"] == "./fido"
+        assert rocq["args"] == ["rocq-lsp"]
+        assert rocq["extensions"] == [".v"]
+
     def test_pre_commit_runs_ci_and_runtime_smoke(self) -> None:
         script = PRE_COMMIT.read_text()
 
@@ -244,6 +254,12 @@ class TestFidoLauncher:
         assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
         assert "run_fido_cli_image fido-sync-tasks" in script
+        assert "rocq-lsp)" in script
+        assert "run_rocq_lsp_image -m fido.rocq_lsp --stdio" in script
+        assert "lsp)" in script
+        assert "run_rocq_lsp_image -m fido.rocq_lsp" in script
+        assert "run_rocq_lsp_image()" in script
+        assert "run_fido_test_python_image()" in script
 
     def test_supervises_foreground_container_and_down_stops_by_name(self) -> None:
         script = FIDO.read_text()
@@ -370,6 +386,8 @@ class TestFidoLauncher:
         assert 'run_fido_test_image "$@"' in script
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
+        assert "rocq-lsp" in help_text
+        assert "lsp" in help_text
         assert "ruff" in help_text
         assert "pyright" in help_text
         assert "pytest" in help_text
@@ -379,6 +397,7 @@ class TestModelDockerfile:
     def test_bake_fido_target_hides_dockerfile_path(self) -> None:
         bake = BAKE.read_text()
         script = FIDO.read_text()
+        dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
         assert 'target "fido"' in bake
         assert 'target "fido-test"' in bake
@@ -401,6 +420,7 @@ class TestModelDockerfile:
         assert 'target = "test-rocq-generated"' in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
+        assert ".lsp.json" in dockerfile
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
             '"test-unit", "test-rocq-generated", "fido", "rocq-repl"]' in bake
@@ -486,7 +506,7 @@ class TestModelDockerfile:
 
         assert "FROM python-deps AS python-check-base" in dockerfile
         assert (
-            "COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json "
+            "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile

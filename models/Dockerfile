@@ -204,7 +204,7 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
 FROM python-deps AS python-check-base
 
 WORKDIR /workspace
-COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
 COPY tools/gen_workflows.py tools/build_graph.sh tools/
@@ -253,7 +253,7 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
 FROM python-deps AS python-test-base
 
 WORKDIR /workspace
-COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
 COPY tools/gen_workflows.py tools/build_graph.sh tools/

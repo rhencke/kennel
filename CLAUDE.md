@@ -27,6 +27,8 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
 | `./fido repl <model.v>` | Open a Python REPL with that model's extracted symbols preloaded and compare supported expressions against OCaml reference extraction. |
+| `./fido rocq-lsp` | Run the stdio LSP server for `.v` model navigation. `.lsp.json` points editor/agent LSP clients here. |
+| `./fido lsp hover|definition|references|callers|signature|completion|symbols|tokens|codelens|codeactions|graph|explain|rename|diagnostics ... --json` | Query Rocq model navigation as JSON for shell agents. |
 | `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
 | `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
 | `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |

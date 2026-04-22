@@ -17,6 +17,7 @@ build_graph=$repo_root/tools/build_graph.sh
 need_secret=0
 named_run=0
 quiet=0
+container_entrypoint=
 restart_codes=" 3 75 "
 stop_codes=" 0 130 137 143 "
 
@@ -295,7 +296,7 @@ make_rocq_models() {
   if [ "${#build_args[@]}" -eq 0 ] \
     && [ -f "$manifest" ] \
     && [ "$(cat "$manifest")" = "$current" ]; then
-    echo "models build cache hit"
+    echo "models build cache hit" >&2
     return
   fi
 
@@ -449,6 +450,9 @@ run_container() {
   if [ "$named_run" = "1" ]; then
     run_args=(--name "$container" "${run_args[@]}")
   fi
+  if [ -n "$container_entrypoint" ]; then
+    run_args+=(--entrypoint "$container_entrypoint")
+  fi
   add_mount_if_exists "$HOME/.claude"
   add_mount_if_exists "$HOME/.claude.json"
   add_mount_if_exists "$HOME/.config/gh"
@@ -468,6 +472,11 @@ run_fido_test_image() {
   run_container "$@"
 }
 
+run_fido_test_python_image() {
+  build_image fido-test "$test_image"
+  container_entrypoint=python3 run_container "$@"
+}
+
 run_fido_cli_image() {
   run_fido_test_image "$@"
 }
@@ -480,6 +489,11 @@ run_rocq_repl_image() {
   make_rocq_models
   build_image rocq-repl "$rocq_repl_image"
   run_container "$@"
+}
+
+run_rocq_lsp_image() {
+  make_rocq_models
+  run_fido_test_python_image "$@"
 }
 
 prune_restart_buildkit_async() {
@@ -592,6 +606,12 @@ case "$command" in
     ;;
   repl)
     run_rocq_repl_image python3 -m fido.rocq_repl "${@:2}"
+    ;;
+  rocq-lsp)
+    run_rocq_lsp_image -m fido.rocq_lsp --stdio "${@:2}"
+    ;;
+  lsp)
+    run_rocq_lsp_image -m fido.rocq_lsp "${@:2}"
     ;;
   ruff|pyright|pytest)
     run_fido_test_image "$@"

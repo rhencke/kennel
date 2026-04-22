@@ -1,0 +1,9 @@
+{
+  "languageServers": {
+    "rocq": {
+      "command": "./fido",
+      "args": ["rocq-lsp"],
+      "extensions": [".v"]
+    }
+  }
+}

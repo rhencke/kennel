@@ -27,6 +27,8 @@ tests = "fido.tests_main:main"
 tests-unit = "fido.tests_main:main_unit"
 tests-rocq-generated = "fido.tests_main:main_rocq_generated"
 traceback = "fido.rocq_traceback:main"
+rocq-lsp = "fido.rocq_lsp:main_lsp"
+lsp = "fido.rocq_lsp:main_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fido"]

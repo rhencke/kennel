@@ -42,6 +42,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
@@ -78,6 +79,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
@@ -117,6 +119,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
@@ -187,6 +190,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
@@ -226,6 +230,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
@@ -261,6 +266,7 @@ EOF
 .dockerignore
 .githooks/pre-commit
 .github/workflows/ci.yml
+.lsp.json
 .python-version
 docker-bake.hcl
 dune-workspace
