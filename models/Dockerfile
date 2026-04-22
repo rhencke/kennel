@@ -198,7 +198,14 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
         exit 1; \
     fi \
     && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/reals-unsupported.log \
-    && grep -F '"code": "PYEX041"' /tmp/reals-unsupported.log
+    && grep -F '"code": "PYEX041"' /tmp/reals-unsupported.log \
+    && if opam exec -- dune build rocq-python-extraction/test/io_run_unsupported.vo > /tmp/io-run-unsupported.log 2>&1; then \
+        cat /tmp/io-run-unsupported.log; \
+        echo "expected io_run_unsupported.v extraction to fail with PYEX042" >&2; \
+        exit 1; \
+    fi \
+    && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/io-run-unsupported.log \
+    && grep -F '"code": "PYEX042"' /tmp/io-run-unsupported.log
 
 FROM python-base AS python-deps
 

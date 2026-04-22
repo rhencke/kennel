@@ -20,4 +20,5 @@ From PyExtractTest Require Export
   source_maps
   strings_bytes
   numbers
-  finite_collections.
+  finite_collections
+  io_boundaries.

@@ -270,6 +270,13 @@ class IO(Generic[_IOValue]):
 
         return IO(run_pure)
 
+    @classmethod
+    def from_sync(cls, thunk: Callable[[], _IOValue]) -> IO[_IOValue]:
+        async def run_sync() -> _IOValue:
+            return thunk()
+
+        return IO(run_sync)
+
 
 def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:
     return value()
@@ -790,6 +797,7 @@ let diagnostic_catalogue = [
   { code = "PYEX039"; title = "Generated Python name collision"; category = "naming"; remediation = "Rename one Rocq declaration or extract through a module namespace."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex039-generated-python-name-collision" };
   { code = "PYEX040"; title = "Unclassified extraction failure"; category = "internal"; remediation = "Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex040-unclassified-extraction-failure" };
   { code = "PYEX041"; title = "Unsupported real number extraction"; category = "numeric"; remediation = "Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex041-unsupported-real-number-extraction" };
+  { code = "PYEX042"; title = "Unsupported IO effect extraction"; category = "io"; remediation = "Keep IO values at an async boundary or provide an explicit IO adapter remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex042-unsupported-io-effect-extraction" };
 ]
 
 let diagnostic_prefix = "PYTHON_EXTRACTION_DIAGNOSTIC_JSON: "
@@ -877,6 +885,7 @@ let marker_reader_ask = "__PYMONAD_READER_ASK__"
 let marker_io_type = "__PYMONAD_IO_TYPE__"
 let marker_io_pure = "__PYMONAD_IO_PURE__"
 let marker_io_bind = "__PYMONAD_IO_BIND__"
+let marker_io_run = "__PYMONAD_IO_RUN__"
 
 let is_monad_marker_string s =
   let prefix = "__PYMONAD_" in
@@ -1320,6 +1329,8 @@ let rec pp_expr state env expr =
             Some (str "IO.pure(" ++ pp_expr state env value ++ str ")")
         | Some marker, [m; f] when String.equal marker marker_io_bind ->
             Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+        | Some marker, _ when String.equal marker marker_io_run ->
+            extraction_diagnostic_error ~detail:marker "PYEX042"
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
             Some (pp_option_bind_expr opt_expr fn_expr)
         | Some marker, _
@@ -2558,6 +2569,7 @@ let rec pp_type_with state pp_tvar = function
         else if is_positive_set_type_ref r then "frozenset[int]"
         else if is_string_map_type_ref r then "dict[str, object]"
         else if is_string_set_type_ref r then "frozenset[str]"
+        else if is_custom r && String.equal (find_custom r) marker_io_type then "IO"
         else if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
@@ -2586,6 +2598,10 @@ let rec pp_type_with state pp_tvar = function
         (match args with
          | [arg] -> str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
          | _ -> str "dict[str, object]")
+      else if is_custom r && String.equal (find_custom r) marker_io_type then
+        (match args with
+         | [arg] -> str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "IO[object]")
       else if is_positive_set_type_ref r || is_string_set_type_ref r then str name
       else if List.is_empty args then str name
       else
@@ -2601,6 +2617,18 @@ let rec pp_type_with state pp_tvar = function
 
 let pp_type state typ =
   pp_type_with state ml_typevar_name typ
+
+let rec type_ends_in_io = function
+  | Tarr (_, ret) -> type_ends_in_io ret
+  | Tglob (r, [value]) when is_custom r && String.equal (find_custom r) marker_io_type ->
+      Some value
+  | _ ->
+      None
+
+let rec arrow_type args ret =
+  match args with
+  | [] -> ret
+  | arg :: rest -> Tarr (arg, arrow_type rest ret)
 
 let pp_protocol_decl state spec =
   let n = List.length spec.protocol_arg_types in
@@ -2748,9 +2776,87 @@ let pp_annotated_params names annots =
        pp_param (List.nth names i) ++ str ": " ++ List.nth annots i)
     (List.init (List.length names) Fun.id)
 
+let pp_io_term_decl state env name a typ ret_typ =
+  let builder_name = "_io_" ^ name in
+  let args, _io_ret = type_decomp typ in
+  let facade_typ = arrow_type args ret_typ in
+  let facade_prefix, facade_arg_annots, facade_ret_annot =
+    signature_data state name facade_typ
+  in
+  let builder_prefix, builder_arg_annots, builder_ret_annot =
+    signature_data state builder_name typ
+  in
+  let facade_call pp_arg args =
+    str "return await " ++ str builder_name ++ str "(" ++
+    prlist_with_sep (fun () -> str ", ")
+      pp_arg
+      args ++
+    str ").run()"
+  in
+  let lam_ids, body = collect_lams a in
+  match lam_ids with
+  | [] ->
+      let builder =
+        match pp_function_wrapper state env builder_name a typ with
+        | Some pp -> pp
+        | None ->
+            builder_prefix ++
+            str builder_name ++ str ": " ++ builder_ret_annot ++
+            str " = " ++ pp_expr state env a ++ fnl ()
+      in
+      if List.is_empty args then
+        builder ++ fnl () ++ facade_prefix ++
+        str "async def " ++ str name ++ str "() -> " ++ facade_ret_annot ++
+        str ":" ++ fnl () ++
+        str "    return await " ++ str builder_name ++ str ".run()" ++ fnl ()
+      else
+        let arg_names =
+          if Int.equal (List.length args) 1 then ["x"]
+          else List.init (List.length args) (fun i -> "arg" ^ string_of_int i)
+        in
+        builder ++ fnl () ++ facade_prefix ++
+        str "async def " ++ str name ++ str "(" ++
+        prlist_with_sep (fun () -> str ", ")
+          (fun i ->
+             pp_pyname (List.nth arg_names i) ++ str ": " ++
+             List.nth facade_arg_annots i)
+          (List.init (List.length arg_names) Fun.id) ++
+        str ") -> " ++ facade_ret_annot ++ str ":" ++ fnl () ++
+        str "    " ++ facade_call pp_pyname arg_names ++ fnl ()
+  | _ ->
+      let params = List.map id_of_mlid lam_ids in
+      let params', env' = push_vars params env in
+      let visible_params_rev = List.rev (visible_params params') in
+      let pp_builder_params =
+        if Int.equal (List.length visible_params_rev) (List.length builder_arg_annots) then
+          pp_annotated_params visible_params_rev builder_arg_annots
+        else
+          pp_param_list (List.rev params')
+      in
+      let pp_facade_params =
+        if Int.equal (List.length visible_params_rev) (List.length facade_arg_annots) then
+          pp_annotated_params visible_params_rev facade_arg_annots
+        else
+          pp_param_list (List.rev params')
+      in
+      let builder =
+        builder_prefix ++
+        str "def " ++ str builder_name ++ str "(" ++ pp_builder_params ++
+        str ") -> " ++ builder_ret_annot ++ str ":" ++ fnl () ++
+        str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+      in
+      builder ++ fnl () ++ facade_prefix ++
+      str "async def " ++ str name ++ str "(" ++ pp_facade_params ++
+      str ") -> " ++ facade_ret_annot ++ str ":" ++ fnl () ++
+      str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
+
 let pp_term_decl state env name a typ =
   let lam_ids, body = collect_lams a in
   let pp_prefix, arg_annots, ret_annot = signature_data state name typ in
+  match type_ends_in_io typ with
+  | Some ret_typ ->
+      pp_io_term_decl state env name a typ ret_typ
+  | None ->
   if List.is_empty lam_ids then
     (* Non-function value: simple assignment — unless the body is a [raise]
        expression (MLaxiom / MLexn / MLparray), which cannot appear as the

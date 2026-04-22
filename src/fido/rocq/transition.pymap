@@ -3,9 +3,9 @@
   "python_file": "transition.py",
   "entries": [
     {
-      "python_start_line": 325,
+      "python_start_line": 332,
       "python_start_col": 0,
-      "python_end_line": 370,
+      "python_end_line": 377,
       "python_end_col": 38,
       "source_file": "session_lock.v",
       "source_start_line": 67,

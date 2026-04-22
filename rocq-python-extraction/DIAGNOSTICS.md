@@ -132,3 +132,6 @@ Remediation: Check the detail field, reduce the Rocq input, and add a catalogue 
 
 ## PYEX041 Unsupported Real Number Extraction
 Remediation: Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping.
+
+## PYEX042 Unsupported IO Effect Extraction
+Remediation: Keep IO values at an async boundary or provide an explicit IO adapter remapping.

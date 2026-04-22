@@ -3,9 +3,9 @@
   "python_file": "payload_text.py",
   "entries": [
     {
-      "python_start_line": 273,
+      "python_start_line": 280,
       "python_start_col": 0,
-      "python_end_line": 273,
+      "python_end_line": 280,
       "python_end_col": 32,
       "source_file": "payload_text.v",
       "source_start_line": 21,
@@ -16,9 +16,9 @@
       "symbol": "event_name"
     },
     {
-      "python_start_line": 276,
+      "python_start_line": 283,
       "python_start_col": 0,
-      "python_end_line": 276,
+      "python_end_line": 283,
       "python_end_col": 41,
       "source_file": "payload_text.v",
       "source_start_line": 25,
@@ -29,9 +29,9 @@
       "symbol": "event_name_bytes"
     },
     {
-      "python_start_line": 279,
+      "python_start_line": 286,
       "python_start_col": 0,
-      "python_end_line": 279,
+      "python_end_line": 286,
       "python_end_col": 22,
       "source_file": "payload_text.v",
       "source_start_line": 28,
@@ -42,9 +42,9 @@
       "symbol": "newline_byte"
     },
     {
-      "python_start_line": 282,
+      "python_start_line": 289,
       "python_start_col": 0,
-      "python_end_line": 289,
+      "python_end_line": 296,
       "python_end_col": 12,
       "source_file": "payload_text.v",
       "source_start_line": 33,

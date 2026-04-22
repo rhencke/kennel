@@ -64,3 +64,5 @@ q_half.py
 q_num.py
 q_den.py
 FiniteCollectionFixtures.py
+read_file_echo.py
+http_status_ok.py

@@ -231,6 +231,13 @@ class IO(Generic[_IOValue]):
 
         return IO(run_pure)
 
+    @classmethod
+    def from_sync(cls, thunk: Callable[[], _IOValue]) -> IO[_IOValue]:
+        async def run_sync() -> _IOValue:
+            return thunk()
+
+        return IO(run_sync)
+
 
 def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:
     return value()
