@@ -4,8 +4,8 @@ set -e
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-echo "==> warming buildx CI checks and runtime image cache"
-./fido warm
+echo "==> running buildx CI checks and runtime image cache"
+./fido ci
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the
 # working-tree copy of src/fido/rocq/ must match the index — a

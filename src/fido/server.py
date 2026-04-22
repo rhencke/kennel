@@ -1210,7 +1210,7 @@ def bootstrap_issue_caches(
 
     Called once in :func:`run` after the registry is created but before the
     watchdog threads start.  Each repo gets a fresh ``find_all_open_issues``
-    snapshot so the cache is warm from the first moment — even for repos
+    snapshot so the cache is populated from the first moment — even for repos
     whose worker resumes on an existing issue and never calls
     ``find_next_issue`` during the current fido run.
 
@@ -1336,7 +1336,7 @@ def run(
     )
     registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
-    # Bootstrap issue caches eagerly so the picker has warm data immediately —
+    # Bootstrap issue caches eagerly so the picker has populated data immediately —
     # even for repos whose worker resumes on an existing issue and never calls
     # find_next_issue during this run (closes #837).
     _bootstrap_issue_caches(config.repos, gh, registry)

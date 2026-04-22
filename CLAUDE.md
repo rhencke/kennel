@@ -15,8 +15,9 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido help` | Print the command list. |
 | `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
 | `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
-| `./fido warm` | Build the buildx `warm` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
-| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. |
+| `./fido ci` | Build the buildx `ci` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
+| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. Uses host `python3` only for the stdlib generator, not host `uv`. |
+| `./fido prune` | Manually prune BuildKit cache using `FIDO_BUILDKIT_KEEP_STORAGE` as the storage floor. CI does not prune automatically. |
 | `./fido make-rocq [args...]` | Generate Rocq-extracted Python and run Rocq model buildx targets. |
 | `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
 | `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
@@ -25,6 +26,7 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido sync-tasks <work_dir>` | Sync a repo task list into its GitHub PR body. |
 | `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
+| `./fido repl <model.v>` | Open a Python REPL with that model's extracted symbols preloaded and compare supported expressions against OCaml reference extraction. |
 | `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
 | `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
 | `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |
@@ -74,20 +76,20 @@ cd /home/rhencke/home-runner && ./fido up --port 9000 --secret-file /run/secrets
 ## Testing
 
 ```bash
-./fido warm
+./fido ci
 ```
 
-Use `./fido warm` for the same full validation path as CI and the pre-commit
+Use `./fido ci` for the same full validation path as CI and the pre-commit
 hook. Use `./fido tests [pytest args...]` only for focused pytest reruns.
 
 ## Linting
 
 ```bash
-./fido warm
+./fido ci
 ```
 
 Use focused commands such as `./fido ruff check .` or `./fido ruff format .`
-only while iterating. The commit path is `./fido warm`.
+only while iterating. The commit path is `./fido ci`.
 
 ## Module guide
 
@@ -671,20 +673,21 @@ and pytest.
 ### Testing
 
 ```bash
-./fido make-rocq --target test  # build Rocq artifacts, then run pytest in uv buildx
-./fido make-rocq --target ci    # format, lint, typecheck, generated typecheck, tests
+./fido make-rocq  # regenerate committed Rocq-extracted Python
+./fido ci         # format, lint, typecheck, generated typecheck, tests
 ```
 
-`./fido make-rocq` rebuilds the Rocq image locally when its Dockerfile or inputs change.
+`./fido make-rocq` runs the `make-rocq` buildx bake target. BuildKit rebuilds
+the Rocq image and dependent layers when their Dockerfile or inputs change.
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/test_*.py`; `./fido make-rocq --target test`
-is the canonical assertion path.
+tests under `rocq-python-extraction/test/test_*.py`; `./fido ci` is the
+canonical assertion path.
 
 ### Building
 
 ```bash
-./fido make-rocq --target test-extract  # compile extraction theories in the Rocq image
+./fido ci  # compile extraction theories, then run the Python checks
 ```
 
 ### Linting / formatting

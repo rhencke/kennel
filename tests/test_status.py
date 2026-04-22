@@ -1,5 +1,7 @@
 """Tests for fido.status — state-reading and formatting."""
 
+# pyright: reportArgumentType=false, reportMissingParameterType=false, reportMissingTypeArgument=false, reportPrivateUsage=false, reportUnknownLambdaType=false
+
 from __future__ import annotations
 
 import fcntl
@@ -7,6 +9,7 @@ import json
 import subprocess
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fido.color import _CODES
@@ -23,6 +26,7 @@ from fido.status import (
     RateLimitInfo,
     RateLimitWindowInfo,
     RepoStatus,
+    SystemResourceInfo,
     WebhookActivityInfo,
     _claude_pid,
     _current_task,
@@ -32,8 +36,11 @@ from fido.status import (
     _format_agent_line,
     _format_cache_line,
     _format_duration_until,
+    _format_gib,
+    _format_percent,
     _format_rate_limit_line,
     _format_rate_limit_window,
+    _format_resource_line,
     _format_uptime,
     _git_dir,
     _parse_iso_datetime,
@@ -45,6 +52,7 @@ from fido.status import (
     _rate_limit_color,
     _read_state,
     _repos_from_pid,
+    _system_resources,
     collect,
     format_status,
     provider_statuses_for_repo_configs,
@@ -433,6 +441,68 @@ class TestElapsedSinceIso:
         ref = datetime(2026, 1, 1, tzinfo=timezone.utc)
         future = (ref + timedelta(minutes=1)).isoformat()
         assert _elapsed_since_iso(future, _now=lambda: ref) == 0
+
+
+class TestSystemResources:
+    def test_collects_system_resources(self, tmp_path: Path) -> None:
+        meminfo = tmp_path / "meminfo"
+        meminfo.write_text("MemTotal:       1048576 kB\nMemAvailable:    262144 kB\n")
+        loadavg = tmp_path / "loadavg"
+        loadavg.write_text("1.25 0.50 0.25 1/100 123\n")
+
+        result = _system_resources(
+            meminfo_path=meminfo,
+            loadavg_path=loadavg,
+            disk_path=tmp_path,
+            _disk_usage=lambda _path: SimpleNamespace(
+                total=1024**3, free=256 * 1024**2
+            ),
+            _cpu_count=lambda: 4,
+        )
+
+        assert result == SystemResourceInfo(
+            load_1=1.25,
+            load_5=0.50,
+            load_15=0.25,
+            cpu_count=4,
+            mem_total_bytes=1048576 * 1024,
+            mem_available_bytes=262144 * 1024,
+            disk_path=str(tmp_path),
+            disk_total_bytes=1024**3,
+            disk_free_bytes=256 * 1024**2,
+        )
+
+    def test_collect_returns_none_for_unreadable_resources(
+        self, tmp_path: Path
+    ) -> None:
+        assert (
+            _system_resources(
+                meminfo_path=tmp_path / "missing",
+                loadavg_path=tmp_path / "loadavg",
+            )
+            is None
+        )
+
+    def test_formats_resource_line(self) -> None:
+        resources = SystemResourceInfo(
+            load_1=1.25,
+            load_5=0.50,
+            load_15=0.25,
+            cpu_count=4,
+            mem_total_bytes=8 * 1024**3,
+            mem_available_bytes=2 * 1024**3,
+            disk_path="/",
+            disk_total_bytes=100 * 1024**3,
+            disk_free_bytes=25 * 1024**3,
+        )
+
+        assert _format_gib(1536 * 1024**2) == "1.5GiB"
+        assert _format_percent(1, 0) == "n/a"
+        assert _format_resource_line(resources) == (
+            "host: cpu load 1.25/4 (0.50, 0.25), "
+            "mem 6.0GiB/8.0GiB (75%), disk / 75.0GiB/100.0GiB (75%)"
+        )
+        assert _format_resource_line(None) is None
 
 
 class TestCollectWebhookPropagation:
@@ -1490,6 +1560,30 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=12345, fido_uptime=7980, repos=[])
         output = format_status(status)
         assert output == "fido: UP (pid 12345, uptime 2h13m)"
+
+    def test_includes_host_resources(self) -> None:
+        status = FidoStatus(
+            fido_pid=12345,
+            fido_uptime=7980,
+            repos=[],
+            resources=SystemResourceInfo(
+                load_1=0.25,
+                load_5=0.50,
+                load_15=0.75,
+                cpu_count=2,
+                mem_total_bytes=4 * 1024**3,
+                mem_available_bytes=1024**3,
+                disk_path="/",
+                disk_total_bytes=20 * 1024**3,
+                disk_free_bytes=5 * 1024**3,
+            ),
+        )
+
+        output = format_status(status)
+
+        assert "host: cpu load 0.25/2 (0.50, 0.75)" in output
+        assert "mem 3.0GiB/4.0GiB (75%)" in output
+        assert "disk / 15.0GiB/20.0GiB (75%)" in output
 
     def test_includes_provider_limits_summary_and_repo_provider(self) -> None:
         provider_status = ProviderPressureStatus(

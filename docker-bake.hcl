@@ -6,6 +6,10 @@ variable "FIDO_TEST_IMAGE" {
   default = "fido-test:local"
 }
 
+variable "FIDO_ROCQ_REPL_IMAGE" {
+  default = "fido-rocq-repl:local"
+}
+
 variable "FIDO_UID" {
   default = "1000"
 }
@@ -50,9 +54,37 @@ target "fido-test" {
   }
 }
 
+target "rocq-repl" {
+  context = "."
+  dockerfile = "models/Dockerfile"
+  target = "rocq-repl"
+  tags = [FIDO_ROCQ_REPL_IMAGE]
+  output = ["type=docker"]
+  args = {
+    ROCQ_IMAGE = "rocq_image"
+  }
+  contexts = {
+    rocq_image = "target:rocq-image"
+  }
+}
+
 target "rocq-image" {
   context = "rocq-python-extraction"
   dockerfile = "Dockerfile"
+}
+
+target "make-rocq" {
+  context = "."
+  dockerfile = "models/Dockerfile"
+  target = "export"
+  output = ["type=local,dest=."]
+  args = {
+    ROCQ_IMAGE = "rocq_image"
+  }
+  contexts = {
+    rocq_image = "target:rocq-image"
+    rocq_models_cache = ".cache/rocq-models/context"
+  }
 }
 
 target "format" {
@@ -107,10 +139,23 @@ target "generated-typecheck" {
   }
 }
 
-target "test" {
+target "test-unit" {
   context = "."
   dockerfile = "models/Dockerfile"
-  target = "test"
+  target = "test-unit"
+  args = {
+    ROCQ_IMAGE = "rocq_image"
+  }
+  contexts = {
+    rocq_image = "target:rocq-image"
+    rocq_models_cache = ".cache/rocq-models/context"
+  }
+}
+
+target "test-rocq-generated" {
+  context = "."
+  dockerfile = "models/Dockerfile"
+  target = "test-rocq-generated"
   args = {
     ROCQ_IMAGE = "rocq_image"
   }
@@ -121,9 +166,5 @@ target "test" {
 }
 
 group "ci" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test"]
-}
-
-group "warm" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido"]
+  targets = ["format", "lint", "typecheck", "generated-typecheck", "test-unit", "test-rocq-generated", "fido", "rocq-repl"]
 }

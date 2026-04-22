@@ -3,11 +3,11 @@
 
 fido_build_targets_for_group() {
   case "$1" in
-    default)
-      printf '%s\n' fido-test warm
+    ci)
+      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl test-rocq-generated test-unit typecheck
       ;;
-    warm)
-      printf '%s\n' fido format generated-typecheck lint rocq-image test typecheck
+    default)
+      printf '%s\n' ci fido-test make-rocq
       ;;
     *)
       return 2
@@ -31,6 +31,8 @@ EOF
       cat <<'EOF'
 .python-version
 models/Dockerfile
+package-lock.json
+package.json
 pyproject.toml
 uv.lock
 EOF
@@ -99,13 +101,12 @@ rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
 rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
-rocq-python-extraction/test/*.py
 rocq-python-extraction/test/*.v
 rocq-python-extraction/test/dune
 rocq-python-extraction/test/generated_pyright_targets.txt
 rocq-python-extraction/test/generated_pytest_targets.txt
+rocq-python-extraction/test/pyright_*.py
 src
-tests
 tools/build_graph.sh
 tools/gen_workflows.py
 uv.lock
@@ -173,7 +174,15 @@ rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
 EOF
       ;;
-    test)
+    rocq-repl)
+      cat <<'EOF'
+models/Dockerfile
+rocq-python-extraction/Dockerfile
+rocq-python-extraction/dune-project
+rocq-python-extraction/rocq-python-extraction.opam
+EOF
+      ;;
+    test-rocq-generated)
       cat <<'EOF'
 .dockerignore
 .githooks/pre-commit
@@ -206,6 +215,40 @@ rocq-python-extraction/test/*.v
 rocq-python-extraction/test/dune
 rocq-python-extraction/test/generated_pyright_targets.txt
 rocq-python-extraction/test/generated_pytest_targets.txt
+src
+tools/build_graph.sh
+tools/gen_workflows.py
+uv.lock
+EOF
+      ;;
+    test-unit)
+      cat <<'EOF'
+.dockerignore
+.githooks/pre-commit
+.github/workflows/ci.yml
+.python-version
+docker-bake.hcl
+dune-workspace
+fido
+models/*.v
+models/Dockerfile
+models/dune
+models/dune-project
+package-lock.json
+package.json
+pyproject.toml
+pyrightconfig.json
+rocq-python-extraction/DIAGNOSTICS.md
+rocq-python-extraction/Dockerfile
+rocq-python-extraction/META.rocq-python-extraction.template
+rocq-python-extraction/dune
+rocq-python-extraction/dune-project
+rocq-python-extraction/export_pytest_generated.sh
+rocq-python-extraction/g_python_extraction.mlg
+rocq-python-extraction/python.ml
+rocq-python-extraction/rocq-python-extraction.opam
+rocq-python-extraction/run_generated_pyright.sh
+rocq-python-extraction/run_in_docker.sh
 src
 tests
 tools/build_graph.sh

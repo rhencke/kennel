@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
+import shutil
 import subprocess
 import urllib.request
 from collections.abc import Callable
@@ -87,6 +89,21 @@ class RateLimitInfo:
 
 
 @dataclass
+class SystemResourceInfo:
+    """Host resource snapshot for ``fido status`` display."""
+
+    load_1: float
+    load_5: float
+    load_15: float
+    cpu_count: int | None
+    mem_total_bytes: int
+    mem_available_bytes: int
+    disk_path: str
+    disk_total_bytes: int
+    disk_free_bytes: int
+
+
+@dataclass
 class IssueCacheInfo:
     """Snapshot of the per-repo issue tree cache for ``fido status`` display
     (closes #812).
@@ -145,6 +162,7 @@ class FidoStatus:
     repos: list[RepoStatus]
     provider_statuses: list[ProviderPressureStatus] = field(default_factory=list)
     rate_limit: RateLimitInfo | None = None
+    resources: SystemResourceInfo | None = None
 
 
 def _format_uptime(seconds: int) -> str:
@@ -159,6 +177,34 @@ def _format_uptime(seconds: int) -> str:
     if mins:
         return f"{hours}h{mins}m"
     return f"{hours}h"
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / (1024**3):.1f}GiB"
+
+
+def _format_percent(used: int, total: int) -> str:
+    if total <= 0:
+        return "n/a"
+    return f"{round((used / total) * 100)}%"
+
+
+def _format_resource_line(resources: SystemResourceInfo | None) -> str | None:
+    if resources is None:
+        return None
+    mem_used = resources.mem_total_bytes - resources.mem_available_bytes
+    disk_used = resources.disk_total_bytes - resources.disk_free_bytes
+    cores = f"/{resources.cpu_count}" if resources.cpu_count else ""
+    return (
+        f"{color(BOLD, 'host:')} "
+        f"cpu load {resources.load_1:.2f}{cores} "
+        f"{color(DIM, f'({resources.load_5:.2f}, {resources.load_15:.2f})')}, "
+        f"mem {_format_gib(mem_used)}/{_format_gib(resources.mem_total_bytes)} "
+        f"({_format_percent(mem_used, resources.mem_total_bytes)}), "
+        f"disk {resources.disk_path} "
+        f"{_format_gib(disk_used)}/{_format_gib(resources.disk_total_bytes)} "
+        f"({_format_percent(disk_used, resources.disk_total_bytes)})"
+    )
 
 
 def _fido_running(lock_path: Path) -> bool:
@@ -227,6 +273,38 @@ def _process_uptime_seconds(
     except (OSError, ValueError):  # fmt: skip
         pass
     return None
+
+
+def _system_resources(
+    *,
+    meminfo_path: Path = Path("/proc/meminfo"),
+    loadavg_path: Path = Path("/proc/loadavg"),
+    disk_path: Path = Path("/"),
+    _disk_usage: Callable[[Path], Any] = shutil.disk_usage,
+    _cpu_count: Callable[[], int | None] = os.cpu_count,
+) -> SystemResourceInfo | None:
+    """Return a best-effort host resource snapshot for status display."""
+    try:
+        meminfo: dict[str, int] = {}
+        for line in meminfo_path.read_text().splitlines():
+            key, raw = line.split(":", 1)
+            value = raw.strip().split()[0]
+            meminfo[key] = int(value) * 1024
+        load_parts = loadavg_path.read_text().split()
+        disk = _disk_usage(disk_path)
+        return SystemResourceInfo(
+            load_1=float(load_parts[0]),
+            load_5=float(load_parts[1]),
+            load_15=float(load_parts[2]),
+            cpu_count=_cpu_count(),
+            mem_total_bytes=meminfo["MemTotal"],
+            mem_available_bytes=meminfo["MemAvailable"],
+            disk_path=str(disk_path),
+            disk_total_bytes=int(disk.total),
+            disk_free_bytes=int(disk.free),
+        )
+    except OSError, ValueError, KeyError, IndexError:
+        return None
 
 
 def _repos_from_pid(pid: int) -> list[RepoConfig]:
@@ -726,6 +804,7 @@ def collect() -> FidoStatus:
         repos=repos,
         provider_statuses=list(provider_statuses.values()),
         rate_limit=rate_limit_info,
+        resources=_system_resources(),
     )
 
 
@@ -1118,6 +1197,10 @@ def format_status(status: FidoStatus) -> str:
     else:
         lines.append(f"{color(BOLD, 'fido:')} {color(RED_BOLD, 'DOWN')}")
 
+    resource_line = _format_resource_line(status.resources)
+    if resource_line is not None:
+        lines.append(resource_line)
+
     provider_summary = _format_provider_summary_line(status.provider_statuses)
     if provider_summary is not None:
         lines.append(provider_summary)
@@ -1139,3 +1222,7 @@ def format_status(status: FidoStatus) -> str:
 
 def main() -> None:
     print(format_status(collect()))
+
+
+if __name__ == "__main__":
+    main()

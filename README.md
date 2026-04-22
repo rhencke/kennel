@@ -10,10 +10,11 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido help
 ./fido up
 ./fido down
-./fido warm
+./fido ci
 ./fido gen-workflows
+./fido prune
 ./fido status
-./fido tests  # focused pytest convenience; use ./fido warm before commits
+./fido tests  # focused pytest convenience; use ./fido ci before commits
 ./fido ruff format .
 ./fido pyright
 ./fido pytest tests/test_build_wrapper.py -q
@@ -28,12 +29,16 @@ with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
 clone, rebuilds the image, and starts again. It exits normally on ordinary
 shutdown signals. `./fido down` stops the named container gracefully; `--rm`
 lets Docker remove it after the stop.
-`./fido warm` builds the `warm` bake group, which depends on full CI and the
+`./fido ci` builds the `ci` bake group, which depends on full CI and the
 production runtime image cache, so local and CI runs populate those cache
 families through one command. The `fido-test` image is built on demand for ad hoc local
 commands.
 `./fido gen-workflows` regenerates `.github/workflows/ci.yml` from the buildx
-bake graph and Dockerfile input graph.
+bake graph and Dockerfile input graph. It uses host `python3` only for this
+stdlib generator and does not use host `uv`. `./fido prune` manually trims
+BuildKit cache with `FIDO_BUILDKIT_KEEP_STORAGE` as the storage floor; CI does
+not prune automatically because the self-hosted runner's local BuildKit cache is
+the speed path.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
@@ -74,46 +79,36 @@ Use the Fido launcher:
 ```
 
 `./fido make-rocq` is the canonical Rocq model generation entry point. It runs
-`docker buildx build`, extracts `models/*.v`, formats the generated Python in
-an Astral `uv` Python image, and writes the committed output to
-`src/fido/rocq/`.
+the `make-rocq` buildx bake target, extracts `models/*.v`, formats the
+generated Python in an Astral `uv` Python image, and writes the committed
+output to `src/fido/rocq/`.
 
 The helper keeps build work inside buildx:
 
-- Rocq/Dune run in an internal `rocq-python-extraction:ci` image that `./fido make-rocq`
-  builds with buildx from `rocq-python-extraction/Dockerfile`. Set
-  `ROCQ_IMAGE=...` to test another image and skip the internal image build.
+- Rocq/Dune run through the `rocq-image` bake target from
+  `rocq-python-extraction/Dockerfile`.
 - Python formatting runs in `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`.
-- The Rocq image build cache is exported through buildx to
-  `.cache/rocq-models/image`.
-- The model Dockerfile build cache is exported through buildx to
-  `.cache/rocq-models/buildx` when the active builder supports external cache
-  export. This includes uv cache mounts used by the `ci` target.
+- BuildKit owns the image and layer cache in the active builder.
 - The Dune `_build` cache is exported through buildx to
   `.cache/rocq-models/context/_build`.
 - A manifest in `.cache/rocq-models/manifest.sha` gives unchanged local runs a
   fast pre-build exit.
 
-Extra arguments are passed through to `docker buildx build` before the final
-context argument:
+Extra arguments are passed through to `docker buildx bake` before the
+`make-rocq` target:
 
 ```bash
 ./fido make-rocq --no-cache
-./fido make-rocq --target format
-./fido make-rocq --target lint
-./fido make-rocq --target typecheck
-./fido make-rocq --target generated-typecheck
-./fido make-rocq --target test
 ```
 
 All Python checks run inside buildx bake targets. Rocq test artifacts are
 produced by a Rocq stage, then ruff format, ruff lint, pyright, generated
-pyright, and pytest run as separate uv stages. The `ci` and `warm` bake groups
-are meta groups over those real targets, so BuildKit can run independent checks
+pyright, unit pytest, and generated Rocq pytest run as separate uv stages. The
+`ci` bake group is a meta group over those real targets, so BuildKit can run independent checks
 in parallel without scratch sentinel targets. The uv dependency layers follow
 Astral's Docker pattern: `pyproject.toml`, `uv.lock`, and `.python-version` are
 copied into `uv sync --frozen --no-install-project` layers before application
-inputs are copied. The pre-commit hook and CI both call `./fido warm`.
+inputs are copied. The pre-commit hook and CI both call `./fido ci`.
 
 The internal smart-output mode is available for buildx artifact producers:
 

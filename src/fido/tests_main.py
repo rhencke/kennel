@@ -1,7 +1,5 @@
 """Project test runner entrypoint."""
 
-from __future__ import annotations
-
 import os
 import subprocess
 import sys
@@ -20,14 +18,33 @@ def ensure_rocq_python_artifacts() -> None:
     )
 
 
-def main() -> int:
+def run_pytest(argv: list[str], *, paths: list[str], coverage: list[str]) -> int:
     import pytest
 
-    ensure_rocq_python_artifacts()
     args = [
-        "--cov",
+        *(f"--cov={source}" for source in coverage),
         "--cov-report=term-missing",
         "--cov-fail-under=100",
-        *sys.argv[1:],
+        *(argv or paths),
     ]
     return pytest.main(args)
+
+
+def main() -> int:
+    ensure_rocq_python_artifacts()
+    return run_pytest(
+        sys.argv[1:], paths=[], coverage=["fido", "rocq-python-extraction/test"]
+    )
+
+
+def main_unit() -> int:
+    return run_pytest(sys.argv[1:], paths=["tests"], coverage=["fido"])
+
+
+def main_rocq_generated() -> int:
+    ensure_rocq_python_artifacts()
+    return run_pytest(
+        sys.argv[1:],
+        paths=["rocq-python-extraction/test"],
+        coverage=["rocq-python-extraction/test"],
+    )

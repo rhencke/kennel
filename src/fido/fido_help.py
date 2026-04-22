@@ -11,8 +11,9 @@ Commands:
   help              Show this help.
   up                Run and supervise the fido server in the foreground.
   down              Stop the named fido server container.
-  warm              Warm buildx CI and runtime image targets.
+  ci                Build CI checks and runtime image cache.
   gen-workflows     Regenerate GitHub Actions workflows from buildx.
+  prune             Prune BuildKit cache, bounded by FIDO_BUILDKIT_KEEP_STORAGE.
   make-rocq         Generate Rocq-extracted Python through buildx.
   status            Print fido status.
   task              Manage repo task files.
@@ -21,6 +22,7 @@ Commands:
   sync-tasks        Sync repo tasks to GitHub.
   tests             Run pytest through the project test entry point.
   traceback         Annotate extracted Python tracebacks.
+  repl              Open a Python REPL for a Rocq model with OCaml compare.
   ruff              Run ruff through containerized uv.
   pyright           Run pyright through containerized uv.
   pytest            Run pytest through containerized uv."""

@@ -24,6 +24,8 @@ fido-status = "fido.status:main"
 fido-sync-tasks = "fido.sync_tasks_cli:main"
 fido-task = "fido.cli:main"
 tests = "fido.tests_main:main"
+tests-unit = "fido.tests_main:main_unit"
+tests-rocq-generated = "fido.tests_main:main_rocq_generated"
 traceback = "fido.rocq_traceback:main"
 
 [tool.hatch.build.targets.wheel]

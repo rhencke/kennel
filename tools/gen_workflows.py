@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shlex
 import subprocess
 import sys
@@ -15,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 BUILD_GRAPH = ROOT / "tools" / "build_graph.sh"
-FIDO = ROOT / "fido"
 
 
 @dataclass
@@ -26,17 +24,7 @@ class CopyInstruction:
 
 @dataclass
 class RunInstruction:
-    cache_mounts: list["CacheMount"] = field(default_factory=list)
-
-    @property
-    def uses_cache_mount(self) -> bool:
-        return bool(self.cache_mounts)
-
-
-@dataclass(frozen=True)
-class CacheMount:
-    id: str
-    target: str
+    pass
 
 
 Instruction = CopyInstruction | RunInstruction
@@ -59,40 +47,12 @@ def load_bake_plan(output: str) -> dict[str, object]:
 
 def bake_plan() -> dict[str, object]:
     output = subprocess.check_output(
-        ["docker", "buildx", "bake", "--print", "warm", "fido-test"],
+        ["docker", "buildx", "bake", "--print", "ci", "fido-test", "make-rocq"],
         cwd=ROOT,
         text=True,
         stderr=subprocess.STDOUT,
     )
     return load_bake_plan(output)
-
-
-def rocq_cache_paths() -> dict[str, str]:
-    script = FIDO.read_text()
-    paths: dict[str, str] = {}
-    for variable, key in (
-        ("image_cache", "image"),
-        ("build_cache", "buildx"),
-        ("cache_context", "context"),
-    ):
-        match = re.search(
-            rf'^\s*local {variable}="\$repo_root/([^"]+)"$',
-            script,
-            flags=re.MULTILINE,
-        )
-        if match is None:
-            sys.exit(f"could not find {variable} in {FIDO}")
-        paths[key] = match.group(1)
-    return paths
-
-
-def cache_entries(plan: dict[str, object]) -> list[tuple[str, str, str]]:
-    _ = cache_scopes(plan)
-    entries = []
-    for key, path in rocq_cache_paths().items():
-        target_key = "rocq-image" if key == "image" else "rocq-models"
-        entries.append((f"rocq-model-{key}", path, target_key))
-    return entries
 
 
 def cache_scopes(plan: dict[str, object]) -> list[str]:
@@ -152,28 +112,8 @@ def parse_dockerfile(path: Path) -> list[Stage]:
                     CopyInstruction(sources=args[:-1], from_name=from_name)
                 )
         elif keyword == "RUN":
-            stages[-1].instructions.append(RunInstruction(parse_cache_mounts(parts)))
+            stages[-1].instructions.append(RunInstruction())
     return stages
-
-
-def parse_cache_mounts(parts: list[str]) -> list[CacheMount]:
-    mounts: list[CacheMount] = []
-    for part in parts:
-        if not part.startswith("--mount="):
-            continue
-        options: dict[str, str] = {}
-        for option in part.removeprefix("--mount=").split(","):
-            key, separator, value = option.partition("=")
-            if separator:
-                options[key] = value
-        if options.get("type") != "cache":
-            continue
-        target = options.get("target")
-        if target is None:
-            continue
-        mount_id = options.get("id", target.strip("/").replace("/", "-"))
-        mounts.append(CacheMount(id=mount_id, target=target))
-    return mounts
 
 
 def stage_map(stages: list[Stage]) -> dict[str, Stage]:
@@ -240,7 +180,6 @@ def target_inputs(
     bake_target: str,
     *,
     target_stage_override: str | None = None,
-    include_cache_mount_stages: bool = False,
 ) -> set[str]:
     context, dockerfile, target_stage = dockerfile_for_bake_target(plan, bake_target)
     stages = parse_dockerfile(dockerfile)
@@ -260,13 +199,13 @@ def target_inputs(
         seen_bake_targets.add(name)
         inputs.update(target_inputs(plan, name))
 
-    def add_stage(stage_name: str, *, stop_after_cache_mounts: bool = False) -> None:
+    def add_stage(stage_name: str) -> None:
         if stage_name in seen_stages:
             return
         seen_stages.add(stage_name)
         stage = stages_by_name[stage_name]
         if stage.base in stages_by_name:
-            add_stage(stage.base, stop_after_cache_mounts=stop_after_cache_mounts)
+            add_stage(stage.base)
         elif stage.base.startswith("${") and stage.base.endswith("}"):
             if target := arg_named_target(plan, bake_target, stage.base[2:-1]):
                 add_bake_target(target)
@@ -278,129 +217,12 @@ def target_inputs(
                         for source in instruction.sources
                     )
                 elif instruction.from_name in stages_by_name:
-                    add_stage(
-                        instruction.from_name,
-                        stop_after_cache_mounts=stop_after_cache_mounts,
-                    )
+                    add_stage(instruction.from_name)
                 elif target := named_target(plan, bake_target, instruction.from_name):
                     add_bake_target(target)
-            elif (
-                stop_after_cache_mounts
-                and isinstance(instruction, RunInstruction)
-                and instruction.uses_cache_mount
-            ):
-                return
 
-    if include_cache_mount_stages:
-        for stage in stages:
-            if any(
-                isinstance(instruction, RunInstruction) and instruction.uses_cache_mount
-                for instruction in stage.instructions
-            ):
-                add_stage(stage.name, stop_after_cache_mounts=True)
-    else:
-        add_stage(target_stage)
+    add_stage(target_stage)
     return inputs
-
-
-def cache_key_inputs(plan: dict[str, object]) -> dict[str, list[str]]:
-    warm_targets = cache_scopes(plan)
-    keys = {
-        "rocq-image": sorted(target_inputs(plan, "rocq-image")),
-        "rocq-models": sorted(
-            target_inputs(plan, "format", target_stage_override="extract")
-        ),
-    }
-    for mount in cache_mounts_for_targets(plan, warm_targets):
-        keys[f"buildkit-mount-{mount.id}"] = cache_mount_key_inputs(mount)
-    return keys
-
-
-def cache_mounts_for_targets(
-    plan: dict[str, object], bake_targets: list[str]
-) -> list[CacheMount]:
-    mounts: dict[str, CacheMount] = {}
-    visited: set[tuple[str, str]] = set()
-
-    def visit_stage(
-        context: str,
-        stages_by_name: dict[str, Stage],
-        bake_target: str,
-        stage_name: str,
-    ) -> None:
-        key = (bake_target, stage_name)
-        if key in visited:
-            return
-        visited.add(key)
-        stage = stages_by_name[stage_name]
-        if stage.base in stages_by_name:
-            visit_stage(context, stages_by_name, bake_target, stage.base)
-        elif stage.base.startswith("${") and stage.base.endswith("}"):
-            if target := arg_named_target(plan, bake_target, stage.base[2:-1]):
-                visit_target(target)
-        for instruction in stage.instructions:
-            if isinstance(instruction, CopyInstruction):
-                if instruction.from_name in stages_by_name:
-                    visit_stage(
-                        context,
-                        stages_by_name,
-                        bake_target,
-                        instruction.from_name,
-                    )
-                elif instruction.from_name is not None and (
-                    target := named_target(plan, bake_target, instruction.from_name)
-                ):
-                    visit_target(target)
-            elif isinstance(instruction, RunInstruction):
-                for mount in instruction.cache_mounts:
-                    existing = mounts.get(mount.id)
-                    if existing is not None and existing.target != mount.target:
-                        sys.exit(
-                            f"cache mount id {mount.id!r} has conflicting targets: "
-                            f"{existing.target!r} and {mount.target!r}"
-                        )
-                    mounts[mount.id] = mount
-
-    def visit_target(name: str) -> None:
-        context, dockerfile, target_stage = dockerfile_for_bake_target(plan, name)
-        stages = parse_dockerfile(dockerfile)
-        stages_by_name = stage_map(stages)
-        if not target_stage:
-            target_stage = stages[-1].name
-        visit_stage(context, stages_by_name, name, target_stage)
-
-    for target in bake_targets:
-        visit_target(target)
-    return [mounts[name] for name in sorted(mounts)]
-
-
-def cache_mount_key_inputs(mount: CacheMount) -> list[str]:
-    base = {"models/Dockerfile"}
-    if mount.id.startswith("fido-uv-"):
-        return sorted(base | {".python-version", "pyproject.toml", "uv.lock"})
-    if mount.id == "fido-npm":
-        return sorted(base | {"package.json", "package-lock.json"})
-    if mount.id == "fido-pyright":
-        return sorted(
-            base
-            | {".python-version", "pyproject.toml", "uv.lock", "pyrightconfig.json"}
-        )
-    return sorted(base)
-
-
-def hashfiles_pattern(path: str) -> str:
-    if any(char in path for char in "*?["):
-        return path
-    full_path = ROOT / path
-    if full_path.is_dir():
-        return f"{path.rstrip('/')}/**"
-    return path
-
-
-def hashfiles_expression(paths: list[str]) -> str:
-    patterns = (hashfiles_pattern(path).replace("'", "''") for path in paths)
-    quoted = ", ".join(f"'{pattern}'" for pattern in patterns)
-    return f"${{{{ hashFiles({quoted}) }}}}"
 
 
 def expanded_input_files(paths: list[str]) -> list[Path]:
@@ -442,7 +264,7 @@ def target_hashes(plan: dict[str, object], group: str) -> dict[str, str]:
     if not isinstance(group_targets, list):
         sys.exit(f"buildx bake group {group!r} did not include targets")
     names = sorted(set(targets) | {str(target) for target in group_targets})
-    if group == "warm":
+    if group == "ci":
         names = [name for name in names if name != "fido-test"]
     return {name: content_hash(sorted(target_inputs(plan, name))) for name in names}
 
@@ -454,9 +276,7 @@ def render_build_graph(plan: dict[str, object]) -> str:
     graph_targets = {
         target: sorted(target_inputs(plan, target)) for target in cache_scopes(plan)
     }
-    graph_targets["make-rocq"] = sorted(
-        target_inputs(plan, "format", target_stage_override="export")
-    )
+    graph_targets["make-rocq"] = sorted(target_inputs(plan, "make-rocq"))
 
     lines = [
         "# Generated by ./fido gen-workflows; do not edit by hand.",
@@ -471,7 +291,7 @@ def render_build_graph(plan: dict[str, object]) -> str:
         raw_targets = group_data.get("targets", [])
         if not isinstance(raw_targets, list):
             continue
-        if group_name == "warm":
+        if group_name == "ci":
             targets = [target for target in cache_scopes(plan) if target != "fido-test"]
         else:
             targets = sorted(raw_targets)
@@ -518,92 +338,12 @@ def render_build_graph(plan: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def restore_step(name: str, path: str, key_expression: str) -> str:
-    step_id = "restore-" + name.replace("-", "_")
-    return f"""\
-      - name: Restore {name} build cache
-        id: {step_id}
-        uses: actions/cache/restore@v4
-        with:
-          path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-{key_expression}
-          restore-keys: |
-            buildx-{name}-${{{{ runner.os }}}}-
-"""
-
-
-def save_step(name: str, path: str, key_expression: str) -> str:
-    restore_id = "restore-" + name.replace("-", "_")
-    return f"""\
-      - name: Save {name} build cache
-        if: success() && steps.{restore_id}.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-{key_expression}
-"""
-
-
-def cache_step_id(name: str) -> str:
-    return "cache-" + name.replace("-", "_")
-
-
-def buildkit_mount_cache_step(mount: CacheMount, key_expression: str) -> str:
-    name = f"buildkit-mount-{mount.id}"
-    step_id = cache_step_id(name)
-    path = f".cache/buildkit-mounts/{mount.id}"
-    cache_map = json.dumps(
-        {path: {"target": mount.target, "id": mount.id}},
-        indent=2,
-        sort_keys=True,
-    )
-    indented_cache_map = "\n".join(
-        f"            {line}" for line in cache_map.splitlines()
-    )
-    return f"""\
-      - name: Cache {mount.id} BuildKit mount
-        id: {step_id}
-        uses: actions/cache@v4
-        with:
-          path: {path}
-          key: buildkit-mount-{mount.id}-${{{{ runner.os }}}}-{key_expression}
-          restore-keys: |
-            buildkit-mount-{mount.id}-${{{{ runner.os }}}}-
-      - name: Inject {mount.id} BuildKit mount
-        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
-        with:
-          builder: ${{{{ steps.setup-buildx.outputs.name }}}}
-          cache-map: |
-{indented_cache_map}
-          scratch-dir: .cache/buildkit-mounts-scratch/{mount.id}
-          skip-extraction: ${{{{ steps.{step_id}.outputs.cache-hit }}}}
-"""
-
-
 def render(plan: dict[str, object]) -> str:
-    keys = cache_key_inputs(plan)
-    key_expressions = {key: hashfiles_expression(paths) for key, paths in keys.items()}
-    buildkit_mounts = cache_mounts_for_targets(plan, cache_scopes(plan))
-    buildkit_mount_steps = "".join(
-        buildkit_mount_cache_step(
-            mount,
-            key_expressions[f"buildkit-mount-{mount.id}"],
-        )
-        for mount in buildkit_mounts
-    )
-    restores = "".join(
-        restore_step(name, path, key_expressions[key])
-        for name, path, key in cache_entries(plan)
-    )
-    saves = "".join(
-        save_step(name, path, key_expressions[key])
-        for name, path, key in cache_entries(plan)
-    )
     scopes = ", ".join(cache_scopes(plan))
     return f"""\
 # Generated by ./fido gen-workflows; do not edit by hand.
 # Refresh with: ./fido gen-workflows
-# Buildx gha cache scopes discovered from bake: {scopes}
+# Buildx local cache scopes discovered from bake: {scopes}
 name: CI
 
 on:
@@ -611,19 +351,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '17 3 */6 * *'
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
-    env:
-      FIDO_BUILDX_CACHE_BACKEND: gha
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-        id: setup-buildx
-{restores}{buildkit_mount_steps}      - run: ./.githooks/pre-commit
+      - run: ./.githooks/pre-commit
       - name: Check committed model mirrors
         run: |
           ./fido make-rocq
@@ -632,7 +366,7 @@ jobs:
         run: |
           ./fido gen-workflows
           git diff --exit-code -- .github/workflows/ci.yml tools/build_graph.sh
-{saves}"""
+"""
 
 
 def main() -> None:
@@ -648,7 +382,7 @@ def main() -> None:
             print(f"{name} {digest}")
         return
     if len(args) == 2 and args[0] == "--target-hash":
-        hashes = target_hashes(plan or bake_plan(), "warm")
+        hashes = target_hashes(plan or bake_plan(), "ci")
         try:
             print(hashes[args[1]])
         except KeyError:
