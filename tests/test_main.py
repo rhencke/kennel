@@ -1,7 +1,5 @@
 """Tests for fido.main — top-level entry point dispatcher."""
 
-from __future__ import annotations
-
 from unittest.mock import MagicMock, patch
 
 from fido.main import main

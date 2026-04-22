@@ -1,7 +1,5 @@
 """Shared type definitions for fido."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from enum import StrEnum
 

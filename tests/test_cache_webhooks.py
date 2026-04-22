@@ -1,7 +1,5 @@
 """Tests for fido.cache_webhooks.translate (closes #812, #817)."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 
 from fido.cache_webhooks import translate

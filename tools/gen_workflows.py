@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Generate the CI workflow from the buildx bake target graph."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import shlex

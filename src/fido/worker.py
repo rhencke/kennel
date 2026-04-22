@@ -1,7 +1,5 @@
 """Fido worker — runs one iteration of the work loop for a single repo."""
 
-from __future__ import annotations
-
 import fcntl
 import json
 import logging

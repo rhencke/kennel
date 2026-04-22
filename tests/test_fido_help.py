@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from fido.fido_help import main
 
 

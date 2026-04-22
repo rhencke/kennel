@@ -1,7 +1,5 @@
 """Durable per-comment reply promises stored as empty files."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 

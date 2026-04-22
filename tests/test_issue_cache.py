@@ -1,7 +1,5 @@
 """Tests for fido.issue_cache.IssueTreeCache (closes #812)."""
 
-from __future__ import annotations
-
 import threading
 from datetime import datetime, timedelta, timezone
 

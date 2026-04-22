@@ -1,7 +1,5 @@
 """Tests for the project test entrypoint."""
 
-from __future__ import annotations
-
 from unittest.mock import patch
 
 import pytest

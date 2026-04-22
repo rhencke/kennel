@@ -1,7 +1,5 @@
 """Unit tests for fido/prompts.py — prompt-building functions and Prompts class."""
 
-from __future__ import annotations
-
 import pytest
 
 from fido.prompts import (

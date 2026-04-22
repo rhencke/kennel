@@ -1,7 +1,5 @@
 """fido task CLI — add/complete/list tasks in the shared task file."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging

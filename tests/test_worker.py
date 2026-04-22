@@ -1,7 +1,5 @@
 """Tests for fido.worker — WorkerContext, lock acquisition, git context."""
 
-from __future__ import annotations
-
 import logging
 import subprocess
 import threading

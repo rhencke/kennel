@@ -1,7 +1,5 @@
 """Tests for Worker._commit_provider_leftovers_if_any (#654)."""
 
-from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock

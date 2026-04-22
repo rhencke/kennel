@@ -22,8 +22,6 @@ preventing the comments sub-agent and the webhook handler from each posting
 a duplicate reply to the same thread (fixes #672).
 """
 
-from __future__ import annotations
-
 import threading
 
 

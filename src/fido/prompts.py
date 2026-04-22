@@ -1,7 +1,5 @@
 """Prompt builders — pure functions and a DI class that assembles text for Claude."""
 
-from __future__ import annotations
-
 import json
 from typing import Any
 

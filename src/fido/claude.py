@@ -1,7 +1,5 @@
 """Claude CLI wrappers — all claude subprocess calls in one place."""
 
-from __future__ import annotations
-
 import json
 import logging
 import os

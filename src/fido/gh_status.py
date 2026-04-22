@@ -1,7 +1,5 @@
 """CLI for `fido gh-status set <message>` — set FidoCanCode's GitHub profile status."""
 
-from __future__ import annotations
-
 import logging
 import random
 import sys

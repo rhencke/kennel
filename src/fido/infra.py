@@ -8,8 +8,6 @@ Real implementations delegate directly to the stdlib with no added logic.
 Tests inject fakes or mocks constructed at the call site.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import os
 import shutil

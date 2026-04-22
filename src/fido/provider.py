@@ -10,8 +10,6 @@ from before the copilot provider existed; they were moved here once both
 providers needed them so the naming stopped lying about scope.
 """
 
-from __future__ import annotations
-
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager

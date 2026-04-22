@@ -1,7 +1,5 @@
 """Help text for the root ``fido`` launcher."""
 
-from __future__ import annotations
-
 
 def main() -> None:
     print(

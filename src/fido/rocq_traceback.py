@@ -1,7 +1,5 @@
 """Annotate extracted Python tracebacks with Rocq source locations."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import re

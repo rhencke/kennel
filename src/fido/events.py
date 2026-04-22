@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import fcntl
 import logging
 import re

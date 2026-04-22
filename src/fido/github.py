@@ -1,7 +1,5 @@
 """GitHub CLI wrappers — all gh subprocess calls in one place."""
 
-from __future__ import annotations
-
 import logging
 import os
 import re
