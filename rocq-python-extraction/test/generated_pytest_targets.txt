@@ -43,3 +43,11 @@ tree_root_of_repeat.py
 Phase10Mod.py
 source_map_runtime_error.py
 source_map_runtime_error.pymap
+github_key.py
+payload_fragment.py
+ascii_A.py
+byte_lf.py
+first_ascii_or_A.py
+tail_or_empty.py
+ascii_roundtrip.py
+byte_label.py

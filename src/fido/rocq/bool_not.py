@@ -33,6 +33,51 @@ def _impossible() -> Never:  # From seed.v:21:11
     raise _Impossible()  # From seed.v:21:11
 
 
+class _RocqUtf8BoundaryError(UnicodeError):  # From seed.v:21:11
+    pass  # From seed.v:21:11
+
+
+def _rocq_string_cons(head: int, tail: str) -> str:  # From seed.v:21:11
+    try:  # From seed.v:21:11
+        return bytes([head]).decode("utf-8") + tail  # From seed.v:21:11
+    except UnicodeDecodeError as exc:  # From seed.v:21:11
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc  # From seed.v:21:11
+
+
+def _rocq_string_uncons(value: str) -> tuple[int, str]:  # From seed.v:21:11
+    encoded = value.encode("utf-8")  # From seed.v:21:11
+    if not encoded:  # From seed.v:21:11
+        raise _Impossible()  # From seed.v:21:11
+    try:  # From seed.v:21:11
+        tail = encoded[1:].decode("utf-8")  # From seed.v:21:11
+    except UnicodeDecodeError as exc:  # From seed.v:21:11
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc  # From seed.v:21:11
+    return encoded[0], tail  # From seed.v:21:11
+
+
+def _rocq_ascii_to_int(
+    b0: bool, b1: bool, b2: bool, b3: bool, b4: bool, b5: bool, b6: bool, b7: bool
+) -> int:  # From seed.v:21:11
+    return sum(
+        (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
+    )  # From seed.v:21:11
+
+
+def _rocq_ascii_bits(
+    value: int,
+) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:  # From seed.v:21:11
+    if value < 0 or value > 255:  # From seed.v:21:11
+        raise ValueError("Rocq byte/ascii value out of range")  # From seed.v:21:11
+    return cast(
+        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
+        tuple(bool(value & (1 << i)) for i in range(8)),
+    )  # From seed.v:21:11
+
+
 class StateT(Generic[_StateTState, _StateTValue]):  # From seed.v:21:11
     def __init__(
         self,
@@ -142,7 +187,7 @@ def __apply_applicative(
 
 
 __ = None  # erased logical argument  # From seed.v:21:11
-# bool: remapped to Python primitive via Extract Inductive  # From seed.v:21:11
+# bool: remapped to Python primitive  # From seed.v:21:11
 
 
 def bool_not(b: bool) -> bool:  # From seed.v:21:11

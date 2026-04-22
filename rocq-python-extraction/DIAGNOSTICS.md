@@ -112,6 +112,12 @@ Remediation: Extract a computational member of the mutual block or remove the pr
 ## PYEX036 Unsupported Bytes Literal Encoding
 Remediation: Restrict extracted strings to byte strings or provide a Python remapping.
 
+Runtime note: Rocq `String.string` extracts to Python `str` at a UTF-8 text
+boundary. A generated pattern match that destructs a Python string raises
+`_RocqUtf8BoundaryError` when the split would leave an invalid UTF-8 tail, such
+as matching `String _ rest` against a string whose first character is encoded
+with multiple bytes.
+
 ## PYEX037 Unsupported Float Literal
 Remediation: Avoid NaN/infinity payloads that cannot round-trip or remap the constant explicitly.
 

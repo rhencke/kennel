@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "python_file": "event_name.py",
+  "entries": [
+    {
+      "python_start_line": 1,
+      "python_end_line": 115,
+      "source_file": "payload_text.v",
+      "source_start_line": 19,
+      "source_start_col": 11,
+      "source_end_line": 19,
+      "source_end_col": 21,
+      "kind": "extraction",
+      "symbol": "event_name"
+    }
+  ]
+}

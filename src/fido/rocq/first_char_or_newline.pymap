@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "python_file": "first_char_or_newline.py",
+  "entries": [
+    {
+      "python_start_line": 1,
+      "python_end_line": 116,
+      "source_file": "payload_text.v",
+      "source_start_line": 25,
+      "source_start_col": 11,
+      "source_end_line": 25,
+      "source_end_col": 32,
+      "kind": "extraction",
+      "symbol": "first_char_or_newline"
+    }
+  ]
+}

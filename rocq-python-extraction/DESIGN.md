@@ -341,7 +341,7 @@ preserve all significant bits.
 
 ### 2.16 `MLstring s`
 
-**What it is:** A Rocq byte-string literal (from `Coq.Strings.Byte`).
+**What it is:** A Rocq primitive byte-string literal.
 
 **Python target:** A Python `bytes` literal.
 
@@ -596,7 +596,17 @@ downstream code search for `__` to find erasure points.
 Rocq users can redirect specific types and constants to Python primitives via
 extraction hints.  The `table.ml` module stores these.
 
-Standard remappings planned for MVP:
+The Python backend also owns a small set of Stdlib remappings that are always
+available without local pragmas:
+
+| Rocq type | Python target | Notes |
+|-----------|---------------|-------|
+| `Stdlib.Strings.String.string` | `str` | UTF-8 text boundary; `String` pattern splitting raises `_RocqUtf8BoundaryError` if the tail is invalid UTF-8. |
+| `Stdlib.Strings.Ascii.ascii` | `int` | Byte value in `0..255`; `Ascii b0 ... b7` packs least-significant bit first. |
+| `Stdlib.Init.Byte.byte` | `int` | Byte constructors `x00` through `xff` lower to integer literals. |
+| primitive `%pstring` / `MLstring` | `bytes` | Byte strings are emitted as Python `bytes` literals. |
+
+Other remappings currently covered by acceptance tests:
 
 | Rocq type | Python target |
 |-----------|---------------|
@@ -606,11 +616,9 @@ Standard remappings planned for MVP:
 | `Coq.Init.Datatypes.option` | `T \| None` |
 | `Coq.Init.Datatypes.prod` | `tuple[A, B]` |
 | `Coq.Init.Datatypes.unit` | `None` |
-| `Coq.Strings.String.string` | `str` |
 
-These are configured via `Extract Inductive` / `Extract Constant` pragmas in
-`.v` files — the backend does not hard-code them; `table.ml` already handles
-the lookup.
+These remain configured via `Extract Inductive` / `Extract Constant` pragmas
+in `.v` files; `table.ml` handles those lookups.
 
 ---
 

@@ -7,3 +7,8 @@ zeros_pair.py
 repeat_tree.py
 tree_root_of_repeat.py
 Phase10Mod.py
+github_key.py
+payload_fragment.py
+ascii_A.py
+byte_lf.py
+tail_or_empty.py

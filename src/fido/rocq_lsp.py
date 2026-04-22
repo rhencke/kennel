@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import sys
-from ast import ClassDef, FunctionDef, parse
+from ast import AnnAssign, Assign, ClassDef, FunctionDef, Name, parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -884,6 +884,35 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
             if signature.endswith(":"):
                 signature = signature[:-1]
             signatures[node.name] = (
+                signature,
+                Range(Position(start, 0), Position(end, len(lines[end]))),
+            )
+        elif isinstance(node, AnnAssign) and isinstance(node.target, Name):
+            name = node.target.id
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            signature = " ".join(
+                _strip_generated_comment(line).strip()
+                for line in lines[start : end + 1]
+            )
+            signatures[name] = (
+                signature,
+                Range(Position(start, 0), Position(end, len(lines[end]))),
+            )
+        elif isinstance(node, Assign):
+            target = next(
+                (target for target in node.targets if isinstance(target, Name)),
+                None,
+            )
+            if target is None:
+                continue
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            signature = " ".join(
+                _strip_generated_comment(line).strip()
+                for line in lines[start : end + 1]
+            )
+            signatures[target.id] = (
                 signature,
                 Range(Position(start, 0), Position(end, len(lines[end]))),
             )

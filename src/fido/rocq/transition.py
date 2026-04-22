@@ -33,6 +33,53 @@ def _impossible() -> Never:  # From session_lock.v:67:11
     raise _Impossible()  # From session_lock.v:67:11
 
 
+class _RocqUtf8BoundaryError(UnicodeError):  # From session_lock.v:67:11
+    pass  # From session_lock.v:67:11
+
+
+def _rocq_string_cons(head: int, tail: str) -> str:  # From session_lock.v:67:11
+    try:  # From session_lock.v:67:11
+        return bytes([head]).decode("utf-8") + tail  # From session_lock.v:67:11
+    except UnicodeDecodeError as exc:  # From session_lock.v:67:11
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc  # From session_lock.v:67:11
+
+
+def _rocq_string_uncons(value: str) -> tuple[int, str]:  # From session_lock.v:67:11
+    encoded = value.encode("utf-8")  # From session_lock.v:67:11
+    if not encoded:  # From session_lock.v:67:11
+        raise _Impossible()  # From session_lock.v:67:11
+    try:  # From session_lock.v:67:11
+        tail = encoded[1:].decode("utf-8")  # From session_lock.v:67:11
+    except UnicodeDecodeError as exc:  # From session_lock.v:67:11
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc  # From session_lock.v:67:11
+    return encoded[0], tail  # From session_lock.v:67:11
+
+
+def _rocq_ascii_to_int(
+    b0: bool, b1: bool, b2: bool, b3: bool, b4: bool, b5: bool, b6: bool, b7: bool
+) -> int:  # From session_lock.v:67:11
+    return sum(
+        (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
+    )  # From session_lock.v:67:11
+
+
+def _rocq_ascii_bits(
+    value: int,
+) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:  # From session_lock.v:67:11
+    if value < 0 or value > 255:  # From session_lock.v:67:11
+        raise ValueError(
+            "Rocq byte/ascii value out of range"
+        )  # From session_lock.v:67:11
+    return cast(
+        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
+        tuple(bool(value & (1 << i)) for i in range(8)),
+    )  # From session_lock.v:67:11
+
+
 class StateT(Generic[_StateTState, _StateTValue]):  # From session_lock.v:67:11
     def __init__(
         self,
@@ -146,7 +193,7 @@ def __apply_applicative(
 __ = None  # erased logical argument  # From session_lock.v:67:11
 _A = TypeVar("_A")  # From session_lock.v:67:11
 
-# option: remapped to Python primitive via Extract Inductive  # From session_lock.v:67:11
+# option: remapped to Python primitive  # From session_lock.v:67:11
 
 
 class State:  # From session_lock.v:67:11

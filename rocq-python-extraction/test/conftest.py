@@ -42,6 +42,16 @@ EXPLICIT_TARGETS = {
         "source_map_runtime_error.py",
         "source_map_runtime_error.pymap",
     ],
+    "test_strings_bytes.py": [
+        "github_key.py",
+        "payload_fragment.py",
+        "ascii_A.py",
+        "byte_lf.py",
+        "first_ascii_or_A.py",
+        "tail_or_empty.py",
+        "ascii_roundtrip.py",
+        "byte_label.py",
+    ],
 }
 
 

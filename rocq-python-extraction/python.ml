@@ -66,6 +66,28 @@ let preamble _state _name comment _used_modules _safe =
   str "    pass" ++ fnl () ++
   str "def _impossible() -> Never:" ++ fnl () ++
   str "    raise _Impossible()" ++ fnl () ++
+  str "class _RocqUtf8BoundaryError(UnicodeError):" ++ fnl () ++
+  str "    pass" ++ fnl () ++
+  str "def _rocq_string_cons(head: int, tail: str) -> str:" ++ fnl () ++
+  str "    try:" ++ fnl () ++
+  str "        return bytes([head]).decode(\"utf-8\") + tail" ++ fnl () ++
+  str "    except UnicodeDecodeError as exc:" ++ fnl () ++
+  str "        raise _RocqUtf8BoundaryError(\"Rocq string split crosses a UTF-8 boundary\") from exc" ++ fnl () ++
+  str "def _rocq_string_uncons(value: str) -> tuple[int, str]:" ++ fnl () ++
+  str "    encoded = value.encode(\"utf-8\")" ++ fnl () ++
+  str "    if not encoded:" ++ fnl () ++
+  str "        raise _Impossible()" ++ fnl () ++
+  str "    try:" ++ fnl () ++
+  str "        tail = encoded[1:].decode(\"utf-8\")" ++ fnl () ++
+  str "    except UnicodeDecodeError as exc:" ++ fnl () ++
+  str "        raise _RocqUtf8BoundaryError(\"Rocq string split crosses a UTF-8 boundary\") from exc" ++ fnl () ++
+  str "    return encoded[0], tail" ++ fnl () ++
+  str "def _rocq_ascii_to_int(b0: bool, b1: bool, b2: bool, b3: bool, b4: bool, b5: bool, b6: bool, b7: bool) -> int:" ++ fnl () ++
+  str "    return sum((1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit)" ++ fnl () ++
+  str "def _rocq_ascii_bits(value: int) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:" ++ fnl () ++
+  str "    if value < 0 or value > 255:" ++ fnl () ++
+  str "        raise ValueError(\"Rocq byte/ascii value out of range\")" ++ fnl () ++
+  str "    return cast(tuple[bool, bool, bool, bool, bool, bool, bool, bool], tuple(bool(value & (1 << i)) for i in range(8)))" ++ fnl () ++
   str "class StateT(Generic[_StateTState, _StateTValue]):" ++ fnl () ++
   str "    def __init__(self, step: Callable[[_StateTState], tuple[_StateTValue, _StateTState]], state: _StateTState | None = None) -> None:" ++ fnl () ++
   str "        self._step = step" ++ fnl () ++
@@ -243,6 +265,100 @@ let pp_impossible_expr () =
 
 let pp_impossible_stmt () =
   str "raise _Impossible()"
+
+(*s Built-in Stdlib remappings.
+
+    These are deliberately backend-owned rather than expressed with local
+    [Extract Inductive] pragmas.  They give ordinary Rocq text/byte values a
+    stable Python representation in every model:
+
+      String.string -> str
+      Ascii.ascii   -> int in 0..255
+      Byte.byte     -> int in 0..255
+
+    Rocq [String.string] is structurally a byte list.  The Python value is
+    decoded UTF-8 text, so destructing a string is only valid at UTF-8
+    character boundaries. *)
+
+let has_suffix s suffix =
+  let s_len = String.length s in
+  let suffix_len = String.length suffix in
+  s_len >= suffix_len &&
+  String.equal suffix (String.sub s (s_len - suffix_len) suffix_len)
+
+let global_path r =
+  try
+    DirPath.to_string (Nametab.dirpath_of_global r.glob) ^ "." ^
+    Id.to_string (Nametab.basename_of_global r.glob)
+  with Not_found ->
+    ""
+
+let global_basename r =
+  try Id.to_string (Nametab.basename_of_global r.glob)
+  with Not_found -> ""
+
+let global_path_has_suffix r suffix =
+  has_suffix (global_path r) suffix
+
+let is_std_string_type_ref r =
+  global_path_has_suffix r ".Strings.String.string"
+
+let is_std_string_empty_ref r =
+  global_path_has_suffix r ".Strings.String.EmptyString"
+
+let is_std_string_cons_ref r =
+  global_path_has_suffix r ".Strings.String.String"
+
+let is_std_ascii_type_ref r =
+  global_path_has_suffix r ".Strings.Ascii.ascii"
+
+let is_std_ascii_cons_ref r =
+  global_path_has_suffix r ".Strings.Ascii.Ascii"
+
+let is_std_byte_type_ref r =
+  global_path_has_suffix r ".Init.Byte.byte"
+
+let is_prim_string_type_ref r =
+  global_path_has_suffix r ".Strings.PrimString.string"
+
+let std_byte_constructor_value r =
+  let name = global_basename r in
+  if String.length name = 3 && name.[0] = 'x' then
+    int_of_string_opt ("0x" ^ String.sub name 1 2)
+  else
+    None
+
+let is_std_byte_cons_ref r =
+  match std_byte_constructor_value r with
+  | Some n -> n >= 0 && n <= 255
+  | None -> false
+
+let is_std_remapped_type_ref r =
+  is_std_string_type_ref r || is_std_ascii_type_ref r || is_std_byte_type_ref r ||
+  is_prim_string_type_ref r
+
+let is_std_string_type = function
+  | Tglob (r, _) -> is_std_string_type_ref r
+  | _ -> false
+
+let is_std_ascii_type = function
+  | Tglob (r, _) -> is_std_ascii_type_ref r
+  | _ -> false
+
+let is_std_byte_type = function
+  | Tglob (r, _) -> is_std_byte_type_ref r
+  | _ -> false
+
+let is_std_bool_true_ref r =
+  global_path_has_suffix r ".Init.Datatypes.true"
+
+let is_std_bool_false_ref r =
+  global_path_has_suffix r ".Init.Datatypes.false"
+
+let std_bool_expr = function
+  | MLcons (_, r, []) when is_std_bool_true_ref r -> Some true
+  | MLcons (_, r, []) when is_std_bool_false_ref r -> Some false
+  | _ -> None
 
 type diagnostic = {
   code : string;
@@ -585,6 +701,10 @@ let expand_pusual n = function
     Call [expand_pusual] on the top-level pattern before entering here so
     that [Pusual] nodes never reach this function. *)
 let rec pp_pattern state env' = function
+  | Pcons (r, []) when is_std_byte_cons_ref r ->
+      str (string_of_int (Option.get (std_byte_constructor_value r)))
+  | Pusual r when is_std_byte_cons_ref r ->
+      str (string_of_int (Option.get (std_byte_constructor_value r)))
   | Pcons (r, []) ->
       let cons = str_cons state r in
       (* Erased / empty-name constructor: emit wildcard so the arm still matches *)
@@ -779,6 +899,25 @@ let rec pp_expr state env = function
       str "(" ++
       prlist_with_sep (fun () -> str ", ") (pp_expr state env) l ++
       str ")"
+  | MLcons (_, r, []) when is_std_string_empty_ref r ->
+      str "\"\""
+  | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
+      str "_rocq_string_cons(" ++ pp_expr state env head ++ str ", " ++
+      pp_expr state env tail ++ str ")"
+  | MLcons (_, r, args) when is_std_ascii_cons_ref r ->
+      if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
+      else
+        let pp_bool_bit a =
+          match std_bool_expr a with
+          | Some true -> str "True"
+          | Some false -> str "False"
+          | None -> pp_expr state env a
+        in
+        str "_rocq_ascii_to_int(" ++
+        prlist_with_sep (fun () -> str ", ") pp_bool_bit args ++
+        str ")"
+  | MLcons (_, r, []) when is_std_byte_cons_ref r ->
+      str (string_of_int (Option.get (std_byte_constructor_value r)))
   | MLcons (_, r, args) ->
       let cons_name = str_cons state r in
       if is_coinductive (State.get_table state) r then
@@ -840,7 +979,11 @@ let rec pp_expr state env = function
           let (_, p1, _) = branches.(1) in
           is_bool_patt p0 "True" && is_bool_patt p1 "False" )
       in
-      if is_bool then
+      if is_std_string_type ty then
+        pp_std_string_match_expr state env scrutinee branches
+      else if is_std_ascii_type ty then
+        pp_std_ascii_match_expr state env scrutinee branches
+      else if is_bool then
         let (_, _, body_true)  = branches.(0) in
         let (_, _, body_false) = branches.(1) in
         pp_expr state env body_true  ++ str " if " ++
@@ -958,6 +1101,94 @@ let rec pp_expr state env = function
       prlist_with_sep fnl pp_one (List.init n (fun j -> j)) ++ fnl () ++
       pp_pyid name_arr.(i)
 
+and pp_branch_lambda state env ids body =
+  let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+  let params = List.rev ids' in
+  match visible_params params with
+  | [] -> str "(lambda: " ++ pp_expr state env' body ++ str ")"
+  | params ->
+      str "(lambda " ++
+      prlist_with_sep (fun () -> str ", ") pp_param params ++
+      str ": " ++ pp_expr state env' body ++ str ")"
+
+and pp_std_string_match_expr state env scrutinee branches =
+  let empty_arm = ref None in
+  let cons_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with
+    | None -> slot := Some value
+    | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_string_empty_ref r ->
+        set_once empty_arm (ids, body)
+    | Pcons (r, _) when is_std_string_cons_ref r ->
+        set_once cons_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error
+          ~detail:"unsupported nested String.string pattern shape"
+          "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_empty =
+    match !empty_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_cons =
+    match !cons_arm with
+    | Some (ids, body) ->
+        str "(lambda __pair: (" ++
+        pp_branch_lambda state env ids body ++
+        str ")(__pair[0], __pair[1]))(_rocq_string_uncons(__s))"
+    | None -> fallback ()
+  in
+  str "(lambda __s: " ++ pp_empty ++ str " if __s == \"\" else " ++
+  pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+
+and pp_std_ascii_match_expr state env scrutinee branches =
+  let ascii_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with
+    | None -> slot := Some value
+    | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, _) when is_std_ascii_cons_ref r ->
+        set_once ascii_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error
+          ~detail:"unsupported Ascii.ascii pattern shape"
+          "PYEX040"
+  in
+  Array.iter classify branches;
+  match !ascii_arm with
+  | Some (ids, body) ->
+      str "(lambda __bits: (" ++
+      pp_branch_lambda state env ids body ++
+      str ")(__bits[0], __bits[1], __bits[2], __bits[3], __bits[4], __bits[5], __bits[6], __bits[7]))(_rocq_ascii_bits(" ++
+      pp_expr state env scrutinee ++ str "))"
+  | None ->
+      (match !wildcard_arm with
+       | Some (ids, body) ->
+           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+       | None -> pp_impossible_expr ())
+
 (*s Custom-match expression emitter.
     When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
     function, case analysis on [T] cannot use Python [match]/[case] (the
@@ -1033,7 +1264,9 @@ let rec pp_return_body state env indent = function
           let (_, p1, _) = branches.(1) in
           is_bool_patt p0 "True" && is_bool_patt p1 "False" )
       in
-      if is_bool then
+      if is_std_string_type ty || is_std_ascii_type ty then
+        str "return " ++ pp_expr state env expr
+      else if is_bool then
         (* Ternary — valid expression; a single [return] suffices. *)
         str "return " ++ pp_expr state env expr
       else if is_custom_match branches then
@@ -1222,7 +1455,10 @@ let rec pp_type_with state pp_tvar = function
          Inductive type names are capitalized to match the class names
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
       let name =
-        if is_custom r then find_custom r
+        if is_std_string_type_ref r then "str"
+        else if is_prim_string_type_ref r then "bytes"
+        else if is_std_ascii_type_ref r || is_std_byte_type_ref r then "int"
+        else if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
           let open GlobRef in
@@ -1524,9 +1760,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
-      else if is_custom p.ip_typename_ref then
+      else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
         str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
+        str ": remapped to Python primitive" ++ fnl ()
       else
         str "# " ++ Id.print p.ip_typename ++
         str ": singleton inductive, constructor was " ++
@@ -1535,9 +1771,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
-      else if is_custom p.ip_typename_ref then
+      else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
         str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
+        str ": remapped to Python primitive" ++ fnl ()
       else
         let tvars = List.init ind.ind_nparams typevar_name in
         (* Emit TypeVar declarations once, before the dataclass. *)
@@ -1561,9 +1797,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
-        else if is_custom p.ip_typename_ref then
+        else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
           str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
+          str ": remapped to Python primitive" ++ fnl ()
         else
           let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
           let n = Array.length p.ip_types in
@@ -1617,9 +1853,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical coinductive" ++ fnl ()
-        else if is_custom p.ip_typename_ref then
+        else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
           str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
+          str ": remapped to Python primitive" ++ fnl ()
         else
           let tname = packet_name state p in
           let local_tvar_name i =
@@ -1672,7 +1908,7 @@ let pp_ind_decl state (ind : ml_ind) =
 
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
-  | Dtype (r, _, _) when is_custom r -> mt ()
+  | Dtype (r, _, _) when is_custom r || is_std_remapped_type_ref r -> mt ()
   | Dtype _     -> diagnostic_comment "PYEX003"
   | Dterm (r, a, typ) ->
       if is_prop_type typ then mt ()
@@ -1738,15 +1974,17 @@ let decl_export_names state = function
            not (is_inline_custom rv.(i)))
       |> List.map (fun i -> pp_global state Term rv.(i))
   | Dtype (r, _, _) ->
-      if is_custom r then [] else [pp_global state Type r]
+      if is_custom r || is_std_remapped_type_ref r then [] else [pp_global state Type r]
   | Dind ind ->
       let packet_names packet =
-        let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
-        let cnames =
-          Array.to_list packet.ip_consnames_ref
-          |> List.map (pp_global state Cons)
-        in
-        tname :: cnames
+        if is_std_remapped_type_ref packet.ip_typename_ref then []
+        else
+          let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+          let cnames =
+            Array.to_list packet.ip_consnames_ref
+            |> List.map (pp_global state Cons)
+          in
+          tname :: cnames
       in
       Array.to_list ind.ind_packets |> List.concat_map packet_names
 

@@ -22,7 +22,8 @@ cat >"$OUT_DIR/pyrightconfig.json" <<'EOF'
     "Phase10Mod.py",
     "pyright_list_map_check.py",
     "pyright_coinductive_check.py",
-    "pyright_modules_check.py"
+    "pyright_modules_check.py",
+    "pyright_strings_bytes_check.py"
   ],
   "executionEnvironments": [
     {
@@ -43,5 +44,7 @@ cp rocq-python-extraction/test/pyright_coinductive_check.py \
   "$OUT_DIR/pyright_coinductive_check.py"
 cp rocq-python-extraction/test/pyright_modules_check.py \
   "$OUT_DIR/pyright_modules_check.py"
+cp rocq-python-extraction/test/pyright_strings_bytes_check.py \
+  "$OUT_DIR/pyright_strings_bytes_check.py"
 
 uv run pyright -p "$OUT_DIR/pyrightconfig.json"
