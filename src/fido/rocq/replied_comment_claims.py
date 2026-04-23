@@ -592,6 +592,30 @@ def promise_covered_comments(p: PromiseRow) -> list[int]:
     return p.promise_covered_comments
 
 
+class ConversationLane:
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewThreadLane(ConversationLane):
+    arg0: int
+
+
+@dataclass(frozen=True)
+class PullRequestLane(ConversationLane):
+    arg0: int
+
+
+ConversationLaneT = ReviewThreadLane | PullRequestLane
+
+
+@dataclass(frozen=True)
+class ReplyArtifact:
+    artifact_comment: int
+    artifact_lane: ConversationLane
+    artifact_promises: list[int]
+
+
 def new_attempt(owner: ClaimOwner) -> Attempt:
     return Attempt(
         attempt_owner=owner,
@@ -921,6 +945,23 @@ def recover_promise(
             )
         case __impossible:
             assert_never(__impossible)
+
+
+def record_reply_artifact(
+    artifact_comment0: int,
+    lane: ConversationLane,
+    covered_promises: list[int],
+    artifacts: dict[int, ReplyArtifact],
+) -> dict[int, ReplyArtifact]:
+    return _rocq_map_add(
+        _rocq_positive_key(artifact_comment0),
+        ReplyArtifact(
+            artifact_comment=artifact_comment0,
+            artifact_lane=lane,
+            artifact_promises=covered_promises,
+        ),
+        artifacts,
+    )
 
 
 def claim_state_completed(state: ClaimState) -> bool:

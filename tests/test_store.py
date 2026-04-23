@@ -10,6 +10,7 @@ from fido.store import (
     FidoStore,
     ReplyOwner,
     append_reply_promise_marker,
+    append_reply_promise_markers,
     extract_reply_promise_ids,
 )
 
@@ -155,6 +156,22 @@ def test_reply_promise_marker_helpers_ignore_empty_and_duplicate_body(
     assert extract_reply_promise_ids(None) == ()
 
 
+def test_reply_promise_markers_support_many_promises(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.prepare_reply(
+        owner="webhook", comment_type="issues", anchor_comment_id=1
+    )
+    second = store.prepare_reply(
+        owner="webhook", comment_type="issues", anchor_comment_id=2
+    )
+    assert first is not None
+    assert second is not None
+
+    body = append_reply_promise_markers("done", [first.promise_id, second.promise_id])
+
+    assert extract_reply_promise_ids(body) == (first.promise_id, second.promise_id)
+
+
 def test_recover_from_bodies_ignores_unknown_promise(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
 
@@ -178,11 +195,13 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 1
+    assert version == 2
     assert {
         "comment_claims",
         "reply_promises",
         "reply_promise_comments",
+        "reply_artifacts",
+        "reply_artifact_promises",
         "command_queue",
         "implementation_tasks",
         "fido_state",
@@ -192,6 +211,51 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "restart_metadata",
         "transition_audit_log",
     } <= tables
+
+
+def test_record_artifact_tracks_many_promises(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=501
+    )
+    second = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=502
+    )
+    assert first is not None
+    assert second is not None
+
+    store.record_artifact(
+        artifact_comment_id=9001,
+        comment_type="pulls",
+        lane_key="pulls:owner/repo:7:thread:501",
+        promise_ids=[first.promise_id, second.promise_id],
+    )
+
+    assert store.artifact_for_promise(first.promise_id) is not None
+    artifact = store.artifact_for_promise(second.promise_id)
+    assert artifact is not None
+    assert artifact.artifact_comment_id == 9001
+    assert artifact.promise_ids == tuple(sorted((first.promise_id, second.promise_id)))
+
+
+def test_record_artifact_ignores_empty_promise_ids(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+
+    store.record_artifact(
+        artifact_comment_id=9002,
+        comment_type="pulls",
+        lane_key="pulls:owner/repo:7:thread:501",
+        promise_ids=[],
+    )
+
+    assert store.artifact_for_promise("00000000-0000-0000-0000-000000000000") is None
+
+
+def test_artifact_for_promise_returns_none_when_missing(tmp_path: Path) -> None:
+    assert (
+        FidoStore(tmp_path).artifact_for_promise("00000000-0000-0000-0000-000000000000")
+        is None
+    )
 
 
 def test_schema_rejects_newer_user_version(tmp_path: Path) -> None:

@@ -71,6 +71,21 @@ Record PromiseRow : Type := {
   promise_covered_comments : list positive
 }.
 
+(** [ConversationLane] is the batch boundary for visible replies.
+    Review comments aggregate per root thread; top-level PR comments aggregate
+    in one PR-level lane. *)
+Inductive ConversationLane : Type :=
+| ReviewThreadLane : positive -> ConversationLane
+| PullRequestLane : positive -> ConversationLane.
+
+(** [ReplyArtifact] is one visible GitHub comment that may discharge many
+    promises in the same lane. *)
+Record ReplyArtifact : Type := {
+  artifact_comment : positive;
+  artifact_lane : ConversationLane;
+  artifact_promises : list positive
+}.
+
 (** [new_attempt] creates the initial shared metadata for a prepared promise. *)
 Definition new_attempt (owner : ClaimOwner) : Attempt :=
   {| attempt_owner := owner;
@@ -290,6 +305,20 @@ Definition recover_promise
   | ReplayFailed => fail_promise promise claims promises
   end.
 
+(** [record_reply_artifact] records one visible GitHub reply artifact and the
+    promises it covers.  Runtime recovery uses hidden markers to recover this
+    same many-promises-to-one-artifact relation after crashes. *)
+Definition record_reply_artifact
+    (artifact_comment : positive)
+    (lane : ConversationLane)
+    (covered_promises : list positive)
+    (artifacts : PositiveMap.t ReplyArtifact) : PositiveMap.t ReplyArtifact :=
+  PositiveMap.add artifact_comment
+    {| artifact_comment := artifact_comment;
+       artifact_lane := lane;
+       artifact_promises := covered_promises |}
+    artifacts.
+
 (** [claim_completed] observes whether one raw comment id is completed. *)
 Definition claim_state_completed (state : ClaimState) : bool :=
   match state with
@@ -305,4 +334,4 @@ Definition claim_completed (claims : PositiveMap.t ClaimRow) (comment : positive
   end.
 
 Python File Extraction replied_comment_claims
-  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise claim_completed".
+  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact claim_completed".

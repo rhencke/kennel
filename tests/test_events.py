@@ -12,7 +12,10 @@ from fido.events import (
     _get_commit_summary,
     _is_allowed,
     _notify_thread_change,
+    _posted_comment_id,
+    _record_reply_artifact,
     _reorder_tasks_background,
+    _reply_promise_ids,
     _rewrite_pr_description,
     _summarize_as_action_item,
     _task_snapshot,
@@ -564,6 +567,56 @@ class TestRecoverReplyPromises:
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
 
+    def test_coalesces_issue_comment_promises_in_same_pr_lane(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        first = self._prepare_promise(tmp_path, "issues", 301)
+        second = self._prepare_promise(tmp_path, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+
+        def get_issue_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                301: {
+                    "id": 301,
+                    "body": "first",
+                    "html_url": "https://github.com/owner/repo/pull/7#issuecomment-301",
+                    "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+                    "user": {"login": "owner"},
+                },
+                302: {
+                    "id": 302,
+                    "body": "second",
+                    "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+                    "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_issue_comment.side_effect = get_issue_comment
+        with (
+            patch(
+                "fido.events.reply_to_issue_comment",
+                return_value=("DO", ["task a"]),
+            ) as mock_reply,
+            patch("fido.events.create_task") as mock_create_task,
+        ):
+            result = recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert result is True
+        assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
+        mock_create_task.assert_called_once()
+        store = FidoStore(tmp_path)
+        assert store.promise(first.promise_id).state == "acked"
+        assert store.promise(second.promise_id).state == "acked"
+
     def test_review_recovery_clears_group_promises_before_task_creation(
         self, tmp_path: Path
     ) -> None:
@@ -801,6 +854,68 @@ class TestIsAllowed:
         cfg = _config(tmp_path)
         rc = self._repo_cfg(tmp_path, collaborators=frozenset())
         assert not _is_allowed("anyone", rc, cfg)
+
+
+class TestReplyPromiseHelpers:
+    def test_reply_promise_ids_deduplicates_context_values(self) -> None:
+        assert _reply_promise_ids(
+            {
+                "reply_promise_id": "one",
+                "reply_promise_ids": ["one", "two", "", None],
+            }
+        ) == ("one", "two")
+
+    def test_reply_promise_ids_handles_missing_context(self) -> None:
+        assert _reply_promise_ids(None) == ()
+
+    def test_posted_comment_id_extracts_int_only(self) -> None:
+        assert _posted_comment_id({"id": 7}) == 7
+        assert _posted_comment_id({"id": "7"}) is None
+        assert _posted_comment_id(None) is None
+
+    def test_record_reply_artifact_persists_and_marks_posted(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=700
+        )
+        assert promise is not None
+
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9007,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(promise.promise_id,),
+        )
+
+        assert store.promise(promise.promise_id).state == "posted"
+        artifact = store.artifact_for_promise(promise.promise_id)
+        assert artifact is not None
+        assert artifact.artifact_comment_id == 9007
+
+    def test_record_reply_artifact_ignores_missing_comment_id(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=701
+        )
+        assert promise is not None
+
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=None,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(promise.promise_id,),
+        )
+
+        assert store.promise(promise.promise_id).state == "prepared"
+        assert store.artifact_for_promise(promise.promise_id) is None
 
 
 class TestDispatchPing:
@@ -1687,12 +1802,12 @@ class TestReplyToComment:
         summarize_calls = [p for p in calls if "Convert this PR review comment" in p]
         assert len(summarize_calls) == 1
         assert "Please add null input validation" in summarize_calls[0]
-        # Fido's previous reply is edited in-place rather than a new reply posted.
-        edit_args = mock_gh.edit_review_comment.call_args.args
-        assert edit_args[:2] == ("owner/repo", 101)
-        assert edit_args[2].startswith("Done!")
-        assert "fido:reply-promise:" in edit_args[2]
-        mock_gh.reply_to_review_comment.assert_not_called()
+        # Posted replies are immutable; even with a prior Fido reply we post a new one.
+        reply_args = mock_gh.reply_to_review_comment.call_args.args
+        assert reply_args[:2] == ("owner/repo", 1)
+        assert reply_args[2].startswith("Done!")
+        assert "fido:reply-promise:" in reply_args[2]
+        mock_gh.edit_review_comment.assert_not_called()
 
     def test_act_title_always_from_root_comment(self, tmp_path: Path) -> None:
         """ACT title is always derived from the root comment via _summarize_as_action_item."""
@@ -1818,12 +1933,12 @@ class TestReplyToComment:
         assert cat == "ASK"
         # _summarize_as_action_item must not be called for non-task categories
         assert not summarize_called
-        # Fido's prior reply is edited in-place.
-        edit_args = mock_gh.edit_review_comment.call_args.args
-        assert edit_args[:2] == ("owner/repo", 201)
-        assert edit_args[2].startswith("Could you clarify?")
-        assert "fido:reply-promise:" in edit_args[2]
-        mock_gh.reply_to_review_comment.assert_not_called()
+        # Posted replies are immutable; ask replies also post a new artifact.
+        reply_args = mock_gh.reply_to_review_comment.call_args.args
+        assert reply_args[:2] == ("owner/repo", 1)
+        assert reply_args[2].startswith("Could you clarify?")
+        assert "fido:reply-promise:" in reply_args[2]
+        mock_gh.edit_review_comment.assert_not_called()
 
     def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
         """Reply generation run_turn must pass retry_on_preempt=True so a
@@ -4762,9 +4877,9 @@ class TestReplyToCommentThreadRefetch:
             agent=_client(side_effect=fake_pp),
         )
 
-        # Fido was already last speaker — edits in place (not skipped)
-        mock_gh.edit_review_comment.assert_called_once()
-        mock_gh.reply_to_review_comment.assert_not_called()
+        # Posted replies are immutable; Fido posts a new reply instead.
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
 
     def test_skips_post_fido_can_code_login_also_detected(self, tmp_path: Path) -> None:
         """The 'fido-can-code' login is also recognised as a Fido reply
