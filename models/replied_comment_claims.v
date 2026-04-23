@@ -36,10 +36,10 @@ Inductive ClaimOwner : Type :=
 | OwnerWorker
 | OwnerRecovery.
 
-(** [AttemptCore] is the shared durable metadata carried by both indexes.
+(** [Attempt] is the shared durable metadata carried by both indexes.
     Retry fields are abstract counters/ticks so D1 can state retryability
     without owning the full D22 scheduler. *)
-Record AttemptCore : Type := {
+Record Attempt : Type := {
   attempt_owner : ClaimOwner;
   attempt_retry_count : nat;
   attempt_next_retry_after : nat
@@ -48,7 +48,7 @@ Record AttemptCore : Type := {
 (** [ClaimRow] is the comment-keyed exclusion index.  It points at the outbound
     promise that owns or completed the raw GitHub comment id. *)
 Record ClaimRow : Type := {
-  claim_core : AttemptCore;
+  claim_attempt : Attempt;
   claim_state : ClaimState;
   claim_promise : positive
 }.
@@ -56,28 +56,28 @@ Record ClaimRow : Type := {
 (** [PromiseRow] is the promise-keyed outbound reply attempt.  One promise may
     cover many comment-keyed claims. *)
 Record PromiseRow : Type := {
-  promise_core : AttemptCore;
+  promise_attempt : Attempt;
   promise_state : PromiseState;
   promise_anchor_comment : positive;
   promise_covered_comments : list positive
 }.
 
 (** [new_attempt] creates the initial shared metadata for a prepared promise. *)
-Definition new_attempt (owner : ClaimOwner) : AttemptCore :=
+Definition new_attempt (owner : ClaimOwner) : Attempt :=
   {| attempt_owner := owner;
      attempt_retry_count := 0;
      attempt_next_retry_after := 0 |}.
 
 (** [retry_attempt] advances retry metadata after a failed attempt. *)
-Definition retry_attempt (core : AttemptCore) : AttemptCore :=
-  {| attempt_owner := attempt_owner core;
-     attempt_retry_count := S (attempt_retry_count core);
-     attempt_next_retry_after := S (attempt_next_retry_after core) |}.
+Definition retry_attempt (attempt : Attempt) : Attempt :=
+  {| attempt_owner := attempt_owner attempt;
+     attempt_retry_count := S (attempt_retry_count attempt);
+     attempt_next_retry_after := S (attempt_next_retry_after attempt) |}.
 
 (** [reset_attempt_retry] clears backoff metadata after an acked attempt. *)
-Definition reset_attempt_retry (core : AttemptCore) : AttemptCore :=
-  {| attempt_owner := attempt_owner core;
-     attempt_retry_count := attempt_retry_count core;
+Definition reset_attempt_retry (attempt : Attempt) : Attempt :=
+  {| attempt_owner := attempt_owner attempt;
+     attempt_retry_count := attempt_retry_count attempt;
      attempt_next_retry_after := 0 |}.
 
 (** [claim_is_blocking] says whether an existing claim prevents a new owner
@@ -110,7 +110,7 @@ Fixpoint all_claimable (claims : PositiveMap.t ClaimRow) (comments : list positi
 (** [in_progress_row] builds the durable row installed by a prepared promise. *)
 Definition in_progress_row (owner : ClaimOwner) (promise : positive) : ClaimRow :=
   {|
-    claim_core := new_attempt owner;
+    claim_attempt := new_attempt owner;
     claim_state := ClaimInProgress;
     claim_promise := promise
   |}.
@@ -142,7 +142,7 @@ Definition prepare_claims
   if all_claimable claims comments then
     let claims' := claim_all owner promise comments claims in
     let promise_row := {|
-      promise_core := new_attempt owner;
+      promise_attempt := new_attempt owner;
       promise_state := PromisePrepared;
       promise_anchor_comment := anchor;
       promise_covered_comments := comments
@@ -160,7 +160,7 @@ Definition mark_promise_posted
   | None => promises
   | Some row =>
       PositiveMap.add promise
-        {| promise_core := promise_core row;
+        {| promise_attempt := promise_attempt row;
            promise_state := PromisePosted;
            promise_anchor_comment := promise_anchor_comment row;
            promise_covered_comments := promise_covered_comments row |}
@@ -177,7 +177,7 @@ Definition complete_comment
   | None => claims
   | Some row =>
       PositiveMap.add comment
-        {| claim_core := reset_attempt_retry (claim_core row);
+        {| claim_attempt := reset_attempt_retry (claim_attempt row);
            claim_state := ClaimCompleted;
            claim_promise := promise |}
         claims
@@ -204,7 +204,7 @@ Definition ack_promise
   | Some row =>
       let claims' := complete_all promise (promise_covered_comments row) claims in
       let promises' := PositiveMap.add promise
-        {| promise_core := reset_attempt_retry (promise_core row);
+        {| promise_attempt := reset_attempt_retry (promise_attempt row);
            promise_state := PromiseAcked;
            promise_anchor_comment := promise_anchor_comment row;
            promise_covered_comments := promise_covered_comments row |}
@@ -214,7 +214,7 @@ Definition ack_promise
 
 (** [retryable_row] is the failure row installed after a pre-post failure. *)
 Definition retryable_row (row : ClaimRow) : ClaimRow :=
-  {| claim_core := retry_attempt (claim_core row);
+  {| claim_attempt := retry_attempt (claim_attempt row);
      claim_state := ClaimRetryableFailed;
      claim_promise := claim_promise row |}.
 
@@ -243,7 +243,7 @@ Definition fail_promise
   | Some row =>
       let claims' := fail_all (promise_covered_comments row) claims in
       let promises' := PositiveMap.add promise
-        {| promise_core := retry_attempt (promise_core row);
+        {| promise_attempt := retry_attempt (promise_attempt row);
            promise_state := PromiseFailed;
            promise_anchor_comment := promise_anchor_comment row;
            promise_covered_comments := promise_covered_comments row |}

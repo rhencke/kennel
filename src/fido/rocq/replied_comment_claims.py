@@ -489,33 +489,33 @@ ClaimOwnerT = OwnerWebhook | OwnerWorker | OwnerRecovery
 
 
 @dataclass(frozen=True)
-class Build_AttemptCore:
+class Build_Attempt:
     attempt_owner: ClaimOwner
     attempt_retry_count: int
     attempt_next_retry_after: int
 
 
-def attempt_owner(a: AttemptCore) -> ClaimOwner:
+def attempt_owner(a: Attempt) -> ClaimOwner:
     return a.attempt_owner
 
 
-def attempt_retry_count(a: AttemptCore) -> int:
+def attempt_retry_count(a: Attempt) -> int:
     return a.attempt_retry_count
 
 
-def attempt_next_retry_after(a: AttemptCore) -> int:
+def attempt_next_retry_after(a: Attempt) -> int:
     return a.attempt_next_retry_after
 
 
 @dataclass(frozen=True)
 class Build_ClaimRow:
-    claim_core: AttemptCore
+    claim_attempt: Attempt
     claim_state: ClaimState
     claim_promise: int
 
 
-def claim_core(c: ClaimRow) -> AttemptCore:
-    return c.claim_core
+def claim_attempt(c: ClaimRow) -> Attempt:
+    return c.claim_attempt
 
 
 def claim_state(c: ClaimRow) -> ClaimState:
@@ -528,14 +528,14 @@ def claim_promise(c: ClaimRow) -> int:
 
 @dataclass(frozen=True)
 class Build_PromiseRow:
-    promise_core: AttemptCore
+    promise_attempt: Attempt
     promise_state: PromiseState
     promise_anchor_comment: int
     promise_covered_comments: list[int]
 
 
-def promise_core(p: PromiseRow) -> AttemptCore:
-    return p.promise_core
+def promise_attempt(p: PromiseRow) -> Attempt:
+    return p.promise_attempt
 
 
 def promise_anchor_comment(p: PromiseRow) -> int:
@@ -546,26 +546,26 @@ def promise_covered_comments(p: PromiseRow) -> list[int]:
     return p.promise_covered_comments
 
 
-def new_attempt(owner: ClaimOwner) -> AttemptCore:
-    return Build_AttemptCore(
+def new_attempt(owner: ClaimOwner) -> Attempt:
+    return Build_Attempt(
         attempt_owner=owner,
         attempt_retry_count=0,
         attempt_next_retry_after=0,
     )
 
 
-def retry_attempt(core: AttemptCore) -> AttemptCore:
-    return Build_AttemptCore(
-        attempt_owner=attempt_owner(core),
-        attempt_retry_count=attempt_retry_count(core) + 1,
-        attempt_next_retry_after=attempt_next_retry_after(core) + 1,
+def retry_attempt(attempt0: Attempt) -> Attempt:
+    return Build_Attempt(
+        attempt_owner=attempt_owner(attempt0),
+        attempt_retry_count=attempt_retry_count(attempt0) + 1,
+        attempt_next_retry_after=attempt_next_retry_after(attempt0) + 1,
     )
 
 
-def reset_attempt_retry(core: AttemptCore) -> AttemptCore:
-    return Build_AttemptCore(
-        attempt_owner=attempt_owner(core),
-        attempt_retry_count=attempt_retry_count(core),
+def reset_attempt_retry(attempt0: Attempt) -> Attempt:
+    return Build_Attempt(
+        attempt_owner=attempt_owner(attempt0),
+        attempt_retry_count=attempt_retry_count(attempt0),
         attempt_next_retry_after=0,
     )
 
@@ -612,7 +612,7 @@ def in_progress_row(
     promise: int,
 ) -> ClaimRow:
     return Build_ClaimRow(
-        claim_core=new_attempt(owner),
+        claim_attempt=new_attempt(owner),
         claim_state=ClaimInProgress(),
         claim_promise=promise,
     )
@@ -658,7 +658,7 @@ def prepare_claims(
             claims,
         )
         promise_row = Build_PromiseRow(
-            promise_core=new_attempt(owner),
+            promise_attempt=new_attempt(owner),
             promise_state=PromisePrepared(),
             promise_anchor_comment=anchor,
             promise_covered_comments=comments,
@@ -685,7 +685,7 @@ def mark_promise_posted(
     return _rocq_map_add(
         _rocq_positive_key(promise),
         Build_PromiseRow(
-            promise_core=promise_core(row),
+            promise_attempt=promise_attempt(row),
             promise_state=PromisePosted(),
             promise_anchor_comment=promise_anchor_comment(row),
             promise_covered_comments=promise_covered_comments(row),
@@ -706,7 +706,7 @@ def complete_comment(
     return _rocq_map_add(
         _rocq_positive_key(comment),
         Build_ClaimRow(
-            claim_core=reset_attempt_retry(claim_core(row)),
+            claim_attempt=reset_attempt_retry(claim_attempt(row)),
             claim_state=ClaimCompleted(),
             claim_promise=promise,
         ),
@@ -755,7 +755,7 @@ def ack_promise(
     promises_ = _rocq_map_add(
         _rocq_positive_key(promise),
         Build_PromiseRow(
-            promise_core=reset_attempt_retry(promise_core(row)),
+            promise_attempt=reset_attempt_retry(promise_attempt(row)),
             promise_state=PromiseAcked(),
             promise_anchor_comment=promise_anchor_comment(row),
             promise_covered_comments=promise_covered_comments(row),
@@ -770,7 +770,7 @@ def ack_promise(
 
 def retryable_row(row: ClaimRow) -> ClaimRow:
     return Build_ClaimRow(
-        claim_core=retry_attempt(claim_core(row)),
+        claim_attempt=retry_attempt(claim_attempt(row)),
         claim_state=ClaimRetryableFailed(),
         claim_promise=claim_promise(row),
     )
@@ -819,7 +819,7 @@ def fail_promise(
     promises_ = _rocq_map_add(
         _rocq_positive_key(promise),
         Build_PromiseRow(
-            promise_core=retry_attempt(promise_core(row)),
+            promise_attempt=retry_attempt(promise_attempt(row)),
             promise_state=PromiseFailed(),
             promise_anchor_comment=promise_anchor_comment(row),
             promise_covered_comments=promise_covered_comments(row),
