@@ -562,6 +562,21 @@ let pp_impossible_expr () =
 let pp_impossible_stmt () =
   str "raise _Impossible()"
 
+let set_once slot value =
+  match !slot with
+  | None -> slot := Some value
+  | Some _ -> ()
+
+let active_method_targets : (string * (string * string)) list ref = ref []
+
+let lookup_active_method_target source_name =
+  List.assoc_opt source_name !active_method_targets
+
+let pp_collection_key kind pp_key =
+  match kind with
+  | `Positive -> str "_rocq_positive_key(" ++ pp_key ++ str ")"
+  | `String -> str "_rocq_string_key(" ++ pp_key ++ str ")"
+
 (*s Built-in Stdlib remappings.
 
     These are deliberately backend-owned rather than expressed with local
@@ -1316,14 +1331,44 @@ let rec pp_expr state env expr =
   match expr with
   | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
       str "StateT.get_state()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_pure ->
+      str "StateT.pure"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_bind ->
+      str "StateT.bind"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_put ->
+      str "StateT.put_state"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
       str "lambda __reader_env: __reader_env"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_pure ->
+      str "(lambda value: (lambda __reader_env: value))"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_bind ->
+      str "(lambda reader_expr, fn_expr: lambda __reader_env: fn_expr(reader_expr(__reader_env))(__reader_env))"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_pure ->
+      str "IO.pure"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bind ->
+      str "IO.bind"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bracket ->
+      str "IO.bracket"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_mutex ->
       str "Mutex.new()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_channel ->
       str "Channel.new()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_future ->
       str "Future.new()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_acquire ->
+      str "Mutex.acquire"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_release ->
+      str "Mutex.release"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_send ->
+      str "Channel.send"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_receive ->
+      str "Channel.receive"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_set ->
+      str "Future.set_result"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_result ->
+      str "Future.result"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_done ->
+      str "Future.done"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_interleave ->
       extraction_diagnostic_error ~detail:(find_custom r) "PYEX043"
   | MLglob r when is_custom r && is_concurrency_marker_string (find_custom r) ->
@@ -1368,12 +1413,20 @@ let rec pp_expr state env expr =
       in
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      let pp_method_call_expr =
+        match head, all_args with
+        | MLglob r, self_arg :: method_args -> (
+            match lookup_active_method_target (pp_global state Term r) with
+            | Some (_class_name, method_name) ->
+                Some
+                  (pp_expr state env self_arg ++ str "." ++ str method_name ++ str "(" ++
+                   prlist_with_sep (fun () -> str ", ") (pp_expr state env) method_args ++
+                   str ")")
+            | None -> None)
+        | _ -> None
+      in
       let collection_key kind key =
-        match kind with
-        | `Positive ->
-            str "_rocq_positive_key(" ++ pp_expr state env key ++ str ")"
-        | `String ->
-            str "_rocq_string_key(" ++ pp_expr state env key ++ str ")"
+        pp_collection_key kind (pp_expr state env key)
       in
       let pp_map_app kind r =
         match all_args with
@@ -1531,27 +1584,34 @@ let rec pp_expr state env expr =
         | _ ->
             None
       in
-      (match pp_collection_expr with
+      let pp_default_app =
+        (* Parenthesise the function if it is itself a lambda expression,
+           since [lambda x: e] has very low precedence in Python. *)
+        let pp_head =
+          match head with
+          | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
+          | _ -> pp_expr state env head
+        in
+        if List.is_empty all_args then pp_head
+        else
+          pp_head ++ str "(" ++
+          prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+          str ")"
+      in
+      let pp_special =
+        match pp_method_call_expr with
+        | Some _ as pp -> pp
+        | None ->
+            (match pp_collection_expr with
+             | Some _ as pp -> pp
+             | None ->
+                 (match pp_concurrency_expr with
+                  | Some _ as pp -> pp
+                  | None -> pp_monad_expr))
+      in
+      (match pp_special with
        | Some pp -> pp
-       | None ->
-      (match pp_concurrency_expr with
-       | Some pp -> pp
-       | None ->
-      (match pp_monad_expr with
-       | Some pp -> pp
-       | None ->
-           (* Parenthesise the function if it is itself a lambda expression,
-              since [lambda x: e] has very low precedence in Python. *)
-           let pp_head =
-             match head with
-             | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-             | _       -> pp_expr state env head
-           in
-           if List.is_empty all_args then pp_head
-           else
-             pp_head ++ str "(" ++
-             prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-             str ")")))
+       | None -> pp_default_app)
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
@@ -1776,18 +1836,34 @@ let rec pp_expr state env expr =
               | Prel k -> pp_pyid (get_db_name k env')
               | _      -> str ("_e" ^ string_of_int i)
             in
-            (* Scrutinee is pure; sharing the [pp] value avoids duplication. *)
+            (* The common record-projection case extracts one bound field.
+               Emit direct attribute access so generated accessors are plain
+               Python instead of lambda applications. *)
+            let direct_projection =
+              match body with
+              | MLrel k ->
+                  List.find_mapi
+                    (fun i -> function
+                       | Prel k' when Int.equal k k' -> Some i
+                       | _ -> None)
+                    sub_pats
+              | _ -> None
+            in
             let pp_scr = pp_expr state env scrutinee in
-            let pp_arg i = pp_scr ++ str "." ++ pp_field_name state r fds i in
-            str "(lambda " ++
-            prlist_with_sep (fun () -> str ", ") pp_param_for_pos
-              (List.init n_fds (fun i -> i)) ++
-            str ": " ++
-            pp_expr state env' body ++
-            str ")(" ++
-            prlist_with_sep (fun () -> str ", ") pp_arg
-              (List.init n_fds (fun i -> i)) ++
-            str ")"
+            (match direct_projection with
+             | Some i ->
+                 pp_scr ++ str "." ++ pp_field_name state r fds i
+             | None ->
+                 let pp_arg i = pp_scr ++ str "." ++ pp_field_name state r fds i in
+                 str "(lambda " ++
+                 prlist_with_sep (fun () -> str ", ") pp_param_for_pos
+                   (List.init n_fds (fun i -> i)) ++
+                 str ": " ++
+                 pp_expr state env' body ++
+                 str ")(" ++
+                 prlist_with_sep (fun () -> str ", ") pp_arg
+                   (List.init n_fds (fun i -> i)) ++
+                 str ")")
         | None ->
         (* General match: emit Python [match]/[case] statement.
            This is a statement in Python, so it only works correctly when the
@@ -1864,15 +1940,29 @@ and pp_branch_lambda state env ids body =
       prlist_with_sep (fun () -> str ", ") pp_param params ++
       str ": " ++ pp_expr state env' body
 
+and pp_branch_thunk_expr state env ids body =
+  str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+
+and pp_branch_call_expr state env ids body args =
+  str "(" ++ pp_branch_lambda state env ids body ++ str ")(" ++
+  prlist_with_sep (fun () -> str ", ") (fun arg -> arg) args ++ str ")"
+
+and pp_branch_or_impossible_expr state env = function
+  | Some (ids, body) -> pp_branch_thunk_expr state env ids body
+  | None -> pp_impossible_expr ()
+
+and pp_branch_or_fallback_expr state env fallback = function
+  | Some (ids, body) -> pp_branch_thunk_expr state env ids body
+  | None -> fallback ()
+
+and pp_branch_pair_expr state env ids body pair_expr =
+  str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
+  str ")(__pair[0], __pair[1]))(" ++ pair_expr ++ str ")"
+
 and pp_std_string_match_expr state env scrutinee branches =
   let empty_arm = ref None in
   let cons_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with
-    | None -> slot := Some value
-    | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_string_empty_ref r ->
@@ -1888,23 +1978,16 @@ and pp_std_string_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_empty =
-    match !empty_arm with
-    | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !empty_arm
   in
   let pp_cons =
     match !cons_arm with
     | Some (ids, body) ->
-        str "(lambda __pair: (" ++
-        pp_branch_lambda state env ids body ++
-        str ")(__pair[0], __pair[1]))(_rocq_string_uncons(__s))"
+        pp_branch_pair_expr state env ids body
+          (str "_rocq_string_uncons(__s)")
     | None -> fallback ()
   in
   str "(lambda __s: " ++ pp_empty ++ str " if __s == \"\" else " ++
@@ -1913,11 +1996,6 @@ and pp_std_string_match_expr state env scrutinee branches =
 and pp_std_ascii_match_expr state env scrutinee branches =
   let ascii_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with
-    | None -> slot := Some value
-    | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, _) when is_std_ascii_cons_ref r ->
@@ -1937,18 +2015,12 @@ and pp_std_ascii_match_expr state env scrutinee branches =
       str ")(__bits[0], __bits[1], __bits[2], __bits[3], __bits[4], __bits[5], __bits[6], __bits[7]))(_rocq_ascii_bits(" ++
       pp_expr state env scrutinee ++ str "))"
   | None ->
-      (match !wildcard_arm with
-       | Some (ids, body) ->
-           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-       | None -> pp_impossible_expr ())
+      pp_branch_or_impossible_expr state env !wildcard_arm
 
 and pp_std_nat_match_expr state env scrutinee branches =
   let zero_arm = ref None in
   let succ_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_nat_zero_ref r ->
@@ -1962,19 +2034,15 @@ and pp_std_nat_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_succ =
     match !succ_arm with
     | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__n - 1)"
+        pp_branch_call_expr state env ids body [str "__n - 1"]
     | None -> fallback ()
   in
   str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
@@ -1986,9 +2054,6 @@ and pp_std_positive_match_expr state env scrutinee branches =
   let xo_arm = ref None in
   let xi_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_positive_xh_ref r ->
@@ -2006,25 +2071,21 @@ and pp_std_positive_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_xh =
-    match !xh_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !xh_arm
   in
   let pp_xo =
     match !xo_arm with
     | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__p // 2)"
+        pp_branch_call_expr state env ids body [str "__p // 2"]
     | None -> fallback ()
   in
   let pp_xi =
     match !xi_arm with
     | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")((__p - 1) // 2)"
+        pp_branch_call_expr state env ids body [str "(__p - 1) // 2"]
     | None -> fallback ()
   in
   str "(lambda __p: _rocq_numeric_domain_error(\"positive\", __p) if __p <= 0 else " ++
@@ -2036,9 +2097,6 @@ and pp_std_N_match_expr state env scrutinee branches =
   let zero_arm = ref None in
   let pos_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_N_zero_ref r ->
@@ -2052,18 +2110,14 @@ and pp_std_N_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_pos =
     match !pos_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(__n)"
+    | Some (ids, body) -> pp_branch_call_expr state env ids body [str "__n"]
     | None -> fallback ()
   in
   str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
@@ -2075,9 +2129,6 @@ and pp_std_Z_match_expr state env scrutinee branches =
   let pos_arm = ref None in
   let neg_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_Z_zero_ref r ->
@@ -2093,23 +2144,19 @@ and pp_std_Z_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_pos =
     match !pos_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(__z)"
+    | Some (ids, body) -> pp_branch_call_expr state env ids body [str "__z"]
     | None -> fallback ()
   in
   let pp_neg =
     match !neg_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")(-__z)"
+    | Some (ids, body) -> pp_branch_call_expr state env ids body [str "-__z"]
     | None -> fallback ()
   in
   str "(lambda __z: " ++ pp_zero ++ str " if __z == 0 else " ++
@@ -2119,9 +2166,6 @@ and pp_std_Z_match_expr state env scrutinee branches =
 and pp_std_Q_match_expr state env scrutinee branches =
   let q_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, _) when is_std_Q_make_ref r ->
@@ -2139,18 +2183,12 @@ and pp_std_Q_match_expr state env scrutinee branches =
       str ")(__q.numerator, __q.denominator))(" ++
       pp_expr state env scrutinee ++ str ")"
   | None ->
-      (match !wildcard_arm with
-       | Some (ids, body) ->
-           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-       | None -> pp_impossible_expr ())
+      pp_branch_or_impossible_expr state env !wildcard_arm
 
 and pp_std_bool_match_expr state env scrutinee branches =
   let true_arm = ref None in
   let false_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_bool_true_ref r ->
@@ -2164,19 +2202,13 @@ and pp_std_bool_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_true =
-    match !true_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !true_arm
   in
   let pp_false =
-    match !false_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !false_arm
   in
   pp_true ++ str " if " ++ pp_expr state env scrutinee ++ str " else " ++ pp_false
 
@@ -2184,9 +2216,6 @@ and pp_std_option_match_expr state env scrutinee branches =
   let none_arm = ref None in
   let some_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_option_none_ref r ->
@@ -2200,19 +2229,15 @@ and pp_std_option_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_none =
-    match !none_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !none_arm
   in
   let pp_some =
     match !some_arm with
     | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__option)"
+        pp_branch_call_expr state env ids body [str "__option"]
     | None -> fallback ()
   in
   str "(lambda __option: " ++ pp_none ++ str " if __option is None else " ++
@@ -2222,9 +2247,6 @@ and pp_std_list_match_expr state env scrutinee branches =
   let nil_arm = ref None in
   let cons_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_list_nil_ref r ->
@@ -2238,20 +2260,15 @@ and pp_std_list_match_expr state env scrutinee branches =
   in
   Array.iter classify branches;
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> pp_impossible_expr ()
+    pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_nil =
-    match !nil_arm with
-    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !nil_arm
   in
   let pp_cons =
     match !cons_arm with
     | Some (ids, body) ->
-        str "(" ++ pp_branch_lambda state env ids body ++
-        str ")(__list[0], __list[1:])"
+        pp_branch_call_expr state env ids body [str "__list[0]"; str "__list[1:]"]
     | None -> fallback ()
   in
   str "(lambda __list: " ++ pp_nil ++ str " if __list == [] else " ++
@@ -2260,9 +2277,6 @@ and pp_std_list_match_expr state env scrutinee branches =
 and pp_std_prod_match_expr state env scrutinee branches =
   let pair_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, _) when is_std_prod_pair_ref r ->
@@ -2275,13 +2289,9 @@ and pp_std_prod_match_expr state env scrutinee branches =
   Array.iter classify branches;
   match !pair_arm with
   | Some (ids, body) ->
-      str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
-      str ")(__pair[0], __pair[1]))(" ++ pp_expr state env scrutinee ++ str ")"
+      pp_branch_pair_expr state env ids body (pp_expr state env scrutinee)
   | None ->
-      (match !wildcard_arm with
-       | Some (ids, body) ->
-           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
-       | None -> pp_impossible_expr ())
+      pp_branch_or_impossible_expr state env !wildcard_arm
 
 (*s Custom-match expression emitter.
     When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
@@ -2333,6 +2343,101 @@ let collect_app f args =
   in
   collect args f
 
+let pp_multiline_enclosed indent open_pp close_pp items =
+  let arg_pfx = indent_string (indent + 4) in
+  let close_pfx = indent_string indent in
+  open_pp ++ fnl () ++
+  prlist_with_sep
+    (fun () -> str "," ++ fnl ())
+    (fun item -> str arg_pfx ++ item)
+    items ++
+  str "," ++ fnl () ++ str close_pfx ++ close_pp
+
+let pp_multiline_items indent head items =
+  pp_multiline_enclosed indent (head ++ str "(") (str ")") items
+
+let pp_multiline_tuple indent items =
+  pp_multiline_enclosed indent (str "(") (str ")") items
+
+let rec pp_statement_expr state env indent = function
+  | MLmagic a ->
+      pp_statement_expr state env indent a
+  | MLcons (_, r, [value]) when is_std_option_some_ref r ->
+      pp_statement_expr state env indent value
+  | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
+      pp_multiline_tuple indent
+        [ pp_statement_expr state env (indent + 4) left;
+          pp_statement_expr state env (indent + 4) right ]
+  | MLcons (_, r, args)
+    when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
+         not (String.equal "" (str_cons state r)) &&
+         not (List.is_empty (get_record_fields (State.get_table state) r)) ->
+      let cons_name = str_cons state r in
+      let fds = get_record_fields (State.get_table state) r in
+      pp_multiline_items indent (str cons_name)
+        (List.mapi
+           (fun i a ->
+              pp_field_name state r fds i ++ str "=" ++
+              pp_statement_expr state env (indent + 4) a)
+           args)
+  | MLapp (f, args) -> (
+      let head, all_args = collect_app f args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      let collection_key kind key =
+        pp_collection_key kind (pp_expr state env key)
+      in
+      let call callee args =
+        pp_multiline_items indent callee
+          (List.map (pp_statement_expr state env (indent + 4)) args)
+      in
+      match head, all_args with
+      | MLglob r, [key; value; mapping]
+        when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
+          let kind =
+            if is_positive_map_ref r "add" then `Positive else `String
+          in
+          pp_multiline_items indent (str "_rocq_map_add")
+            [ collection_key kind key;
+              pp_statement_expr state env (indent + 4) value;
+              pp_statement_expr state env (indent + 4) mapping ]
+      | MLglob r, [key; mapping]
+        when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
+          let kind =
+            if is_positive_map_ref r "remove" then `Positive else `String
+          in
+          pp_multiline_items indent (str "_rocq_map_remove")
+            [ collection_key kind key;
+              pp_statement_expr state env (indent + 4) mapping ]
+      | MLglob r, [key; value; values]
+        when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
+          let kind =
+            if is_positive_set_ref r "add" then `Positive else `String
+          in
+          pp_multiline_items indent (str "_rocq_set_add")
+            [ collection_key kind key;
+              pp_statement_expr state env (indent + 4) value;
+              pp_statement_expr state env (indent + 4) values ]
+      | MLglob r, [key; values]
+        when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
+          let kind =
+            if is_positive_set_ref r "remove" then `Positive else `String
+          in
+          pp_multiline_items indent (str "_rocq_set_remove")
+            [ collection_key kind key;
+              pp_statement_expr state env (indent + 4) values ]
+      | _, _ when List.length all_args >= 3 ->
+          call (pp_expr state env head) all_args
+      | _ ->
+          pp_expr state env (MLapp (f, args)))
+  | expr ->
+      (match expr with
+       | MLtuple items when List.length items >= 2 ->
+           pp_multiline_tuple indent
+             (List.map (pp_statement_expr state env (indent + 4)) items)
+       | _ ->
+      pp_expr state env expr
+      )
+
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
     a statement, not an expression.  This printer recurses into [MLcase]
@@ -2364,13 +2469,16 @@ let rec pp_return_body state env indent = function
         pp_std_N_return_body state env indent scrutinee branches
       else if is_std_list_type ty then
         pp_std_list_return_body state env indent scrutinee branches
+      else if is_std_option_type ty then
+        pp_std_option_return_body state env indent scrutinee branches
       else if is_std_prod_type ty then
         pp_std_prod_return_body state env indent scrutinee branches
       else if is_std_ascii_type ty ||
               is_std_nat_type ty || is_std_positive_type ty ||
-              is_std_Z_type ty || is_std_Q_type ty ||
-              is_std_bool_type ty || is_std_option_type ty then
+              is_std_Z_type ty || is_std_Q_type ty then
         str "return " ++ pp_expr state env expr
+      else if is_std_bool_type ty then
+        pp_std_bool_return_body state env indent scrutinee branches
       else if is_bool then
         (* Ternary — valid expression; a single [return] suffices. *)
         str "return " ++ pp_expr state env expr
@@ -2425,7 +2533,14 @@ let rec pp_return_body state env indent = function
          is the shape produced by Program Fixpoint's [Fix_sub] helper. *)
       match unwrap_fix a1 with
       | None ->
-          str "return " ++ pp_expr state env (MLletin (id, a1, a2))
+          let params, env' = push_vars [id_of_mlid id] env in
+          let bname = List.hd params in
+          let pfx = String.make indent ' ' in
+          let pp_binder =
+            if Id.equal bname dummy_name then str "_" else pp_pyid bname
+          in
+          pp_binder ++ str " = " ++ pp_statement_expr state env indent a1 ++
+          fnl () ++ str pfx ++ pp_return_body state env' indent a2
       | Some (i, ids, defs) ->
       let params, env' = push_vars [id_of_mlid id] env in
       let bname = List.hd params in
@@ -2493,7 +2608,18 @@ let rec pp_return_body state env indent = function
           | _ ->
           match unwrap_fix head with
           | None ->
-              str "return " ++ pp_expr state env (MLapp (f, args))
+              (match head with
+               | MLlam _ as lam ->
+                   let ids, body = collect_lams lam in
+                   let visible_args =
+                     List.filter (fun a -> not (is_erased_arg a)) all_args
+                   in
+                   pp_return_arm state env indent ids
+                     (List.map (pp_expr state env) visible_args)
+                     body
+               | _ ->
+                   str "return " ++
+                   pp_statement_expr state env indent (MLapp (f, args)))
           | Some (i, ids, defs) ->
               let def_pfx = String.make indent ' ' in
               let pp_defs, selected = pp_fix_statement state env indent i ids defs in
@@ -2509,7 +2635,7 @@ let rec pp_return_body state env indent = function
       let pp_defs, selected = pp_fix_statement state env indent i ids defs in
       pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
   | expr ->
-      str "return " ++ pp_expr state env expr
+      str "return " ++ pp_statement_expr state env indent expr
 
 and pp_return_arm state env indent ids values body =
   let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
@@ -2530,13 +2656,14 @@ and pp_return_arm state env indent ids values body =
       prlist_with_sep (fun () -> fnl () ++ str pfx) (fun line -> line) lines ++
       fnl () ++ str pfx ++ pp_return_body state env' indent body
 
+and pp_return_or_impossible state env indent = function
+  | Some (ids, body) -> pp_return_arm state env indent ids [] body
+  | None -> pp_impossible_stmt ()
+
 and pp_std_list_return_body state env indent scrutinee branches =
   let nil_arm = ref None in
   let cons_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_list_nil_ref r ->
@@ -2552,9 +2679,7 @@ and pp_std_list_return_body state env indent scrutinee branches =
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> pp_impossible_stmt ()
+    pp_return_or_impossible state env (indent + 4) !wildcard_arm
   in
   let pp_nil =
     match !nil_arm with
@@ -2568,22 +2693,91 @@ and pp_std_list_return_body state env indent scrutinee branches =
           [str "__list[0]"; str "__list[1:]"]
           body
     | None ->
-        (match !wildcard_arm with
-         | Some (ids, body) -> pp_return_arm state env indent ids [] body
-         | None -> pp_impossible_stmt ())
+        pp_return_or_impossible state env indent !wildcard_arm
   in
   str "__list = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __list == []:" ++ fnl () ++
   str body_pfx ++ pp_nil ++ fnl () ++
   str pfx ++ pp_cons
 
+and pp_std_option_return_body state env indent scrutinee branches =
+  let none_arm = ref None in
+  let some_arm = ref None in
+  let wildcard_arm = ref None in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_option_none_ref r ->
+        set_once none_arm (ids, body)
+    | Pcons (r, _) when is_std_option_some_ref r ->
+        set_once some_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback body_indent =
+    pp_return_or_impossible state env body_indent !wildcard_arm
+  in
+  let pp_none =
+    match !none_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_some =
+    match !some_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env indent ids [str "__option"] body
+    | None ->
+        pp_return_or_impossible state env indent !wildcard_arm
+  in
+  str "__option = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __option is None:" ++ fnl () ++
+  str body_pfx ++ pp_none ++ fnl () ++
+  str pfx ++ pp_some
+
+and pp_std_bool_return_body state env indent scrutinee branches =
+  let true_arm = ref None in
+  let false_arm = ref None in
+  let wildcard_arm = ref None in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_bool_true_ref r ->
+        set_once true_arm (ids, body)
+    | Pcons (r, []) when is_std_bool_false_ref r ->
+        set_once false_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported bool pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback body_indent =
+    pp_return_or_impossible state env body_indent !wildcard_arm
+  in
+  let pp_true =
+    match !true_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_false =
+    match !false_arm with
+    | Some (ids, body) -> pp_return_arm state env indent ids [] body
+    | None ->
+        pp_return_or_impossible state env indent !wildcard_arm
+  in
+  str "if " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
+  str body_pfx ++ pp_true ++ fnl () ++
+  str pfx ++ pp_false
+
 and pp_std_string_return_body state env indent scrutinee branches =
   let empty_arm = ref None in
   let cons_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_string_empty_ref r ->
@@ -2599,9 +2793,7 @@ and pp_std_string_return_body state env indent scrutinee branches =
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback () =
-    match !wildcard_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> pp_impossible_stmt ()
+    pp_return_or_impossible state env (indent + 4) !wildcard_arm
   in
   let pp_empty =
     match !empty_arm with
@@ -2615,9 +2807,7 @@ and pp_std_string_return_body state env indent scrutinee branches =
           [str "__pair[0]"; str "__pair[1]"]
           body
     | None ->
-        (match !wildcard_arm with
-         | Some (ids, body) -> pp_return_arm state env indent ids [] body
-         | None -> pp_impossible_stmt ())
+        pp_return_or_impossible state env indent !wildcard_arm
   in
   str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __s == \"\":" ++ fnl () ++
@@ -2629,9 +2819,6 @@ and pp_std_N_return_body state env indent scrutinee branches =
   let zero_arm = ref None in
   let pos_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, []) when is_std_N_zero_ref r ->
@@ -2647,9 +2834,7 @@ and pp_std_N_return_body state env indent scrutinee branches =
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback branch_indent =
-    match !wildcard_arm with
-    | Some (ids, body) -> pp_return_arm state env branch_indent ids [] body
-    | None -> pp_impossible_stmt ()
+    pp_return_or_impossible state env branch_indent !wildcard_arm
   in
   let pp_zero =
     match !zero_arm with
@@ -2671,9 +2856,6 @@ and pp_std_N_return_body state env indent scrutinee branches =
 and pp_std_prod_return_body state env indent scrutinee branches =
   let pair_arm = ref None in
   let wildcard_arm = ref None in
-  let set_once slot value =
-    match !slot with None -> slot := Some value | Some _ -> ()
-  in
   let classify (ids, pat, body) =
     match expand_pusual (List.length ids) pat with
     | Pcons (r, _) when is_std_prod_pair_ref r ->
@@ -2690,9 +2872,7 @@ and pp_std_prod_return_body state env indent scrutinee branches =
       str (String.make indent ' ') ++
       pp_return_arm state env indent ids [str "__pair[0]"; str "__pair[1]"] body
   | None ->
-      (match !wildcard_arm with
-       | Some (ids, body) -> pp_return_arm state env indent ids [] body
-       | None -> pp_impossible_stmt ())
+      pp_return_or_impossible state env indent !wildcard_arm
 
 and pp_fix_statement state env indent i ids defs =
   let n = Array.length ids in
@@ -2968,6 +3148,35 @@ let signature_data state name typ =
   in
   (pp_term_typevar_decls ++ protocol_pp, arg_annots, pp_term_type ret)
 
+let pp_def_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  if List.length params >= 2 then
+    def_prefix ++ str name ++ str "(" ++ fnl () ++
+    prlist_with_sep
+      (fun () -> str "," ++ fnl ())
+      (fun (param, annot) -> str "    " ++ param ++ str ": " ++ annot)
+      params ++
+    str "," ++ fnl () ++
+    str ") -> " ++ ret_annot ++ str ":"
+  else
+    def_prefix ++ str name ++ str "(" ++
+    prlist_with_sep
+      (fun () -> str ", ")
+      (fun (param, annot) -> param ++ str ": " ++ annot)
+      params ++
+    str ") -> " ++ ret_annot ++ str ":"
+
+let pp_unannotated_def_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  def_prefix ++ str name ++ str "(" ++ pp_param_list params ++ str ") -> " ++
+  ret_annot ++ str ":"
+
+let annotated_params_opt params annots =
+  if Int.equal (List.length params) (List.length annots) then
+    Some (List.mapi (fun i param -> (pp_param param, List.nth annots i)) params)
+  else
+    None
+
 (*s Python term declaration emitter.
     Detects a lambda-headed RHS and promotes it to a [def]; non-lambda
     RHS stays as a simple assignment. *)
@@ -3010,23 +3219,16 @@ let pp_function_wrapper state env name a typ =
             (List.init n Fun.id) ++
           str ")"
     in
+    let pp_signature =
+      pp_def_signature name
+        (List.mapi (fun i arg -> (pp_pyname arg, List.nth arg_annots i)) arg_names)
+        ret_annot
+    in
     Some (
       pp_prefix ++
-      str "def " ++ str name ++ str "(" ++
-      prlist_with_sep (fun () -> str ", ")
-        (fun i ->
-           pp_pyname (List.nth arg_names i) ++ str ": " ++ List.nth arg_annots i)
-        (List.init n Fun.id) ++
-      str ") -> " ++ ret_annot ++
-      str ":" ++ fnl () ++
+      pp_signature ++ fnl () ++
       str "    return " ++ pp_call ++ fnl ()
     )
-
-let pp_annotated_params names annots =
-  prlist_with_sep (fun () -> str ", ")
-    (fun i ->
-       pp_param (List.nth names i) ++ str ": " ++ List.nth annots i)
-    (List.init (List.length names) Fun.id)
 
 let pp_io_term_decl state env name a typ ret_typ =
   let builder_name = "_io_" ^ name in
@@ -3058,8 +3260,7 @@ let pp_io_term_decl state env name a typ ret_typ =
       in
       if List.is_empty args then
         builder ++ fnl () ++ fnl () ++ facade_prefix ++
-        str "async def " ++ str name ++ str "() -> " ++ facade_ret_annot ++
-        str ":" ++ fnl () ++
+        pp_def_signature ~is_async:true name [] facade_ret_annot ++ fnl () ++
         str "    return await " ++ str builder_name ++ str ".run()" ++ fnl ()
       else
         let arg_names =
@@ -3067,40 +3268,56 @@ let pp_io_term_decl state env name a typ ret_typ =
           else List.init (List.length args) (fun i -> "arg" ^ string_of_int i)
         in
         builder ++ fnl () ++ fnl () ++ facade_prefix ++
-        str "async def " ++ str name ++ str "(" ++
-        prlist_with_sep (fun () -> str ", ")
-          (fun i ->
-             pp_pyname (List.nth arg_names i) ++ str ": " ++
-             List.nth facade_arg_annots i)
-          (List.init (List.length arg_names) Fun.id) ++
-        str ") -> " ++ facade_ret_annot ++ str ":" ++ fnl () ++
+        pp_def_signature ~is_async:true name
+          (List.mapi
+             (fun i arg -> (pp_pyname arg, List.nth facade_arg_annots i))
+             arg_names)
+          facade_ret_annot ++ fnl () ++
         str "    " ++ facade_call pp_pyname arg_names ++ fnl ()
   | _ ->
       let params = List.map id_of_mlid lam_ids in
       let params', env' = push_vars params env in
       let visible_params_rev = List.rev (visible_params params') in
-      let pp_builder_params =
-        if Int.equal (List.length visible_params_rev) (List.length builder_arg_annots) then
-          pp_annotated_params visible_params_rev builder_arg_annots
-        else
-          pp_param_list (List.rev params')
+      let builder_params =
+        annotated_params_opt visible_params_rev builder_arg_annots
       in
-      let pp_facade_params =
-        if Int.equal (List.length visible_params_rev) (List.length facade_arg_annots) then
-          pp_annotated_params visible_params_rev facade_arg_annots
-        else
-          pp_param_list (List.rev params')
+      let facade_params =
+        annotated_params_opt visible_params_rev facade_arg_annots
       in
       let builder =
         builder_prefix ++
-        str "def " ++ str builder_name ++ str "(" ++ pp_builder_params ++
-        str ") -> " ++ builder_ret_annot ++ str ":" ++ fnl () ++
+        (match builder_params with
+         | Some params -> pp_def_signature builder_name params builder_ret_annot
+         | None ->
+             pp_unannotated_def_signature builder_name (List.rev params')
+               builder_ret_annot) ++ fnl () ++
         str "    " ++ pp_return_body state env' 4 body ++ fnl ()
       in
       builder ++ fnl () ++ fnl () ++ facade_prefix ++
-      str "async def " ++ str name ++ str "(" ++ pp_facade_params ++
-      str ") -> " ++ facade_ret_annot ++ str ":" ++ fnl () ++
+      (match facade_params with
+       | Some params -> pp_def_signature ~is_async:true name params facade_ret_annot
+       | None ->
+           pp_unannotated_def_signature ~is_async:true name (List.rev params')
+             facade_ret_annot) ++ fnl () ++
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
+
+let pp_top_level_record_value state env name typ r args =
+  let fields = get_record_fields (State.get_table state) r in
+  let pp_field_arg (index, value) =
+    str "    " ++ pp_field_name state r fields index ++ str "=" ++ pp_expr state env value
+  in
+  str name ++ str ": " ++ pp_type state typ ++ str " = " ++
+  str (pp_global state Cons r) ++ str "(" ++ fnl () ++
+  prlist_with_sep
+    (fun () -> str "," ++ fnl ())
+    pp_field_arg
+    (List.mapi (fun index value -> (index, value)) args) ++
+  str "," ++ fnl () ++
+  str ")" ++ fnl ()
+
+let uses_native_record_constructor state r =
+  let fields = get_record_fields (State.get_table state) r in
+  not (List.is_empty fields) && not (is_std_Q_make_ref r)
 
 let pp_term_decl state env name a typ =
   let lam_ids, body = collect_lams a in
@@ -3116,6 +3333,8 @@ let pp_term_decl state env name a typ =
     ( match a with
       | MLaxiom _ | MLexn _ | MLparray _ ->
           pp_expr state env a ++ fnl ()
+      | MLcons (_, r, args) when uses_native_record_constructor state r ->
+          pp_prefix ++ pp_top_level_record_value state env name typ r args
       | _ ->
           (match pp_function_wrapper state env name a typ with
           | Some pp -> pp
@@ -3127,21 +3346,133 @@ let pp_term_decl state env name a typ =
     let params = List.map id_of_mlid lam_ids in
     let params', env' = push_vars params env in
     let visible_params_rev = List.rev (visible_params params') in
-    let pp_params =
-      if Int.equal (List.length visible_params_rev) (List.length arg_annots) then
-        pp_annotated_params visible_params_rev arg_annots
-      else
-        pp_param_list (List.rev params')
-    in
+    let pp_params = annotated_params_opt visible_params_rev arg_annots in
     pp_prefix ++
-    str "def " ++ str name ++ str "(" ++
-    pp_params ++
-    str ") -> " ++ ret_annot ++
-    str ":" ++ fnl () ++
+    (match pp_params with
+     | Some params -> pp_def_signature name params ret_annot
+     | None ->
+         pp_unannotated_def_signature name (List.rev params') ret_annot) ++
+    fnl () ++
     (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
        at 8, case bodies at 12.  The "    " prefix handles the first line only;
        [pp_return_body] generates the rest with absolute column positions. *)
     str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+
+let pp_method_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  if List.length params >= 1 then
+    def_prefix ++ str name ++ str "(" ++ fnl () ++
+    str "    self," ++ fnl () ++
+    prlist_with_sep
+      (fun () -> str "," ++ fnl ())
+      (fun (param, annot) -> str "    " ++ param ++ str ": " ++ annot)
+      params ++
+    str "," ++ fnl () ++
+    str ") -> " ++ ret_annot ++ str ":"
+  else
+    def_prefix ++ str name ++ str "(self) -> " ++ ret_annot ++ str ":"
+
+let pp_unannotated_method_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  let pp_tail =
+    if List.is_empty params then
+      mt ()
+    else
+      str ", " ++
+      prlist_with_sep (fun () -> str ", ") pp_param params
+  in
+  def_prefix ++ str name ++ str "(self" ++ pp_tail ++ str ") -> " ++
+  ret_annot ++ str ":"
+
+let pp_method_term_decl state env method_name a typ =
+  let lam_ids, body = collect_lams a in
+  let args, ret = type_decomp typ in
+  match lam_ids, args with
+  | _ :: _, _ :: method_args ->
+      let method_typ = arrow_type method_args ret in
+      let pp_prefix, arg_annots, ret_annot =
+        signature_data state method_name method_typ
+      in
+      let params = List.map id_of_mlid lam_ids in
+      let params', env' = push_vars params env in
+      let visible_params_rev = List.rev (visible_params params') in
+      (match visible_params_rev with
+       | [] -> extraction_diagnostic_error "PYEX040"
+       | self_param :: method_params ->
+           let self_alias = Pp.string_of_ppcmds (pp_param self_param) in
+           let pp_params = annotated_params_opt method_params arg_annots in
+           pp_prefix ++
+           (match pp_params with
+            | Some params -> pp_method_signature method_name params ret_annot
+            | None ->
+                pp_unannotated_method_signature method_name method_params ret_annot) ++
+           fnl () ++
+           (if String.equal self_alias "self" then mt ()
+            else str "    " ++ str self_alias ++ str " = self" ++ fnl ()) ++
+           str "    " ++ pp_return_body state env' 4 body ++ fnl ())
+  | _ -> extraction_diagnostic_error "PYEX040"
+
+let underscore_prefix name =
+  match String.index_opt name '_' with
+  | None -> None
+  | Some index when index > 0 -> Some (String.sub name 0 index)
+  | Some _ -> None
+
+let consistent_field_prefix field_names =
+  match List.filter_map underscore_prefix field_names with
+  | [] -> None
+  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
+  | _ -> None
+
+let method_target_of_term_decl state record_class_prefixes record_field_names = function
+  | Dterm (r, _a, typ) -> (
+      if is_custom r then None else
+      let args, _ret = type_decomp typ in
+      match args with
+      | [] -> None
+      | Tglob (self_ref, _) :: _ ->
+          let class_name = capitalize_first (pp_global state Term self_ref) in
+          let source_name = pp_global state Term r in
+          if List.mem source_name record_field_names then None
+          else
+            (match List.assoc_opt class_name record_class_prefixes, String.index_opt source_name '_' with
+             | Some prefix, Some index when String.equal prefix (String.sub source_name 0 index) ->
+                 let method_name =
+                   String.sub source_name (index + 1)
+                     (String.length source_name - index - 1)
+                 in
+                 Some (class_name, method_name)
+             | _ -> None)
+      | _ :: _ -> None)
+  | _ -> None
+
+let record_class_name_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record _ when Array.length ind.ind_packets > 0 ->
+          Some (capitalize_first (pp_global state Term ind.ind_packets.(0).ip_typename_ref))
+      | _ -> None)
+  | _ -> None
+
+let record_field_names_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record fields when Array.length ind.ind_packets > 0 ->
+          let packet = ind.ind_packets.(0) in
+          let ind_kn = kn_of_ind packet.ip_typename_ref in
+          Some
+            (List.filter_map
+               (function
+                 | Some r' -> Some (pp_global_with_key state Term ind_kn r')
+                 | None -> None)
+               fields)
+      | _ -> None)
+  | _ -> None
+
+let record_class_prefix_of_decl state decl =
+  match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
+  | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
+  | _ -> None
 
 (*s Inductive type emission as Python dataclasses.
     Each live constructor becomes a frozen [@dataclass] class whose fields
@@ -3174,8 +3505,13 @@ let pp_type_shifted_with state shift pp_tvar typ =
 let pp_type_shifted state shift =
   pp_type_shifted_with state shift typevar_name
 
-let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name) packet fields_opt base_opt j =
-  let cname = pp_global state Cons packet.ip_consnames_ref.(j) in
+let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
+    ?class_name packet fields_opt base_opt j =
+  let cname =
+    match class_name with
+    | Some name -> name
+    | None -> pp_global state Cons packet.ip_consnames_ref.(j)
+  in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
   let field_name i =
@@ -3655,10 +3991,102 @@ let pp_structure_elem state = function
       let name = module_binding_name state l in
       pp_named_module_type_decl state name mt
 
+let pp_structure_sel state sel =
+  let methods_by_class = Hashtbl.create 8 in
+  let class_names =
+    List.filter_map
+      (function
+        | (_, SEdecl d) -> record_class_name_of_decl state d
+        | (_, SEmodule _) | (_, SEmodtype _) -> None)
+      sel
+  in
+  let class_prefixes =
+    List.filter_map
+      (function
+        | (_, SEdecl d) -> record_class_prefix_of_decl state d
+        | (_, SEmodule _) | (_, SEmodtype _) -> None)
+      sel
+  in
+  let record_field_names =
+    List.concat
+      (List.filter_map
+         (function
+           | (_, SEdecl d) -> record_field_names_of_decl state d
+           | (_, SEmodule _) | (_, SEmodtype _) -> None)
+         sel)
+  in
+  List.iter
+      (function
+      | (_, SEdecl (Dterm (r, _a, _typ) as d)) -> (
+          match method_target_of_term_decl state class_prefixes record_field_names d with
+          | Some (class_name, method_name) when List.mem class_name class_names ->
+              let entries =
+                match Hashtbl.find_opt methods_by_class class_name with
+                | Some entries -> entries
+                | None -> []
+              in
+              Hashtbl.replace methods_by_class class_name ((method_name, d) :: entries)
+          | _ -> ())
+      | (_, SEdecl _d) -> ()
+      | (_, SEmodule _) | (_, SEmodtype _) -> ())
+    sel;
+  let method_targets =
+    Hashtbl.to_seq methods_by_class
+    |> List.of_seq
+    |> List.concat_map
+         (fun (class_name, methods) ->
+            List.map
+              (fun (method_name, decl) ->
+                 match decl with
+                 | Dterm (r, _a, _typ) ->
+                     (pp_global state Term r, (class_name, method_name))
+                 | _ -> extraction_diagnostic_error "PYEX040")
+              methods)
+  in
+  let prior_method_targets = !active_method_targets in
+  active_method_targets := method_targets;
+  let rendered =
+  let pp_record_methods class_name =
+    match Hashtbl.find_opt methods_by_class class_name with
+    | None -> mt ()
+    | Some methods ->
+        fnl () ++
+        prlist_with_sep
+          (fun () -> fnl ())
+          (fun (method_name, decl) ->
+             match decl with
+             | Dterm (_r, a, typ) ->
+                 indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
+             | _ -> mt ())
+          (List.rev methods)
+  in
+  prlist
+    (function
+      | (_, SEdecl d) -> (
+          match method_target_of_term_decl state class_prefixes record_field_names d with
+          | Some (class_name, _method_name) when List.mem class_name class_names ->
+              mt ()
+          | _ ->
+              pp_decl state d ++
+              (match record_class_name_of_decl state d with
+               | Some class_name -> pp_record_methods class_name
+               | None -> mt ()))
+      | (l, SEmodule m) ->
+          let name = module_binding_name state l in
+          if is_std_collection_module_name name then mt ()
+          else pp_named_module_binding state 0 name m ++ fnl ()
+      | (l, SEmodtype mt) ->
+          let name = module_binding_name state l in
+          pp_named_module_type_decl state name mt)
+    sel
+  in
+  active_method_targets := prior_method_targets;
+  rendered
+
 let pp_struct state struc =
   let pp_mod (mp, sel) =
     State.with_visibility state mp [] (fun state ->
-      prlist (pp_structure_elem state) sel)
+      pp_structure_sel state sel)
   in
   prlist pp_mod struc
 

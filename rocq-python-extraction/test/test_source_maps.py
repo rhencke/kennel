@@ -1,10 +1,10 @@
 import io
-import json
 import traceback
 from pathlib import Path
 
 import pytest
 
+from fido.rocq_pymap import PyMap
 from fido.rocq_traceback import TracebackAnnotator
 
 
@@ -14,21 +14,16 @@ def test_generated_python_has_no_inline_source_comments(build_default: Path) -> 
 
 
 def test_generated_pymap_points_back_to_rocq_source(build_default: Path) -> None:
-    data = json.loads((build_default / "source_map_runtime_error.pymap").read_text())
+    source_map = PyMap.load(build_default / "source_map_runtime_error.pymap")
+    entry = source_map.entries[0]
 
-    assert data["version"] == 1
-    assert data["python_file"] == "source_map_runtime_error.py"
-    assert data["entries"][0]["source_file"] == "source_maps.v"
-    assert data["entries"][0]["source_start_line"] > 0
-    assert data["entries"][0]["source_start_col"] >= 0
-    assert data["entries"][0]["python_start_line"] > 0
-    assert data["entries"][0]["python_start_col"] >= 0
-    assert (
-        data["entries"][0]["python_end_line"] >= data["entries"][0]["python_start_line"]
-    )
-    assert (
-        data["entries"][0]["python_end_col"] >= data["entries"][0]["python_start_col"]
-    )
+    assert entry.source_file == "source_maps.v"
+    assert entry.source_start_line > 0
+    assert entry.source_start_col >= 0
+    assert entry.python_start_line > 0
+    assert entry.python_start_col >= 0
+    assert entry.python_end_line >= entry.python_start_line
+    assert entry.python_end_col >= entry.python_start_col
 
 
 def test_traceback_cli_resolves_runtime_error_to_rocq_source(

@@ -77,5 +77,68 @@ Fixpoint repo_providers (repos : list repo_entry) : list String.string :=
 Definition repo_count (repos : list repo_entry) : nat :=
   List.length repos.
 
+(** [CoordIndex] groups the runtime coordination inputs that otherwise repeat
+    across most operations.  It is the source-level object boundary we want the
+    Python backend to recognize as a class-shaped API. *)
+Record CoordIndex : Type := {
+  coord_claims : PositiveSet.t;
+  coord_issue_owners : PositiveMap.t String.string;
+  coord_repos : list repo_entry
+}.
+
+(** [empty_coord_index] creates an empty runtime coordination index. *)
+Definition empty_coord_index : CoordIndex := {|
+  coord_claims := PositiveSet.empty;
+  coord_issue_owners := PositiveMap.empty String.string;
+  coord_repos := []
+|}.
+
+(** [coord_add_claim] records an owned claim in a whole coordination index. *)
+Definition coord_add_claim (index : CoordIndex) (thread : positive) : CoordIndex := {|
+  coord_claims := add_claim thread index.(coord_claims);
+  coord_issue_owners := index.(coord_issue_owners);
+  coord_repos := index.(coord_repos)
+|}.
+
+(** [coord_remove_claim] clears an owned claim in a whole coordination index. *)
+Definition coord_remove_claim (index : CoordIndex) (thread : positive) : CoordIndex := {|
+  coord_claims := remove_claim thread index.(coord_claims);
+  coord_issue_owners := index.(coord_issue_owners);
+  coord_repos := index.(coord_repos)
+|}.
+
+(** [coord_has_claim] checks claim ownership through the grouped index. *)
+Definition coord_has_claim (index : CoordIndex) (thread : positive) : bool :=
+  has_claim index.(coord_claims) thread.
+
+(** [coord_assign_issue] records a GitHub issue owner in the grouped index. *)
+Definition coord_assign_issue (index : CoordIndex) (issue : positive)
+    (owner : String.string) : CoordIndex := {|
+  coord_claims := index.(coord_claims);
+  coord_issue_owners := assign_issue issue owner index.(coord_issue_owners);
+  coord_repos := index.(coord_repos)
+|}.
+
+(** [coord_unassign_issue] clears a GitHub issue owner in the grouped index. *)
+Definition coord_unassign_issue (index : CoordIndex) (issue : positive) : CoordIndex := {|
+  coord_claims := index.(coord_claims);
+  coord_issue_owners := unassign_issue issue index.(coord_issue_owners);
+  coord_repos := index.(coord_repos)
+|}.
+
+(** [coord_issue_owner] looks up a GitHub issue owner through the grouped index. *)
+Definition coord_issue_owner (index : CoordIndex) (issue : positive)
+    : option String.string :=
+  issue_owner index.(coord_issue_owners) issue.
+
+(** [coord_repo_providers] projects runtime repo providers through the grouped
+    index. *)
+Definition coord_repo_providers (index : CoordIndex) : list String.string :=
+  repo_providers index.(coord_repos).
+
+(** [coord_repo_count] counts runtime repos through the grouped index. *)
+Definition coord_repo_count (index : CoordIndex) : nat :=
+  repo_count index.(coord_repos).
+
 Python File Extraction coord_index
-  "add_claim remove_claim has_claim assign_issue unassign_issue issue_owner repo_providers repo_count".
+  "add_claim remove_claim has_claim assign_issue unassign_issue issue_owner repo_providers repo_count empty_coord_index coord_add_claim coord_remove_claim coord_has_claim coord_assign_issue coord_unassign_issue coord_issue_owner coord_repo_providers coord_repo_count".

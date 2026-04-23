@@ -15,6 +15,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import IO, Any
 
+from fido.rocq_pymap import PyMap, PyMapError
+
 _IMPORT_MODULES = {
     "dataclasses",
     "itertools",
@@ -222,14 +224,13 @@ class ModelLoader:
         map_path = path.with_suffix(".pymap")
         if map_path.is_file():
             try:
-                data = json.loads(map_path.read_text())
-            except json.JSONDecodeError as exc:
+                source_map = PyMap.load(map_path)
+            except PyMapError as exc:
                 print(f"warning: could not parse {map_path}: {exc}", file=self._stderr)
             else:
                 return any(
-                    Path(str(entry.get("source_file", ""))).name == source.name
-                    for entry in data.get("entries", [])
-                    if isinstance(entry, dict)
+                    Path(entry.source_file).name == source.name
+                    for entry in source_map.entries
                 )
 
         marker = f"# From {source.name}:"
@@ -254,22 +255,20 @@ class ModelLoader:
         if not path.is_file():
             return {}
         try:
-            data = json.loads(path.read_text())
-        except json.JSONDecodeError as exc:
+            source_map = PyMap.load(path)
+        except PyMapError as exc:
             print(f"warning: could not parse {path}: {exc}", file=self._stderr)
             return {}
         symbols: dict[str, RocqSymbol] = {}
-        for entry in data.get("entries", []):
-            if not isinstance(entry, dict):
-                continue
-            symbol = str(entry.get("symbol", ""))
+        for entry in source_map.entries:
+            symbol = entry.symbol
             if not symbol:
                 continue
             symbols[symbol] = RocqSymbol(
                 name=symbol,
-                source_file=str(entry["source_file"]),
-                source_start_line=int(entry["source_start_line"]),
-                source_start_col=int(entry["source_start_col"]),
+                source_file=entry.source_file,
+                source_start_line=entry.source_start_line,
+                source_start_col=entry.source_start_col,
             )
         return symbols
 

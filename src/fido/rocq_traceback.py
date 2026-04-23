@@ -1,12 +1,13 @@
 """Annotate extracted Python tracebacks with Rocq source locations."""
 
 import argparse
-import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO
+
+from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError
 
 _FRAME_RE = re.compile(
     r'^(?P<prefix>\s*File ")(?P<file>[^"]+)(?P<mid>", line )'
@@ -25,15 +26,15 @@ class SourceMapEntry:
     source_start_col: int
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> SourceMapEntry:
+    def from_pymap(cls, entry: PyMapEntry) -> SourceMapEntry:
         return cls(
-            python_start_line=int(data["python_start_line"]),
-            python_start_col=int(data.get("python_start_col", 0)),
-            python_end_line=int(data["python_end_line"]),
-            python_end_col=int(data.get("python_end_col", 0)),
-            source_file=str(data["source_file"]),
-            source_start_line=int(data["source_start_line"]),
-            source_start_col=int(data["source_start_col"]),
+            python_start_line=entry.python_start_line,
+            python_start_col=entry.python_start_col,
+            python_end_line=entry.python_end_line,
+            python_end_col=entry.python_end_col,
+            source_file=entry.source_file,
+            source_start_line=entry.source_start_line,
+            source_start_col=entry.source_start_col,
         )
 
     def contains(self, line: int) -> bool:
@@ -49,11 +50,8 @@ class SourceMap:
 
     @classmethod
     def load(cls, path: Path) -> SourceMap:
-        raw = json.loads(path.read_text())
-        if raw.get("version") != 1:
-            raise ValueError(f"unsupported source map version in {path}")
         entries = tuple(
-            SourceMapEntry.from_json(entry) for entry in raw.get("entries", [])
+            SourceMapEntry.from_pymap(entry) for entry in PyMap.load(path).entries
         )
         return cls(entries)
 
@@ -102,7 +100,7 @@ class TracebackAnnotator:
             return None
         try:
             return SourceMap.load(map_path)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        except (OSError, PyMapError) as exc:
             print(f"warning: could not read {map_path}: {exc}", file=self._err)
             return None
 

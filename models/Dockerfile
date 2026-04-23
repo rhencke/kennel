@@ -140,6 +140,11 @@ COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/
 RUN targets="" \
     && for model in models/*.v; do targets="$targets ${model%.v}.vo"; done \
     && tools/rocq_model_outputs.sh models/*.v > /tmp/expected-model-outputs \
+    && while IFS= read -r output; do \
+        rm -f "/workspace/_build/default/$output"; \
+    done < /tmp/expected-model-outputs \
+    && rm -rf /workspace/_build/default/rocq-python-extraction \
+    && rm -f /workspace/_build/default/models/*.vo /workspace/_build/default/models/*.glob \
     && opam exec -- dune build $targets \
     && mkdir -p /tmp/model-output/src/fido/rocq \
     && while IFS= read -r output; do \

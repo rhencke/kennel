@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import IO, Any
 from urllib.parse import unquote, urlparse
 
+from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError, UnsupportedPyMapStability
+
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*")
 _KEYWORDS = frozenset(
     {
@@ -178,6 +180,7 @@ class RocqIndex:
         self._models_dir = self._repo_root / "models"
         self._generated_dir = self._repo_root / "src" / "fido" / "rocq"
         self._symbols: dict[str, Symbol] = {}
+        self._python_symbols: dict[str, Symbol] = {}
         self._diagnostics: list[Diagnostic] = []
 
     @property
@@ -190,6 +193,7 @@ class RocqIndex:
 
     def refresh(self) -> None:
         self._symbols = {}
+        self._python_symbols = {}
         self._diagnostics = []
         if not self._generated_dir.is_dir():
             self._diagnostics.append(
@@ -201,11 +205,19 @@ class RocqIndex:
 
     def symbol_at(self, path: Path, line: int, character: int) -> Symbol | None:
         source = self._resolve(path)
+        if source.is_relative_to(self._generated_dir):
+            python_symbol = self._python_symbol_at(source, line, character)
+            if python_symbol is not None:
+                return python_symbol
         for symbol in self.symbols_for_file(source):
             if _contains(symbol.source.range, line, character):
                 return symbol
         token = self._token_at(source, line, character)
-        return self._symbols.get(token) if token else None
+        if token is None:
+            return None
+        if source.is_relative_to(self._generated_dir):
+            return self._python_symbols.get(token)
+        return self._symbols.get(token)
 
     def symbols_for_file(self, path: Path) -> tuple[Symbol, ...]:
         source = self._resolve(path)
@@ -276,41 +288,41 @@ class RocqIndex:
 
     def _load_map(self, map_path: Path) -> None:
         try:
-            raw = json.loads(map_path.read_text())
-        except json.JSONDecodeError as exc:
+            source_map = PyMap.load(map_path)
+        except UnsupportedPyMapStability:
+            self._diagnostics.append(
+                Diagnostic(f"unsupported source map stability in {map_path.name}")
+            )
+            return
+        except PyMapError as exc:
             self._diagnostics.append(
                 Diagnostic(f"bad source map {map_path.name}: {exc}")
             )
             return
-        if raw.get("version") != 1:
-            self._diagnostics.append(
-                Diagnostic(f"unsupported source map version in {map_path.name}")
-            )
-            return
-        python_path = self._generated_dir / str(raw.get("python_file", ""))
+        python_path = map_path.with_suffix(".py")
         signatures = _python_signatures(python_path)
-        for entry in raw.get("entries", []):
-            if isinstance(entry, dict):
-                self._load_entry(map_path, python_path, signatures, entry)
+        for entry in source_map.entries:
+            self._load_entry(map_path, python_path, signatures, entry)
 
     def _load_entry(
         self,
         map_path: Path,
         python_path: Path,
         signatures: dict[str, tuple[str, Range]],
-        entry: dict[str, Any],
+        entry: PyMapEntry,
     ) -> None:
-        name = str(entry.get("symbol", ""))
+        name = entry.symbol
         if not name:
             return
-        source = self._source_path(str(entry.get("source_file", "")))
+        python_name = entry.python_symbol or name
+        source = self._source_path(entry.source_file)
         if source is None:
             self._diagnostics.append(
                 Diagnostic(f"{map_path.name}: source file missing for {name}")
             )
             return
-        start_line = int(entry["source_start_line"]) - 1
-        start_col = int(entry["source_start_col"])
+        start_line = entry.source_start_line - 1
+        start_col = entry.source_start_col
         source_location = Location(
             source,
             Range(
@@ -318,7 +330,7 @@ class RocqIndex:
                 Position(start_line, start_col + len(name)),
             ),
         )
-        python_info = signatures.get(name)
+        python_info = signatures.get(python_name)
         python_location: Location | None = None
         python_signature: str | None = None
         if python_info is not None:
@@ -329,16 +341,22 @@ class RocqIndex:
             )
         else:
             self._diagnostics.append(
-                Diagnostic(f"generated Python declaration missing for {name}", source)
+                Diagnostic(
+                    f"generated Python declaration missing for {python_name}", source
+                )
             )
         if name in self._symbols:
             self._diagnostics.append(Diagnostic(f"duplicate extracted symbol: {name}"))
-        self._symbols[name] = Symbol(
+        symbol = Symbol(
             name=name,
             source=source_location,
             python=python_location,
             python_signature=python_signature,
         )
+        self._symbols[name] = symbol
+        self._python_symbols.setdefault(python_name, symbol)
+        if "." in python_name:
+            self._python_symbols.setdefault(python_name.rsplit(".", 1)[1], symbol)
         if (
             python_path.is_file()
             and source.stat().st_mtime > python_path.stat().st_mtime
@@ -370,6 +388,18 @@ class RocqIndex:
             if match.start() <= character < match.end():
                 return match.group(0)
         return None
+
+    def _python_symbol_at(self, path: Path, line: int, character: int) -> Symbol | None:
+        matches = [
+            symbol
+            for symbol in self._symbols.values()
+            if symbol.python is not None
+            and symbol.python.path == path
+            and _contains(symbol.python.range, line, character)
+        ]
+        if not matches:
+            return None
+        return min(matches, key=_python_symbol_span_size)
 
 
 class RocqLanguageService:
@@ -864,9 +894,26 @@ def _repo_path(repo_root: Path, path: Path) -> str:
 
 
 def _contains(value: Range, line: int, character: int) -> bool:
-    if line != value.start.line:
+    if line < value.start.line or line > value.end.line:
         return False
-    return value.start.character <= character <= value.end.character
+    if line == value.start.line and character < value.start.character:
+        return False
+    if line == value.end.line and character > value.end.character:
+        return False
+    return True
+
+
+def _range_span_size(value: Range) -> tuple[int, int]:
+    return (
+        value.end.line - value.start.line,
+        value.end.character - value.start.character,
+    )
+
+
+def _python_symbol_span_size(symbol: Symbol) -> tuple[int, int]:
+    python = symbol.python
+    assert python is not None
+    return _range_span_size(python.range)
 
 
 def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
@@ -878,19 +925,14 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
     signatures: dict[str, tuple[str, Range]] = {}
     for node in tree.body:
         if isinstance(node, FunctionDef | AsyncFunctionDef | ClassDef):
-            start = node.lineno - 1
-            end = _signature_end_line(lines, start)
-            signature = " ".join(
-                _strip_generated_comment(line).strip()
-                for line in lines[start : end + 1]
-            )
-            if signature.endswith(":"):
-                signature = signature[:-1]
-            signature = _compact_python_signature(signature)
-            signatures[node.name] = (
-                signature,
-                Range(Position(start, 0), Position(end, len(lines[end]))),
-            )
+            signatures[node.name] = _python_signature_entry(lines, node)
+            if isinstance(node, ClassDef):
+                for member in node.body:
+                    if not isinstance(member, FunctionDef | AsyncFunctionDef):
+                        continue
+                    signatures[f"{node.name}.{member.name}"] = _python_signature_entry(
+                        lines, member
+                    )
         elif isinstance(node, AnnAssign) and isinstance(node.target, Name):
             name = node.target.id
             start = node.lineno - 1
@@ -923,20 +965,32 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
     return signatures
 
 
-def _python_range_from_entry(entry: dict[str, Any], fallback: Range) -> Range:
-    try:
-        return Range(
-            Position(
-                max(0, int(entry["python_start_line"]) - 1),
-                max(0, int(entry["python_start_col"])),
-            ),
-            Position(
-                max(0, int(entry["python_end_line"]) - 1),
-                max(0, int(entry["python_end_col"])),
-            ),
-        )
-    except KeyError, TypeError, ValueError:
-        return fallback
+def _python_signature_entry(
+    lines: list[str], node: FunctionDef | AsyncFunctionDef | ClassDef
+) -> tuple[str, Range]:
+    start = node.lineno - 1
+    end = _signature_end_line(lines, start)
+    signature = " ".join(
+        _strip_generated_comment(line).strip() for line in lines[start : end + 1]
+    )
+    if signature.endswith(":"):
+        signature = signature[:-1]
+    return _compact_python_signature(signature), Range(
+        Position(start, 0), Position(end, len(lines[end]))
+    )
+
+
+def _python_range_from_entry(entry: PyMapEntry, fallback: Range) -> Range:
+    return Range(
+        Position(
+            max(0, entry.python_start_line - 1),
+            max(0, entry.python_start_col),
+        ),
+        Position(
+            max(0, entry.python_end_line - 1),
+            max(0, entry.python_end_col),
+        ),
+    )
 
 
 def _signature_end_line(lines: list[str], start: int) -> int:
@@ -954,7 +1008,8 @@ def _strip_generated_comment(line: str) -> str:
 
 
 def _compact_python_signature(signature: str) -> str:
-    return re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
+    compacted = re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
+    return re.sub(r",\)", ")", compacted)
 
 
 def _identifier_matches_without_comments(

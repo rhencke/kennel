@@ -8,7 +8,6 @@ from fido.config import Config, RepoMembership
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
-    _comment_lock,
     _configured_agent,
     _get_commit_summary,
     _is_allowed,
@@ -30,7 +29,7 @@ from fido.events import (
     reply_to_review,
 )
 from fido.provider import ProviderID
-from fido.reply_promises import add_reply_promise
+from fido.store import FidoStore, ReplyPromiseRecord
 
 
 class RepoConfig(_RepoConfig):
@@ -132,6 +131,17 @@ class TestNeedsMoreContext:
 
 
 class TestRecoverReplyPromises:
+    def _prepare_promise(
+        self, tmp_path: Path, comment_type: str, comment_id: int
+    ) -> ReplyPromiseRecord:
+        promise = FidoStore(tmp_path).prepare_reply(
+            owner="recovery",
+            comment_type=comment_type,
+            anchor_comment_id=comment_id,
+        )
+        assert promise is not None
+        return promise
+
     def test_returns_false_when_no_promises(self, tmp_path: Path) -> None:
         assert not recover_reply_promises(
             tmp_path / ".git" / "fido",
@@ -143,7 +153,7 @@ class TestRecoverReplyPromises:
 
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -168,7 +178,7 @@ class TestRecoverReplyPromises:
                 7,
             )
         assert result is True
-        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
         mock_create_task.assert_called_once()
         assert mock_create_task.call_args.args[0] == "task one"
         assert mock_create_task.call_args.kwargs["thread"] == {
@@ -180,9 +190,63 @@ class TestRecoverReplyPromises:
             "comment_type": "issues",
         }
 
+    def test_recovers_stale_issue_marker_without_reposting(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=303
+        )
+        assert promise is not None
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comments.return_value = [
+            {
+                "id": 1,
+                "body": f"done\n\n<!-- fido:reply-promise:{promise.promise_id} -->",
+            }
+        ]
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
+            assert recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        mock_reply.assert_not_called()
+        assert store.promise(promise.promise_id).state == "acked"
+
+    def test_recovers_stale_pull_marker_without_reposting(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=305
+        )
+        assert promise is not None
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.fetch_comment_thread.return_value = [
+            {
+                "id": 1,
+                "body": f"done\n\n<!-- fido:reply-promise:{promise.promise_id} -->",
+            }
+        ]
+        with patch("fido.events.reply_to_comment") as mock_reply:
+            assert recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        mock_reply.assert_not_called()
+        assert store.promise(promise.promise_id).state == "acked"
+
     def test_deleted_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "pulls", 205)
+        promise = self._prepare_promise(tmp_path, "pulls", 205)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = None
@@ -193,11 +257,11 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
-        assert not (fido_dir / "reply-promises" / "pulls-205").exists()
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
 
     def test_deleted_issue_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = None
@@ -208,11 +272,11 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
-        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
 
     def test_other_pr_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "pulls", 205)
+        self._prepare_promise(tmp_path, "pulls", 205)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
@@ -229,11 +293,13 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
-        assert (fido_dir / "reply-promises" / "pulls-205").exists()
+        assert [
+            p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
+        ] == [205]
 
     def test_other_pr_issue_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "issues", 302)
+        self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -250,11 +316,13 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
-        assert (fido_dir / "reply-promises" / "issues-302").exists()
+        assert [
+            p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
+        ] == [302]
 
     def test_issue_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "issues", 302)
+        self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -276,11 +344,43 @@ class TestRecoverReplyPromises:
                 7,
             )
         mock_reply.assert_not_called()
-        assert (fido_dir / "reply-promises" / "issues-302").exists()
+        assert [
+            p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
+        ] == [302]
+
+    def test_issue_recovery_marks_failed_when_reply_raises(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        self._prepare_promise(tmp_path, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+            "user": {"login": "owner"},
+        }
+        with (
+            pytest.raises(RuntimeError, match="reply failed"),
+            patch(
+                "fido.events.reply_to_issue_comment",
+                side_effect=RuntimeError("reply failed"),
+            ),
+        ):
+            recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
 
     def test_pull_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "pulls", 205)
+        self._prepare_promise(tmp_path, "pulls", 205)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
@@ -302,11 +402,44 @@ class TestRecoverReplyPromises:
                 7,
             )
         mock_reply.assert_not_called()
-        assert (fido_dir / "reply-promises" / "pulls-205").exists()
+        assert [
+            p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
+        ] == [205]
+
+    def test_pull_recovery_marks_failed_when_reply_raises(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        self._prepare_promise(tmp_path, "pulls", 205)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_pull_comment.return_value = {
+            "id": 205,
+            "body": "please fix",
+            "path": "foo.py",
+            "line": 1,
+            "diff_hunk": "@@ @@",
+            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r205",
+            "user": {"login": "owner"},
+        }
+        with (
+            pytest.raises(RuntimeError, match="reply failed"),
+            patch(
+                "fido.events.reply_to_comment",
+                side_effect=RuntimeError("reply failed"),
+            ),
+        ):
+            recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+            )
+        assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
 
     def test_defer_recovery_skips_task_creation(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -332,13 +465,13 @@ class TestRecoverReplyPromises:
             )
         assert result is True
         mock_create_task.assert_not_called()
-        assert not (fido_dir / "reply-promises" / "issues-302").exists()
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
 
     def test_issue_recovery_clears_promise_before_task_creation(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        promise_path = add_reply_promise(fido_dir, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -350,7 +483,7 @@ class TestRecoverReplyPromises:
         }
 
         def fail_after_reply(*args, **kwargs):
-            assert not promise_path.exists()
+            assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
             raise RuntimeError("task add failed")
 
         with (
@@ -368,18 +501,14 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                 )
-        assert not promise_path.exists()
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
 
     def test_coalesces_review_comment_promises_in_same_thread(
         self, tmp_path: Path
     ) -> None:
-        import os
-
         fido_dir = tmp_path / ".git" / "fido"
-        first = add_reply_promise(fido_dir, "pulls", 101)
-        second = add_reply_promise(fido_dir, "pulls", 102)
-        os.utime(first, ns=(1, 1))
-        os.utime(second, ns=(2, 2))
+        first = self._prepare_promise(tmp_path, "pulls", 101)
+        second = self._prepare_promise(tmp_path, "pulls", 102)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
@@ -427,14 +556,16 @@ class TestRecoverReplyPromises:
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
         assert mock_create_task.call_count == 2
-        assert not any((fido_dir / "reply-promises").iterdir())
+        store = FidoStore(tmp_path)
+        assert store.promise(first.promise_id).state == "acked"
+        assert store.promise(second.promise_id).state == "acked"
 
     def test_review_recovery_clears_group_promises_before_task_creation(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        first = add_reply_promise(fido_dir, "pulls", 101)
-        second = add_reply_promise(fido_dir, "pulls", 102)
+        first = self._prepare_promise(tmp_path, "pulls", 101)
+        second = self._prepare_promise(tmp_path, "pulls", 102)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
@@ -467,8 +598,9 @@ class TestRecoverReplyPromises:
         gh.get_pull_comment.side_effect = get_pull_comment
 
         def fail_after_reply(*args, **kwargs):
-            assert not first.exists()
-            assert not second.exists()
+            store = FidoStore(tmp_path)
+            assert store.promise(first.promise_id).state == "acked"
+            assert store.promise(second.promise_id).state == "acked"
             raise RuntimeError("task add failed")
 
         with (
@@ -483,17 +615,18 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                 )
-        assert not first.exists()
-        assert not second.exists()
+        store = FidoStore(tmp_path)
+        assert store.promise(first.promise_id).state == "acked"
+        assert store.promise(second.promise_id).state == "acked"
 
     def test_recovery_raises_on_invalid_candidate_in_later_group(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "pulls", 101)
-        add_reply_promise(fido_dir, "pulls", 102)
-        add_reply_promise(fido_dir, "pulls", 201)
-        add_reply_promise(fido_dir, "pulls", 999)
+        self._prepare_promise(tmp_path, "pulls", 101)
+        self._prepare_promise(tmp_path, "pulls", 102)
+        self._prepare_promise(tmp_path, "pulls", 201)
+        self._prepare_promise(tmp_path, "pulls", 999)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
@@ -560,18 +693,17 @@ class TestRecoverReplyPromises:
                 )
         assert mock_reply.call_count == 0
         mock_create_task.assert_not_called()
-        assert (fido_dir / "reply-promises" / "pulls-101").exists()
-        assert (fido_dir / "reply-promises" / "pulls-102").exists()
-        assert (fido_dir / "reply-promises" / "pulls-201").exists()
-        assert (fido_dir / "reply-promises" / "pulls-999").exists()
+        assert [
+            p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
+        ] == [101, 102, 201, 999]
 
     def test_recovery_skips_handled_candidates_when_processing_later_groups(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        add_reply_promise(fido_dir, "pulls", 101)
-        add_reply_promise(fido_dir, "pulls", 102)
-        add_reply_promise(fido_dir, "pulls", 201)
+        self._prepare_promise(tmp_path, "pulls", 101)
+        self._prepare_promise(tmp_path, "pulls", 102)
+        self._prepare_promise(tmp_path, "pulls", 201)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
@@ -624,7 +756,7 @@ class TestRecoverReplyPromises:
             )
         assert result is True
         assert mock_reply.call_count == 2
-        assert not any((fido_dir / "reply-promises").iterdir())
+        assert FidoStore(tmp_path).recoverable_promises() == []
 
 
 class TestIsAllowed:
@@ -881,13 +1013,6 @@ class TestDispatchUnknown:
 
 
 # ── New coverage tests ──────────────────────────────────────────────────────
-
-
-class TestCommentLock:
-    def test_creates_lock_file(self, tmp_path: Path) -> None:
-        path = _comment_lock(tmp_path, 42)
-        assert path == tmp_path / ".git" / "fido" / "comments" / "42.lock"
-        assert path.parent.is_dir()
 
 
 class TestSummarizeAsActionItem:
@@ -1433,34 +1558,28 @@ class TestReplyToComment:
                 agent=_client(side_effect=fake_pp),
             )
 
-    def test_lock_race_returns_act_with_no_titles(self, tmp_path: Path) -> None:
-        """Second call with same comment_id is blocked by lock.
+    def test_claim_race_returns_act_with_no_titles(self, tmp_path: Path) -> None:
+        """Second call with same comment_id is blocked by SQLite claim.
 
         Must return empty titles so the server creates no phantom tasks —
-        the process that holds the lock will handle reply and task creation.
+        the process that owns the claim will handle reply and task creation.
         """
-        import fcntl
-
         cfg = self._cfg(tmp_path)
         cid = 999
-        lock_path = _comment_lock(tmp_path, cid)
-        # Pre-acquire the lock to simulate race
-        lock_fd = open(lock_path, "w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            action = Action(
-                prompt="comment",
-                reply_to={"repo": "owner/repo", "pr": 1, "comment_id": cid},
-                comment_body="competing update",
-                is_bot=False,
-            )
-            cat, titles = reply_to_comment(
-                action, cfg, self._repo_cfg(tmp_path), MagicMock()
-            )
-            assert cat == "ACT"  # returns without posting
-            assert titles == []  # no phantom tasks — other process handles it
-        finally:
-            lock_fd.close()
+        assert FidoStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=cid
+        )
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": cid},
+            comment_body="competing update",
+            is_bot=False,
+        )
+        cat, titles = reply_to_comment(
+            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+        )
+        assert cat == "ACT"
+        assert titles == []
 
     def test_no_comment_id_skips_lock(self, tmp_path: Path) -> None:
         """When comment_id is None, lock is skipped; maybe_react is still called."""
@@ -1564,8 +1683,11 @@ class TestReplyToComment:
         summarize_calls = [p for p in calls if "Convert this PR review comment" in p]
         assert len(summarize_calls) == 1
         assert "Please add null input validation" in summarize_calls[0]
-        # Fido's previous reply is edited in-place rather than a new reply posted
-        mock_gh.edit_review_comment.assert_called_once_with("owner/repo", 101, "Done!")
+        # Fido's previous reply is edited in-place rather than a new reply posted.
+        edit_args = mock_gh.edit_review_comment.call_args.args
+        assert edit_args[:2] == ("owner/repo", 101)
+        assert edit_args[2].startswith("Done!")
+        assert "fido:reply-promise:" in edit_args[2]
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_act_title_always_from_root_comment(self, tmp_path: Path) -> None:
@@ -1692,10 +1814,11 @@ class TestReplyToComment:
         assert cat == "ASK"
         # _summarize_as_action_item must not be called for non-task categories
         assert not summarize_called
-        # Fido's prior reply is edited in-place
-        mock_gh.edit_review_comment.assert_called_once_with(
-            "owner/repo", 201, "Could you clarify?"
-        )
+        # Fido's prior reply is edited in-place.
+        edit_args = mock_gh.edit_review_comment.call_args.args
+        assert edit_args[:2] == ("owner/repo", 201)
+        assert edit_args[2].startswith("Could you clarify?")
+        assert "fido:reply-promise:" in edit_args[2]
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
@@ -2100,10 +2223,8 @@ class TestReplyToIssueComment:
         # the reply generation call, which must survive session preemption.
         assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
-    def test_writes_durable_claim_file_after_reply(self, tmp_path: Path) -> None:
-        """After posting a reply, a .lock file is written at
-        .git/fido/comments/<comment_id>.lock so a fido restart doesn't
-        re-pick the comment via backfill (closes #834)."""
+    def test_writes_durable_claim_after_reply(self, tmp_path: Path) -> None:
+        """After posting a reply, the comment id is completed in SQLite."""
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
@@ -2118,8 +2239,25 @@ class TestReplyToIssueComment:
             MagicMock(),
             agent=_client(side_effect=fake_pp),
         )
-        claim_file = tmp_path / ".git" / "fido" / "comments" / "4275080243.lock"
-        assert claim_file.exists(), "durable claim file must be written after reply"
+        assert FidoStore(tmp_path).claim_state(4275080243) == "completed"
+
+    def test_claimed_issue_comment_returns_no_titles(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        promise = FidoStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=4275080244
+        )
+        assert promise is not None
+
+        category, titles = reply_to_issue_comment(
+            self._action(cid=4275080244),
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client("unused"),
+        )
+
+        assert category == "ACT"
+        assert titles == []
 
     def test_no_comment_id_skips_claim_write(self, tmp_path: Path) -> None:
         """When comment_id is absent, no claim file is created (no-op)."""
@@ -3866,13 +4004,12 @@ class TestBackfillMissedPrComments:
         mock_create.assert_not_called()
 
     def test_skips_already_claimed_comments(self, tmp_path: Path) -> None:
-        """Comments with a durable claim file are not re-queued on restart.
+        """Comments with a durable SQLite claim are not re-queued on restart.
 
-        reply_to_issue_comment writes .git/fido/comments/<id>.lock after
-        posting; backfill must honour that file and skip re-queueing —
-        closes #834.
+        reply_to_issue_comment completes comment ids in SQLite after posting;
+        backfill must honour that durable claim and skip re-queueing.
         """
-        from fido.events import _comment_lock, backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
@@ -3880,8 +4017,11 @@ class TestBackfillMissedPrComments:
             self._comment(200, body="not yet handled"),
         ]
         mock_gh.is_thread_resolved_for_comment.return_value = False
-        # Pre-create the claim file for comment 100 (simulates a prior reply).
-        _comment_lock(tmp_path, 100).touch(exist_ok=True)
+        promise = FidoStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=100
+        )
+        assert promise is not None
+        FidoStore(tmp_path).ack_promise(promise.promise_id)
 
         with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(

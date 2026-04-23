@@ -412,15 +412,15 @@ _LengthT0 = TypeVar("_LengthT0")
 
 
 def length(x: list[_LengthT0]) -> int:
-    def length(l):
+    def length0(l):
         __list = l
         if __list == []:
             return 0
         a = __list[0]
         l_ = __list[1:]
-        return length(l_) + 1
+        return length0(l_) + 1
 
-    return length(x)
+    return length0(x)
 
 
 # positive: remapped to Python primitive
@@ -428,27 +428,56 @@ def length(x: list[_LengthT0]) -> int:
 # string: remapped to Python primitive
 
 
-def add_claim(thread: int, claims: frozenset[int]) -> frozenset[int]:
+def add_claim(
+    thread: int,
+    claims: frozenset[int],
+) -> frozenset[int]:
     return _rocq_set_add(_rocq_positive_key(thread), claims)
 
 
-def remove_claim(thread: int, claims: frozenset[int]) -> frozenset[int]:
-    return _rocq_set_remove(_rocq_positive_key(thread), claims)
+def remove_claim(
+    thread: int,
+    claims: frozenset[int],
+) -> frozenset[int]:
+    return _rocq_set_remove(
+        _rocq_positive_key(thread),
+        claims,
+    )
 
 
-def has_claim(claims: frozenset[int], thread: int) -> bool:
+def has_claim(
+    claims: frozenset[int],
+    thread: int,
+) -> bool:
     return _rocq_positive_key(thread) in claims
 
 
-def assign_issue(issue: int, owner: str, owners: dict[int, str]) -> dict[int, str]:
-    return _rocq_map_add(_rocq_positive_key(issue), owner, owners)
+def assign_issue(
+    issue: int,
+    owner: str,
+    owners: dict[int, str],
+) -> dict[int, str]:
+    return _rocq_map_add(
+        _rocq_positive_key(issue),
+        owner,
+        owners,
+    )
 
 
-def unassign_issue(issue: int, owners: dict[int, str]) -> dict[int, str]:
-    return _rocq_map_remove(_rocq_positive_key(issue), owners)
+def unassign_issue(
+    issue: int,
+    owners: dict[int, str],
+) -> dict[int, str]:
+    return _rocq_map_remove(
+        _rocq_positive_key(issue),
+        owners,
+    )
 
 
-def issue_owner(owners: dict[int, str], issue: int) -> str | None:
+def issue_owner(
+    owners: dict[int, str],
+    issue: int,
+) -> str | None:
     return owners.get(_rocq_positive_key(issue))
 
 
@@ -476,3 +505,100 @@ def repo_providers(repos: list[repo_entry]) -> list[str]:
 
 def repo_count(repos: list[repo_entry]) -> int:
     return length(repos)
+
+
+@dataclass(frozen=True)
+class CoordIndex:
+    coord_claims: frozenset[int]
+    coord_issue_owners: dict[int, str]
+    coord_repos: list[repo_entry]
+
+    def add_claim(
+        self,
+        thread: int,
+    ) -> CoordIndex:
+        index = self
+        return CoordIndex(
+            coord_claims=add_claim(thread, coord_claims(index)),
+            coord_issue_owners=coord_issue_owners(index),
+            coord_repos=coord_repos(index),
+        )
+
+    def remove_claim(
+        self,
+        thread: int,
+    ) -> CoordIndex:
+        index = self
+        return CoordIndex(
+            coord_claims=remove_claim(thread, coord_claims(index)),
+            coord_issue_owners=coord_issue_owners(index),
+            coord_repos=coord_repos(index),
+        )
+
+    def has_claim(
+        self,
+        thread: int,
+    ) -> bool:
+        index = self
+        return has_claim(coord_claims(index), thread)
+
+    def assign_issue(
+        self,
+        issue: int,
+        owner: str,
+    ) -> CoordIndex:
+        index = self
+        return CoordIndex(
+            coord_claims=coord_claims(index),
+            coord_issue_owners=assign_issue(
+                issue,
+                owner,
+                coord_issue_owners(index),
+            ),
+            coord_repos=coord_repos(index),
+        )
+
+    def unassign_issue(
+        self,
+        issue: int,
+    ) -> CoordIndex:
+        index = self
+        return CoordIndex(
+            coord_claims=coord_claims(index),
+            coord_issue_owners=unassign_issue(issue, coord_issue_owners(index)),
+            coord_repos=coord_repos(index),
+        )
+
+    def issue_owner(
+        self,
+        issue: int,
+    ) -> str | None:
+        index = self
+        return issue_owner(coord_issue_owners(index), issue)
+
+    def repo_providers(self) -> list[str]:
+        index = self
+        return repo_providers(coord_repos(index))
+
+    def repo_count(self) -> int:
+        index = self
+        return repo_count(coord_repos(index))
+
+
+def coord_claims(c: CoordIndex) -> frozenset[int]:
+    return c.coord_claims
+
+
+def coord_issue_owners(c: CoordIndex) -> dict[int, str]:
+    return c.coord_issue_owners
+
+
+def coord_repos(c: CoordIndex) -> list[repo_entry]:
+    return c.coord_repos
+
+
+empty_coord_index: CoordIndex = CoordIndex(
+    coord_claims=frozenset(),
+    coord_issue_owners={},
+    coord_repos=[],
+)

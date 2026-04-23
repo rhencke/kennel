@@ -394,7 +394,462 @@ __ = None  # erased logical argument
 # bool: remapped to Python primitive
 
 
-def bool_not(b: bool) -> bool:
+def negb(b: bool) -> bool:
     if b:
         return False
     return True
+
+
+# nat: remapped to Python primitive
+_A = TypeVar("_A")
+
+
+# option: remapped to Python primitive
+_A = TypeVar("_A")
+_B = TypeVar("_B")
+
+
+# prod: remapped to Python primitive
+_A = TypeVar("_A")
+
+
+# list: remapped to Python primitive
+# positive: remapped to Python primitive
+
+
+class ClaimState:
+    pass
+
+
+@dataclass(frozen=True)
+class ClaimInProgress(ClaimState):
+    pass
+
+
+@dataclass(frozen=True)
+class ClaimCompleted(ClaimState):
+    pass
+
+
+@dataclass(frozen=True)
+class ClaimRetryableFailed(ClaimState):
+    pass
+
+
+ClaimStateT = ClaimInProgress | ClaimCompleted | ClaimRetryableFailed
+
+
+class PromiseState:
+    pass
+
+
+@dataclass(frozen=True)
+class PromisePrepared(PromiseState):
+    pass
+
+
+@dataclass(frozen=True)
+class PromisePosted(PromiseState):
+    pass
+
+
+@dataclass(frozen=True)
+class PromiseAcked(PromiseState):
+    pass
+
+
+@dataclass(frozen=True)
+class PromiseFailed(PromiseState):
+    pass
+
+
+PromiseStateT = PromisePrepared | PromisePosted | PromiseAcked | PromiseFailed
+
+
+class ClaimOwner:
+    pass
+
+
+@dataclass(frozen=True)
+class OwnerWebhook(ClaimOwner):
+    pass
+
+
+@dataclass(frozen=True)
+class OwnerWorker(ClaimOwner):
+    pass
+
+
+@dataclass(frozen=True)
+class OwnerRecovery(ClaimOwner):
+    pass
+
+
+ClaimOwnerT = OwnerWebhook | OwnerWorker | OwnerRecovery
+
+
+@dataclass(frozen=True)
+class Attempt:
+    attempt_owner: ClaimOwner
+    attempt_retry_count: int
+    attempt_next_retry_after: int
+
+
+def attempt_owner(a: Attempt) -> ClaimOwner:
+    return a.attempt_owner
+
+
+def attempt_retry_count(a: Attempt) -> int:
+    return a.attempt_retry_count
+
+
+def attempt_next_retry_after(a: Attempt) -> int:
+    return a.attempt_next_retry_after
+
+
+@dataclass(frozen=True)
+class ClaimRow:
+    claim_attempt: Attempt
+    claim_state: ClaimState
+    claim_promise: int
+
+    def is_blocking(self) -> bool:
+        row = self
+        match claim_state(row):
+            case ClaimInProgress():
+                return True
+            case ClaimCompleted():
+                return True
+            case ClaimRetryableFailed():
+                return False
+            case __impossible:
+                assert_never(__impossible)
+
+
+def claim_attempt(c: ClaimRow) -> Attempt:
+    return c.claim_attempt
+
+
+def claim_state(c: ClaimRow) -> ClaimState:
+    return c.claim_state
+
+
+def claim_promise(c: ClaimRow) -> int:
+    return c.claim_promise
+
+
+@dataclass(frozen=True)
+class PromiseRow:
+    promise_attempt: Attempt
+    promise_state: PromiseState
+    promise_anchor_comment: int
+    promise_covered_comments: list[int]
+
+
+def promise_attempt(p: PromiseRow) -> Attempt:
+    return p.promise_attempt
+
+
+def promise_anchor_comment(p: PromiseRow) -> int:
+    return p.promise_anchor_comment
+
+
+def promise_covered_comments(p: PromiseRow) -> list[int]:
+    return p.promise_covered_comments
+
+
+def new_attempt(owner: ClaimOwner) -> Attempt:
+    return Attempt(
+        attempt_owner=owner,
+        attempt_retry_count=0,
+        attempt_next_retry_after=0,
+    )
+
+
+def retry_attempt(attempt0: Attempt) -> Attempt:
+    return Attempt(
+        attempt_owner=attempt_owner(attempt0),
+        attempt_retry_count=attempt_retry_count(attempt0) + 1,
+        attempt_next_retry_after=attempt_next_retry_after(attempt0) + 1,
+    )
+
+
+def reset_attempt_retry(attempt0: Attempt) -> Attempt:
+    return Attempt(
+        attempt_owner=attempt_owner(attempt0),
+        attempt_retry_count=attempt_retry_count(attempt0),
+        attempt_next_retry_after=0,
+    )
+
+
+def comment_claimable(
+    claims: dict[int, ClaimRow],
+    comment: int,
+) -> bool:
+    __option = claims.get(_rocq_positive_key(comment))
+    if __option is None:
+        return True
+    row = __option
+    return negb(row.is_blocking())
+
+
+def all_claimable(
+    claims: dict[int, ClaimRow],
+    comments: list[int],
+) -> bool:
+    __list = comments
+    if __list == []:
+        return True
+    comment = __list[0]
+    rest = __list[1:]
+    if comment_claimable(claims, comment):
+        return all_claimable(claims, rest)
+    return False
+
+
+def in_progress_row(
+    owner: ClaimOwner,
+    promise: int,
+) -> ClaimRow:
+    return ClaimRow(
+        claim_attempt=new_attempt(owner),
+        claim_state=ClaimInProgress(),
+        claim_promise=promise,
+    )
+
+
+def claim_all(
+    owner: ClaimOwner,
+    promise: int,
+    comments: list[int],
+    claims: dict[int, ClaimRow],
+) -> dict[int, ClaimRow]:
+    __list = comments
+    if __list == []:
+        return claims
+    comment = __list[0]
+    rest = __list[1:]
+    return claim_all(
+        owner,
+        promise,
+        rest,
+        _rocq_map_add(
+            _rocq_positive_key(comment),
+            in_progress_row(owner, promise),
+            claims,
+        ),
+    )
+
+
+def prepare_claims(
+    owner: ClaimOwner,
+    promise: int,
+    anchor: int,
+    covered: list[int],
+    claims: dict[int, ClaimRow],
+    promises: dict[int, PromiseRow],
+) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]] | None:
+    comments = [anchor] + covered
+    if all_claimable(claims, comments):
+        claims_ = claim_all(
+            owner,
+            promise,
+            comments,
+            claims,
+        )
+        promise_row = PromiseRow(
+            promise_attempt=new_attempt(owner),
+            promise_state=PromisePrepared(),
+            promise_anchor_comment=anchor,
+            promise_covered_comments=comments,
+        )
+        return (
+            claims_,
+            _rocq_map_add(
+                _rocq_positive_key(promise),
+                promise_row,
+                promises,
+            ),
+        )
+    return None
+
+
+def mark_promise_posted(
+    promise: int,
+    promises: dict[int, PromiseRow],
+) -> dict[int, PromiseRow]:
+    __option = promises.get(_rocq_positive_key(promise))
+    if __option is None:
+        return promises
+    row = __option
+    return _rocq_map_add(
+        _rocq_positive_key(promise),
+        PromiseRow(
+            promise_attempt=promise_attempt(row),
+            promise_state=PromisePosted(),
+            promise_anchor_comment=promise_anchor_comment(row),
+            promise_covered_comments=promise_covered_comments(row),
+        ),
+        promises,
+    )
+
+
+def complete_comment(
+    promise: int,
+    comment: int,
+    claims: dict[int, ClaimRow],
+) -> dict[int, ClaimRow]:
+    __option = claims.get(_rocq_positive_key(comment))
+    if __option is None:
+        return claims
+    row = __option
+    return _rocq_map_add(
+        _rocq_positive_key(comment),
+        ClaimRow(
+            claim_attempt=reset_attempt_retry(claim_attempt(row)),
+            claim_state=ClaimCompleted(),
+            claim_promise=promise,
+        ),
+        claims,
+    )
+
+
+def complete_all(
+    promise: int,
+    comments: list[int],
+    claims: dict[int, ClaimRow],
+) -> dict[int, ClaimRow]:
+    __list = comments
+    if __list == []:
+        return claims
+    comment = __list[0]
+    rest = __list[1:]
+    return complete_all(
+        promise,
+        rest,
+        complete_comment(
+            promise,
+            comment,
+            claims,
+        ),
+    )
+
+
+def ack_promise(
+    promise: int,
+    claims: dict[int, ClaimRow],
+    promises: dict[int, PromiseRow],
+) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]]:
+    __option = promises.get(_rocq_positive_key(promise))
+    if __option is None:
+        return (
+            claims,
+            promises,
+        )
+    row = __option
+    claims_ = complete_all(
+        promise,
+        promise_covered_comments(row),
+        claims,
+    )
+    promises_ = _rocq_map_add(
+        _rocq_positive_key(promise),
+        PromiseRow(
+            promise_attempt=reset_attempt_retry(promise_attempt(row)),
+            promise_state=PromiseAcked(),
+            promise_anchor_comment=promise_anchor_comment(row),
+            promise_covered_comments=promise_covered_comments(row),
+        ),
+        promises,
+    )
+    return (
+        claims_,
+        promises_,
+    )
+
+
+def retryable_row(row: ClaimRow) -> ClaimRow:
+    return ClaimRow(
+        claim_attempt=retry_attempt(claim_attempt(row)),
+        claim_state=ClaimRetryableFailed(),
+        claim_promise=claim_promise(row),
+    )
+
+
+def fail_comment(
+    comment: int,
+    claims: dict[int, ClaimRow],
+) -> dict[int, ClaimRow]:
+    __option = claims.get(_rocq_positive_key(comment))
+    if __option is None:
+        return claims
+    row = __option
+    return _rocq_map_add(
+        _rocq_positive_key(comment),
+        retryable_row(row),
+        claims,
+    )
+
+
+def fail_all(
+    comments: list[int],
+    claims: dict[int, ClaimRow],
+) -> dict[int, ClaimRow]:
+    __list = comments
+    if __list == []:
+        return claims
+    comment = __list[0]
+    rest = __list[1:]
+    return fail_all(rest, fail_comment(comment, claims))
+
+
+def fail_promise(
+    promise: int,
+    claims: dict[int, ClaimRow],
+    promises: dict[int, PromiseRow],
+) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]]:
+    __option = promises.get(_rocq_positive_key(promise))
+    if __option is None:
+        return (
+            claims,
+            promises,
+        )
+    row = __option
+    claims_ = fail_all(promise_covered_comments(row), claims)
+    promises_ = _rocq_map_add(
+        _rocq_positive_key(promise),
+        PromiseRow(
+            promise_attempt=retry_attempt(promise_attempt(row)),
+            promise_state=PromiseFailed(),
+            promise_anchor_comment=promise_anchor_comment(row),
+            promise_covered_comments=promise_covered_comments(row),
+        ),
+        promises,
+    )
+    return (
+        claims_,
+        promises_,
+    )
+
+
+def claim_state_completed(state: ClaimState) -> bool:
+    match state:
+        case ClaimInProgress():
+            return False
+        case ClaimCompleted():
+            return True
+        case ClaimRetryableFailed():
+            return False
+        case __impossible:
+            assert_never(__impossible)
+
+
+def claim_completed(
+    claims: dict[int, ClaimRow],
+    comment: int,
+) -> bool:
+    __option = claims.get(_rocq_positive_key(comment))
+    if __option is None:
+        return False
+    row = __option
+    return claim_state_completed(claim_state(row))

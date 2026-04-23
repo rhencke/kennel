@@ -9,6 +9,7 @@ open Stdarg
 open Miniml
 open Common
 open Modutil
+open Mlutil
 open Python
 
 type source_span = {
@@ -41,25 +42,41 @@ let universe_trace_comment gr =
         (str "Erased universe variables: " ++
          str (String.concat ", " names))
 
-let json_escape s =
+let csv_escape s =
   let buf = Buffer.create (String.length s + 8) in
+  let needs_quotes = ref false in
   String.iter
     (function
-      | '"' -> Buffer.add_string buf "\\\""
-      | '\\' -> Buffer.add_string buf "\\\\"
-      | '\b' -> Buffer.add_string buf "\\b"
-      | '\012' -> Buffer.add_string buf "\\f"
-      | '\n' -> Buffer.add_string buf "\\n"
-      | '\r' -> Buffer.add_string buf "\\r"
-      | '\t' -> Buffer.add_string buf "\\t"
-      | c ->
-          let code = Char.code c in
-          if code < 0x20 then Buffer.add_string buf (Printf.sprintf "\\u%04x" code)
-          else Buffer.add_char buf c)
+      | '"' ->
+          needs_quotes := true;
+          Buffer.add_string buf "\"\""
+      | ',' | '\n' | '\r' as c ->
+          needs_quotes := true;
+          Buffer.add_char buf c
+      | c -> Buffer.add_char buf c)
     s;
-  Buffer.contents buf
+  let escaped = Buffer.contents buf in
+  if !needs_quotes then "\"" ^ escaped ^ "\"" else escaped
 
-let json_string s = "\"" ^ json_escape s ^ "\""
+let pymap_header =
+  "stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol\n"
+
+let pymap_row ~symbol ~python_symbol ~python_start_line ~python_start_col ~python_end_line
+    ~python_end_col span =
+  Printf.sprintf "%s,%d,%d,%d,%d,%s,%d,%d,%d,%d,%s,%s,%s\n"
+    "open"
+    python_start_line
+    python_start_col
+    python_end_line
+    python_end_col
+    (csv_escape span.source_file)
+    span.source_start_line
+    span.source_start_col
+    span.source_end_line
+    span.source_end_col
+    "extraction"
+    (csv_escape symbol)
+    (csv_escape python_symbol)
 
 let source_file_of_loc loc =
   match loc.Loc.fname with
@@ -133,6 +150,42 @@ let normalize_top_level_spacing source =
   in
   String.concat "\n" (loop None 0 [] lines) ^ "\n"
 
+let is_python_ident_char = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
+  | _ -> false
+
+let rename_python_identifiers renames source =
+  if List.is_empty renames then source
+  else
+    let table = Hashtbl.create (List.length renames) in
+    List.iter (fun (old_name, new_name) -> Hashtbl.replace table old_name new_name) renames;
+    let len = String.length source in
+    let out = Buffer.create len in
+    let rec emit_ident start finish =
+      let ident = String.sub source start (finish - start) in
+      Buffer.add_string out
+        (match Hashtbl.find_opt table ident with
+         | Some renamed -> renamed
+         | None -> ident)
+    in
+    let rec loop i =
+      if i >= len then ()
+      else if is_python_ident_char source.[i] &&
+              (i = 0 || not (is_python_ident_char source.[i - 1]))
+      then
+        let rec find_end j =
+          if j < len && is_python_ident_char source.[j] then find_end (j + 1) else j
+        in
+        let finish = find_end i in
+        emit_ident i finish;
+        loop finish
+      else (
+        Buffer.add_char out source.[i];
+        loop (i + 1))
+    in
+    loop 0;
+    Buffer.contents out
+
 let source_lines source =
   let lines = String.split_on_char '\n' source in
   match List.rev lines with
@@ -175,49 +228,81 @@ let is_top_level_declaration line =
 
 let python_symbol_span source name =
   let lines = Array.of_list (source_lines source) in
-  let def_prefix = "def " ^ name ^ "(" in
-  let class_prefix = "class " ^ name in
-  let ann_prefix = name ^ ":" in
-  let assign_prefix = name ^ " =" in
   let last_index = Array.length lines - 1 in
-  let rec find_start index =
-    if index > last_index then None
-    else
-      let line = lines.(index) in
-        let trimmed = trim_left line in
-        if starts_with trimmed def_prefix
-           || starts_with trimmed class_prefix
-           || starts_with trimmed ann_prefix
-           || starts_with trimmed assign_prefix
-        then Some (index, trimmed)
-        else find_start (index + 1)
-  in
   let rec next_top_level index =
     if index > last_index then None
     else if is_top_level_declaration lines.(index) then Some index
     else next_top_level (index + 1)
+  in
+  let rec next_at_or_above_indent indent index =
+    if index > last_index then None
+    else if String.equal lines.(index) "" then
+      next_at_or_above_indent indent (index + 1)
+    else if leading_column lines.(index) <= indent then Some index
+    else next_at_or_above_indent indent (index + 1)
   in
   let rec previous_nonempty index =
     if index < 0 then 0
     else if String.equal lines.(index) "" then previous_nonempty (index - 1)
     else index
   in
-  match find_start 0 with
-  | None -> (1, 0, 1, 0)
-  | Some (start_index, trimmed) ->
-      let start_line = start_index + 1 in
-      let start_col = leading_column lines.(start_index) in
-      let is_block =
-        starts_with trimmed def_prefix || starts_with trimmed class_prefix
-      in
-      let end_index =
-        if not is_block then start_index
-        else
-          match next_top_level (start_index + 1) with
-          | None -> previous_nonempty last_index
-          | Some index -> previous_nonempty (index - 1)
-      in
-      (start_line, start_col, end_index + 1, String.length lines.(end_index))
+  let find_named_symbol start_index indent symbol_name =
+    let def_prefix = "def " ^ symbol_name ^ "(" in
+    let async_def_prefix = "async def " ^ symbol_name ^ "(" in
+    let class_prefix = "class " ^ symbol_name in
+    let ann_prefix = symbol_name ^ ":" in
+    let assign_prefix = symbol_name ^ " =" in
+    let rec loop index =
+      if index > last_index then None
+      else
+        let line = lines.(index) in
+        let trimmed = trim_left line in
+        let col = leading_column line in
+        if (match indent with None -> true | Some required -> Int.equal col required)
+           && (starts_with trimmed def_prefix
+               || starts_with trimmed async_def_prefix
+               || starts_with trimmed class_prefix
+               || starts_with trimmed ann_prefix
+               || starts_with trimmed assign_prefix)
+        then Some (index, trimmed, col)
+        else loop (index + 1)
+    in
+    loop start_index
+  in
+  let span_of_match (start_index, trimmed, start_col) =
+    let is_block =
+      starts_with trimmed "def "
+      || starts_with trimmed "async def "
+      || starts_with trimmed "class "
+    in
+    let end_index =
+      if not is_block then start_index
+      else
+        match next_at_or_above_indent start_col (start_index + 1) with
+        | None -> previous_nonempty last_index
+        | Some index -> previous_nonempty (index - 1)
+    in
+    (start_index + 1, start_col, end_index + 1, String.length lines.(end_index))
+  in
+  match String.split_on_char '.' name with
+  | [simple_name] -> (
+      match find_named_symbol 0 None simple_name with
+      | None -> (1, 0, 1, 0)
+      | Some found -> span_of_match found)
+  | [class_name; member_name] -> (
+      match find_named_symbol 0 (Some 0) class_name with
+      | None -> (1, 0, 1, 0)
+      | Some (class_index, _trimmed, class_indent) ->
+          let class_end =
+            match next_top_level (class_index + 1) with
+            | None -> previous_nonempty last_index
+            | Some index -> previous_nonempty (index - 1)
+          in
+          match find_named_symbol (class_index + 1) (Some (class_indent + 4)) member_name with
+          | Some (member_index, trimmed, start_col) when member_index <= class_end ->
+              span_of_match (member_index, trimmed, start_col)
+          | _ -> (1, 0, 1, 0))
+  | _ -> (1, 0, 1, 0)
 
 let write_pymap ~python_file ~span ~source =
   let line_count = count_lines source in
@@ -225,74 +310,259 @@ let write_pymap ~python_file ~span ~source =
   let (python_start_line, python_start_col, python_end_line, python_end_col) =
     python_symbol_span source symbol
   in
-  let entries =
-    if line_count = 0 then "[]"
+  let rows =
+    if line_count = 0 then ""
     else
-      Printf.sprintf
-        "[\n    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }\n  ]"
-        python_start_line
-        python_start_col
-        python_end_line
-        python_end_col
-        (json_string span.source_file)
-        span.source_start_line
-        span.source_start_col
-        span.source_end_line
-        span.source_end_col
-        (json_string symbol)
+      pymap_row ~symbol ~python_symbol:symbol
+        ~python_start_line ~python_start_col ~python_end_line
+        ~python_end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in
-  output_string oc
-    (Printf.sprintf
-       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
-       (json_string (Filename.basename python_file))
-       entries);
+  output_string oc pymap_header;
+  output_string oc rows;
   close_out oc
 
-let write_python_with_source_map ~fname ~span pp =
-  let source = normalize_top_level_spacing (Pp.string_of_ppcmds pp) in
+let write_python_with_source_map ?(renames=[]) ~fname ~span pp =
+  let source =
+    Pp.string_of_ppcmds pp
+    |> normalize_top_level_spacing
+    |> rename_python_identifiers renames
+  in
   let oc = open_out fname in
   output_string oc source;
   close_out oc;
   write_pymap ~python_file:fname ~span ~source
 
 let write_pymap_entries ~python_file ~source entries =
-  let entry_json (name, span) =
-    let (start_line, start_col, end_line, end_col) = python_symbol_span source name in
-    Printf.sprintf
-      "    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }"
-      start_line
-      start_col
-      end_line
-      end_col
-      (json_string span.source_file)
-      span.source_start_line
-      span.source_start_col
-      span.source_end_line
-      span.source_end_col
-      (json_string name)
-  in
-  let entries_json =
-    match entries with
-    | [] -> "[]"
-    | _ -> "[\n" ^ String.concat ",\n" (List.map entry_json entries) ^ "\n  ]"
+  let entry_row (symbol, python_symbol, span) =
+    let (start_line, start_col, end_line, end_col) =
+      python_symbol_span source python_symbol
+    in
+    pymap_row ~symbol ~python_symbol
+      ~python_start_line:start_line ~python_start_col:start_col
+      ~python_end_line:end_line ~python_end_col:end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in
-  output_string oc
-    (Printf.sprintf
-       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
-       (json_string (Filename.basename python_file))
-       entries_json);
+  output_string oc pymap_header;
+  List.iter (fun entry -> output_string oc (entry_row entry)) entries;
   close_out oc
 
-let write_python_group_with_source_map ~fname ~fallback_span:_ ~entries pp =
-  let source = normalize_top_level_spacing (Pp.string_of_ppcmds pp) in
+let write_python_group_with_source_map ?(renames=[]) ~fname ~fallback_span:_ ~entries pp =
+  let source =
+    Pp.string_of_ppcmds pp
+    |> normalize_top_level_spacing
+    |> rename_python_identifiers renames
+  in
   let oc = open_out fname in
   output_string oc source;
   close_out oc;
   write_pymap_entries ~python_file:fname ~source entries
+
+let dedupe_source_map_entries entries =
+  let seen = Hashtbl.create (List.length entries) in
+  List.filter
+    (fun (symbol, _, _) ->
+      if Hashtbl.mem seen symbol then false
+      else (
+        Hashtbl.add seen symbol ();
+        true))
+    entries
+
+let span_for_global symbol gr =
+  match source_span_of_global gr with
+  | Some span -> span
+  | None -> fallback_source_span symbol
+
+let capitalize_first_ascii s =
+  if String.length s = 0 then s
+  else
+    let b = Bytes.of_string s in
+    Bytes.set b 0 (Char.uppercase_ascii (Bytes.get b 0));
+    Bytes.to_string b
+
+let basename_of_global_string r =
+  Id.to_string (Nametab.basename_of_global r.glob)
+
+let underscore_prefix name =
+  match String.index_opt name '_' with
+  | None -> None
+  | Some index when index > 0 -> Some (String.sub name 0 index)
+  | Some _ -> None
+
+let consistent_field_prefix field_names =
+  match List.filter_map underscore_prefix field_names with
+  | [] -> None
+  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
+  | _ -> None
+
+let rec type_decomp_local = function
+  | Tarr (arg, ret) ->
+      let args, result = type_decomp_local ret in
+      arg :: args, result
+  | typ -> [], typ
+
+let source_map_entries_of_inductive state (ind : ml_ind) =
+  let packet_entries packet =
+    if packet.ip_logical then
+      []
+    else
+      let type_name =
+        capitalize_first_ascii (basename_of_global_string packet.ip_typename_ref)
+      in
+      let type_entry =
+        type_name, type_name, span_for_global type_name packet.ip_typename_ref.glob
+      in
+      let constructor_entries =
+        match ind.ind_kind with
+        | Record _ -> []
+        | _ ->
+            Array.to_list packet.ip_consnames_ref
+            |> List.map (fun r ->
+                 let name = basename_of_global_string r in
+                 name, name, span_for_global name r.glob)
+      in
+      type_entry :: constructor_entries
+  in
+  Array.to_list ind.ind_packets |> List.concat_map packet_entries
+
+let source_map_entry_of_global symbol r =
+  symbol, symbol, span_for_global symbol r.glob
+
+let python_symbol_of_runtime_name name =
+  match name with
+  | "io_pure" -> Some "IO.pure"
+  | "io_bind" -> Some "IO.bind"
+  | "io_bracket" -> Some "IO.bracket"
+  | "io_run" -> Some "IO.run"
+  | "new_mutex" -> Some "Mutex.new"
+  | "new_channel" -> Some "Channel.new"
+  | "new_future" -> Some "Future.new"
+  | "mutex_acquire" -> Some "Mutex.acquire"
+  | "mutex_release" -> Some "Mutex.release"
+  | "channel_send" -> Some "Channel.send"
+  | "channel_receive" -> Some "Channel.receive"
+  | "future_set" -> Some "Future.set_result"
+  | "future_result" -> Some "Future.result"
+  | "future_done" -> Some "Future.done"
+  | _ -> None
+
+let source_map_entry_of_runtime_marker symbol r =
+  Option.map
+    (fun python_symbol ->
+      symbol, python_symbol, span_for_global symbol r.glob)
+    (python_symbol_of_runtime_name symbol)
+
+let method_target_of_term state record_class_prefixes record_field_names r typ =
+  if is_runtime_marker_ref r then None else
+  let args, _ret = type_decomp_local typ in
+  match args with
+  | [] -> None
+  | Tglob (self_ref, _) :: _ ->
+      let class_name = capitalize_first_ascii (basename_of_global_string self_ref) in
+      let source_symbol = basename_of_global_string r in
+      if List.mem source_symbol record_field_names then None
+      else
+        (match List.assoc_opt class_name record_class_prefixes, String.index_opt source_symbol '_' with
+         | Some prefix, Some index when String.equal prefix (String.sub source_symbol 0 index) ->
+             let method_name =
+               String.sub source_symbol (index + 1)
+                 (String.length source_symbol - index - 1)
+             in
+             let python_symbol = class_name ^ "." ^ method_name in
+             Some (source_symbol, python_symbol, span_for_global source_symbol r.glob)
+         | _ -> None)
+  | _ :: _ -> None
+
+let source_map_entries_of_decl state = function
+  | Dind ind -> source_map_entries_of_inductive state ind
+  | Dterm (r, _a, _typ) ->
+      let symbol = basename_of_global_string r in
+      if is_runtime_marker_ref r then
+        (match source_map_entry_of_runtime_marker symbol r with
+         | Some entry -> [entry]
+         | None -> [])
+      else
+        [source_map_entry_of_global symbol r]
+  | Dfix _ | Dtype _ -> []
+
+let source_map_entries_of_structure state struc =
+  let record_class_prefixes =
+    List.concat_map
+      (fun (_mp, elems) ->
+        List.filter_map
+          (function
+            | (_, SEdecl (Dind ind)) -> (
+                match ind.ind_kind with
+                | Record fields when Array.length ind.ind_packets > 0 ->
+                    let field_names =
+                      List.filter_map
+                        (function
+                          | Some r' -> Some (basename_of_global_string r')
+                          | None -> None)
+                        fields
+                    in
+                    Option.map
+                      (fun prefix ->
+                        ( capitalize_first_ascii
+                            (basename_of_global_string ind.ind_packets.(0).ip_typename_ref),
+                          prefix ))
+                      (consistent_field_prefix field_names)
+                | _ -> None)
+            | (_, SEdecl _) | (_, SEmodule _) | (_, SEmodtype _) -> None)
+          elems)
+      struc
+  in
+  let record_field_names =
+    List.concat_map
+      (fun (_mp, elems) ->
+        List.concat
+          (List.filter_map
+             (function
+               | (_, SEdecl (Dind ind)) -> (
+               match ind.ind_kind with
+               | Record fields when Array.length ind.ind_packets > 0 ->
+                    Some
+                      (List.filter_map
+                         (function
+                           | Some r' -> Some (basename_of_global_string r')
+                           | None -> None)
+                         fields)
+                   | _ -> None)
+               | (_, SEdecl _) | (_, SEmodule _) | (_, SEmodtype _) -> None)
+             elems))
+      struc
+  in
+  let entries_of_elem = function
+    | (_, SEdecl (Dterm (r, _a, typ) as decl)) -> (
+        match method_target_of_term state record_class_prefixes record_field_names r typ with
+        | Some entry -> [entry]
+        | None -> source_map_entries_of_decl state decl)
+    | (_, SEdecl decl) -> source_map_entries_of_decl state decl
+    | (_, SEmodule _) | (_, SEmodtype _) -> []
+  in
+  List.concat_map
+    (fun (_mp, elems) -> List.concat_map entries_of_elem elems)
+    struc
+
+let record_renames_of_structure struc =
+  List.concat_map
+    (fun (_mp, elems) ->
+      List.filter_map
+        (function
+          | (_, SEdecl (Dind ind)) -> (
+              match ind.ind_kind with
+              | Record _ when Array.length ind.ind_packets > 0 ->
+                  let packet = ind.ind_packets.(0) in
+                  Some
+                    ( basename_of_global_string packet.ip_consnames_ref.(0),
+                      capitalize_first_ascii
+                        (basename_of_global_string packet.ip_typename_ref) )
+              | _ -> None)
+          | (_, SEdecl _) | (_, SEmodule _) | (_, SEmodtype _) -> None)
+        elems)
+    struc
 
 let qualids_of_space_separated_names names =
   names
@@ -359,6 +629,7 @@ let python_print_structure_to_file state (fname, mo) comment struc =
   ignore (d.pp_struct state struc);
   let opened = opened_libraries state in
   let span = fallback_source_span (Id.to_string mo) in
+  let renames = record_renames_of_structure struc in
   begin
     try
       let state = State.set_phase state Impl in
@@ -366,7 +637,7 @@ let python_print_structure_to_file state (fname, mo) comment struc =
         d.preamble state mo comment opened unsafe_needs ++
         d.pp_struct state struc
       in
-      write_python_with_source_map ~fname ~span pp
+      write_python_with_source_map ~renames ~fname ~span pp
     with reraise ->
       raise reraise
   end;
@@ -397,12 +668,13 @@ let python_extract ~opaque_access qid =
     Python.python_descr.pp_struct state struc
   in
   let fname  = base ^ ".py" in
+  let renames = record_renames_of_structure struc in
   let span =
     match source_span_of_global gr with
     | Some span -> span
     | None -> fallback_source_span base
   in
-  write_python_with_source_map ~fname ~span pp;
+  write_python_with_source_map ~renames ~fname ~span pp;
   Feedback.msg_notice (str "Extracted to " ++ str fname)
 
 (** Build one .py file from several global references while preserving a
@@ -413,6 +685,15 @@ let python_extract_file ~opaque_access file_id qids =
       (fun qid ->
         { glob = Smartlocate.global_with_alias qid; inst = InfvInst.empty })
       qids
+  in
+  let requested_source_files =
+    List.fold_left
+      (fun files global ->
+        match source_span_of_global global.glob with
+        | Some span when not (List.mem span.source_file files) ->
+            span.source_file :: files
+        | _ -> files)
+      [] globals
   in
   let state =
     State.make ~modular:false ~library:false
@@ -432,19 +713,25 @@ let python_extract_file ~opaque_access file_id qids =
     Python.python_descr.pp_struct state struc
   in
   let fname = base ^ ".py" in
+  let renames = record_renames_of_structure struc in
   let entries =
-    List.map
-      (fun global ->
-        let symbol = Id.to_string (Nametab.basename_of_global global.glob) in
-        let span =
-          match source_span_of_global global.glob with
-          | Some span -> span
-          | None -> fallback_source_span symbol
-        in
-        symbol, span)
-      globals
+    dedupe_source_map_entries
+      (source_map_entries_of_structure state struc @
+       List.map
+         (fun global ->
+           let symbol = Id.to_string (Nametab.basename_of_global global.glob) in
+           let span =
+             match source_span_of_global global.glob with
+             | Some span -> span
+             | None -> fallback_source_span symbol
+           in
+           symbol, symbol, span)
+         globals)
+      |> List.filter (fun (_symbol, _python_symbol, span) ->
+           List.mem span.source_file requested_source_files)
   in
   write_python_group_with_source_map
+    ~renames
     ~fname
     ~fallback_span:(fallback_source_span base)
     ~entries

@@ -166,6 +166,10 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   invocation and lean on the pre-commit hook: just attempt the commit (without
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
+- **Do a dedup pass before commit** — after the feature works, do one explicit
+  pass over the touched code to consolidate any new duplication introduced by
+  the change. Do not stop at green tests if the diff still contains obvious new
+  duplicate logic that can be merged cleanly.
 - **Local entry point** — use `./fido help`. Do not call host `uv` for normal
   checks or server startup. The launcher owns buildx image selection, UID/GID
   mapping, credentials mounts, and stdin passthrough.

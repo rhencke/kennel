@@ -449,7 +449,10 @@ class Preempt(Event):
 EventT = WorkerAcquire | HandlerAcquire | WorkerRelease | HandlerRelease | Preempt
 
 
-def transition(current: State, event0: Event) -> State | None:
+def transition(
+    current: State,
+    event0: Event,
+) -> State | None:
     match current:
         case Free():
             match event0:
