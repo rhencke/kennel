@@ -391,27 +391,48 @@ def __apply_applicative(
 __ = None  # erased logical argument
 
 
+# unit: remapped to Python primitive
 # nat: remapped to Python primitive
-# positive: remapped to Python primitive
-# N: remapped to Python primitive
-# Z: remapped to Python primitive
-# Q: remapped to Python primitive
+_A = TypeVar("_A")
 
 
-max_retries: int = ((0 + 1) + 1) + 1
+# option: remapped to Python primitive
+_A = TypeVar("_A")
 
 
-retry_budget: int = 1 * 2 + 1
+# list: remapped to Python primitive
 
 
-def retry_delta(remaining: int) -> int:
-    __n = remaining
-    if __n == 0:
-        return -1
-    if __n > 0:
-        p = __n
-        return p
-    return _rocq_numeric_domain_error("N", __n)
+def _io_roundtrip_message(message: int) -> IO[int]:
+    def __io_bind_next(mutex):
+        def __io_bracket_release(x):
+            return mutex.release()
+
+        def __io_bracket_use(x):
+            def __io_bind_next(channel):
+                def __io_bind_next(x0):
+                    def __io_bind_next(received):
+                        def __io_bind_next(future):
+                            def __io_bind_next(x1):
+                                def __io_bind_next(result):
+                                    return IO.pure(result)
+
+                                return future.result().bind(__io_bind_next)
+
+                            return future.set_result(received).bind(__io_bind_next)
+
+                        return Future.new().bind(__io_bind_next)
+
+                    return channel.receive().bind(__io_bind_next)
+
+                return channel.send(message).bind(__io_bind_next)
+
+            return Channel.new().bind(__io_bind_next)
+
+        return IO.bracket(mutex.acquire(), __io_bracket_release, __io_bracket_use)
+
+    return Mutex.new().bind(__io_bind_next)
 
 
-backoff_ratio: Fraction = Fraction(1, 1 * 2)
+async def roundtrip_message(message: int) -> int:
+    return await _io_roundtrip_message(message).run()

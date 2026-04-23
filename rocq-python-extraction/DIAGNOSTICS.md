@@ -135,3 +135,9 @@ Remediation: Use nat, positive, N, Z, or Q for extracted computation; Rocq R has
 
 ## PYEX042 Unsupported IO Effect Extraction
 Remediation: Keep IO values at an async boundary or provide an explicit IO adapter remapping.
+
+## PYEX043 Unsupported Concurrency Scheduling Extraction
+Remediation: Model deterministic wrapper boundaries only; do not extract scheduler interleavings as executable Python.
+
+## PYEX044 Concurrency Marker Arity Mismatch
+Remediation: Use supported __PYCONC_* markers with the documented number of computational arguments.

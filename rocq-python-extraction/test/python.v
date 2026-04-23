@@ -21,4 +21,5 @@ From PyExtractTest Require Export
   strings_bytes
   numbers
   finite_collections
-  io_boundaries.
+  io_boundaries
+  concurrency_primitives.

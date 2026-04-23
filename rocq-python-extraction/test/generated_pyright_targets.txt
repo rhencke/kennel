@@ -19,3 +19,5 @@ q_den.py
 FiniteCollectionFixtures.py
 read_file_echo.py
 http_status_ok.py
+lock_channel_future_demo.py
+future_done_after_set.py

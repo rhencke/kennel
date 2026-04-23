@@ -101,14 +101,7 @@ RUN chown opam:opam /workspace
 USER opam
 
 COPY --chown=opam:opam dune-workspace ./
-COPY --chown=opam:opam \
-    rocq-python-extraction/dune-project \
-    rocq-python-extraction/dune \
-    rocq-python-extraction/rocq-python-extraction.opam \
-    rocq-python-extraction/META.rocq-python-extraction.template \
-    rocq-python-extraction/g_python_extraction.mlg \
-    rocq-python-extraction/python.ml \
-    rocq-python-extraction/
+COPY --chown=opam:opam rocq-python-extraction rocq-python-extraction
 COPY --chown=opam:opam tools/rocq_model_outputs.sh tools/
 
 FROM ${ROCQ_IMAGE} AS rocq-toolchain
@@ -177,12 +170,7 @@ COPY --from=extract /workspace/_build /.cache/rocq-models/context/_build
 
 FROM rocq-plugin-source AS test-extract
 
-COPY --chown=opam:opam \
-    rocq-python-extraction/test/dune \
-    rocq-python-extraction/test/*.v \
-    rocq-python-extraction/test/generated_pytest_targets.txt \
-    rocq-python-extraction/test/generated_pyright_targets.txt \
-    rocq-python-extraction/test/
+COPY --chown=opam:opam rocq-python-extraction/test rocq-python-extraction/test
 
 RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
     && mkdir -p /tmp/pytest-artifacts /tmp/pyright-artifacts \
@@ -205,7 +193,14 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
         exit 1; \
     fi \
     && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/io-run-unsupported.log \
-    && grep -F '"code": "PYEX042"' /tmp/io-run-unsupported.log
+    && grep -F '"code": "PYEX042"' /tmp/io-run-unsupported.log \
+    && if opam exec -- dune build rocq-python-extraction/test/concurrency_interleave_unsupported.vo > /tmp/concurrency-interleave-unsupported.log 2>&1; then \
+        cat /tmp/concurrency-interleave-unsupported.log; \
+        echo "expected concurrency_interleave_unsupported.v extraction to fail with PYEX043" >&2; \
+        exit 1; \
+    fi \
+    && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/concurrency-interleave-unsupported.log \
+    && grep -F '"code": "PYEX043"' /tmp/concurrency-interleave-unsupported.log
 
 FROM python-base AS python-deps
 
@@ -215,7 +210,7 @@ COPY .python-version pyproject.toml uv.lock ./
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-FROM python-deps AS python-check-base
+FROM python-deps AS python-workspace-base
 
 WORKDIR /workspace
 COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
@@ -225,19 +220,7 @@ COPY tools/gen_workflows.py tools/build_graph.sh tools/
 COPY models/Dockerfile models/Dockerfile
 COPY models/dune-project models/dune models/*.v models/
 COPY src src
-COPY tests tests
-COPY rocq-python-extraction/Dockerfile \
-    rocq-python-extraction/DIAGNOSTICS.md \
-    rocq-python-extraction/META.rocq-python-extraction.template \
-    rocq-python-extraction/dune \
-    rocq-python-extraction/dune-project \
-    rocq-python-extraction/export_pytest_generated.sh \
-    rocq-python-extraction/g_python_extraction.mlg \
-    rocq-python-extraction/python.ml \
-    rocq-python-extraction/rocq-python-extraction.opam \
-    rocq-python-extraction/run_in_docker.sh \
-    rocq-python-extraction/
-COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
+COPY rocq-python-extraction rocq-python-extraction
 COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
 
 ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
@@ -246,6 +229,10 @@ ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv sync --frozen
+
+FROM python-workspace-base AS python-check-base
+
+COPY tests tests
 
 FROM python-check-base AS format
 
@@ -263,40 +250,12 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv run pyright
 
-FROM python-deps AS python-test-base
-
-WORKDIR /workspace
-COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
-COPY .githooks/pre-commit .githooks/pre-commit
-COPY .github/workflows/ci.yml .github/workflows/
-COPY tools/gen_workflows.py tools/build_graph.sh tools/
-COPY models/Dockerfile models/Dockerfile
-COPY models/dune-project models/dune models/*.v models/
-COPY src src
-COPY rocq-python-extraction/Dockerfile \
-    rocq-python-extraction/DIAGNOSTICS.md \
-    rocq-python-extraction/META.rocq-python-extraction.template \
-    rocq-python-extraction/dune \
-    rocq-python-extraction/dune-project \
-    rocq-python-extraction/export_pytest_generated.sh \
-    rocq-python-extraction/g_python_extraction.mlg \
-    rocq-python-extraction/python.ml \
-    rocq-python-extraction/rocq-python-extraction.opam \
-    rocq-python-extraction/run_in_docker.sh \
-    rocq-python-extraction/
-COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
-
-ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
-ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv sync --frozen
+FROM python-workspace-base AS python-test-base
 
 FROM python-test-base AS generated-typecheck
 
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
-COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
@@ -306,7 +265,6 @@ FROM python-test-base AS test
 
 COPY tests tests
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
-COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv run tests

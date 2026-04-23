@@ -38,11 +38,17 @@ let file_naming state mp =
 
 (*s Preamble emitted at the top of every extracted .py file. *)
 
-let runtime_prelude = {|from itertools import islice
+let runtime_prelude = {|import asyncio
+import queue
+import threading
+from contextlib import asynccontextmanager
+from concurrent.futures import Future as _ConcurrentFuture
+from itertools import islice
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     Generic,
@@ -63,6 +69,9 @@ _StateTValue = TypeVar("_StateTValue")
 _StateTNext = TypeVar("_StateTNext")
 _IOValue = TypeVar("_IOValue")
 _IONext = TypeVar("_IONext")
+_IOOwner = TypeVar("_IOOwner")
+_ChannelValue = TypeVar("_ChannelValue")
+_FutureValue = TypeVar("_FutureValue")
 
 
 class _Impossible(RuntimeError):
@@ -276,6 +285,117 @@ class IO(Generic[_IOValue]):
             return thunk()
 
         return IO(run_sync)
+
+    @classmethod
+    def from_blocking(cls, thunk: Callable[[], _IOValue]) -> IO[_IOValue]:
+        async def run_blocking() -> _IOValue:
+            return await asyncio.to_thread(thunk)
+
+        return IO(run_blocking)
+
+    @classmethod
+    @asynccontextmanager
+    async def ownership(
+        cls,
+        acquire: IO[_IOOwner],
+        release: Callable[[_IOOwner], IO[None]],
+    ) -> AsyncIterator[_IOOwner]:
+        owner = await acquire.run()
+        try:
+            yield owner
+        finally:
+            await release(owner).run()
+
+    @classmethod
+    def bracket(
+        cls,
+        acquire: IO[_IOOwner],
+        release: Callable[[_IOOwner], IO[None]],
+        use: Callable[[_IOOwner], IO[_IONext]],
+    ) -> IO[_IONext]:
+        async def run_bracket() -> _IONext:
+            async with cls.ownership(acquire, release) as owner:
+                return await use(owner).run()
+
+        return IO(run_bracket)
+
+
+class Mutex:
+    """Explicit threading mutex wrapper for extracted coordination models.
+
+    This wrapper exposes Python's lock behavior; it does not prove fairness,
+    starvation freedom, or a Rocq-level scheduler semantics.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    @classmethod
+    def new(cls) -> IO[Mutex]:
+        return IO.from_sync(cls)
+
+    def acquire(self) -> IO[None]:
+        def lock() -> None:
+            self._lock.acquire()
+
+        return IO.from_blocking(lock)
+
+    def release(self) -> IO[None]:
+        def unlock() -> None:
+            self._lock.release()
+
+        return IO.from_sync(unlock)
+
+
+class Channel(Generic[_ChannelValue]):
+    """Explicit FIFO channel wrapper backed by queue.SimpleQueue.
+
+    FIFO order is for completed sends observed by this queue.  This wrapper
+    does not model scheduler fairness, producer/consumer races, or cancellation.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.SimpleQueue[_ChannelValue] = queue.SimpleQueue()
+
+    @classmethod
+    def new(cls) -> IO[Channel[_ChannelValue]]:
+        return IO.from_sync(cls)
+
+    def send(self, value: _ChannelValue) -> IO[None]:
+        def put() -> None:
+            self._queue.put(value)
+
+        return IO.from_sync(put)
+
+    def receive(self) -> IO[_ChannelValue]:
+        return IO.from_blocking(self._queue.get)
+
+
+class Future(Generic[_FutureValue]):
+    """Explicit future wrapper backed by concurrent.futures.Future.
+
+    Completion follows Python Future semantics: result blocks until completed,
+    double completion raises, and no Rocq-level thread interleaving is implied.
+    """
+
+    def __init__(self) -> None:
+        self._future: _ConcurrentFuture[_FutureValue] = _ConcurrentFuture()
+
+    @classmethod
+    def new(cls) -> IO[Future[_FutureValue]]:
+        return IO.from_sync(cls)
+
+    def set_result(self, value: _FutureValue) -> IO[None]:
+        def set_value() -> None:
+            self._future.set_result(value)
+
+        return IO.from_sync(set_value)
+
+    def result(self) -> IO[_FutureValue]:
+        return IO.from_blocking(self._future.result)
+
+    def done(self) -> bool:
+        return self._future.done()
 
 
 def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:
@@ -798,6 +918,8 @@ let diagnostic_catalogue = [
   { code = "PYEX040"; title = "Unclassified extraction failure"; category = "internal"; remediation = "Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex040-unclassified-extraction-failure" };
   { code = "PYEX041"; title = "Unsupported real number extraction"; category = "numeric"; remediation = "Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex041-unsupported-real-number-extraction" };
   { code = "PYEX042"; title = "Unsupported IO effect extraction"; category = "io"; remediation = "Keep IO values at an async boundary or provide an explicit IO adapter remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex042-unsupported-io-effect-extraction" };
+  { code = "PYEX043"; title = "Unsupported concurrency scheduling extraction"; category = "concurrency"; remediation = "Model deterministic wrapper boundaries only; do not extract scheduler interleavings as executable Python."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex043-unsupported-concurrency-scheduling-extraction" };
+  { code = "PYEX044"; title = "Concurrency marker arity mismatch"; category = "concurrency"; remediation = "Use supported __PYCONC_* markers with the documented number of computational arguments."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex044-concurrency-marker-arity-mismatch" };
 ]
 
 let diagnostic_prefix = "PYTHON_EXTRACTION_DIAGNOSTIC_JSON: "
@@ -885,7 +1007,22 @@ let marker_reader_ask = "__PYMONAD_READER_ASK__"
 let marker_io_type = "__PYMONAD_IO_TYPE__"
 let marker_io_pure = "__PYMONAD_IO_PURE__"
 let marker_io_bind = "__PYMONAD_IO_BIND__"
+let marker_io_bracket = "__PYMONAD_IO_BRACKET__"
 let marker_io_run = "__PYMONAD_IO_RUN__"
+let marker_mutex_type = "__PYCONC_MUTEX_TYPE__"
+let marker_channel_type = "__PYCONC_CHANNEL_TYPE__"
+let marker_future_type = "__PYCONC_FUTURE_TYPE__"
+let marker_new_mutex = "__PYCONC_NEW_MUTEX__"
+let marker_new_channel = "__PYCONC_NEW_CHANNEL__"
+let marker_new_future = "__PYCONC_NEW_FUTURE__"
+let marker_mutex_acquire = "__PYCONC_MUTEX_ACQUIRE__"
+let marker_mutex_release = "__PYCONC_MUTEX_RELEASE__"
+let marker_channel_send = "__PYCONC_CHANNEL_SEND__"
+let marker_channel_receive = "__PYCONC_CHANNEL_RECEIVE__"
+let marker_future_set = "__PYCONC_FUTURE_SET__"
+let marker_future_result = "__PYCONC_FUTURE_RESULT__"
+let marker_future_done = "__PYCONC_FUTURE_DONE__"
+let marker_interleave = "__PYCONC_INTERLEAVE__"
 
 let is_monad_marker_string s =
   let prefix = "__PYMONAD_" in
@@ -893,8 +1030,19 @@ let is_monad_marker_string s =
   String.length s >= prefix_len &&
   String.equal prefix (String.sub s 0 prefix_len)
 
+let is_concurrency_marker_string s =
+  let prefix = "__PYCONC_" in
+  let prefix_len = String.length prefix in
+  String.length s >= prefix_len &&
+  String.equal prefix (String.sub s 0 prefix_len)
+
 let is_monad_marker_ref r =
   is_custom r && is_monad_marker_string (find_custom r)
+
+let is_runtime_marker_ref r =
+  is_custom r &&
+  let marker = find_custom r in
+  is_monad_marker_string marker || is_concurrency_marker_string marker
 
 let marker_of_ast = function
   | MLglob r when is_custom r ->
@@ -1170,6 +1318,16 @@ let rec pp_expr state env expr =
       str "StateT.get_state()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
       str "lambda __reader_env: __reader_env"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_mutex ->
+      str "Mutex.new()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_channel ->
+      str "Channel.new()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_future ->
+      str "Future.new()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_interleave ->
+      extraction_diagnostic_error ~detail:(find_custom r) "PYEX043"
+  | MLglob r when is_custom r && is_concurrency_marker_string (find_custom r) ->
+      extraction_diagnostic_error ~detail:(find_custom r) "PYEX044"
   | MLglob r when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
       str "{}"
   | MLglob r when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
@@ -1309,6 +1467,35 @@ let rec pp_expr state env expr =
         pp_expr state env reader_expr ++
         str "(__reader_env))(__reader_env)"
       in
+      let pp_concurrency_expr =
+        match marker_of_ast head, all_args with
+        | Some marker, [] when String.equal marker marker_new_mutex ->
+            Some (str "Mutex.new()")
+        | Some marker, [] when String.equal marker marker_new_channel ->
+            Some (str "Channel.new()")
+        | Some marker, [] when String.equal marker marker_new_future ->
+            Some (str "Future.new()")
+        | Some marker, [mutex] when String.equal marker marker_mutex_acquire ->
+            Some (pp_expr state env mutex ++ str ".acquire()")
+        | Some marker, [mutex] when String.equal marker marker_mutex_release ->
+            Some (pp_expr state env mutex ++ str ".release()")
+        | Some marker, [channel; value] when String.equal marker marker_channel_send ->
+            Some (pp_expr state env channel ++ str ".send(" ++ pp_expr state env value ++ str ")")
+        | Some marker, [channel] when String.equal marker marker_channel_receive ->
+            Some (pp_expr state env channel ++ str ".receive()")
+        | Some marker, [future; value] when String.equal marker marker_future_set ->
+            Some (pp_expr state env future ++ str ".set_result(" ++ pp_expr state env value ++ str ")")
+        | Some marker, [future] when String.equal marker marker_future_result ->
+            Some (pp_expr state env future ++ str ".result()")
+        | Some marker, [future] when String.equal marker marker_future_done ->
+            Some (pp_expr state env future ++ str ".done()")
+        | Some marker, _ when String.equal marker marker_interleave ->
+            extraction_diagnostic_error ~detail:marker "PYEX043"
+        | Some marker, _ when is_concurrency_marker_string marker ->
+            extraction_diagnostic_error ~detail:marker "PYEX044"
+        | _ ->
+            None
+      in
       let pp_monad_expr =
         match marker_of_ast head, all_args with
         | Some marker, [value] when String.equal marker marker_state_pure ->
@@ -1329,6 +1516,9 @@ let rec pp_expr state env expr =
             Some (str "IO.pure(" ++ pp_expr state env value ++ str ")")
         | Some marker, [m; f] when String.equal marker marker_io_bind ->
             Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+        | Some marker, [acquire; release; use] when String.equal marker marker_io_bracket ->
+            Some (str "IO.bracket(" ++ pp_expr state env acquire ++ str ", " ++
+                  pp_expr state env release ++ str ", " ++ pp_expr state env use ++ str ")")
         | Some marker, _ when String.equal marker marker_io_run ->
             extraction_diagnostic_error ~detail:marker "PYEX042"
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
@@ -1342,6 +1532,9 @@ let rec pp_expr state env expr =
             None
       in
       (match pp_collection_expr with
+       | Some pp -> pp
+       | None ->
+      (match pp_concurrency_expr with
        | Some pp -> pp
        | None ->
       (match pp_monad_expr with
@@ -1358,7 +1551,7 @@ let rec pp_expr state env expr =
            else
              pp_head ++ str "(" ++
              prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-             str ")"))
+             str ")")))
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
@@ -2249,15 +2442,61 @@ let rec pp_return_body state env indent = function
   | MLapp (f, args) -> (
       match collect_app f args with
       | head, all_args -> (
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          let pp_io_bind_statement action next =
+            let ids, body = collect_lams next in
+            let params, env' = push_vars (List.rev_map id_of_mlid ids) env in
+            let params = List.rev (visible_params params) in
+            let bind_name = "__io_bind_next" in
+            let pfx = String.make indent ' ' in
+            let body_pfx = String.make (indent + 4) ' ' in
+            let pp_params =
+              if List.is_empty params then str "__ignored"
+              else pp_param_list params
+            in
+            str "def " ++ str bind_name ++ str "(" ++ pp_params ++ str "):" ++
+            fnl () ++ str body_pfx ++ pp_return_body state env' (indent + 4) body ++
+            fnl () ++ fnl () ++ str pfx ++ str "return " ++ pp_expr state env action ++
+            str ".bind(" ++ str bind_name ++ str ")"
+          in
+          let pp_io_lambda_statement name lam =
+            let ids, body = collect_lams lam in
+            let params, env' = push_vars (List.rev_map id_of_mlid ids) env in
+            let params = List.rev (visible_params params) in
+            let body_pfx = String.make (indent + 4) ' ' in
+            let pp_params =
+              if List.is_empty params then str "__ignored"
+              else pp_param_list params
+            in
+            str "def " ++ str name ++ str "(" ++ pp_params ++ str "):" ++
+            fnl () ++ str body_pfx ++ pp_return_body state env' (indent + 4) body
+          in
+          let pp_io_bracket_statement acquire release use =
+            let release_name = "__io_bracket_release" in
+            let use_name = "__io_bracket_use" in
+            let pfx = String.make indent ' ' in
+            pp_io_lambda_statement release_name release ++
+            fnl () ++ fnl () ++ str pfx ++
+            pp_io_lambda_statement use_name use ++
+            fnl () ++ fnl () ++ str pfx ++
+            str "return IO.bracket(" ++ pp_expr state env acquire ++ str ", " ++
+            str release_name ++ str ", " ++ str use_name ++ str ")"
+          in
+          match marker_of_ast head, visible_args with
+          | Some marker, [action; next] when String.equal marker marker_io_bind ->
+              pp_io_bind_statement action next
+          | Some marker, [acquire; release; use]
+            when String.equal marker marker_io_bracket ->
+              pp_io_bracket_statement acquire release use
+          | _ ->
           match unwrap_fix head with
           | None ->
               str "return " ++ pp_expr state env (MLapp (f, args))
           | Some (i, ids, defs) ->
               let def_pfx = String.make indent ' ' in
               let pp_defs, selected = pp_fix_statement state env indent i ids defs in
-              let visible_args =
-                List.filter (fun a -> not (is_erased_arg a)) all_args
-              in
               pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++
               pp_pyid selected ++ str "(" ++
               prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
@@ -2570,6 +2809,9 @@ let rec pp_type_with state pp_tvar = function
         else if is_string_map_type_ref r then "dict[str, object]"
         else if is_string_set_type_ref r then "frozenset[str]"
         else if is_custom r && String.equal (find_custom r) marker_io_type then "IO"
+        else if is_custom r && String.equal (find_custom r) marker_mutex_type then "Mutex"
+        else if is_custom r && String.equal (find_custom r) marker_channel_type then "Channel"
+        else if is_custom r && String.equal (find_custom r) marker_future_type then "Future"
         else if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
@@ -2602,6 +2844,16 @@ let rec pp_type_with state pp_tvar = function
         (match args with
          | [arg] -> str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
          | _ -> str "IO[object]")
+      else if is_custom r && String.equal (find_custom r) marker_mutex_type then
+        str "Mutex"
+      else if is_custom r && String.equal (find_custom r) marker_channel_type then
+        (match args with
+         | [arg] -> str "Channel[" ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "Channel[object]")
+      else if is_custom r && String.equal (find_custom r) marker_future_type then
+        (match args with
+         | [arg] -> str "Future[" ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "Future[object]")
       else if is_positive_set_type_ref r || is_string_set_type_ref r then str name
       else if List.is_empty args then str name
       else
@@ -2805,7 +3057,7 @@ let pp_io_term_decl state env name a typ ret_typ =
             str " = " ++ pp_expr state env a ++ fnl ()
       in
       if List.is_empty args then
-        builder ++ fnl () ++ facade_prefix ++
+        builder ++ fnl () ++ fnl () ++ facade_prefix ++
         str "async def " ++ str name ++ str "() -> " ++ facade_ret_annot ++
         str ":" ++ fnl () ++
         str "    return await " ++ str builder_name ++ str ".run()" ++ fnl ()
@@ -2814,7 +3066,7 @@ let pp_io_term_decl state env name a typ ret_typ =
           if Int.equal (List.length args) 1 then ["x"]
           else List.init (List.length args) (fun i -> "arg" ^ string_of_int i)
         in
-        builder ++ fnl () ++ facade_prefix ++
+        builder ++ fnl () ++ fnl () ++ facade_prefix ++
         str "async def " ++ str name ++ str "(" ++
         prlist_with_sep (fun () -> str ", ")
           (fun i ->
@@ -2845,7 +3097,7 @@ let pp_io_term_decl state env name a typ ret_typ =
         str ") -> " ++ builder_ret_annot ++ str ":" ++ fnl () ++
         str "    " ++ pp_return_body state env' 4 body ++ fnl ()
       in
-      builder ++ fnl () ++ facade_prefix ++
+      builder ++ fnl () ++ fnl () ++ facade_prefix ++
       str "async def " ++ str name ++ str "(" ++ pp_facade_params ++
       str ") -> " ++ facade_ret_annot ++ str ":" ++ fnl () ++
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
@@ -3140,7 +3392,7 @@ let pp_decl state = function
   | Dtype _     -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003"
   | Dterm (r, a, typ) ->
       if is_prop_type typ then mt ()
-      else if is_monad_marker_ref r then mt ()
+      else if is_runtime_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
       else if is_std_collection_term_ref r then mt ()
       else if is_custom r then
@@ -3156,7 +3408,7 @@ let pp_decl state = function
       let env = empty_env state () in
       let pp_one i =
         if is_prop_type typs.(i) then mt ()
-        else if is_monad_marker_ref rv.(i) then mt ()
+        else if is_runtime_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
         else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then
@@ -3195,14 +3447,14 @@ let rec module_type_annotation state = function
 
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
-      if is_prop_type typ || is_inline_custom r || is_monad_marker_ref r ||
+      if is_prop_type typ || is_inline_custom r || is_runtime_marker_ref r ||
          is_std_collection_term_ref r then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
       |> List.filter (fun i ->
            not (is_prop_type typs.(i)) &&
-           not (is_monad_marker_ref rv.(i)) &&
+           not (is_runtime_marker_ref rv.(i)) &&
            not (is_inline_custom rv.(i)) &&
            not (is_std_collection_term_ref rv.(i)))
       |> List.map (fun i -> pp_global state Term rv.(i))

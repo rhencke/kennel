@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import sys
-from ast import AnnAssign, Assign, ClassDef, FunctionDef, Name, parse
+from ast import AnnAssign, Assign, AsyncFunctionDef, ClassDef, FunctionDef, Name, parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -877,7 +877,7 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
     lines = text.splitlines()
     signatures: dict[str, tuple[str, Range]] = {}
     for node in tree.body:
-        if isinstance(node, FunctionDef | ClassDef):
+        if isinstance(node, FunctionDef | AsyncFunctionDef | ClassDef):
             start = node.lineno - 1
             end = _signature_end_line(lines, start)
             signature = " ".join(

@@ -582,11 +582,14 @@ def test_helpers_cover_comments_strings_uris_and_main(
     generated = tmp_path / "generated.py"
     generated.write_text(
         "answer: int = 42  # From model.v:1:1\n"
+        "async def effect() -> int:  # From model.v:1:1\n"
+        "    return 1\n"
         "plain = 'ok'  # From model.v:2:1\n"
         "target.attr = 0\n"
     )
     signatures = rocq_lsp._python_signatures(generated)
     assert signatures["answer"][0] == "answer: int = 42"
+    assert signatures["effect"][0] == "async def effect() -> int"
     assert signatures["plain"][0] == "plain = 'ok'"
     assert "target" not in signatures
     assert rocq_lsp._signature_end_line(["def x("], 0) == 0

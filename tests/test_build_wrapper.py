@@ -485,21 +485,25 @@ class TestModelDockerfile:
         assert "RUN chown opam:opam /workspace" in dockerfile
         assert "USER opam" in dockerfile
         assert "COPY --chown=opam:opam dune-workspace ./" in dockerfile
-        assert "rocq-python-extraction/g_python_extraction.mlg" in dockerfile
+        assert (
+            "COPY --chown=opam:opam rocq-python-extraction rocq-python-extraction"
+            in dockerfile
+        )
         assert "FROM rocq-plugin-source AS extract" in dockerfile
         assert (
             "COPY --chown=opam:opam models/dune-project models/dune models/*.v models/"
             in dockerfile
         )
         assert "FROM rocq-plugin-source AS test-extract" in dockerfile
-        assert "rocq-python-extraction/test/*.v" in dockerfile
-        assert "rocq-python-extraction/test/generated_pytest_targets.txt" in dockerfile
-        assert "rocq-python-extraction/test/generated_pyright_targets.txt" in dockerfile
+        assert (
+            "COPY --chown=opam:opam rocq-python-extraction/test rocq-python-extraction/test"
+            in dockerfile
+        )
 
     def test_python_checks_have_explicit_host_inputs(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
-        assert "FROM python-deps AS python-check-base" in dockerfile
+        assert "FROM python-deps AS python-workspace-base" in dockerfile
         assert (
             "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
@@ -508,15 +512,9 @@ class TestModelDockerfile:
         assert "COPY models/Dockerfile models/Dockerfile" in dockerfile
         assert "COPY src src" in dockerfile
         assert "COPY tests tests" in dockerfile
-        assert (
-            "COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/"
-            in dockerfile
-        )
-        assert "FROM python-deps AS python-test-base" in dockerfile
-        assert (
-            "rocq-python-extraction/META.rocq-python-extraction.template" in dockerfile
-        )
-        assert "rocq-python-extraction/g_python_extraction.mlg" in dockerfile
+        assert "COPY rocq-python-extraction rocq-python-extraction" in dockerfile
+        assert "FROM python-workspace-base AS python-check-base" in dockerfile
+        assert "FROM python-workspace-base AS python-test-base" in dockerfile
 
     def test_fido_runtime_uses_host_uid_gid_build_args(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
@@ -534,9 +532,6 @@ class TestModelDockerfile:
         assert "FROM python-check-base AS lint" in dockerfile
         assert "FROM python-check-base AS typecheck" in dockerfile
         assert "FROM python-test-base AS generated-typecheck" in dockerfile
-        assert (
-            "COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/"
-        ) in dockerfile
         assert "FROM python-test-base AS test" in dockerfile
         assert "uv run tests" in dockerfile
         assert "FROM scratch AS ci" not in dockerfile
