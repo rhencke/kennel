@@ -32,6 +32,7 @@ from fido.events import (
     reply_to_review,
 )
 from fido.provider import ProviderID
+from fido.rocq import replied_comment_claims as oracle
 from fido.store import FidoStore, ReplyPromiseRecord
 
 
@@ -81,6 +82,30 @@ def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
     else:
         client.run_turn.return_value = return_value
     return client
+
+
+def _oracle_owner(owner: str) -> object:
+    match owner:
+        case "webhook":
+            return oracle.OwnerWebhook()
+        case "worker":
+            return oracle.OwnerWorker()
+        case "recovery":
+            return oracle.OwnerRecovery()
+
+
+def _promise_state_name(state: object) -> str:
+    if isinstance(state, str):
+        return {
+            "prepared": "PromisePrepared",
+            "posted": "PromisePosted",
+            "acked": "PromiseAcked",
+            "failed": "PromiseFailed",
+            "in_progress": "ClaimInProgress",
+            "completed": "ClaimCompleted",
+            "retryable_failed": "ClaimRetryableFailed",
+        }[state]
+    return type(state).__name__
 
 
 class TestNeedsMoreContext:
@@ -144,6 +169,46 @@ class TestRecoverReplyPromises:
         )
         assert promise is not None
         return promise
+
+    def _assert_recovery_matches_oracle(
+        self,
+        tmp_path: Path,
+        promise: ReplyPromiseRecord,
+        observation: object,
+        *,
+        covered_comment_ids: tuple[int, ...] | None = None,
+    ) -> None:
+        comments = list(
+            covered_comment_ids
+            if covered_comment_ids is not None
+            else promise.covered_comment_ids[1:]
+        )
+        prepared = oracle.prepare_claims(
+            _oracle_owner("recovery"),
+            1,
+            promise.anchor_comment_id,
+            comments,
+            {},
+            {},
+        )
+        assert prepared is not None
+        claims, promises = prepared
+        claims, promises = oracle.recover_promise(1, observation, claims, promises)
+
+        persisted = FidoStore(tmp_path).promise(promise.promise_id)
+        assert persisted is not None
+        assert _promise_state_name(persisted.state) == _promise_state_name(
+            promises[1].promise_state
+        )
+        for comment_id in promise.covered_comment_ids:
+            assert (
+                FidoStore(tmp_path).claim_state(comment_id)
+                == {
+                    "ClaimInProgress": "in_progress",
+                    "ClaimCompleted": "completed",
+                    "ClaimRetryableFailed": "retryable_failed",
+                }[_promise_state_name(claims[comment_id].claim_state)]
+            )
 
     def test_returns_false_when_no_promises(self, tmp_path: Path) -> None:
         assert not recover_reply_promises(
@@ -220,6 +285,11 @@ class TestRecoverReplyPromises:
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.SeenPromiseMarker(),
+        )
 
     def test_recovers_stale_pull_marker_without_reposting(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -246,6 +316,11 @@ class TestRecoverReplyPromises:
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.SeenPromiseMarker(),
+        )
 
     def test_deleted_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -261,6 +336,11 @@ class TestRecoverReplyPromises:
             7,
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.AnchorDeleted(),
+        )
 
     def test_deleted_issue_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -276,6 +356,11 @@ class TestRecoverReplyPromises:
             7,
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.AnchorDeleted(),
+        )
 
     def test_other_pr_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -300,6 +385,11 @@ class TestRecoverReplyPromises:
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [205]
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.WrongPullRequest(),
+        )
 
     def test_other_pr_issue_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -324,6 +414,11 @@ class TestRecoverReplyPromises:
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [302]
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.WrongPullRequest(),
+        )
 
     def test_issue_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -357,7 +452,7 @@ class TestRecoverReplyPromises:
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        self._prepare_promise(tmp_path, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -383,6 +478,11 @@ class TestRecoverReplyPromises:
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.ReplayFailed(),
+        )
 
     def test_pull_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -414,7 +514,7 @@ class TestRecoverReplyPromises:
 
     def test_pull_recovery_marks_failed_when_reply_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        self._prepare_promise(tmp_path, "pulls", 205)
+        promise = self._prepare_promise(tmp_path, "pulls", 205)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
@@ -443,6 +543,11 @@ class TestRecoverReplyPromises:
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            promise,
+            oracle.ReplayFailed(),
+        )
 
     def test_defer_recovery_skips_task_creation(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -566,6 +671,16 @@ class TestRecoverReplyPromises:
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            first,
+            oracle.ReplayPosted(),
+        )
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            second,
+            oracle.ReplayPosted(),
+        )
 
     def test_coalesces_issue_comment_promises_in_same_pr_lane(
         self, tmp_path: Path
@@ -616,6 +731,16 @@ class TestRecoverReplyPromises:
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            first,
+            oracle.ReplayPosted(),
+        )
+        self._assert_recovery_matches_oracle(
+            tmp_path,
+            second,
+            oracle.ReplayPosted(),
+        )
 
     def test_review_recovery_clears_group_promises_before_task_creation(
         self, tmp_path: Path

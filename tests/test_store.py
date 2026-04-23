@@ -9,6 +9,7 @@ from fido.rocq import replied_comment_claims as oracle
 from fido.store import (
     FidoStore,
     ReplyOwner,
+    ReplyPromiseRecord,
     append_reply_promise_marker,
     append_reply_promise_markers,
     extract_reply_promise_ids,
@@ -17,6 +18,59 @@ from fido.store import (
 
 def _oracle_promise_state(promises: object, promise_id: int) -> object:
     return promises[promise_id].promise_state  # type: ignore[index]
+
+
+def _oracle_claim_state(claims: object, comment_id: int) -> object:
+    return claims[comment_id].claim_state  # type: ignore[index]
+
+
+def _oracle_owner(owner: ReplyOwner) -> object:
+    match owner:
+        case "webhook":
+            return oracle.OwnerWebhook()
+        case "worker":
+            return oracle.OwnerWorker()
+        case "recovery":
+            return oracle.OwnerRecovery()
+
+
+def _state_name(state: object) -> str:
+    if isinstance(state, str):
+        return {
+            "prepared": "PromisePrepared",
+            "posted": "PromisePosted",
+            "acked": "PromiseAcked",
+            "failed": "PromiseFailed",
+            "in_progress": "ClaimInProgress",
+            "completed": "ClaimCompleted",
+            "retryable_failed": "ClaimRetryableFailed",
+        }[state]
+    return type(state).__name__
+
+
+def _assert_store_matches_oracle(
+    store: FidoStore,
+    store_promise: ReplyPromiseRecord,
+    *,
+    oracle_claims: dict[int, object],
+    oracle_promises: dict[int, object],
+    oracle_promise_id: int = 1,
+) -> None:
+    persisted = store.promise(store_promise.promise_id)
+    assert persisted is not None
+    oracle_row = oracle_promises[oracle_promise_id]
+    assert persisted.anchor_comment_id == oracle_row.promise_anchor_comment
+    assert persisted.covered_comment_ids == tuple(oracle_row.promise_covered_comments)
+    assert _state_name(persisted.state) == _state_name(oracle_row.promise_state)
+    for comment_id in persisted.covered_comment_ids:
+        assert (
+            store.claim_state(comment_id)
+            == {
+                "ClaimInProgress": "in_progress",
+                "ClaimCompleted": "completed",
+                "ClaimRetryableFailed": "retryable_failed",
+            }[_state_name(_oracle_claim_state(oracle_claims, comment_id))]
+        )
 
 
 def test_prepare_claim_is_atomic_and_blocks_duplicate_owner(tmp_path: Path) -> None:
@@ -124,6 +178,108 @@ def test_ack_promise_completes_every_covered_comment(tmp_path: Path) -> None:
         store.prepare_reply(owner="worker", comment_type="pulls", anchor_comment_id=202)
         is None
     )
+
+
+def test_store_prepare_reply_matches_oracle(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    promise = store.prepare_reply(
+        owner="webhook",
+        comment_type="pulls",
+        anchor_comment_id=601,
+        covered_comment_ids=[602, 603],
+    )
+    assert promise is not None
+
+    prepared = oracle.prepare_claims(
+        _oracle_owner("webhook"),
+        1,
+        601,
+        [602, 603],
+        {},
+        {},
+    )
+    assert prepared is not None
+    claims, promises = prepared
+
+    _assert_store_matches_oracle(
+        store,
+        promise,
+        oracle_claims=claims,
+        oracle_promises=promises,
+    )
+
+
+def test_store_mark_posted_and_ack_match_oracle(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    promise = store.prepare_reply(
+        owner="worker",
+        comment_type="issues",
+        anchor_comment_id=611,
+        covered_comment_ids=[612],
+    )
+    assert promise is not None
+
+    prepared = oracle.prepare_claims(
+        _oracle_owner("worker"),
+        1,
+        611,
+        [612],
+        {},
+        {},
+    )
+    assert prepared is not None
+    claims, promises = prepared
+    promises = oracle.mark_promise_posted(1, promises)
+    store.mark_posted(promise.promise_id)
+    _assert_store_matches_oracle(
+        store,
+        promise,
+        oracle_claims=claims,
+        oracle_promises=promises,
+    )
+
+    claims, promises = oracle.ack_promise(1, claims, promises)
+    store.ack_promise(promise.promise_id)
+    _assert_store_matches_oracle(
+        store,
+        promise,
+        oracle_claims=claims,
+        oracle_promises=promises,
+    )
+
+
+def test_store_mark_failed_matches_oracle(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    promise = store.prepare_reply(
+        owner="recovery",
+        comment_type="pulls",
+        anchor_comment_id=621,
+        covered_comment_ids=[622],
+    )
+    assert promise is not None
+
+    prepared = oracle.prepare_claims(
+        _oracle_owner("recovery"),
+        1,
+        621,
+        [622],
+        {},
+        {},
+    )
+    assert prepared is not None
+    claims, promises = prepared
+    claims, promises = oracle.fail_promise(1, claims, promises)
+
+    store.mark_failed(promise.promise_id)
+    _assert_store_matches_oracle(
+        store,
+        promise,
+        oracle_claims=claims,
+        oracle_promises=promises,
+    )
+    assert set(p.promise_id for p in store.recoverable_promises()) == {
+        promise.promise_id
+    }
 
 
 def test_reply_promise_marker_round_trips_and_recovers(tmp_path: Path) -> None:
