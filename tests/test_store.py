@@ -14,6 +14,10 @@ from fido.store import (
 )
 
 
+def _oracle_promise_state(promises: object, promise_id: int) -> object:
+    return promises[promise_id].promise_state  # type: ignore[index]
+
+
 def test_prepare_claim_is_atomic_and_blocks_duplicate_owner(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
 
@@ -274,3 +278,42 @@ def test_extracted_oracle_matches_claim_lifecycle() -> None:
     completed_claims, _ = oracle.ack_promise(3, retry_claims, retry_promises)
     assert oracle.claim_completed(completed_claims, 10)
     assert oracle.claim_completed(completed_claims, 11)
+
+
+def test_extracted_oracle_matches_recovery_lifecycle() -> None:
+    prepared = oracle.prepare_claims(oracle.OwnerWebhook(), 1, 10, [11], {}, {})
+    assert prepared is not None
+    claims, promises = prepared
+
+    assert oracle.promise_recoverable(oracle.PromisePrepared())
+    marker_claims, marker_promises = oracle.recover_promise(
+        1, oracle.SeenPromiseMarker(), claims, promises
+    )
+    assert oracle.claim_completed(marker_claims, 10)
+    assert oracle.claim_completed(marker_claims, 11)
+    assert not oracle.promise_recoverable(_oracle_promise_state(marker_promises, 1))
+
+    posted_claims, posted_promises = oracle.recover_promise(
+        1, oracle.ReplayPosted(), claims, promises
+    )
+    assert oracle.claim_completed(posted_claims, 10)
+    assert oracle.claim_completed(posted_claims, 11)
+    assert not oracle.promise_recoverable(_oracle_promise_state(posted_promises, 1))
+
+    failed_claims, failed_promises = oracle.recover_promise(
+        1, oracle.AnchorDeleted(), claims, promises
+    )
+    assert oracle.comment_claimable(failed_claims, 10)
+    assert oracle.promise_recoverable(_oracle_promise_state(failed_promises, 1))
+
+    failed_again_claims, failed_again_promises = oracle.recover_promise(
+        1, oracle.ReplayFailed(), claims, promises
+    )
+    assert oracle.comment_claimable(failed_again_claims, 10)
+    assert oracle.promise_recoverable(_oracle_promise_state(failed_again_promises, 1))
+
+    same_claims, same_promises = oracle.recover_promise(
+        1, oracle.WrongPullRequest(), claims, promises
+    )
+    assert same_claims == claims
+    assert same_promises == promises

@@ -30,6 +30,15 @@ Inductive PromiseState : Type :=
 | PromiseAcked
 | PromiseFailed.
 
+(** [RecoveryObservation] is the live GitHub fact observed when replaying or
+    reconciling a durable promise after a crash, redelivery, or startup scan. *)
+Inductive RecoveryObservation : Type :=
+| SeenPromiseMarker
+| AnchorDeleted
+| WrongPullRequest
+| ReplayPosted
+| ReplayFailed.
+
 (** [ClaimOwner] records the runtime path that owns an in-progress claim. *)
 Inductive ClaimOwner : Type :=
 | OwnerWebhook
@@ -167,6 +176,15 @@ Definition mark_promise_posted
         promises
   end.
 
+(** [promise_recoverable] says whether recovery should still inspect a durable
+    promise.  Acked promises are terminal; all earlier states still need
+    reconciliation against live GitHub state. *)
+Definition promise_recoverable (state : PromiseState) : bool :=
+  match state with
+  | PromiseAcked => false
+  | _ => true
+  end.
+
 (** [complete_comment] marks one raw comment id as completed by an acked
     promise. *)
 Definition complete_comment
@@ -251,6 +269,27 @@ Definition fail_promise
       (claims', promises')
   end.
 
+(** [recover_promise] applies one live recovery observation to a durable
+    promise.  Marker sightings and successful replay complete the lifecycle;
+    deleted anchors and replay failures return the promise to retryable
+    failure; comments that belong to another PR are left untouched for a later
+    pass on the correct PR. *)
+Definition recover_promise
+    (promise : positive)
+    (observation : RecoveryObservation)
+    (claims : PositiveMap.t ClaimRow)
+    (promises : PositiveMap.t PromiseRow) : PositiveMap.t ClaimRow * PositiveMap.t PromiseRow :=
+  match observation with
+  | SeenPromiseMarker => ack_promise promise claims promises
+  | AnchorDeleted => fail_promise promise claims promises
+  | WrongPullRequest => (claims, promises)
+  | ReplayPosted =>
+      let promises' := mark_promise_posted promise promises in
+      let '(claims', promises'') := ack_promise promise claims promises' in
+      (claims', promises'')
+  | ReplayFailed => fail_promise promise claims promises
+  end.
+
 (** [claim_completed] observes whether one raw comment id is completed. *)
 Definition claim_state_completed (state : ClaimState) : bool :=
   match state with
@@ -266,4 +305,4 @@ Definition claim_completed (claims : PositiveMap.t ClaimRow) (comment : positive
   end.
 
 Python File Extraction replied_comment_claims
-  "comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise claim_completed".
+  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise claim_completed".

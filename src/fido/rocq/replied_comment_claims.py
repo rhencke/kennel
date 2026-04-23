@@ -466,6 +466,40 @@ class PromiseFailed(PromiseState):
 PromiseStateT = PromisePrepared | PromisePosted | PromiseAcked | PromiseFailed
 
 
+class RecoveryObservation:
+    pass
+
+
+@dataclass(frozen=True)
+class SeenPromiseMarker(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class AnchorDeleted(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class WrongPullRequest(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class ReplayPosted(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class ReplayFailed(RecoveryObservation):
+    pass
+
+
+RecoveryObservationT = (
+    SeenPromiseMarker | AnchorDeleted | WrongPullRequest | ReplayPosted | ReplayFailed
+)
+
+
 class ClaimOwner:
     pass
 
@@ -694,6 +728,20 @@ def mark_promise_posted(
     )
 
 
+def promise_recoverable(state: PromiseState) -> bool:
+    match state:
+        case PromisePrepared():
+            return True
+        case PromisePosted():
+            return True
+        case PromiseAcked():
+            return False
+        case PromiseFailed():
+            return True
+        case __impossible:
+            assert_never(__impossible)
+
+
 def complete_comment(
     promise: int,
     comment: int,
@@ -830,6 +878,49 @@ def fail_promise(
         claims_,
         promises_,
     )
+
+
+def recover_promise(
+    promise: int,
+    observation: RecoveryObservation,
+    claims: dict[int, ClaimRow],
+    promises: dict[int, PromiseRow],
+) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]]:
+    match observation:
+        case SeenPromiseMarker():
+            return ack_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case AnchorDeleted():
+            return fail_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case WrongPullRequest():
+            return (
+                claims,
+                promises,
+            )
+        case ReplayPosted():
+            promises_ = mark_promise_posted(promise, promises)
+            __pair = ack_promise(promise, claims, promises_)
+            claims_ = __pair[0]
+            promises__ = __pair[1]
+            return (
+                claims_,
+                promises__,
+            )
+        case ReplayFailed():
+            return fail_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case __impossible:
+            assert_never(__impossible)
 
 
 def claim_state_completed(state: ClaimState) -> bool:

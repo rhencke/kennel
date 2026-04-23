@@ -276,7 +276,7 @@ class TestRecoverReplyPromises:
 
     def test_other_pr_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        self._prepare_promise(tmp_path, "pulls", 205)
+        promise = self._prepare_promise(tmp_path, "pulls", 205)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
@@ -293,13 +293,14 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [205]
 
     def test_other_pr_issue_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
-        self._prepare_promise(tmp_path, "issues", 302)
+        promise = self._prepare_promise(tmp_path, "issues", 302)
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
@@ -316,6 +317,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
         )
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [302]
@@ -377,6 +379,7 @@ class TestRecoverReplyPromises:
                 7,
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
+        assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
 
     def test_pull_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -436,6 +439,7 @@ class TestRecoverReplyPromises:
                 7,
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
+        assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
 
     def test_defer_recovery_skips_task_creation(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"

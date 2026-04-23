@@ -1804,6 +1804,7 @@ class TestProcessAction:
             "promise must exist before attempt"
         )
         assert store.claim_state(207) == "completed"
+        assert store.recoverable_promises() == []
 
     def test_successful_redelivery_clears_stale_review_promise(
         self, server: tuple
@@ -2229,6 +2230,7 @@ class TestProcessAction:
             "promise must exist before attempt"
         )
         assert store.claim_state(305) == "completed"
+        assert store.recoverable_promises() == []
 
     def test_successful_redelivery_clears_stale_issue_promise(
         self, server: tuple
