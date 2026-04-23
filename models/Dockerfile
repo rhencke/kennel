@@ -161,6 +161,7 @@ COPY .python-version pyproject.toml uv.lock ./
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
 RUN cd /workspace/src/fido/rocq \
+    && uvx --from ruff==0.15.9 ruff format . \
     && find . -type f ! -name ".build-files" -printf "%P\n" | LC_ALL=C sort > .build-files
 
 FROM scratch AS export

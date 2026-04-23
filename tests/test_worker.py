@@ -23,6 +23,7 @@ from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
+from fido.reply_store import ReplyStore
 from fido.state import (
     State,
     _resolve_git_dir,
@@ -6652,23 +6653,17 @@ class TestFilterThreads:
         when the webhook's reply is still in flight and not yet visible via the
         GitHub API (which the last_author == gh_user guard cannot catch).
         """
-        import fido.claimed as kc
-
         w = self._make_worker(tmp_path)
         node = self._make_node(first_db_id=700)
-        kc.replied_comments.add(700)
-        try:
-            result = w._filter_threads([node], "fido-bot", frozenset({"owner"}))
-            assert result == []
-        finally:
-            kc.replied_comments.discard(700)
+        assert ReplyStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=700
+        )
+        result = w._filter_threads([node], "fido-bot", frozenset({"owner"}))
+        assert result == []
 
     def test_includes_unclaimed_thread(self, tmp_path: Path) -> None:
         """Threads whose first comment ID is not in the webhook-claimed set are included."""
-        import fido.claimed as kc
-
         w = self._make_worker(tmp_path)
-        kc.replied_comments.discard(800)  # ensure clean state
         result = w._filter_threads(
             [self._make_node(first_db_id=800)], "fido-bot", frozenset({"owner"})
         )
@@ -6884,13 +6879,8 @@ class TestHandleThreads:
 
     @pytest.fixture(autouse=True)
     def _clean_claimed(self):  # type: ignore[override]
-        """Discard the databaseId=1 that _open_thread_node puts in claimed after each test."""
-        import fido.claimed as kc
-
+        """Kept as an autouse fixture for tests that previously used globals."""
         yield
-        # _open_thread_node() uses databaseId=1 for its first comment; handle_threads now
-        # claims that ID.  Discard it so subsequent tests start with a clean slate.
-        kc.replied_comments.discard(1)
 
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
@@ -6944,6 +6934,20 @@ class TestHandleThreads:
     def test_returns_true_when_threads_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
+        gh.get_review_threads.return_value = [node]
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            result = worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_handles_thread_without_first_database_id(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        node["comments"]["nodes"][0].pop("databaseId")
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -7028,8 +7032,7 @@ class TestHandleThreads:
         assert "unresolved threads" in caplog.text
 
     def test_claims_thread_first_db_id_before_sub_agent(self, tmp_path: Path) -> None:
-        """handle_threads claims each thread's first_db_id in _webhook_claimed before the sub-agent runs."""
-        import fido.claimed as kc
+        """handle_threads claims each thread's first_db_id before the sub-agent runs."""
 
         w, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()  # first comment databaseId=1
@@ -7042,10 +7045,7 @@ class TestHandleThreads:
         ):
             result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
-        # The first_db_id must now be in the claim set so a concurrent webhook
-        # handler will see it and skip its own reply.
-        assert 1 in kc.replied_comments
-        # autouse fixture discards 1 after the test
+        assert ReplyStore(tmp_path).claim_state(1) == "completed"
 
     def test_skips_thread_if_claimed_in_race_window(self, tmp_path: Path) -> None:
         """Race simulation: webhook claims a thread ID after _filter_threads but before handle_threads claims it.
@@ -7054,8 +7054,6 @@ class TestHandleThreads:
         with a pre-claimed first_db_id — simulating the narrow race window between
         _filter_threads returning and handle_threads reaching the claim step.
         """
-        import fido.claimed as kc
-
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []  # not used; _filter_threads is patched
         fido_dir = self._fido_dir(tmp_path)
@@ -7070,27 +7068,24 @@ class TestHandleThreads:
             "url": "https://example.com",
             "total": 1,
         }
-        kc.replied_comments.add(901)
-        try:
-            with (
-                patch.object(w, "_filter_threads", return_value=[race_thread]),
-                patch("fido.worker.build_prompt") as mock_bp,
-                patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
-                patch("fido.tasks.sync_tasks_background"),
-            ):
-                result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-            assert result is False
-            mock_bp.assert_not_called()
-            mock_pr.assert_not_called()
-        finally:
-            kc.replied_comments.discard(901)
+        assert ReplyStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=901
+        )
+        with (
+            patch.object(w, "_filter_threads", return_value=[race_thread]),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is False
+        mock_bp.assert_not_called()
+        mock_pr.assert_not_called()
 
     def test_returns_false_when_all_threads_claimed_in_race_window(
         self, tmp_path: Path
     ) -> None:
         """Returns False when every filtered thread is claimed before handle_threads claims them."""
-        import fido.claimed as kc
-
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
@@ -7116,26 +7111,25 @@ class TestHandleThreads:
             "url": "https://example.com/b",
             "total": 1,
         }
-        kc.replied_comments.add(902)
-        kc.replied_comments.add(903)
-        try:
-            with (
-                patch.object(
-                    w, "_filter_threads", return_value=[race_thread_a, race_thread_b]
-                ),
-                patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
-            ):
-                result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-            assert result is False
-            mock_pr.assert_not_called()
-        finally:
-            kc.replied_comments.discard(902)
-            kc.replied_comments.discard(903)
+        store = ReplyStore(tmp_path)
+        assert store.prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=902
+        )
+        assert store.prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=903
+        )
+        with (
+            patch.object(
+                w, "_filter_threads", return_value=[race_thread_a, race_thread_b]
+            ),
+            patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
+        ):
+            result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is False
+        mock_pr.assert_not_called()
 
     def test_releases_claims_on_provider_run_failure(self, tmp_path: Path) -> None:
         """If provider_run raises, claimed thread IDs are released so the next attempt can retry."""
-        import fido.claimed as kc
-
         w, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()  # first comment databaseId=1
         gh.get_review_threads.return_value = [node]
@@ -7147,17 +7141,13 @@ class TestHandleThreads:
         ):
             with pytest.raises(RuntimeError, match="boom"):
                 w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        # Claim must be released so the webhook or next iteration can retry.
-        assert 1 not in kc.replied_comments
-        # autouse fixture also discards 1, redundant but harmless
+        assert ReplyStore(tmp_path).claim_state(1) == "retryable_failed"
 
     def test_logs_skip_when_thread_claimed_in_race_window(
         self, tmp_path: Path, caplog
     ) -> None:
         """Threads dropped in the race window produce an info-level log with the claimed ID."""
         import logging
-
-        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
@@ -7173,26 +7163,23 @@ class TestHandleThreads:
             "url": "https://example.com",
             "total": 1,
         }
-        kc.replied_comments.add(904)
-        try:
-            with (
-                patch.object(w, "_filter_threads", return_value=[race_thread]),
-                patch("fido.worker.build_prompt"),
-                patch("fido.worker.provider_run", return_value=("sid", "")),
-                patch("fido.tasks.sync_tasks_background"),
-                caplog.at_level(logging.INFO, logger="fido"),
-            ):
-                w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-            assert "claimed by webhook" in caplog.text
-        finally:
-            kc.replied_comments.discard(904)
+        assert ReplyStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=904
+        )
+        with (
+            patch.object(w, "_filter_threads", return_value=[race_thread]),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
+            caplog.at_level(logging.INFO, logger="fido"),
+        ):
+            w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert "already claimed" in caplog.text
 
     def test_passes_only_claimable_threads_to_sub_agent_context(
         self, tmp_path: Path
     ) -> None:
         """Only unclaimed threads are included in the context JSON passed to the sub-agent."""
-        import fido.claimed as kc
-
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
@@ -7220,24 +7207,21 @@ class TestHandleThreads:
             "url": "https://example.com/f",
             "total": 1,
         }
-        kc.replied_comments.add(905)
-        kc.replied_comments.discard(906)
-        try:
-            with (
-                patch.object(
-                    w, "_filter_threads", return_value=[claimed_thread, free_thread]
-                ),
-                patch("fido.worker.build_prompt") as mock_bp,
-                patch("fido.worker.provider_run", return_value=("sid", "")),
-                patch("fido.tasks.sync_tasks_background"),
-            ):
-                w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-            _, _, context = mock_bp.call_args[0]
-            assert "free comment body" in context
-            assert "claimed comment body" not in context
-        finally:
-            kc.replied_comments.discard(905)
-            kc.replied_comments.discard(906)
+        assert ReplyStore(tmp_path).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=905
+        )
+        with (
+            patch.object(
+                w, "_filter_threads", return_value=[claimed_thread, free_thread]
+            ),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_bp.call_args[0]
+        assert "free comment body" in context
+        assert "claimed comment body" not in context
 
 
 class TestRunThreadsIntegration:

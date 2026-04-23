@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "python_file": "replied_comment_claims.py",
+  "entries": [
+    {
+      "python_start_line": 560,
+      "python_start_col": 0,
+      "python_end_line": 561,
+      "python_end_col": 165,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 72,
+      "source_start_col": 11,
+      "source_end_line": 72,
+      "source_end_col": 28,
+      "kind": "extraction",
+      "symbol": "comment_claimable"
+    },
+    {
+      "python_start_line": 564,
+      "python_start_col": 0,
+      "python_end_line": 570,
+      "python_end_col": 111,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 80,
+      "source_start_col": 9,
+      "source_end_line": 80,
+      "source_end_col": 22,
+      "kind": "extraction",
+      "symbol": "all_claimable"
+    },
+    {
+      "python_start_line": 586,
+      "python_start_col": 0,
+      "python_end_line": 587,
+      "python_end_col": 469,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 113,
+      "source_start_col": 11,
+      "source_end_line": 113,
+      "source_end_col": 25,
+      "kind": "extraction",
+      "symbol": "prepare_claims"
+    },
+    {
+      "python_start_line": 590,
+      "python_start_col": 0,
+      "python_end_line": 591,
+      "python_end_col": 488,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 137,
+      "source_start_col": 11,
+      "source_end_line": 137,
+      "source_end_col": 30,
+      "kind": "extraction",
+      "symbol": "mark_promise_posted"
+    },
+    {
+      "python_start_line": 607,
+      "python_start_col": 0,
+      "python_end_line": 608,
+      "python_end_col": 591,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 183,
+      "source_start_col": 11,
+      "source_end_line": 183,
+      "source_end_col": 22,
+      "kind": "extraction",
+      "symbol": "ack_promise"
+    },
+    {
+      "python_start_line": 628,
+      "python_start_col": 0,
+      "python_end_line": 629,
+      "python_end_col": 652,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 226,
+      "source_start_col": 11,
+      "source_end_line": 226,
+      "source_end_col": 23,
+      "kind": "extraction",
+      "symbol": "fail_promise"
+    },
+    {
+      "python_start_line": 644,
+      "python_start_col": 0,
+      "python_end_line": 645,
+      "python_end_col": 177,
+      "source_file": "replied_comment_claims.v",
+      "source_start_line": 254,
+      "source_start_col": 11,
+      "source_end_line": 254,
+      "source_end_col": 26,
+      "kind": "extraction",
+      "symbol": "claim_completed"
+    }
+  ]
+}

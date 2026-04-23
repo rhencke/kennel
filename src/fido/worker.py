@@ -17,7 +17,6 @@ from typing import IO, Any, Protocol
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.claimed import replied_comments as _webhook_claimed
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.github import GitHub
@@ -35,6 +34,7 @@ from fido.provider import (
     set_thread_repo,
 )
 from fido.provider_factory import DefaultProviderFactory
+from fido.reply_store import ReplyPromiseRecord, ReplyStore
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -1891,12 +1891,10 @@ class Worker:
         - it has at least one comment,
         - the last commenter is not *gh_user* (awaiting a response),
         - the last commenter is either in *collaborators* or ends with ``[bot]``, and
-        - the first comment's ID has not been claimed by the webhook handler.
+        - the first comment's ID is not claimed or completed in SQLite.
 
         The last rule prevents the comments sub-agent from posting a duplicate
-        reply to a thread that the webhook handler already claimed — even if
-        the reply is still in-flight and not yet visible in the GitHub API
-        (which ``last_author == gh_user`` alone cannot catch).
+        reply to a thread that another webhook or worker attempt already owns.
         """
         result = []
         for node in nodes:
@@ -1913,7 +1911,9 @@ class Worker:
             if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
             first_db_id = first_comment.get("databaseId")
-            if first_db_id is not None and first_db_id in _webhook_claimed:
+            if first_db_id is not None and ReplyStore(
+                self.work_dir
+            ).is_claimed_or_completed(int(first_db_id)):
                 continue
             first_login = (first_comment.get("author") or {}).get("login", "")
             result.append(
@@ -1993,20 +1993,25 @@ class Worker:
             return False
 
         # Claim each thread's first_db_id before launching the comments
-        # sub-agent.  This makes the claim bidirectional: if the webhook
-        # handler claims a thread between _filter_threads and here we skip it;
-        # conversely, if we claim a thread here, a concurrent webhook handler
-        # will see the claim and skip its own reply.  Either way, exactly one
-        # path handles each thread.
+        # sub-agent.  This makes the claim bidirectional: whichever webhook or
+        # worker path prepares the SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
-        claimed_ids: list[int] = []
+        promises: list[ReplyPromiseRecord] = []
+        store = ReplyStore(self.work_dir)
         for t in threads:
             first_db_id = t.get("first_db_id")
-            if first_db_id is not None and not _webhook_claimed.claim(first_db_id):
-                log.info("skipping thread %s — claimed by webhook", first_db_id)
+            if first_db_id is None:
+                claimable.append(t)
+                continue
+            promise = store.prepare_reply(
+                owner="worker",
+                comment_type="pulls",
+                anchor_comment_id=int(first_db_id),
+            )
+            if promise is None:
+                log.info("skipping thread %s — already claimed", first_db_id)
             else:
-                if first_db_id is not None:
-                    claimed_ids.append(first_db_id)
+                promises.append(promise)
                 claimable.append(t)
 
         if not claimable:
@@ -2035,11 +2040,12 @@ class Worker:
                 session_mode=self._consume_turn_session_mode(),
             )
         except Exception:
-            # Release claims so a webhook redelivery (or the next worker
-            # iteration) can retry.
-            for cid in claimed_ids:
-                _webhook_claimed.release(cid)
+            for promise in promises:
+                store.mark_failed(promise.promise_id)
             raise
+        for promise in promises:
+            store.mark_posted(promise.promise_id)
+            store.ack_promise(promise.promise_id)
         log.info("threads done (session=%s)", session_id)
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
