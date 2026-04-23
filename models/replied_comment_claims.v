@@ -30,6 +30,15 @@ Inductive PromiseState : Type :=
 | PromiseAcked
 | PromiseFailed.
 
+(** [RecoveryObservation] is the live GitHub fact observed when replaying or
+    reconciling a durable promise after a crash, redelivery, or startup scan. *)
+Inductive RecoveryObservation : Type :=
+| SeenPromiseMarker
+| AnchorDeleted
+| WrongPullRequest
+| ReplayPosted
+| ReplayFailed.
+
 (** [ClaimOwner] records the runtime path that owns an in-progress claim. *)
 Inductive ClaimOwner : Type :=
 | OwnerWebhook
@@ -61,6 +70,32 @@ Record PromiseRow : Type := {
   promise_anchor_comment : positive;
   promise_covered_comments : list positive
 }.
+
+(** [ConversationLane] is the batch boundary for visible replies.
+    Review comments aggregate per root thread; top-level PR comments aggregate
+    in one PR-level lane. *)
+Inductive ConversationLane : Type :=
+| ReviewThreadLane : positive -> ConversationLane
+| PullRequestLane : positive -> ConversationLane.
+
+(** [ReplyArtifact] is one visible GitHub comment that may discharge many
+    promises in the same lane. *)
+Record ReplyArtifact : Type := {
+  artifact_comment : positive;
+  artifact_lane : ConversationLane;
+  artifact_promises : list positive
+}.
+
+(** [ReviewReplyOutcome] is the policy-level result of triaging one review
+    comment or unresolved review thread.  Python still performs the actual
+    GitHub and task side effects; the model states which obligations apply. *)
+Inductive ReviewReplyOutcome : Type :=
+| ReviewAct
+| ReviewDo
+| ReviewAsk
+| ReviewAnswer
+| ReviewDefer
+| ReviewDump.
 
 (** [new_attempt] creates the initial shared metadata for a prepared promise. *)
 Definition new_attempt (owner : ClaimOwner) : Attempt :=
@@ -167,6 +202,15 @@ Definition mark_promise_posted
         promises
   end.
 
+(** [promise_recoverable] says whether recovery should still inspect a durable
+    promise.  Acked promises are terminal; all earlier states still need
+    reconciliation against live GitHub state. *)
+Definition promise_recoverable (state : PromiseState) : bool :=
+  match state with
+  | PromiseAcked => false
+  | _ => true
+  end.
+
 (** [complete_comment] marks one raw comment id as completed by an acked
     promise. *)
 Definition complete_comment
@@ -251,6 +295,59 @@ Definition fail_promise
       (claims', promises')
   end.
 
+(** [recover_promise] applies one live recovery observation to a durable
+    promise.  Marker sightings and successful replay complete the lifecycle;
+    deleted anchors and replay failures return the promise to retryable
+    failure; comments that belong to another PR are left untouched for a later
+    pass on the correct PR. *)
+Definition recover_promise
+    (promise : positive)
+    (observation : RecoveryObservation)
+    (claims : PositiveMap.t ClaimRow)
+    (promises : PositiveMap.t PromiseRow) : PositiveMap.t ClaimRow * PositiveMap.t PromiseRow :=
+  match observation with
+  | SeenPromiseMarker => ack_promise promise claims promises
+  | AnchorDeleted => fail_promise promise claims promises
+  | WrongPullRequest => (claims, promises)
+  | ReplayPosted =>
+      let promises' := mark_promise_posted promise promises in
+      let '(claims', promises'') := ack_promise promise claims promises' in
+      (claims', promises'')
+  | ReplayFailed => fail_promise promise claims promises
+  end.
+
+(** [record_reply_artifact] records one visible GitHub reply artifact and the
+    promises it covers.  Runtime recovery uses hidden markers to recover this
+    same many-promises-to-one-artifact relation after crashes. *)
+Definition record_reply_artifact
+    (artifact_comment : positive)
+    (lane : ConversationLane)
+    (covered_promises : list positive)
+    (artifacts : PositiveMap.t ReplyArtifact) : PositiveMap.t ReplyArtifact :=
+  PositiveMap.add artifact_comment
+    {| artifact_comment := artifact_comment;
+       artifact_lane := lane;
+       artifact_promises := covered_promises |}
+    artifacts.
+
+(** [review_outcome_creates_tasks] states whether a review reply outcome owes
+    one or more durable work-queue entries after the reply is posted. *)
+Definition review_outcome_creates_tasks (outcome : ReviewReplyOutcome) : bool :=
+  match outcome with
+  | ReviewAct => true
+  | ReviewDo => true
+  | _ => false
+  end.
+
+(** [review_outcome_resolves_thread] states whether a review reply outcome
+    should close the review thread after the reply is posted. *)
+Definition review_outcome_resolves_thread (outcome : ReviewReplyOutcome) : bool :=
+  match outcome with
+  | ReviewDefer => true
+  | ReviewDump => true
+  | _ => false
+  end.
+
 (** [claim_completed] observes whether one raw comment id is completed. *)
 Definition claim_state_completed (state : ClaimState) : bool :=
   match state with
@@ -266,4 +363,4 @@ Definition claim_completed (claims : PositiveMap.t ClaimRow) (comment : positive
   end.
 
 Python File Extraction replied_comment_claims
-  "comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise claim_completed".
+  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact review_outcome_creates_tasks review_outcome_resolves_thread claim_completed".

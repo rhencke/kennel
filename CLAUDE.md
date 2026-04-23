@@ -112,7 +112,6 @@ Markdown instruction files passed to sub-Claude as system prompts:
 | `setup.md` | Task planning |
 | `task.md` | Single task implementation |
 | `ci.md` | CI failure fixing |
-| `comments.md` | Review thread handling |
 | `resume.md` | PR resumption |
 
 ## Task type system

@@ -16,7 +16,7 @@ PromiseState = Literal["prepared", "posted", "acked", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -33,14 +33,40 @@ class ReplyPromiseRecord:
     next_retry_after: str | None
 
 
+@dataclass(frozen=True)
+class ReplyArtifactRecord:
+    """One visible GitHub reply artifact that may cover many promises."""
+
+    artifact_comment_id: int
+    comment_type: str
+    lane_key: str
+    promise_ids: tuple[str, ...]
+
+
 def append_reply_promise_marker(body: str, promise_id: str | None) -> str:
-    """Append a hidden recovery marker to a GitHub reply body."""
-    if not promise_id:
+    """Append one hidden recovery marker to a GitHub reply body."""
+    return append_reply_promise_markers(
+        body, () if promise_id is None else (promise_id,)
+    )
+
+
+def append_reply_promise_markers(body: str, promise_ids: Iterable[str]) -> str:
+    """Append hidden recovery markers for every covered promise id."""
+    normalized = tuple(
+        dict.fromkeys(promise_id for promise_id in promise_ids if promise_id)
+    )
+    if not normalized:
         return body
-    marker = f"<!-- {REPLY_PROMISE_MARKER_PREFIX}{promise_id} -->"
-    if marker in body:
+    existing = set(extract_reply_promise_ids(body))
+    missing = [
+        promise_id for promise_id in normalized if promise_id.lower() not in existing
+    ]
+    if not missing:
         return body
-    return f"{body.rstrip()}\n\n{marker}"
+    markers = "\n".join(
+        f"<!-- {REPLY_PROMISE_MARKER_PREFIX}{promise_id} -->" for promise_id in missing
+    )
+    return f"{body.rstrip()}\n\n{markers}"
 
 
 def extract_reply_promise_ids(body: str | None) -> tuple[str, ...]:
@@ -158,6 +184,79 @@ class FidoStore:
     def mark_posted(self, promise_id: str) -> None:
         """Mark a prepared promise as having reached GitHub."""
         self._set_promise_state(promise_id, "posted")
+
+    def record_artifact(
+        self,
+        *,
+        artifact_comment_id: int,
+        comment_type: str,
+        lane_key: str,
+        promise_ids: Iterable[str],
+    ) -> None:
+        """Record one visible reply artifact and the promises it covers."""
+        covered = tuple(
+            dict.fromkeys(promise_id for promise_id in promise_ids if promise_id)
+        )
+        if not covered:
+            return
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO reply_artifacts (
+                    artifact_comment_id, comment_type, lane_key, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_comment_id) DO UPDATE SET
+                    comment_type = excluded.comment_type,
+                    lane_key = excluded.lane_key,
+                    updated_at = excluded.updated_at
+                """,
+                (artifact_comment_id, comment_type, lane_key, now, now),
+            )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO reply_artifact_promises (
+                    artifact_comment_id, promise_id
+                )
+                VALUES (?, ?)
+                """,
+                ((artifact_comment_id, promise_id) for promise_id in covered),
+            )
+
+    def artifact_for_promise(self, promise_id: str) -> ReplyArtifactRecord | None:
+        """Return the visible reply artifact covering *promise_id*, if any."""
+        self.ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT a.artifact_comment_id, a.comment_type, a.lane_key
+                FROM reply_artifacts AS a
+                JOIN reply_artifact_promises AS ap
+                  ON ap.artifact_comment_id = a.artifact_comment_id
+                WHERE ap.promise_id = ?
+                """,
+                (promise_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            promise_rows = conn.execute(
+                """
+                SELECT promise_id
+                FROM reply_artifact_promises
+                WHERE artifact_comment_id = ?
+                ORDER BY promise_id
+                """,
+                (int(row["artifact_comment_id"]),),
+            ).fetchall()
+        return ReplyArtifactRecord(
+            artifact_comment_id=int(row["artifact_comment_id"]),
+            comment_type=row["comment_type"],
+            lane_key=row["lane_key"],
+            promise_ids=tuple(
+                str(promise_row["promise_id"]) for promise_row in promise_rows
+            ),
+        )
 
     def ack_promise(self, promise_id: str) -> None:
         """Complete a promise and every covered raw comment id."""
@@ -419,6 +518,23 @@ CREATE TABLE IF NOT EXISTS reply_promise_comments (
     comment_id INTEGER NOT NULL,
     PRIMARY KEY(promise_id, comment_id),
     UNIQUE(promise_id, position),
+    FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS reply_artifacts (
+    artifact_comment_id INTEGER PRIMARY KEY,
+    comment_type TEXT NOT NULL,
+    lane_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reply_artifact_promises (
+    artifact_comment_id INTEGER NOT NULL,
+    promise_id TEXT NOT NULL,
+    PRIMARY KEY(artifact_comment_id, promise_id),
+    FOREIGN KEY(artifact_comment_id) REFERENCES reply_artifacts(artifact_comment_id)
+      ON DELETE CASCADE,
     FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
 );
 

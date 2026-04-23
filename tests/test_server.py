@@ -14,9 +14,15 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from fido import provider
+from fido.claude import ClaudeClient
 from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
-from fido.events import Action, recover_reply_promises
+from fido.events import (
+    Action,
+    recover_reply_promises,
+    reply_to_comment,
+    reply_to_issue_comment,
+)
 from fido.infra import Infra
 from fido.provider import ProviderID
 from fido.server import PreflightError, WebhookHandler, _repo_status
@@ -26,6 +32,18 @@ from fido.store import FidoStore
 class RepoConfig(_RepoConfig):
     def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
         super().__init__(*args, provider=provider, **kwargs)
+
+
+def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+    client = MagicMock(spec=ClaudeClient)
+    client.voice_model = "claude-opus-4-6"
+    client.work_model = "claude-sonnet-4-6"
+    client.brief_model = "claude-haiku-4-5"
+    if side_effect is not None:
+        client.run_turn.side_effect = side_effect
+    else:
+        client.run_turn.return_value = return_value
+    return client
 
 
 # Thread-capture and do_POST synchronisation helpers ---------------------------
@@ -1804,6 +1822,67 @@ class TestProcessAction:
             "promise must exist before attempt"
         )
         assert store.claim_state(207) == "completed"
+        assert store.recoverable_promises() == []
+
+    def test_review_comment_success_records_reply_artifact(self, server: tuple) -> None:
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 208,
+                "body": "please add logging",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/5#discussion_r208",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 208, "body": "please add logging", "author": "owner"}
+        ]
+        mock_gh.reply_to_review_comment.return_value = {"id": 9208}
+        WebhookHandler.gh = mock_gh
+        WebhookHandler._fn_reply_to_comment = reply_to_comment
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: looks good"
+            return "One review reply."
+
+        with (
+            patch(
+                "fido.events._configured_agent",
+                return_value=_client(side_effect=fake_pp),
+            ),
+            patch("fido.events.maybe_react"),
+        ):
+            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+
+        assert status == 200
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
+        with store._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.artifact_comment_id, a.lane_key, COUNT(ap.promise_id) AS covered
+                  FROM reply_artifacts AS a
+                  JOIN reply_artifact_promises AS ap
+                    ON ap.artifact_comment_id = a.artifact_comment_id
+              GROUP BY a.artifact_comment_id, a.lane_key
+                """,
+            ).fetchone()
+        assert row is not None
+        assert int(row["artifact_comment_id"]) == 9208
+        assert row["lane_key"] == "pulls:owner/repo:5:thread:208"
+        assert int(row["covered"]) == 1
+        assert store.claim_state(208) == "completed"
 
     def test_successful_redelivery_clears_stale_review_promise(
         self, server: tuple
@@ -2229,6 +2308,65 @@ class TestProcessAction:
             "promise must exist before attempt"
         )
         assert store.claim_state(305) == "completed"
+        assert store.recoverable_promises() == []
+
+    def test_issue_comment_success_records_reply_artifact(self, server: tuple) -> None:
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 306,
+                "body": "please fix this",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/14#issuecomment-306",
+            },
+            "issue": {
+                "number": 14,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.comment_issue.return_value = {"id": 9306}
+        WebhookHandler.gh = mock_gh
+        WebhookHandler._fn_reply_to_issue_comment = reply_to_issue_comment
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: looks good"
+            return "One issue reply."
+
+        with (
+            patch(
+                "fido.events._configured_agent",
+                return_value=_client(side_effect=fake_pp),
+            ),
+            patch("fido.events.maybe_react"),
+        ):
+            status = _post_webhook(url, cfg, "issue_comment", payload)
+
+        assert status == 200
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
+        with store._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.artifact_comment_id, a.lane_key, COUNT(ap.promise_id) AS covered
+                  FROM reply_artifacts AS a
+                  JOIN reply_artifact_promises AS ap
+                    ON ap.artifact_comment_id = a.artifact_comment_id
+              GROUP BY a.artifact_comment_id, a.lane_key
+                """,
+            ).fetchone()
+        assert row is not None
+        assert int(row["artifact_comment_id"]) == 9306
+        assert row["lane_key"] == "issues:owner/repo:14"
+        assert int(row["covered"]) == 1
+        assert store.claim_state(306) == "completed"
 
     def test_successful_redelivery_clears_stale_issue_promise(
         self, server: tuple

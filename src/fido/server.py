@@ -25,6 +25,8 @@ from fido.events import (
     create_task,
     dispatch,
     launch_worker,
+    queue_reply_tasks,
+    reply_outcome_creates_tasks,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
@@ -913,21 +915,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
                 # ACT, DO → add each task title to work queue.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
-                    activity.set_description(
-                        "queuing review comment tasks"
-                        if len(titles or []) != 1
-                        else "queuing review comment task"
-                    )
-                    for title in titles or []:
-                        type(self)._fn_create_task(
-                            title,
-                            self.config,
-                            repo_cfg,
-                            gh,
-                            thread=action.reply_to,
-                            registry=self.registry,
+                if category is not None:
+                    if reply_outcome_creates_tasks(category, thread=action.reply_to):
+                        activity.set_description(
+                            "queuing review comment tasks"
+                            if len(titles or []) != 1
+                            else "queuing review comment task"
                         )
+                    queue_reply_tasks(
+                        category,
+                        titles or [],
+                        self.config,
+                        repo_cfg,
+                        gh,
+                        thread=action.reply_to,
+                        registry=self.registry,
+                        create_task_fn=type(self)._fn_create_task,
+                    )
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
@@ -951,21 +955,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     self._ack_reply(repo_cfg, promise)
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                if reply_outcome_creates_tasks(category or "", thread=action.thread):
                     activity.set_description(
                         "queuing PR comment tasks"
                         if len(titles) != 1
                         else "queuing PR comment task"
                     )
-                    for title in titles:
-                        type(self)._fn_create_task(
-                            title,
-                            self.config,
-                            repo_cfg,
-                            gh,
-                            thread=action.thread,
-                            registry=self.registry,
-                        )
+                queue_reply_tasks(
+                    category or "",
+                    titles,
+                    self.config,
+                    repo_cfg,
+                    gh,
+                    thread=action.thread,
+                    registry=self.registry,
+                    create_task_fn=type(self)._fn_create_task,
+                )
 
             log.info(
                 "action outcome: handled=%s category=%s tasks=%d",

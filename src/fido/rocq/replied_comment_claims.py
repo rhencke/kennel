@@ -466,6 +466,40 @@ class PromiseFailed(PromiseState):
 PromiseStateT = PromisePrepared | PromisePosted | PromiseAcked | PromiseFailed
 
 
+class RecoveryObservation:
+    pass
+
+
+@dataclass(frozen=True)
+class SeenPromiseMarker(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class AnchorDeleted(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class WrongPullRequest(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class ReplayPosted(RecoveryObservation):
+    pass
+
+
+@dataclass(frozen=True)
+class ReplayFailed(RecoveryObservation):
+    pass
+
+
+RecoveryObservationT = (
+    SeenPromiseMarker | AnchorDeleted | WrongPullRequest | ReplayPosted | ReplayFailed
+)
+
+
 class ClaimOwner:
     pass
 
@@ -556,6 +590,69 @@ def promise_anchor_comment(p: PromiseRow) -> int:
 
 def promise_covered_comments(p: PromiseRow) -> list[int]:
     return p.promise_covered_comments
+
+
+class ConversationLane:
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewThreadLane(ConversationLane):
+    arg0: int
+
+
+@dataclass(frozen=True)
+class PullRequestLane(ConversationLane):
+    arg0: int
+
+
+ConversationLaneT = ReviewThreadLane | PullRequestLane
+
+
+@dataclass(frozen=True)
+class ReplyArtifact:
+    artifact_comment: int
+    artifact_lane: ConversationLane
+    artifact_promises: list[int]
+
+
+class ReviewReplyOutcome:
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAct(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDo(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAsk(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAnswer(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDefer(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDump(ReviewReplyOutcome):
+    pass
+
+
+ReviewReplyOutcomeT = (
+    ReviewAct | ReviewDo | ReviewAsk | ReviewAnswer | ReviewDefer | ReviewDump
+)
 
 
 def new_attempt(owner: ClaimOwner) -> Attempt:
@@ -694,6 +791,20 @@ def mark_promise_posted(
     )
 
 
+def promise_recoverable(state: PromiseState) -> bool:
+    match state:
+        case PromisePrepared():
+            return True
+        case PromisePosted():
+            return True
+        case PromiseAcked():
+            return False
+        case PromiseFailed():
+            return True
+        case __impossible:
+            assert_never(__impossible)
+
+
 def complete_comment(
     promise: int,
     comment: int,
@@ -830,6 +941,102 @@ def fail_promise(
         claims_,
         promises_,
     )
+
+
+def recover_promise(
+    promise: int,
+    observation: RecoveryObservation,
+    claims: dict[int, ClaimRow],
+    promises: dict[int, PromiseRow],
+) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]]:
+    match observation:
+        case SeenPromiseMarker():
+            return ack_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case AnchorDeleted():
+            return fail_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case WrongPullRequest():
+            return (
+                claims,
+                promises,
+            )
+        case ReplayPosted():
+            promises_ = mark_promise_posted(promise, promises)
+            __pair = ack_promise(promise, claims, promises_)
+            claims_ = __pair[0]
+            promises__ = __pair[1]
+            return (
+                claims_,
+                promises__,
+            )
+        case ReplayFailed():
+            return fail_promise(
+                promise,
+                claims,
+                promises,
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+def record_reply_artifact(
+    artifact_comment0: int,
+    lane: ConversationLane,
+    covered_promises: list[int],
+    artifacts: dict[int, ReplyArtifact],
+) -> dict[int, ReplyArtifact]:
+    return _rocq_map_add(
+        _rocq_positive_key(artifact_comment0),
+        ReplyArtifact(
+            artifact_comment=artifact_comment0,
+            artifact_lane=lane,
+            artifact_promises=covered_promises,
+        ),
+        artifacts,
+    )
+
+
+def review_outcome_creates_tasks(outcome: ReviewReplyOutcome) -> bool:
+    match outcome:
+        case ReviewAct():
+            return True
+        case ReviewDo():
+            return True
+        case ReviewAsk():
+            return False
+        case ReviewAnswer():
+            return False
+        case ReviewDefer():
+            return False
+        case ReviewDump():
+            return False
+        case __impossible:
+            assert_never(__impossible)
+
+
+def review_outcome_resolves_thread(outcome: ReviewReplyOutcome) -> bool:
+    match outcome:
+        case ReviewAct():
+            return False
+        case ReviewDo():
+            return False
+        case ReviewAsk():
+            return False
+        case ReviewAnswer():
+            return False
+        case ReviewDefer():
+            return True
+        case ReviewDump():
+            return True
+        case __impossible:
+            assert_never(__impossible)
 
 
 def claim_state_completed(state: ClaimState) -> bool:

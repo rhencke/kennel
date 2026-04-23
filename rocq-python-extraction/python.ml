@@ -3649,9 +3649,14 @@ let pp_ind_decl state (ind : ml_ind) =
           in
           let pp_union =
             if List.is_empty tvars then
-              str tname ++ str "T = " ++
-              prlist_with_sep (fun () -> str " | ") str cons_names ++
-              fnl ()
+              let union_text = String.concat " | " cons_names in
+              let alias = tname ^ "T = " ^ union_text in
+              if String.length alias <= 88 then
+                str alias ++ fnl ()
+              else
+                str (tname ^ "T = (") ++ fnl () ++
+                str ("    " ^ union_text) ++ fnl () ++
+                str ")" ++ fnl ()
             else
               mt ()
           in

@@ -1884,7 +1884,7 @@ class Worker:
         gh_user: str,
         collaborators: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """Return unresolved review threads for the comments sub-agent.
+        """Return unresolved review threads for Python-owned reply handling.
 
         A thread is included when:
         - it is not resolved,
@@ -1893,7 +1893,7 @@ class Worker:
         - the last commenter is either in *collaborators* or ends with ``[bot]``, and
         - the first comment's ID is not claimed or completed in SQLite.
 
-        The last rule prevents the comments sub-agent from posting a duplicate
+        The last rule prevents the worker reply path from posting a duplicate
         reply to a thread that another webhook or worker attempt already owns.
         """
         result = []
@@ -1919,7 +1919,7 @@ class Worker:
             result.append(
                 {
                     "id": node["id"],
-                    "is_bot": first_login.endswith("[bot]"),
+                    "is_bot": last_author.endswith("[bot]"),
                     "first_author": first_login,
                     "first_db_id": first_db_id,
                     "first_body": first_comment["body"],
@@ -1978,7 +1978,7 @@ class Worker:
         pr_number: int,
         slug: str,
     ) -> bool:
-        """Check for unresolved review threads and run the comments sub-agent.
+        """Check for unresolved review threads and handle them via Python.
 
         Returns ``True`` if unresolved threads were found and handled.  Returns
         ``False`` if there are no actionable threads.
@@ -1992,9 +1992,9 @@ class Worker:
         if not threads:
             return False
 
-        # Claim each thread's first_db_id before launching the comments
-        # sub-agent.  This makes the claim bidirectional: whichever webhook or
-        # worker path prepares the SQLite promise first owns that comment.
+        # Claim each thread's first_db_id before replying.  This makes the
+        # claim bidirectional: whichever webhook or worker path prepares the
+        # SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
         promises: list[ReplyPromiseRecord] = []
         store = FidoStore(self.work_dir)
@@ -2018,35 +2018,67 @@ class Worker:
             return False
 
         log.info("unresolved threads: %d", len(claimable))
-        context = (
-            f"PR: {pr_number}\n"
-            f"Repo: {repo_ctx.repo}\n"
-            f"Owner: {repo_ctx.owner}\n"
-            f"Repo name: {repo_ctx.repo_name}\n"
-            f"Branch: {slug}\n"
-            f"Upstream: origin/{repo_ctx.default_branch}\n"
-            f"Work dir: {self.work_dir}\n"
-            f"GitHub user: {repo_ctx.gh_user}\n"
-            f"\nUnresolved threads (JSON):\n{json.dumps({'threads': claimable})}"
-        )
-        build_prompt(fido_dir, "comments", context)
-        try:
-            session_id, _ = provider_run(
-                fido_dir,
-                agent=self._provider_agent,
-                model=self._provider_agent.work_model,
-                cwd=self.work_dir,
-                session=None,
-                session_mode=self._consume_turn_session_mode(),
-            )
-        except Exception:
-            for promise in promises:
+        from fido import events
+
+        config = self._config
+        repo_cfg = self._repo_cfg
+        if config is None or repo_cfg is None:
+            raise RuntimeError("thread handling requires explicit config and repo_cfg")
+        pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
+        pr_title = pr_data.get("title") or ""
+        pr_body = pr_data.get("body") or ""
+        promise_by_anchor = {
+            promise.anchor_comment_id: promise
+            for promise in promises
+            if promise.anchor_comment_id > 0
+        }
+
+        for thread in claimable:
+            first_db_id = thread.get("first_db_id")
+            if not isinstance(first_db_id, int):
+                continue
+            promise = promise_by_anchor.get(first_db_id)
+            if promise is None:
+                continue
+            comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
+            if comment is None:
+                log.info("skipping thread %s — root comment missing", first_db_id)
                 store.mark_failed(promise.promise_id)
-            raise
-        for promise in promises:
-            store.mark_posted(promise.promise_id)
-            store.ack_promise(promise.promise_id)
-        log.info("threads done (session=%s)", session_id)
+                continue
+            action = events.build_review_comment_action(
+                repo_ctx.repo,
+                pr_number,
+                pr_title,
+                pr_body,
+                comment,
+                comment_body=thread.get("last_body"),
+                comment_author=thread.get("last_author"),
+            )
+            action.context = {
+                **(action.context or {}),
+                "reply_promise_id": promise.promise_id,
+            }
+            try:
+                category, titles = events.reply_to_comment(
+                    action,
+                    config,
+                    repo_cfg,
+                    self.gh,
+                    agent=self._provider_agent,
+                )
+            except Exception:
+                store.mark_failed(promise.promise_id)
+                raise
+            events.queue_reply_tasks(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                self.gh,
+                thread=action.reply_to,
+                registry=self._registry,
+            )
+        log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
