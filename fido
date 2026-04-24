@@ -509,6 +509,17 @@ run_container() {
   add_mount_if_exists "$HOME/.claude.json"
   add_mount_if_exists "$HOME/.config/gh"
   add_mount_if_exists "$HOME/.cache/copilot"
+  # SSH keys are needed for git push/fetch on SSH-origin workspace clones.
+  # Mounted read-only so the container can use them without mutating.
+  if [ -d "$HOME/.ssh" ]; then
+    run_args+=(--volume "$HOME/.ssh:$HOME/.ssh:ro")
+  fi
+  # Docker socket passthrough — workers need `docker`/`buildx` to run
+  # `./fido ci` and `./fido make-rocq` against the host daemon.  The CLI
+  # binaries are in the image; the daemon stays on the host.
+  if [ -S /var/run/docker.sock ]; then
+    run_args+=(--volume "/var/run/docker.sock:/var/run/docker.sock")
+  fi
 
   log INFO "starting container image=$run_image"
   docker run "${run_args[@]}" "$run_image" "$@"

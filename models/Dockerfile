@@ -4,9 +4,19 @@ ARG ROCQ_IMAGE=rocq-python-extraction:ci
 
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS python-base
 
+ARG DOCKER_BUILDX_VERSION=0.17.1
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl git jq libatomic1 \
+    && apt-get install -y --no-install-recommends \
+        curl git jq libatomic1 openssh-client docker.io \
     && rm -rf /var/lib/apt/lists/*
+
+# buildx is not packaged in bookworm; pull the plugin binary directly.
+# docker.io from apt gives us the CLI; buildx extends it as a subcommand.
+RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
+    && curl -fsSL -o /usr/local/libexec/docker/cli-plugins/docker-buildx \
+        "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-amd64" \
+    && chmod +x /usr/local/libexec/docker/cli-plugins/docker-buildx
 
 ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
 ENV UV_LINK_MODE=copy
