@@ -509,6 +509,86 @@ prune_buildkit() {
     --keep-storage "$prune_keep_storage"
 }
 
+ansi_enabled() {
+  [ -t 1 ] && [ -z "${NO_COLOR:-}" ]
+}
+
+ansi_wrap() {
+  local code=$1
+  shift
+  if ansi_enabled; then
+    printf '\033[%sm%s\033[0m' "$code" "$*"
+  else
+    printf '%s' "$*"
+  fi
+}
+
+ansi_bold() {
+  ansi_wrap "1" "$@"
+}
+
+ansi_dim() {
+  ansi_wrap "2" "$@"
+}
+
+ansi_green() {
+  ansi_wrap "32" "$@"
+}
+
+ansi_red_bold() {
+  ansi_wrap "1;31" "$@"
+}
+
+format_host_resources() {
+  local load_1 load_5 load_15
+  local mem_total_kib mem_available_kib mem_used_kib
+  local disk_total_kib disk_used_kib
+  read -r load_1 load_5 load_15 _ < /proc/loadavg
+  mem_total_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  mem_available_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  mem_used_kib=$((mem_total_kib - mem_available_kib))
+  disk_total_kib=$(df -Pk / | awk 'NR==2 {print $2}')
+  disk_used_kib=$(df -Pk / | awk 'NR==2 {print $3}')
+  printf '%s cpu load %s/%s %s, mem %s/%s (%s%%), disk / %s/%s (%s%%)\n' \
+    "$(ansi_bold 'host:')" \
+    "$load_1" "$(nproc)" \
+    "$(ansi_dim "($load_5, $load_15)")" \
+    "$(awk "BEGIN {printf \"%.1fGiB\", $mem_used_kib/1024/1024}")" \
+    "$(awk "BEGIN {printf \"%.1fGiB\", $mem_total_kib/1024/1024}")" \
+    "$(awk "BEGIN {printf \"%d\", ($mem_used_kib*100)/$mem_total_kib}")" \
+    "$(awk "BEGIN {printf \"%.1fGiB\", $disk_used_kib/1024/1024}")" \
+    "$(awk "BEGIN {printf \"%.1fGiB\", $disk_total_kib/1024/1024}")" \
+    "$(awk "BEGIN {printf \"%d\", ($disk_used_kib*100)/$disk_total_kib}")"
+}
+
+status_fast_path() {
+  local port=${FIDO_PORT:-9000}
+  local payload
+  payload=$(mktemp)
+  if curl -fsS \
+    --connect-timeout 1 \
+    --max-time 1 \
+    -H 'Accept: application/json' \
+    "http://127.0.0.1:${port}/status.json" >"$payload" 2>/dev/null; then
+    printf '%s %s\n' "$(ansi_bold 'fido:')" "$(ansi_green 'UP')"
+    jq -r '
+      (.fido_uptime_seconds
+        | if . == null then empty else "uptime: \((floor|tostring))s" end),
+      (.activities[]? |
+        "  " + .repo_name + ": " + (.what // "idle")
+        + (if .issue == null then "" else " | issue #\(.issue)" end)
+        + (if (.current_task // null) == null then "" else " | task " + .current_task end)
+        + " | pending \((.pending // 0)|tostring)"
+        + " | completed \((.completed // 0)|tostring)"
+      )
+    ' "$payload"
+  else
+    printf '%s %s\n' "$(ansi_bold 'fido:')" "$(ansi_red_bold 'DOWN')"
+  fi
+  rm -f "$payload"
+  format_host_resources
+}
+
 supervise_up() {
   while true; do
     sync_runner
@@ -570,7 +650,7 @@ case "$command" in
     fi
     ;;
   status)
-    run_fido_cli_image_quiet --no-sync python -m fido.status "${@:2}"
+    status_fast_path
     ;;
   task)
     run_fido_cli_image fido-task "${@:2}"

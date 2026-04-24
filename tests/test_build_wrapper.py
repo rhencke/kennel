@@ -239,7 +239,8 @@ class TestFidoLauncher:
         assert "prune)" in script
         assert "prune_buildkit" in script
         assert "status)" in script
-        assert "run_fido_cli_image_quiet --no-sync python -m fido.status" in script
+        assert "status_fast_path" in script
+        assert "http://127.0.0.1:${port}/status.json" in script
         assert "task)" in script
         assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
