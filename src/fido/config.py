@@ -8,6 +8,25 @@ from fido.provider import ProviderID
 log = logging.getLogger(__name__)
 
 
+def default_sub_dir() -> Path:
+    """Return the default path to the ``sub/`` skill-instructions directory.
+
+    Single source of truth for the filesystem walk from the ``fido`` Python
+    package back to the repo-root ``sub/`` tree.  The formula is
+    ``parents[2]`` because this module lives at ``src/fido/config.py`` and
+    ``sub/`` lives at the repo root:
+
+    - ``parents[0]`` → ``src/fido/``
+    - ``parents[1]`` → ``src/``
+    - ``parents[2]`` → repo root, which contains ``sub/``
+
+    Every module that needs this path must import this helper — do not
+    redo the walk inline.  #919 and its follow-up crash were both caused
+    by copies of this formula going stale during the kennel→fido rename.
+    """
+    return Path(__file__).resolve().parents[2] / "sub"
+
+
 @dataclass(frozen=True)
 class RepoMembership:
     """Cached membership info for a repo — who gets to direct fido's work.
@@ -111,5 +130,5 @@ class Config:
                 b.strip() for b in args.allowed_bots.split(",") if b.strip()
             ),
             log_level=args.log_level.upper(),
-            sub_dir=Path(__file__).resolve().parents[2] / "sub",
+            sub_dir=default_sub_dir(),
         )

@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from fido.claude import ClaudeClient
-from fido.config import RepoConfig
+from fido.config import RepoConfig, default_sub_dir
 from fido.github import GitHub
 from fido.provider import ProviderAgent
 from fido.provider_factory import DefaultProviderFactory
@@ -15,7 +15,7 @@ from fido.status import running_repo_configs
 
 log = logging.getLogger(__name__)
 
-_SUB_DIR = Path(__file__).resolve().parent.parent / "sub"
+_SUB_DIR = default_sub_dir()
 _PERSONA_PATH = _SUB_DIR / "persona.md"
 
 _STATUS_SYSTEM = (

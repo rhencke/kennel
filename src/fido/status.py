@@ -31,7 +31,7 @@ from fido.color import (
     wrap_bg_line,
     wrap_raw,
 )
-from fido.config import RepoConfig
+from fido.config import RepoConfig, default_sub_dir
 from fido.provider import (
     ProviderID,
     ProviderPressureStatus,
@@ -358,7 +358,7 @@ def running_repo_configs(
 
 
 def _status_persona_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "sub" / "persona.md"
+    return default_sub_dir() / "persona.md"
 
 
 def provider_statuses_for_repo_configs(

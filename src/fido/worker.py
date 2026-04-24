@@ -18,7 +18,7 @@ import requests as _requests
 
 from fido import hooks, tasks
 from fido.claude import ClaudeCode
-from fido.config import Config, RepoConfig, RepoMembership
+from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts
@@ -194,7 +194,7 @@ class WorkerContext:
 
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
-    return Path(__file__).parent.parent / "sub"
+    return default_sub_dir()
 
 
 def acquire_lock(fido_dir: Path) -> IO[str]:
