@@ -144,18 +144,6 @@ def _rocq_ascii_to_int(
     )
 
 
-def _rocq_ascii_bits(
-    value: str,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    code = ord(value)
-    if code < 0 or code > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(code & (1 << i)) for i in range(8)),
-    )
-
-
 class StateT(Generic[_StateTState, _StateTValue]):
     def __init__(
         self,

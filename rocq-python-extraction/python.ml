@@ -183,18 +183,6 @@ def _rocq_ascii_to_int(
     )
 
 
-def _rocq_ascii_bits(
-    value: str,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    code = ord(value)
-    if code < 0 or code > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(code & (1 << i)) for i in range(8)),
-    )
-
-
 class StateT(Generic[_StateTState, _StateTValue]):
     def __init__(
         self,
@@ -2107,9 +2095,9 @@ and pp_std_ascii_match_expr state env scrutinee branches =
   Array.iter classify branches;
   match !ascii_arm with
   | Some (ids, body) ->
-      str "(lambda __bits: (" ++
+      str "(lambda __c: (" ++
       pp_branch_lambda state env ids body ++
-      str ")(__bits[0], __bits[1], __bits[2], __bits[3], __bits[4], __bits[5], __bits[6], __bits[7]))(_rocq_ascii_bits(" ++
+      str ")(bool(__c & 1), bool(__c & 2), bool(__c & 4), bool(__c & 8), bool(__c & 16), bool(__c & 32), bool(__c & 64), bool(__c & 128)))(ord(" ++
       pp_expr state env scrutinee ++ str "))"
   | None ->
       pp_branch_or_impossible_expr state env !wildcard_arm
