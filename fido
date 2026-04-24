@@ -655,9 +655,6 @@ fetch_status_payload() {
     --max-time 1
     -H 'Accept: application/json'
   )
-  if [ -z "${FIDO_STATUS_URL:-}" ]; then
-    curl_args+=(--noproxy 127.0.0.1,localhost)
-  fi
   curl "${curl_args[@]}" "$status_url" >"$payload" 2>/dev/null
 }
 

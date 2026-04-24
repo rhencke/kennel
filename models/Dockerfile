@@ -207,15 +207,7 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
     && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/concurrency-interleave-unsupported.log \
     && grep -F '"code": "PYEX043"' /tmp/concurrency-interleave-unsupported.log
 
-FROM python-base AS python-deps
-
-WORKDIR /workspace
-COPY .python-version pyproject.toml uv.lock ./
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
-
-FROM python-deps AS python-workspace-base
+FROM fido-python-dev AS python-workspace-base
 
 WORKDIR /workspace
 COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./

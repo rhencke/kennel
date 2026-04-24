@@ -706,7 +706,8 @@ class TestModelDockerfile:
     def test_python_checks_have_explicit_host_inputs(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
-        assert "FROM python-deps AS python-workspace-base" in dockerfile
+        assert "FROM fido-python-dev AS python-workspace-base" in dockerfile
+        assert "FROM python-deps AS python-workspace-base" not in dockerfile
         assert (
             "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
