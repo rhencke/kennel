@@ -1,5 +1,5 @@
 stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
-open,367,0,367,32,payload_text.v,21,11,21,21,extraction,event_name,event_name
-open,370,0,370,41,payload_text.v,25,11,25,27,extraction,event_name_bytes,event_name_bytes
-open,373,0,373,22,payload_text.v,28,11,28,23,extraction,newline_byte,newline_byte
-open,376,0,382,12,payload_text.v,33,11,33,32,extraction,first_char_or_newline,first_char_or_newline
+open,23,0,23,32,payload_text.v,21,11,21,21,extraction,event_name,event_name
+open,26,0,26,41,payload_text.v,25,11,25,27,extraction,event_name_bytes,event_name_bytes
+open,29,0,29,22,payload_text.v,28,11,28,23,extraction,newline_byte,newline_byte
+open,32,0,38,12,payload_text.v,33,11,33,32,extraction,first_char_or_newline,first_char_or_newline

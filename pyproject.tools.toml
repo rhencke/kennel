@@ -9,7 +9,7 @@ ignore = ["E501"]
 # Generated Rocq extraction output is format-checked by CI, but lint has
 # intentional noise: reusable runtime imports, type aliases Rocq erases, and
 # names copied from source terms.
-"src/fido/rocq/*.py" = ["E741", "F401", "F541", "F811", "F821", "F841", "I001"]
+"src/fido/rocq/*.py" = ["E741", "F401", "F403", "F405", "F541", "F811", "F821", "F841", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "rocq-python-extraction/test"]
