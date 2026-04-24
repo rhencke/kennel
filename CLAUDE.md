@@ -36,6 +36,10 @@ owns the filesystem path `./fido`. Use lowercase `fido` for commands, package
 names, module paths, log filenames, secrets, status keys, and URLs. Use
 capitalized `Fido` when referring to him in prose.
 
+Do not invent unsupported `./fido` subcommands. Use only the documented
+commands above or check `./fido help` before invoking a subcommand you have not
+already verified exists.
+
 ## Architecture
 
 ```

@@ -5,7 +5,7 @@ ARG ROCQ_IMAGE=rocq-python-extraction:ci
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS python-base
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git libatomic1 \
+    && apt-get install -y --no-install-recommends git jq libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
@@ -48,7 +48,7 @@ ARG GH_VERSION=2.89.0
 WORKDIR /workspace
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl jq \
     && curl -fsSL -o /tmp/gh.deb "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb" \
     && apt-get install -y --no-install-recommends /tmp/gh.deb \
     && rm -f /tmp/gh.deb \

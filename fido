@@ -579,13 +579,55 @@ format_host_resources() {
     $resource_fields
 }
 
-status_fast_path() {
+fetch_status_payload() {
+  local payload=$1
   local port=${FIDO_PORT:-9000}
+  local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
+  if [[ "$status_url" == file://* ]]; then
+    python3 - "$status_url" "$payload" <<'PY'
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+import sys
+
+url = urlparse(sys.argv[1])
+if url.scheme != "file":
+    raise SystemExit(2)
+Path(sys.argv[2]).write_bytes(Path(unquote(url.path)).read_bytes())
+PY
+    return
+  fi
+  local curl_args=(
+    -fsS
+    --connect-timeout 1
+    --max-time 1
+    -H 'Accept: application/json'
+  )
+  if [ -z "${FIDO_STATUS_URL:-}" ]; then
+    curl_args+=(--noproxy 127.0.0.1,localhost)
+  fi
+  curl "${curl_args[@]}" "$status_url" >"$payload" 2>/dev/null
+}
+
+require_status_tools() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "fido status requires jq on PATH" >&2
+    return 127
+  fi
+  local port=${FIDO_PORT:-9000}
+  local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
+  if [[ "$status_url" != file://* ]] && ! command -v curl >/dev/null 2>&1; then
+    echo "fido status requires curl on PATH" >&2
+    return 127
+  fi
+}
+
+status_fast_path() {
   local payload
   local color_json=false
   local esc_reset= esc_bold= esc_dim= esc_green= esc_red_bold=
   local esc_cyan= esc_magenta= esc_yellow_bg= esc_green_bg= esc_dark_gray=
   local jq_program
+  require_status_tools || return
   payload=$(mktemp)
   if ansi_enabled; then
     color_json=true
@@ -600,11 +642,7 @@ status_fast_path() {
     esc_green_bg=$'\033[42m'
     esc_dark_gray=$'\033[90m'
   fi
-  if curl -fsS \
-    --connect-timeout 1 \
-    --max-time 1 \
-    -H 'Accept: application/json' \
-    "http://127.0.0.1:${port}/status.json" >"$payload" 2>/dev/null; then
+  if fetch_status_payload "$payload"; then
     jq -r \
       --argjson color "$color_json" \
       --arg reset "$esc_reset" \
@@ -659,9 +697,9 @@ status_fast_path() {
                 | map(select(. != null and . != ""))
                 | if length > 0 then " (" + join(", ") + ")" else "" end)
         end;
-      def rate_window($w; $label):
+      def rate_window($w; $name):
         if $w == null then empty
-        else "\($label) \($w.used)/\($w.limit)"
+        else "\($name) \($w.used)/\($w.limit)"
              + (if $w.resets_at then " (" + reset_at($w.resets_at) + ")" else "" end)
         end;
       def worker_is_agent_talker($repo):

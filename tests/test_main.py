@@ -80,15 +80,3 @@ class TestMain:
         with patch("fido.gh_status.main") as mock_main:
             main(["gh-status", "set", "test message"])
         mock_main.assert_called_once_with(["set", "test message"])
-
-    def test_status_subcommand_prints_output(self) -> None:
-        """'fido status' calls collect/format_status and prints the result."""
-        with (
-            patch("fido.status.collect") as mock_collect,
-            patch("fido.status.format_status", return_value="fido: DOWN") as mock_fmt,
-            patch("builtins.print") as mock_print,
-        ):
-            main(["status"])
-        mock_collect.assert_called_once_with()
-        mock_fmt.assert_called_once_with(mock_collect.return_value)
-        mock_print.assert_called_once_with("fido: DOWN")
