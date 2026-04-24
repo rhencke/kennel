@@ -168,12 +168,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_uncons(value: str) -> tuple[str, str]:
-    if not value:
-        raise _Impossible()
-    return value[0], value[1:]
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -2090,7 +2084,7 @@ and pp_std_string_match_expr state env scrutinee branches =
     match !cons_arm with
     | Some (ids, body) ->
         pp_branch_pair_expr state env ids body
-          (str "_rocq_string_uncons(__s)")
+          (str "(__s[0], __s[1:])")
     | None -> fallback ()
   in
   str "(lambda __s: " ++ pp_ternary_text pp_empty ++ str " if __s == \"\" else " ++
@@ -2940,7 +2934,7 @@ and pp_std_string_return_body state env indent scrutinee branches =
     match !cons_arm with
     | Some (ids, body) ->
         pp_return_arm state env indent ids
-          [str "__pair[0]"; str "__pair[1]"]
+          [str "__s[0]"; str "__s[1:]"]
           body
     | None ->
         pp_return_or_impossible state env indent !wildcard_arm
@@ -2948,7 +2942,6 @@ and pp_std_string_return_body state env indent scrutinee branches =
   str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __s == \"\":" ++ fnl () ++
   str body_pfx ++ pp_empty ++ fnl () ++
-  str pfx ++ str "__pair = _rocq_string_uncons(__s)" ++ fnl () ++
   str pfx ++ pp_cons
 
 and pp_std_N_return_body state env indent scrutinee branches =

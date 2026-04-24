@@ -129,12 +129,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_uncons(value: str) -> tuple[str, str]:
-    if not value:
-        raise _Impossible()
-    return value[0], value[1:]
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -395,7 +389,6 @@ def first_char_or_newline(s: str) -> str:
     __s = s
     if __s == "":
         return "\n"
-    __pair = _rocq_string_uncons(__s)
-    c = __pair[0]
-    s0 = __pair[1]
+    c = __s[0]
+    s0 = __s[1:]
     return c
