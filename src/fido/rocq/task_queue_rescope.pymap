@@ -54,9 +54,9 @@ open,1454,0,1455,8,task_queue_rescope.v,574,10,574,20,extraction,TaskChange,Task
 open,1459,0,1460,13,task_queue_rescope.v,575,2,575,15,extraction,TaskCompleted,TaskCompleted
 open,1464,0,1465,13,task_queue_rescope.v,576,2,576,15,extraction,TaskCancelled,TaskCancelled
 open,1469,0,1472,13,task_queue_rescope.v,577,2,577,14,extraction,TaskModified,TaskModified
-open,1478,0,1481,35,task_queue_rescope.v,584,11,584,29,extraction,task_thread_change,task_thread_change
+open,1478,0,1481,35,task_queue_rescope.v,584,11,584,22,extraction,task_change,task_change
 open,1593,0,1597,29,task_queue_rescope.v,654,11,654,31,extraction,cleanup_aborted_task,cleanup_aborted_task
 open,1614,0,1616,29,task_queue_rescope.v,671,11,671,29,extraction,task_still_pending,task_still_pending
 open,1041,0,1043,25,task_queue_rescope.v,327,9,327,35,extraction,rescope_ops_cover_snapshot,rescope_ops_cover_snapshot
-open,1550,0,1553,35,task_queue_rescope.v,619,9,619,31,extraction,compute_thread_changes,compute_thread_changes
+open,1550,0,1553,35,task_queue_rescope.v,619,9,619,29,extraction,compute_task_changes,compute_task_changes
 open,1575,0,1577,21,task_queue_rescope.v,636,9,636,26,extraction,remove_from_order,remove_from_order

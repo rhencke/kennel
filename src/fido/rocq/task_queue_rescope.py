@@ -1475,7 +1475,7 @@ class TaskModified(TaskChange):
 TaskChangeT = TaskCompleted | TaskCancelled | TaskModified
 
 
-def task_thread_change(
+def task_change(
     task: int,
     rows_before: dict[int, TaskRow],
     rows_after: dict[int, TaskRow],
@@ -1547,7 +1547,7 @@ def task_thread_change(
             assert_never(__impossible)
 
 
-def compute_thread_changes(
+def compute_task_changes(
     snapshot_order: list[int],
     rows_before: dict[int, TaskRow],
     rows_after: dict[int, TaskRow],
@@ -1557,12 +1557,12 @@ def compute_thread_changes(
         return []
     task = __list[0]
     rest = __list[1:]
-    rest_ = compute_thread_changes(
+    rest_ = compute_task_changes(
         rest,
         rows_before,
         rows_after,
     )
-    __option = task_thread_change(task, rows_before, rows_after)
+    __option = task_change(task, rows_before, rows_after)
     if __option is None:
         return rest_
     change = __option

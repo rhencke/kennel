@@ -576,12 +576,12 @@ Inductive TaskChange : Type :=
 | TaskCancelled : positive -> TaskChange
 | TaskModified : positive -> string -> string -> TaskChange.
 
-(** [task_thread_change] computes the change record, if any, for one snapped
+(** [task_change] computes the change record, if any, for one snapped
     task given the queue state before and after rescope.
 
     Returns [None] when the task has no source comment, was already completed
     before rescope, or is unchanged. *)
-Definition task_thread_change
+Definition task_change
     (task : positive)
     (rows_before rows_after : PositiveMap.t TaskRow) : option TaskChange :=
   match PositiveMap.find task rows_before with
@@ -610,20 +610,20 @@ Definition task_thread_change
       end
   end.
 
-(** [compute_thread_changes] collects change records for all thread-originated
+(** [compute_task_changes] collects change records for all thread-originated
     tasks in the rescope snapshot that were completed, cancelled, or modified.
 
     Only tasks in [snapshot_order] (those Opus knew about at snap time) are
     checked.  Already-completed tasks and tasks without a source comment are
     skipped, matching [_compute_thread_changes] in [tasks.py]. *)
-Fixpoint compute_thread_changes
+Fixpoint compute_task_changes
     (snapshot_order : list positive)
     (rows_before rows_after : PositiveMap.t TaskRow) : list TaskChange :=
   match snapshot_order with
   | [] => []
   | task :: rest =>
-      let rest' := compute_thread_changes rest rows_before rows_after in
-      match task_thread_change task rows_before rows_after with
+      let rest' := compute_task_changes rest rows_before rows_after in
+      match task_change task rows_before rows_after with
       | None => rest'
       | Some change => change :: rest'
       end
@@ -681,4 +681,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_thread_change compute_thread_changes remove_from_order cleanup_aborted_task task_still_pending".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes remove_from_order cleanup_aborted_task task_still_pending".
