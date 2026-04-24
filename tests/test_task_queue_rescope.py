@@ -557,3 +557,128 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
     # Task 4 (post-snapshot) not included even though it's a thread task
     task4_change = oracle.task_change(4, rows_before, rows_after)
     assert task4_change is None  # task 4 wasn't in rows_before with a status change
+
+
+def test_active_task_ownership_lifecycle() -> None:
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    ask_row = oracle.TaskRow(
+        task_title="ASK: should we widen?",
+        task_description="",
+        task_kind=oracle.TaskAsk(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows: dict[int, object] = {1: spec_row, 2: ask_row}
+
+    # No lease held — begin_task acquires lease for an executable task
+    lease = oracle.begin_task(1, None, rows)
+    assert lease == 1
+
+    # Lease already held — begin_task returns None even for a different task
+    second_attempt = oracle.begin_task(2, lease, rows)
+    assert second_attempt is None
+
+    # Non-executable task (ASK kind) — begin_task returns None even with no lease
+    ask_lease = oracle.begin_task(2, None, rows)
+    assert ask_lease is None
+
+    # Task not in rows — begin_task returns None
+    missing_lease = oracle.begin_task(99, None, rows)
+    assert missing_lease is None
+
+    # abort_task clears matching lease
+    after_abort = oracle.abort_task(1, lease)
+    assert after_abort is None
+
+    # abort_task is a no-op when task doesn't match lease
+    other_lease: object = 2
+    after_wrong_abort = oracle.abort_task(1, other_lease)
+    assert after_wrong_abort == other_lease
+
+    # abort_task is a no-op when no lease held
+    after_no_lease_abort = oracle.abort_task(1, None)
+    assert after_no_lease_abort is None
+
+    # complete_task clears matching lease and marks task completed
+    lease = oracle.begin_task(1, None, rows)
+    new_lease, rows_after = oracle.complete_task(1, lease, rows)
+    assert new_lease is None
+    assert type(rows_after[1].task_status).__name__ == "StatusCompleted"
+    # Other tasks unchanged
+    assert type(rows_after[2].task_status).__name__ == "StatusPending"
+
+    # complete_task with non-matching lease leaves lease intact
+    other_lease2: object = 2
+    new_lease2, rows_after2 = oracle.complete_task(1, other_lease2, rows)
+    assert new_lease2 == other_lease2
+    assert type(rows_after2[1].task_status).__name__ == "StatusCompleted"
+
+    # task_still_pending returns True for pending, False for completed or missing
+    assert oracle.task_still_pending(2, rows)
+    assert not oracle.task_still_pending(1, rows_after)
+    assert not oracle.task_still_pending(99, rows)
+
+
+def test_cleanup_aborted_task() -> None:
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    other_row = oracle.TaskRow(
+        task_title="Other task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows: dict[int, object] = {1: spec_row, 2: other_row}
+    order = [1, 2]
+    lease: object = 1
+
+    # cleanup_aborted_task clears the matching lease, removes task from order and rows
+    (new_lease, new_order), new_rows = oracle.cleanup_aborted_task(
+        1, lease, order, rows
+    )
+    assert new_lease is None
+    assert new_order == [2]
+    assert 1 not in new_rows
+    assert 2 in new_rows
+
+    # cleanup_aborted_task with non-matching lease leaves lease intact
+    other_lease: object = 2
+    (new_lease2, new_order2), new_rows2 = oracle.cleanup_aborted_task(
+        1, other_lease, order, rows
+    )
+    assert new_lease2 == other_lease  # non-matching lease preserved
+    assert new_order2 == [2]
+    assert 1 not in new_rows2
+
+    # cleanup_aborted_task with None lease leaves lease None
+    (new_lease3, new_order3), new_rows3 = oracle.cleanup_aborted_task(
+        1, None, order, rows
+    )
+    assert new_lease3 is None
+    assert new_order3 == [2]
+    assert 1 not in new_rows3
+
+    # cleanup_aborted_task on task not in order/rows is a no-op for those structures
+    (new_lease4, new_order4), new_rows4 = oracle.cleanup_aborted_task(
+        99, lease, order, rows
+    )
+    assert new_lease4 == lease  # task 99 doesn't match task 1's lease
+    assert new_order4 == [1, 2]
+    assert 1 in new_rows4 and 2 in new_rows4
+
+    # remove_from_order removes only the target, preserves duplicates of other ids
+    order_with_extras = [3, 1, 3, 2, 1]
+    stripped = oracle.remove_from_order(1, order_with_extras)
+    assert stripped == [3, 3, 2]
