@@ -554,17 +554,27 @@ Definition complete_task_visible
       end
   end.
 
-(** [ThreadChange] records one change to a thread-originated task detected
+(** [TaskChange] records one change to a thread-originated task detected
     during rescope.
 
-    [ThreadCompleted task] means the task was omitted or explicitly completed
-    by rescope; the original commenter should be told their request is done.
+    [TaskCompleted task] means Opus explicitly marked the task as completed
+    in its rescope result; the original commenter should be told their request
+    is done because it was covered by recent work.
 
-    [ThreadModified task new_title new_description] means the task's title or
+    [TaskCancelled task] means Opus omitted the task entirely from the rescope
+    result; the original commenter should be told their task was removed from
+    the queue.  This is semantically different from completion: the work was
+    not done, it was deprioritised or deemed no longer relevant.
+
+    The distinction matters because the reply body to the commenter differs:
+    "completed" (work was done) vs "cancelled" (work was removed).
+
+    [TaskModified task new_title new_description] means the task's title or
     description changed; the commenter should be told of the updated plan. *)
-Inductive ThreadChange : Type :=
-| ThreadCompleted : positive -> ThreadChange
-| ThreadModified : positive -> string -> string -> ThreadChange.
+Inductive TaskChange : Type :=
+| TaskCompleted : positive -> TaskChange
+| TaskCancelled : positive -> TaskChange
+| TaskModified : positive -> string -> string -> TaskChange.
 
 (** [task_thread_change] computes the change record, if any, for one snapped
     task given the queue state before and after rescope.
@@ -573,7 +583,7 @@ Inductive ThreadChange : Type :=
     before rescope, or is unchanged. *)
 Definition task_thread_change
     (task : positive)
-    (rows_before rows_after : PositiveMap.t TaskRow) : option ThreadChange :=
+    (rows_before rows_after : PositiveMap.t TaskRow) : option TaskChange :=
   match PositiveMap.find task rows_before with
   | None => None
   | Some before_row =>
@@ -584,13 +594,13 @@ Definition task_thread_change
           | StatusCompleted => None
           | _ =>
               match PositiveMap.find task rows_after with
-              | None => Some (ThreadCompleted task)
+              | None => Some (TaskCancelled task)
               | Some after_row =>
                   match task_status after_row with
-                  | StatusCompleted => Some (ThreadCompleted task)
+                  | StatusCompleted => Some (TaskCompleted task)
                   | _ =>
                       if task_metadata_changed before_row after_row then
-                        Some (ThreadModified task
+                        Some (TaskModified task
                           (task_title after_row)
                           (task_description after_row))
                       else None
@@ -601,14 +611,14 @@ Definition task_thread_change
   end.
 
 (** [compute_thread_changes] collects change records for all thread-originated
-    tasks in the rescope snapshot that were completed or modified.
+    tasks in the rescope snapshot that were completed, cancelled, or modified.
 
     Only tasks in [snapshot_order] (those Opus knew about at snap time) are
     checked.  Already-completed tasks and tasks without a source comment are
     skipped, matching [_compute_thread_changes] in [tasks.py]. *)
 Fixpoint compute_thread_changes
     (snapshot_order : list positive)
-    (rows_before rows_after : PositiveMap.t TaskRow) : list ThreadChange :=
+    (rows_before rows_after : PositiveMap.t TaskRow) : list TaskChange :=
   match snapshot_order with
   | [] => []
   | task :: rest =>

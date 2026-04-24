@@ -441,8 +441,16 @@ def _compute_thread_changes(
     attachment are reported.  Already-completed tasks are excluded.
 
     Each record is one of:
-    - ``{"task": ..., "kind": "completed"}`` — Opus omitted it; now marked done
+    - ``{"task": ..., "kind": "completed"}`` — Opus omitted or marked it done
     - ``{"task": ..., "kind": "modified", "new_title": ..., "new_description": ...}``
+
+    Note: the Rocq model (``TaskCompleted`` vs ``TaskCancelled``) distinguishes
+    explicit completion from omission.  Here both map to ``"completed"`` because
+    ``_apply_reorder`` normalises omitted tasks into completed rows — the
+    ``r is None`` case cannot fire through the current ``reorder_tasks`` path.
+    A future change could propagate the distinction (e.g. via a marker field on
+    the task dict set by ``_apply_reorder``) so the reply body distinguishes
+    "done" from "cancelled".
     """
     result_by_id = {t["id"]: t for t in result}
     changes: list[dict[str, Any]] = []

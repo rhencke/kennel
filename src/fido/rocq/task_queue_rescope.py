@@ -1436,30 +1436,35 @@ def complete_task_visible(
             assert_never(__impossible)
 
 
-class ThreadChange:
+class TaskChange:
     pass
 
 
 @dataclass(frozen=True)
-class ThreadCompleted(ThreadChange):
+class TaskCompleted(TaskChange):
     arg0: int
 
 
 @dataclass(frozen=True)
-class ThreadModified(ThreadChange):
+class TaskCancelled(TaskChange):
+    arg0: int
+
+
+@dataclass(frozen=True)
+class TaskModified(TaskChange):
     arg0: int
     arg1: str
     arg2: str
 
 
-ThreadChangeT = ThreadCompleted | ThreadModified
+TaskChangeT = TaskCompleted | TaskCancelled | TaskModified
 
 
 def task_thread_change(
     task: int,
     rows_before: dict[int, TaskRow],
     rows_after: dict[int, TaskRow],
-) -> ThreadChange | None:
+) -> TaskChange | None:
     __option = rows_before.get(_rocq_positive_key(task))
     if __option is None:
         return None
@@ -1472,20 +1477,20 @@ def task_thread_change(
         case StatusPending():
             __option = rows_after.get(_rocq_positive_key(task))
             if __option is None:
-                return ThreadCompleted(task)
+                return TaskCancelled(task)
             after_row = __option
             match task_status(after_row):
                 case StatusPending():
                     if before_row.metadata_changed(after_row):
-                        return ThreadModified(
+                        return TaskModified(
                             task, task_title(after_row), task_description(after_row)
                         )
                     return None
                 case StatusCompleted():
-                    return ThreadCompleted(task)
+                    return TaskCompleted(task)
                 case StatusBlocked():
                     if before_row.metadata_changed(after_row):
-                        return ThreadModified(
+                        return TaskModified(
                             task, task_title(after_row), task_description(after_row)
                         )
                     return None
@@ -1496,20 +1501,20 @@ def task_thread_change(
         case StatusBlocked():
             __option = rows_after.get(_rocq_positive_key(task))
             if __option is None:
-                return ThreadCompleted(task)
+                return TaskCancelled(task)
             after_row = __option
             match task_status(after_row):
                 case StatusPending():
                     if before_row.metadata_changed(after_row):
-                        return ThreadModified(
+                        return TaskModified(
                             task, task_title(after_row), task_description(after_row)
                         )
                     return None
                 case StatusCompleted():
-                    return ThreadCompleted(task)
+                    return TaskCompleted(task)
                 case StatusBlocked():
                     if before_row.metadata_changed(after_row):
-                        return ThreadModified(
+                        return TaskModified(
                             task, task_title(after_row), task_description(after_row)
                         )
                     return None
@@ -1523,7 +1528,7 @@ def compute_thread_changes(
     snapshot_order: list[int],
     rows_before: dict[int, TaskRow],
     rows_after: dict[int, TaskRow],
-) -> list[ThreadChange]:
+) -> list[TaskChange]:
     __list = snapshot_order
     if __list == []:
         return []
