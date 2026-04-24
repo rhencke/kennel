@@ -510,7 +510,13 @@ prune_buildkit() {
 }
 
 ansi_enabled() {
-  [ -t 1 ] && [ -z "${NO_COLOR:-}" ]
+  if [ -n "${NO_COLOR:-}" ]; then
+    return 1
+  fi
+  if [ -n "${FORCE_COLOR:-}" ]; then
+    return 0
+  fi
+  [ -t 1 ]
 }
 
 ansi_wrap() {
@@ -543,22 +549,40 @@ format_host_resources() {
   local load_1 load_5 load_15
   local mem_total_kib mem_available_kib mem_used_kib
   local disk_total_kib disk_used_kib
+  local key value _
+  local resource_fields
   read -r load_1 load_5 load_15 _ < /proc/loadavg
-  mem_total_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-  mem_available_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  while read -r key value _; do
+    case "$key" in
+      MemTotal:)
+        mem_total_kib=$value
+        ;;
+      MemAvailable:)
+        mem_available_kib=$value
+        ;;
+    esac
+  done < /proc/meminfo
   mem_used_kib=$((mem_total_kib - mem_available_kib))
-  disk_total_kib=$(df -Pk / | awk 'NR==2 {print $2}')
-  disk_used_kib=$(df -Pk / | awk 'NR==2 {print $3}')
+  read -r disk_total_kib disk_used_kib < <(df -Pk / | awk 'NR==2 {print $2, $3}')
+  resource_fields=$(awk \
+    -v mem_used_kib="$mem_used_kib" \
+    -v mem_total_kib="$mem_total_kib" \
+    -v disk_used_kib="$disk_used_kib" \
+    -v disk_total_kib="$disk_total_kib" \
+    'BEGIN {
+      printf "%.1fGiB %.1fGiB %d %.1fGiB %.1fGiB %d",
+        mem_used_kib/1024/1024,
+        mem_total_kib/1024/1024,
+        (mem_used_kib*100)/mem_total_kib,
+        disk_used_kib/1024/1024,
+        disk_total_kib/1024/1024,
+        (disk_used_kib*100)/disk_total_kib
+    }')
   printf '%s cpu load %s/%s %s, mem %s/%s (%s%%), disk / %s/%s (%s%%)\n' \
     "$(ansi_bold 'host:')" \
     "$load_1" "$(nproc)" \
     "$(ansi_dim "($load_5, $load_15)")" \
-    "$(awk "BEGIN {printf \"%.1fGiB\", $mem_used_kib/1024/1024}")" \
-    "$(awk "BEGIN {printf \"%.1fGiB\", $mem_total_kib/1024/1024}")" \
-    "$(awk "BEGIN {printf \"%d\", ($mem_used_kib*100)/$mem_total_kib}")" \
-    "$(awk "BEGIN {printf \"%.1fGiB\", $disk_used_kib/1024/1024}")" \
-    "$(awk "BEGIN {printf \"%.1fGiB\", $disk_total_kib/1024/1024}")" \
-    "$(awk "BEGIN {printf \"%d\", ($disk_used_kib*100)/$disk_total_kib}")"
+    $resource_fields
 }
 
 status_fast_path() {
