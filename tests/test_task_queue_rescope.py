@@ -356,3 +356,204 @@ def test_tasks_unblock_matches_oracle(tmp_path: Path) -> None:
     assert next(t for t in runtime if t["id"] == done["id"])["status"] == "completed"
     assert type(oracle_rows[ids[blocked["id"]]].task_status).__name__ == "StatusPending"
     assert type(oracle_rows[ids[done["id"]]].task_status).__name__ == "StatusCompleted"
+
+
+def test_complete_task_visible_idempotency() -> None:
+    # Thread task with source comment: first call marks completed, returns comment id
+    thread_row = oracle.TaskRow(
+        task_title="Review follow-up",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=99,
+    )
+    rows: dict[int, object] = {1: thread_row}
+    rows_after, comment_id = oracle.complete_task_visible(1, rows)
+    assert comment_id == 99
+    assert type(rows_after[1].task_status).__name__ == "StatusCompleted"
+
+    # Second call is idempotent: already completed → returns None, rows unchanged
+    rows_again, comment_id2 = oracle.complete_task_visible(1, rows_after)
+    assert comment_id2 is None
+    assert rows_again is rows_after
+
+    # Spec task (no source comment): completes but returns None on first call too
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows2: dict[int, object] = {2: spec_row}
+    rows2_after, comment_id3 = oracle.complete_task_visible(2, rows2)
+    assert comment_id3 is None
+    assert type(rows2_after[2].task_status).__name__ == "StatusCompleted"
+
+    # Blocked thread task: completes and returns comment id on first call
+    blocked_thread_row = oracle.TaskRow(
+        task_title="Blocked review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusBlocked(),
+        task_source_comment=77,
+    )
+    rows3: dict[int, object] = {3: blocked_thread_row}
+    rows3_after, comment_id4 = oracle.complete_task_visible(3, rows3)
+    assert comment_id4 == 77
+    assert type(rows3_after[3].task_status).__name__ == "StatusCompleted"
+
+    # Re-call on the now-completed blocked task returns None
+    rows3_again, comment_id5 = oracle.complete_task_visible(3, rows3_after)
+    assert comment_id5 is None
+
+
+def test_task_change_detection() -> None:
+    # Baseline rows before rescope: two thread tasks, one spec task
+    thread1_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="old desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    thread2_row = oracle.TaskRow(
+        task_title="Second review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows_before: dict[int, object] = {1: thread1_row, 2: thread2_row, 3: spec_row}
+
+    # Case 1: task rewritten → TaskModified with new title/description
+    rewritten_row = oracle.TaskRow(
+        task_title="First review (updated)",
+        task_description="new desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    rows_rewritten = {1: rewritten_row, 2: thread2_row, 3: spec_row}
+    change = oracle.task_change(1, rows_before, rows_rewritten)
+    assert isinstance(change, oracle.TaskModified)
+    assert change.task == 1
+    assert change.new_title == "First review (updated)"
+    assert change.new_description == "new desc"
+
+    # Case 2: task completed → TaskCompleted
+    completed_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="old desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusCompleted(),
+        task_source_comment=101,
+    )
+    rows_completed = {1: completed_row, 2: thread2_row, 3: spec_row}
+    change2 = oracle.task_change(1, rows_before, rows_completed)
+    assert isinstance(change2, oracle.TaskCompleted)
+    assert change2.task == 1
+
+    # Case 3: task absent from rows_after → TaskCancelled
+    rows_cancelled = {2: thread2_row, 3: spec_row}
+    change3 = oracle.task_change(1, rows_before, rows_cancelled)
+    assert isinstance(change3, oracle.TaskCancelled)
+    assert change3.task == 1
+
+    # Case 4: spec task (no source comment) → None regardless of changes
+    spec_rewritten = oracle.TaskRow(
+        task_title="Spec task new title",
+        task_description="updated",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows_spec_changed = {1: thread1_row, 2: thread2_row, 3: spec_rewritten}
+    change4 = oracle.task_change(3, rows_before, rows_spec_changed)
+    assert change4 is None
+
+    # Case 5: no change to thread task → None
+    change5 = oracle.task_change(2, rows_before, rows_before)
+    assert change5 is None
+
+
+def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
+    thread1_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    thread2_row = oracle.TaskRow(
+        task_title="Second review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    late_row = oracle.TaskRow(
+        task_title="Late thread task",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=303,
+    )
+    rows_before: dict[int, object] = {
+        1: thread1_row,
+        2: thread2_row,
+        3: spec_row,
+        4: late_row,
+    }
+    snapshot_order = [1, 2, 3]  # task 4 arrived after snapshot
+
+    # After rescope: task 1 completed, task 2 rewritten, task 3 unchanged (spec)
+    completed_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusCompleted(),
+        task_source_comment=101,
+    )
+    rewritten_row = oracle.TaskRow(
+        task_title="Second review (updated)",
+        task_description="now with detail",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    rows_after: dict[int, object] = {
+        1: completed_row,
+        2: rewritten_row,
+        3: spec_row,
+        4: late_row,
+    }
+
+    changes = oracle.compute_task_changes(snapshot_order, rows_before, rows_after)
+
+    # Only thread tasks with changes appear, in snapshot order
+    assert len(changes) == 2
+    assert isinstance(changes[0], oracle.TaskCompleted)
+    assert changes[0].task == 1
+    assert isinstance(changes[1], oracle.TaskModified)
+    assert changes[1].task == 2
+    assert changes[1].new_title == "Second review (updated)"
+    assert changes[1].new_description == "now with detail"
+
+    # Task 4 (post-snapshot) not included even though it's a thread task
+    task4_change = oracle.task_change(4, rows_before, rows_after)
+    assert task4_change is None  # task 4 wasn't in rows_before with a status change
