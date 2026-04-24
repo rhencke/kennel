@@ -510,13 +510,7 @@ prune_buildkit() {
 }
 
 ansi_enabled() {
-  if [ -n "${NO_COLOR:-}" ]; then
-    return 1
-  fi
-  if [ -n "${FORCE_COLOR:-}" ]; then
-    return 0
-  fi
-  [ -t 1 ]
+  [ -z "${NO_COLOR:-}" ] && { [ -n "${FORCE_COLOR:-}" ] || [ -t 1 ]; }
 }
 
 ansi_wrap() {
