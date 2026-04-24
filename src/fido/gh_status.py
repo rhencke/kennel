@@ -9,7 +9,7 @@ from pathlib import Path
 from fido.claude import ClaudeClient
 from fido.config import RepoConfig, default_sub_dir
 from fido.github import GitHub
-from fido.provider import ProviderAgent
+from fido.provider import ProviderAgent, safe_voice_turn
 from fido.provider_factory import DefaultProviderFactory
 from fido.status import running_repo_configs
 
@@ -88,12 +88,14 @@ def generate_persona_status(
     if provider is None:
         provider = ClaudeClient()
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
-    result = provider.run_turn(
+    result = safe_voice_turn(
+        provider,
         f"Rewrite this status in Fido's voice: {message}",
         model=provider.voice_model,
         system_prompt=system,
+        log_prefix="generate_persona_status",
     )
-    if not result:
+    if result is None:
         raise ValueError("humanify_status: run_turn returned empty")
     return result
 

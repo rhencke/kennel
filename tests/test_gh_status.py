@@ -61,6 +61,14 @@ class TestGeneratePersonaStatus:
             generate_persona_status("test", "persona")
             mock_cls.assert_called_once_with()
 
+    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
+        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
+        mock_client = _client()
+        mock_client.run_turn.return_value = "fetching bugs"
+        generate_persona_status("fixing bugs", "persona", provider=mock_client)
+        _, kwargs = mock_client.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
+
 
 class TestGeneratePersonaEmoji:
     def test_happy_path(self) -> None:
