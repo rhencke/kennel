@@ -581,19 +581,11 @@ format_host_resources() {
 
 fetch_status_payload() {
   local payload=$1
+  local status_json_file=${_FIDO_STATUS_JSON_FILE:-}
   local port=${FIDO_PORT:-9000}
   local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
-  if [[ "$status_url" == file://* ]]; then
-    python3 - "$status_url" "$payload" <<'PY'
-from pathlib import Path
-from urllib.parse import unquote, urlparse
-import sys
-
-url = urlparse(sys.argv[1])
-if url.scheme != "file":
-    raise SystemExit(2)
-Path(sys.argv[2]).write_bytes(Path(unquote(url.path)).read_bytes())
-PY
+  if [ -n "$status_json_file" ]; then
+    cat "$status_json_file" >"$payload"
     return
   fi
   local curl_args=(
@@ -613,9 +605,7 @@ require_status_tools() {
     echo "fido status requires jq on PATH" >&2
     return 127
   fi
-  local port=${FIDO_PORT:-9000}
-  local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
-  if [[ "$status_url" != file://* ]] && ! command -v curl >/dev/null 2>&1; then
+  if [ -z "${_FIDO_STATUS_JSON_FILE:-}" ] && ! command -v curl >/dev/null 2>&1; then
     echo "fido status requires curl on PATH" >&2
     return 127
   fi

@@ -40,6 +40,12 @@ Do not invent unsupported `./fido` subcommands. Use only the documented
 commands above or check `./fido help` before invoking a subcommand you have not
 already verified exists.
 
+You are *not* under any time pressure or expectation. These tasks are often
+big, hard, and intricate, and they take time and multiple iterations. Do not
+cut corners to get something out quicker. Prefer the slower correct fix, and
+use the extra time to repair incorrect structure or stale assumptions so the
+system gets simpler and more solid over time.
+
 ## Architecture
 
 ```

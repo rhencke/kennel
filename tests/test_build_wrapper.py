@@ -32,7 +32,7 @@ def run_status(
     payload_path = tmp_path / "status.json"
     payload_path.write_text(json.dumps(payload))
     merged_env = os.environ.copy()
-    merged_env["FIDO_STATUS_URL"] = payload_path.resolve().as_uri()
+    merged_env["_FIDO_STATUS_JSON_FILE"] = str(payload_path.resolve())
     if env is not None:
         merged_env.update(env)
     return subprocess.run(
