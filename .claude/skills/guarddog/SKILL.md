@@ -40,6 +40,12 @@ Look deeper if you see:
 - Fido DOWN — did the whole thing crash?
 - Claude process running unusually long (>30 min on same task)
 
+**Not a failure — leave it alone:** when `./fido status` shows workers
+`paused for claude-code reset until <timestamp>`, Fido deliberately quieted
+itself because the provider quota is exhausted. There will be no task
+progression until the reset time. Do not transition to vet mode; just keep
+sampling until the window opens or the user intervenes.
+
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
 - inspect recent errors in `~/log/fido.log`
@@ -91,8 +97,8 @@ Update GitHub status: `./fido gh-status set "diagnosed the problem — <what you
 ### Step 4: File issue
 Create a GitHub issue on `FidoCanCode/home` with:
 - Title describing the bug
-- Milestone `v1: multi-repo + all-Python threads`
-- Add as sub-issue of #41 (bugs work order)
+- Milestone `v1`
+- Add as sub-issue of #41 (`v1 Work Order: Bugs`)
 - Body with: what was observed, likely cause, fix description
 - If you came from watch mode, include the observation timeline
 
@@ -131,11 +137,26 @@ Fido's own code lives in the `home` repo; there is no separate managed `fido`
 workspace.
 
 ### Step 9: Restart Fido
-Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
+Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner must be on `main`, clean, before restart — verify `git -C /home/rhencke/home-runner status` and `git -C /home/rhencke/home-runner rev-parse --abbrev-ref HEAD` first. `./fido up`'s `sync_runner` will try to `git pull` and will misbehave on a feature branch or dirty tree.
+
+Secret file: the launcher expects `$FIDO_SECRET` (default `~/.fido-secret`). If only the legacy `~/.kennel-secret` exists, either symlink it (`ln -s ~/.kennel-secret ~/.fido-secret`) or `export FIDO_SECRET=~/.kennel-secret` before launch.
+
+Launch via the local launcher if it exists, otherwise run directly under setsid so the process survives the calling shell:
 ```bash
-/home/rhencke/start-fido.sh
+if [ -x /home/rhencke/start-fido.sh ]; then
+  /home/rhencke/start-fido.sh
+else
+  cd /home/rhencke/home-runner && \
+    mkdir -p ~/log && \
+    setsid ./fido up --port 9000 \
+      rhencke/confusio:/home/rhencke/workspace/confusio:claude-code \
+      FidoCanCode/home:/home/rhencke/workspace/home:claude-code \
+      >> ~/log/fido.log 2>&1 < /dev/null &
+fi
 sleep 5 && cd /home/rhencke/home-runner && ./fido status
 ```
+
+First boot rebuilds the buildx runtime image and can take several minutes; don't treat a slow first `./fido status` as a failure.
 
 Update GitHub status: `./fido gh-status set "Fido restarted — back on watch duty"`
 
