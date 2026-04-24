@@ -517,8 +517,17 @@ run_container() {
   # Docker socket passthrough — workers need `docker`/`buildx` to run
   # `./fido ci` and `./fido make-rocq` against the host daemon.  The CLI
   # binaries are in the image; the daemon stays on the host.
+  #
+  # The socket is typically owned root:docker with mode 660, so the
+  # container's non-root uid needs the host's docker group GID as a
+  # supplementary group to get write access.  Resolve the GID from the
+  # socket itself — distros vary (Debian uses 103, Ubuntu 999, etc.).
   if [ -S /var/run/docker.sock ]; then
     run_args+=(--volume "/var/run/docker.sock:/var/run/docker.sock")
+    _docker_sock_gid=$(stat -c %g /var/run/docker.sock 2>/dev/null || true)
+    if [ -n "$_docker_sock_gid" ] && [ "$_docker_sock_gid" != 0 ]; then
+      run_args+=(--group-add "$_docker_sock_gid")
+    fi
   fi
 
   log INFO "starting container image=$run_image"
