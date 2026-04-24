@@ -537,6 +537,37 @@ run_fido_cli_image_quiet() {
   quiet=1 run_fido_test_image "$@"
 }
 
+require_host_chat_tools() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "fido chat requires claude on PATH" >&2
+    return 127
+  fi
+}
+
+run_host_chat() {
+  local persona_file=$repo_root/sub/persona.md
+  local persona_text
+  local chat_args=()
+  require_host_chat_tools || return
+  if [ ! -f "$persona_file" ]; then
+    echo "fido chat persona file not found: $persona_file" >&2
+    return 1
+  fi
+  persona_text=$(<"$persona_file")
+  if [ "$#" -eq 0 ]; then
+    chat_args=(/remote-control)
+  else
+    chat_args=("$@")
+  fi
+  cd "$repo_root"
+  export CLAUDE_CODE_NO_FLICKER=1
+  exec nice -n19 claude \
+    --permission-mode=bypassPermissions \
+    --continue \
+    --append-system-prompt "$persona_text" \
+    "${chat_args[@]}"
+}
+
 run_rocq_repl_image() {
   make_rocq_models
   build_image rocq-repl "$rocq_repl_image"
@@ -943,7 +974,8 @@ case "$command" in
     run_fido_cli_image fido-gh-status "${@:2}"
     ;;
   chat)
-    run_fido_image fido-chat "${@:2}"
+    shift
+    run_host_chat "$@"
     ;;
   sync-tasks)
     run_fido_cli_image fido-sync-tasks "${@:2}"

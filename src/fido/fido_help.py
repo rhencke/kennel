@@ -16,7 +16,7 @@ Commands:
   status            Print fido status.
   task              Manage repo task files.
   gh-status         Set FidoCanCode's GitHub profile status.
-  chat              Start an interactive persona session.
+  chat              Start a host-side interactive persona session with system Claude.
   sync-tasks        Sync repo tasks to GitHub.
   tests             Run pytest through the project test entry point.
   traceback         Annotate extracted Python tracebacks.

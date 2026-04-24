@@ -1,4 +1,4 @@
-"""Top-level fido entry point — dispatches to 'serve' or 'task'."""
+"""Top-level fido entry point — dispatches to 'serve' or packaged helper CLIs."""
 
 import sys
 
@@ -20,10 +20,6 @@ def main(
         from fido.gh_status import main as gh_status_main
 
         gh_status_main(args[1:])
-    elif args and args[0] == "chat":
-        from fido.chat import main as chat_main
-
-        chat_main(args[1:])
     elif args and args[0] == "sync-tasks":
         from fido.github import GitHub
         from fido.sync_tasks_cli import main as sync_tasks_main

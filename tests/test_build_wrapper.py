@@ -267,6 +267,16 @@ class TestFidoLauncher:
         assert "status)" in script
         assert "status_fast_path" in script
         assert "http://127.0.0.1:${port}/status.json" in script
+        assert "chat)" in script
+        assert "run_host_chat" in script
+        assert "run_fido_image fido-chat" not in script
+        assert "fido chat requires claude on PATH" in script
+        assert "fido chat persona file not found:" in script
+        assert "--permission-mode=bypassPermissions" in script
+        assert '--append-system-prompt "$persona_text"' in script
+        assert "chat_args=(/remote-control)" in script
+        assert 'cd "$repo_root"' in script
+        assert "export CLAUDE_CODE_NO_FLICKER=1" in script
         assert "task)" in script
         assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
@@ -591,6 +601,17 @@ class TestFidoLauncher:
         assert "ruff" in help_text
         assert "pyright" in help_text
         assert "pytest" in help_text
+
+    def test_chat_is_host_only_and_not_packaged_python(self) -> None:
+        help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
+        pyproject = (REPO / "pyproject.toml").read_text()
+        main_py = (REPO / "src" / "fido" / "main.py").read_text()
+
+        assert "host-side interactive persona session" in help_text
+        assert "fido-chat" not in pyproject
+        assert 'args[0] == "chat"' not in main_py
+        assert not (REPO / "src" / "fido" / "chat.py").exists()
+        assert not (REPO / "tests" / "test_chat.py").exists()
 
 
 class TestModelDockerfile:

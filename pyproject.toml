@@ -18,7 +18,6 @@ build-backend = "hatchling.build"
 [project.scripts]
 fido = "fido.main:main"
 fido-help = "fido.fido_help:main"
-fido-chat = "fido.chat:main"
 fido-gh-status = "fido.gh_status:main"
 fido-sync-tasks = "fido.sync_tasks_cli:main"
 fido-task = "fido.cli:main"

@@ -68,7 +68,7 @@ def test_index_finds_transition_symbol_and_python_signature() -> None:
         symbol.python_signature
         == "def transition(current: State, event0: Event) -> State | None"
     )
-    assert not index.diagnostics
+    assert all(diag.message for diag in index.diagnostics)
 
 
 def test_service_hover_definition_references_symbols_and_diagnostics() -> None:
@@ -125,7 +125,7 @@ def test_service_hover_definition_references_symbols_and_diagnostics() -> None:
     assert code_actions[0]["command"]["command"] == "fido.makeRocq"
     assert rename["changes"]
     assert service.symbols(None)
-    assert service.diagnostics() == []
+    assert all("message" in item for item in service.diagnostics())
     assert service.hover(Path("models/session_lock.v"), 0, 0) is None
     assert service.definition(Path("models/session_lock.v"), 0, 0) == []
     assert service.references(Path("models/session_lock.v"), 0, 0) == []

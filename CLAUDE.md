@@ -22,7 +22,7 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
 | `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
 | `./fido gh-status ...` | Update the FidoCanCode GitHub profile status. |
-| `./fido chat [args...]` | Start an interactive persona session with runner-clone context. |
+| `./fido chat [args...]` | Start a host-side interactive persona session with runner-clone context and system Claude. |
 | `./fido sync-tasks <work_dir>` | Sync a repo task list into its GitHub PR body. |
 | `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
@@ -182,6 +182,8 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
 - **No hacks** — do not compensate for backend, extraction, generator, or
   runtime bugs in models, generated files, or tests. Fix the layer that is
   wrong rather than adding a workaround in a neighboring layer.
+- **No compatibility shims** — when replacing a path or interface, remove the
+  old one instead of preserving a parallel legacy path.
 - **Verify upstream facts** — when a fix depends on external or standard-library
   behavior, check the primary source instead of guessing from memory.
 - **Local entry point** — use `./fido help`. Do not call host `uv` for normal
