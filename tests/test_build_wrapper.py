@@ -242,13 +242,16 @@ class TestModelsBuildScript:
 
 
 class TestFidoLauncher:
-    def test_maps_friendly_commands_to_project_scripts(self) -> None:
+    def test_maps_friendly_commands_to_container_modules(self) -> None:
         script = FIDO.read_text()
 
         assert "help)" in script
-        assert "run_fido_cli_image fido-help" in script
+        assert "run_fido_module_image fido.fido_help" in script
         assert "up)" in script
-        assert "supervise_up fido --secret-file /run/secrets/fido-secret" in script
+        assert (
+            "supervise_up python3 -m fido.main --secret-file /run/secrets/fido-secret"
+            in script
+        )
         assert "make-rocq)" in script
         assert "make_rocq_models" in script
         assert "ci)" in script
@@ -278,15 +281,16 @@ class TestFidoLauncher:
         assert 'cd "$repo_root"' in script
         assert "export CLAUDE_CODE_NO_FLICKER=1" in script
         assert "task)" in script
-        assert "run_fido_cli_image fido-task" in script
+        assert "run_fido_module_image fido.cli" in script
         assert "sync-tasks)" in script
-        assert "run_fido_cli_image fido-sync-tasks" in script
+        assert "run_fido_module_image fido.sync_tasks_cli" in script
         assert "rocq-lsp)" in script
         assert "run_rocq_lsp_image -m fido.rocq_lsp --stdio" in script
         assert "lsp)" in script
         assert "run_rocq_lsp_image -m fido.rocq_lsp" in script
         assert "run_rocq_lsp_image()" in script
         assert "run_fido_test_python_image()" in script
+        assert "run_fido_pyproject_image()" in script
 
     def test_status_fast_path_renders_repo_block_without_color(
         self, tmp_path: Path
@@ -541,7 +545,8 @@ class TestFidoLauncher:
         assert 'FIDO_HOME="$HOME"' in script
         assert "run_fido_image()" in script
         assert "run_fido_test_image()" in script
-        assert "run_fido_cli_image()" in script
+        assert "run_fido_module_image()" in script
+        assert "run_fido_pyproject_image()" in script
         assert "ci_images()" in script
         assert "ci_targets=(" not in script
         assert "bake_target_names()" not in script
@@ -592,8 +597,11 @@ class TestFidoLauncher:
         script = FIDO.read_text()
         help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
 
-        assert "ruff|pyright|pytest)" in script
-        assert 'run_fido_test_image "$@"' in script
+        assert "ruff)" in script
+        assert 'run_fido_pyproject_image ruff "${@:2}"' in script
+        assert 'run_fido_pyproject_image pyright "${@:2}"' in script
+        assert 'run_fido_pyproject_image pytest "${@:2}"' in script
+        assert 'run_fido_pyproject_image python3 -m fido.tests_main "${@:2}"' in script
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
         assert "rocq-lsp" in help_text
@@ -604,11 +612,16 @@ class TestFidoLauncher:
 
     def test_chat_is_host_only_and_not_packaged_python(self) -> None:
         help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
-        pyproject = (REPO / "pyproject.toml").read_text()
         main_py = (REPO / "src" / "fido" / "main.py").read_text()
+        fragments = [
+            (REPO / "pyproject.project.toml").read_text(),
+            (REPO / "pyproject.build.toml").read_text(),
+            (REPO / "pyproject.tools.toml").read_text(),
+        ]
 
         assert "host-side interactive persona session" in help_text
-        assert "fido-chat" not in pyproject
+        assert (REPO / "pyproject").exists()
+        assert all("fido-chat" not in fragment for fragment in fragments)
         assert 'args[0] == "chat"' not in main_py
         assert not (REPO / "src" / "fido" / "chat.py").exists()
         assert not (REPO / "tests" / "test_chat.py").exists()
@@ -659,7 +672,12 @@ class TestModelDockerfile:
         assert "FROM fido-python-prod AS fido-python-dev" in dockerfile
         assert "FROM node:24-bookworm-slim AS node-runtime" in dockerfile
         assert "FROM fido-python-prod AS fido-base" in dockerfile
-        assert "COPY .python-version pyproject.toml uv.lock ./" in dockerfile
+        assert (
+            "COPY .python-version pyproject pyproject.*.toml uv.lock ./" in dockerfile
+        )
+        assert (
+            "COPY tools/compose_pyproject.py tools/compose_pyproject.py" in dockerfile
+        )
         assert "COPY . ." not in dockerfile
         assert "nodejs npm" not in dockerfile
         assert "FROM node-runtime AS node-tools" in dockerfile
@@ -679,8 +697,10 @@ class TestModelDockerfile:
         assert "gh_${GH_VERSION}_linux_amd64.deb" in dockerfile
         assert "ln -sf /opt/fido-node-tools/node_modules/.bin/claude" in dockerfile
         assert "ln -sf /opt/fido-node-tools/node_modules/.bin/copilot" in dockerfile
-        assert "uv sync --frozen --no-dev --no-install-project" in dockerfile
-        assert "uv sync --frozen --no-install-project" in dockerfile
+        assert (
+            "./pyproject uv sync --frozen --no-dev --no-install-project" in dockerfile
+        )
+        assert "./pyproject uv sync --frozen --no-install-project" in dockerfile
         assert (
             "chmod -R a+rwX /opt/fido-node-tools /opt/fido-venv /opt/uv-python"
             not in dockerfile
@@ -731,15 +751,23 @@ class TestModelDockerfile:
         assert "FROM python-deps AS python-workspace-base" not in dockerfile
         assert (
             "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
-            "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
+            "package-lock.json pyproject pyproject.*.toml pyrightconfig.json uv.lock ./"
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
-        assert "COPY models/Dockerfile models/Dockerfile" in dockerfile
+        assert (
+            "COPY tools/build_graph.sh tools/compose_pyproject.py tools/gen_workflows.py tools/"
+            in dockerfile
+        )
+        assert (
+            "COPY models/Dockerfile models/dune-project models/dune models/*.v models/"
+            in dockerfile
+        )
         assert "COPY src src" in dockerfile
         assert "COPY tests tests" in dockerfile
         assert "COPY rocq-python-extraction rocq-python-extraction" in dockerfile
         assert "FROM python-workspace-base AS python-check-base" in dockerfile
         assert "FROM python-workspace-base AS python-test-base" in dockerfile
+        assert "ENV PYTHONPATH=/workspace/src" in dockerfile
 
     def test_fido_runtime_uses_host_uid_gid_build_args(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
@@ -758,7 +786,7 @@ class TestModelDockerfile:
         assert "FROM python-check-base AS typecheck" in dockerfile
         assert "FROM python-test-base AS generated-typecheck" in dockerfile
         assert "FROM python-test-base AS test" in dockerfile
-        assert "uv run tests" in dockerfile
+        assert "RUN ./pyproject python -m fido.tests_main" in dockerfile
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

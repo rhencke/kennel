@@ -161,3 +161,7 @@ def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> No
         print("Usage: fido-gh-status set <message>", file=sys.stderr)
         raise SystemExit(1)
     set_gh_status(" ".join(argv[1:]), _gh=_GitHub())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

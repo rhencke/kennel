@@ -134,3 +134,7 @@ class TracebackCLI:
 
 def main() -> int:
     return TracebackCLI(sys.stdin, sys.stdout, sys.stderr).run(sys.argv[1:])
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

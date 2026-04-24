@@ -32,7 +32,7 @@ def test_ensure_rocq_python_artifacts_runs_export_helper(
     ((args,), kwargs) = mock_run.call_args
     assert args[0].endswith("rocq-python-extraction/export_pytest_generated.sh")
     assert kwargs["check"] is True
-    assert (kwargs["cwd"] / "pyproject.toml").is_file()
+    assert kwargs["cwd"].name == "workspace"
 
 
 def test_main_delegates_to_pytest_with_repo_defaults() -> None:

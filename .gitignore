@@ -4,3 +4,4 @@ __pycache__/
 .coverage
 _build/
 .cache/
+pyproject.toml

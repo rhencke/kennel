@@ -2992,7 +2992,7 @@ class TestSetupHooks:
         (tmp_path / ".git" / "info").mkdir(parents=True)
         compact_cmd, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert compact_cmd.startswith("bash ")
-        assert "sync-tasks" in sync_cmd
+        assert "sync_tasks_cli" in sync_cmd
 
     def test_compact_cmd_references_compact_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -3006,7 +3006,7 @@ class TestSetupHooks:
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
-        assert "fido-sync-tasks" in sync_cmd
+        assert "python -m fido.sync_tasks_cli" in sync_cmd
         assert "uv run" not in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:

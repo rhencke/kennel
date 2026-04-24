@@ -1,0 +1,31 @@
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated Rocq extraction output is format-checked by CI, but lint has
+# intentional noise: reusable runtime imports, type aliases Rocq erases, and
+# names copied from source terms.
+"src/fido/rocq/*.py" = ["E741", "F401", "F541", "F811", "F821", "F841", "I001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "rocq-python-extraction/test"]
+addopts = "-n auto"
+python_files = ["test_*.py"]
+
+[tool.coverage.run]
+source = ["fido", "rocq-python-extraction/test"]
+# Exclude generated Rocq extraction output — tested indirectly via the
+# Docker-backed CI build, not by the Python test suite.
+omit = [
+  "src/fido/rocq/*",
+  "rocq-python-extraction/test/conftest.py",
+  "rocq-python-extraction/test/pyright_*.py",
+]
+
+[tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:"]
+fail_under = 100

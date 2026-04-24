@@ -23,7 +23,9 @@ fido_build_inputs_for_target() {
 models/Dockerfile
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
+tools/compose_pyproject.py
 uv.lock
 EOF
       ;;
@@ -33,7 +35,9 @@ EOF
 models/Dockerfile
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
+tools/compose_pyproject.py
 uv.lock
 EOF
       ;;
@@ -53,7 +57,8 @@ models/dune
 models/dune-project
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
 pyrightconfig.json
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
@@ -62,7 +67,9 @@ rocq-python-extraction/rocq-python-extraction.opam
 src
 tests
 tools/build_graph.sh
+tools/compose_pyproject.py
 tools/gen_workflows.py
+tools/measure_build_graph.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF
@@ -83,7 +90,8 @@ models/dune
 models/dune-project
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
 pyrightconfig.json
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
@@ -92,7 +100,9 @@ rocq-python-extraction/rocq-python-extraction.opam
 rocq-python-extraction/test
 src
 tools/build_graph.sh
+tools/compose_pyproject.py
 tools/gen_workflows.py
+tools/measure_build_graph.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF
@@ -113,7 +123,8 @@ models/dune
 models/dune-project
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
 pyrightconfig.json
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
@@ -122,7 +133,9 @@ rocq-python-extraction/rocq-python-extraction.opam
 src
 tests
 tools/build_graph.sh
+tools/compose_pyproject.py
 tools/gen_workflows.py
+tools/measure_build_graph.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF
@@ -135,11 +148,13 @@ models/*.v
 models/Dockerfile
 models/dune
 models/dune-project
-pyproject.toml
+pyproject
+pyproject.*.toml
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
 rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
+tools/compose_pyproject.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF
@@ -175,7 +190,8 @@ models/dune
 models/dune-project
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
 pyrightconfig.json
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
@@ -185,7 +201,9 @@ rocq-python-extraction/test
 src
 tests
 tools/build_graph.sh
+tools/compose_pyproject.py
 tools/gen_workflows.py
+tools/measure_build_graph.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF
@@ -206,7 +224,8 @@ models/dune
 models/dune-project
 package-lock.json
 package.json
-pyproject.toml
+pyproject
+pyproject.*.toml
 pyrightconfig.json
 rocq-python-extraction
 rocq-python-extraction/Dockerfile
@@ -215,7 +234,9 @@ rocq-python-extraction/rocq-python-extraction.opam
 src
 tests
 tools/build_graph.sh
+tools/compose_pyproject.py
 tools/gen_workflows.py
+tools/measure_build_graph.py
 tools/rocq_model_outputs.sh
 uv.lock
 EOF

@@ -1,31 +1,12 @@
-"""Top-level fido entry point — dispatches to 'serve' or packaged helper CLIs."""
-
-import sys
+"""Top-level fido server entry point."""
 
 
-def main(
-    argv: list[str] | None = None,
-    *,
-    _GitHub: type | None = None,
-) -> None:
-    args = sys.argv[1:] if argv is None else argv
+def main(argv: list[str] | None = None) -> None:
+    del argv
+    from fido.server import run as server_run
 
-    # TODO: remove this compat shim once shell scripts are fully removed
-    if args and args[0] == "task":
-        from fido.cli import main as task_main
-        from fido.github import GitHub
+    server_run()
 
-        task_main(args[1:], _GitHub=_GitHub or GitHub)
-    elif args and args[0] == "gh-status":
-        from fido.gh_status import main as gh_status_main
 
-        gh_status_main(args[1:])
-    elif args and args[0] == "sync-tasks":
-        from fido.github import GitHub
-        from fido.sync_tasks_cli import main as sync_tasks_main
-
-        sync_tasks_main(args[1:], _GitHub=_GitHub or GitHub)
-    else:
-        from fido.server import run as server_run
-
-        server_run()
+if __name__ == "__main__":  # pragma: no cover
+    main()

@@ -11,6 +11,7 @@ RUN apt-get update \
 ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_CACHE_DIR=/root/.cache/uv/python
+ENV PATH="/opt/fido-venv/bin:${PATH}"
 
 FROM python-base AS fido-python-prod
 
@@ -22,17 +23,18 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/fido-venv
 ENV UV_PYTHON_CACHE_DIR=/tmp/uv-cache/python
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 
-COPY .python-version pyproject.toml uv.lock ./
+COPY .python-version pyproject pyproject.*.toml uv.lock ./
+COPY tools/compose_pyproject.py tools/compose_pyproject.py
 
 RUN --mount=type=cache,id=fido-uv-prod,target=/tmp/uv-cache \
     mkdir -p /tmp/uv-cache \
-    && uv sync --frozen --no-dev --no-install-project \
+    && ./pyproject uv sync --frozen --no-dev --no-install-project \
     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 FROM fido-python-prod AS fido-python-dev
 
 RUN --mount=type=cache,id=fido-uv-dev,target=/tmp/uv-cache \
-    uv sync --frozen --no-install-project \
+    ./pyproject uv sync --frozen --no-install-project \
     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 FROM node:24-bookworm-slim AS node-runtime
@@ -82,8 +84,6 @@ RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
     && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /tmp/uv-cache
 
 ENV HOME=$FIDO_HOME
-
-ENTRYPOINT ["uv", "run"]
 
 FROM fido AS fido-test
 
@@ -162,7 +162,8 @@ RUN targets="" \
 FROM python-base AS model-format
 
 WORKDIR /workspace
-COPY .python-version pyproject.toml uv.lock ./
+COPY .python-version pyproject pyproject.*.toml uv.lock ./
+COPY tools/compose_pyproject.py tools/compose_pyproject.py
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
 RUN cd /workspace/src/fido/rocq \
@@ -210,22 +211,18 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
 FROM fido-python-dev AS python-workspace-base
 
 WORKDIR /workspace
-COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject pyproject.*.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
-COPY tools/gen_workflows.py tools/build_graph.sh tools/
-COPY models/Dockerfile models/Dockerfile
-COPY models/dune-project models/dune models/*.v models/
+COPY tools/build_graph.sh tools/compose_pyproject.py tools/gen_workflows.py tools/measure_build_graph.py tools/
+COPY models/Dockerfile models/dune-project models/dune models/*.v models/
 COPY src src
 COPY rocq-python-extraction rocq-python-extraction
 COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
 
 ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
 ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
-    uv sync --frozen
+ENV PYTHONPATH=/workspace/src
 
 FROM python-workspace-base AS python-check-base
 
@@ -233,19 +230,16 @@ COPY tests tests
 
 FROM python-check-base AS format
 
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run ruff format --check .
+RUN ./pyproject ruff format --check .
 
 FROM python-check-base AS lint
 
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run ruff check .
+RUN ./pyproject ruff check .
 
 FROM python-check-base AS typecheck
 
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
-    uv run pyright
+RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
+    ./pyproject pyright
 
 FROM python-workspace-base AS python-test-base
 
@@ -254,14 +248,12 @@ FROM python-test-base AS generated-typecheck
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
 
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
-    uv run python -m fido.rocq_generated_pyright /tmp/generated-pyright
+RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
+    ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright
 
 FROM python-test-base AS test
 
 COPY tests tests
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests
+RUN ./pyproject python -m fido.tests_main

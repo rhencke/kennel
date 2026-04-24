@@ -526,15 +526,16 @@ run_fido_test_image() {
 
 run_fido_test_python_image() {
   build_image fido-test "$test_image"
-  container_entrypoint=python3 run_container "$@"
+  container_entrypoint=/opt/fido-venv/bin/python3 run_container "$@"
 }
 
-run_fido_cli_image() {
-  run_fido_test_image "$@"
+run_fido_pyproject_image() {
+  build_image fido-test "$test_image"
+  container_entrypoint=/workspace/pyproject run_container "$@"
 }
 
-run_fido_cli_image_quiet() {
-  quiet=1 run_fido_test_image "$@"
+run_fido_module_image() {
+  run_fido_test_python_image -m "$@"
 }
 
 require_host_chat_tools() {
@@ -926,14 +927,14 @@ supervise_up() {
 
 case "$command" in
   help)
-    run_fido_cli_image fido-help "${@:2}"
+    run_fido_module_image fido.fido_help "${@:2}"
     ;;
   up)
     shift
     need_secret=1
     named_run=1
     redirect_up_logs
-    supervise_up fido --secret-file /run/secrets/fido-secret "$@"
+    supervise_up python3 -m fido.main --secret-file /run/secrets/fido-secret "$@"
     ;;
   down)
     docker stop "$container" 2>/dev/null || true
@@ -968,23 +969,23 @@ case "$command" in
     status_fast_path
     ;;
   task)
-    run_fido_cli_image fido-task "${@:2}"
+    run_fido_module_image fido.cli "${@:2}"
     ;;
   gh-status)
-    run_fido_cli_image fido-gh-status "${@:2}"
+    run_fido_module_image fido.gh_status "${@:2}"
     ;;
   chat)
     shift
     run_host_chat "$@"
     ;;
   sync-tasks)
-    run_fido_cli_image fido-sync-tasks "${@:2}"
+    run_fido_module_image fido.sync_tasks_cli "${@:2}"
     ;;
   tests)
-    run_fido_test_image tests "${@:2}"
+    run_fido_pyproject_image python3 -m fido.tests_main "${@:2}"
     ;;
   traceback)
-    run_fido_cli_image traceback "${@:2}"
+    run_fido_test_python_image -m fido.rocq_traceback "${@:2}"
     ;;
   repl)
     run_rocq_repl_image python3 -m fido.rocq_repl "${@:2}"
@@ -995,8 +996,14 @@ case "$command" in
   lsp)
     run_rocq_lsp_image -m fido.rocq_lsp "${@:2}"
     ;;
-  ruff|pyright|pytest)
-    run_fido_test_image "$@"
+  ruff)
+    run_fido_pyproject_image ruff "${@:2}"
+    ;;
+  pyright)
+    run_fido_pyproject_image pyright "${@:2}"
+    ;;
+  pytest)
+    run_fido_pyproject_image pytest "${@:2}"
     ;;
   *)
     echo "unsupported fido command: $command" >&2

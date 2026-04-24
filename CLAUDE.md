@@ -29,9 +29,9 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido repl <model.v>` | Open a Python REPL with that model's extracted symbols preloaded and compare supported expressions against OCaml reference extraction. |
 | `./fido rocq-lsp` | Run the stdio LSP server for `.v` model navigation. `.lsp.json` points editor/agent LSP clients here. |
 | `./fido lsp hover|definition|references|callers|signature|completion|symbols|tokens|codelens|codeactions|graph|explain|rename|diagnostics ... --json` | Query Rocq model navigation as JSON for shell agents. |
-| `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
-| `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
-| `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |
+| `./fido ruff ...` | Run ruff from the prebuilt container toolchain under the ephemeral `./pyproject` wrapper, for example `./fido ruff format .` or `./fido ruff check .`. |
+| `./fido pyright [args...]` | Run pyright from the prebuilt container toolchain under the ephemeral `./pyproject` wrapper. |
+| `./fido pytest [args...]` | Run pytest from the prebuilt container toolchain under the ephemeral `./pyproject` wrapper, for example `./fido pytest tests/test_status.py -q`. |
 
 The internal Python package is `fido` because the repo-root launcher already
 owns the filesystem path `./fido`. Use lowercase `fido` for commands, package

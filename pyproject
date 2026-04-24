@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+  :
+else
+  repo_root=$(cd -- "$(dirname "$0")" && pwd)
+fi
+rendered=$repo_root/pyproject.toml
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: ./pyproject <command> [args...]" >&2
+  exit 2
+fi
+
+if [ -e "$rendered" ]; then
+  echo "pyproject.toml already exists; another ./pyproject instance is running or cleanup is needed" >&2
+  exit 1
+fi
+
+cleanup() {
+  rm -f "$rendered"
+}
+trap cleanup EXIT INT TERM HUP
+
+python3 "$repo_root/tools/compose_pyproject.py" --output "$rendered"
+
+set +e
+"$@"
+status=$?
+set -e
+exit "$status"

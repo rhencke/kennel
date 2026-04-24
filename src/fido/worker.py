@@ -1041,7 +1041,7 @@ class Worker:
         hooks.ensure_gitexcluded(self.work_dir)
         compact_script = create_compact_script(fido_dir)
         compact_cmd = f"bash {compact_script}"
-        sync_cmd = f"fido-sync-tasks {self.work_dir} &"
+        sync_cmd = f"python -m fido.sync_tasks_cli {self.work_dir} &"
         hooks.add_hooks(self.work_dir, compact_cmd, sync_cmd)
         return compact_cmd, sync_cmd
 

@@ -109,3 +109,7 @@ def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> No
             cmd.list(args.work_dir)
         case _:
             raise AssertionError(f"unreachable: unknown command {args.command!r}")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

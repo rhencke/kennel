@@ -1,0 +1,4366 @@
+{
+  "generated_at": "2026-04-24T16:51:58Z",
+  "git_head": "3ce7ef61f1fb4f24a8ef51c57fd391f14272975a",
+  "snapshot_rev": "e03f82a5db677f81b3c58aaee5c08b1b96d4741a",
+  "scenarios": [
+    {
+      "name": "warm_no_change",
+      "description": "Warm ./fido ci with no source changes.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 1.324,
+      "step_summary": {
+        "counts": {},
+        "steps": []
+      },
+      "output_tail": [
+        "16:50:21 INFO  [supervisor] ci cache hit",
+        "16:50:21 INFO  [supervisor] checking committed model mirrors",
+        "models build cache hit",
+        "16:50:22 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_prod_python_edit",
+      "description": "Warm ./fido ci after a tiny prod Python edit.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 13.589,
+      "step_summary": {
+        "counts": {
+          "running": 7,
+          "cached": 134
+        },
+        "steps": [
+          {
+            "id": 4,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 6,
+            "label": "typecheck",
+            "status": "cached"
+          },
+          {
+            "id": 11,
+            "label": "fido internal",
+            "status": "running"
+          },
+          {
+            "id": 16,
+            "label": "test internal",
+            "status": "running"
+          },
+          {
+            "id": 25,
+            "label": "format python-base 1/2",
+            "status": "running"
+          },
+          {
+            "id": 34,
+            "label": "fido node-tools 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 35,
+            "label": "fido node-tools 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 36,
+            "label": "fido fido 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 37,
+            "label": "fido fido-python-prod 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 38,
+            "label": "fido fido 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 39,
+            "label": "typecheck python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 40,
+            "label": "fido fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 41,
+            "label": "fido fido-base 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 42,
+            "label": "fido fido-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 43,
+            "label": "fido node-tools 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 44,
+            "label": "typecheck fido-python-prod 1/4",
+            "status": "cached"
+          },
+          {
+            "id": 45,
+            "label": "fido fido-python-prod 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 46,
+            "label": "fido fido 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 58,
+            "label": "lint stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 59,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 60,
+            "label": "rocq-repl rocq-repl 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 61,
+            "label": "rocq-repl rocq-repl 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 62,
+            "label": "rocq-repl rocq-repl 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 63,
+            "label": "generated-typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 64,
+            "label": "generated-typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 65,
+            "label": "generated-typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 66,
+            "label": "generated-typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 67,
+            "label": "generated-typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 68,
+            "label": "generated-typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 69,
+            "label": "generated-typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 70,
+            "label": "generated-typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 71,
+            "label": "generated-typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 72,
+            "label": "format python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 73,
+            "label": "format model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 74,
+            "label": "format extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 75,
+            "label": "format model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 76,
+            "label": "format extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 77,
+            "label": "format model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 78,
+            "label": "format rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 79,
+            "label": "format extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 80,
+            "label": "format rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 81,
+            "label": "format rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 82,
+            "label": "lint python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 83,
+            "label": "lint fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 84,
+            "label": "lint python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 85,
+            "label": "lint python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 86,
+            "label": "lint model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 87,
+            "label": "lint python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 88,
+            "label": "lint python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 89,
+            "label": "lint model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 90,
+            "label": "lint fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 91,
+            "label": "lint python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 92,
+            "label": "lint model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 93,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 94,
+            "label": "typecheck builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 95,
+            "label": "typecheck rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 96,
+            "label": "typecheck stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 97,
+            "label": "typecheck rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 98,
+            "label": "generated-typecheck test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 99,
+            "label": "typecheck stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 100,
+            "label": "typecheck builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 101,
+            "label": "typecheck builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 102,
+            "label": "generated-typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 103,
+            "label": "generated-typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 104,
+            "label": "typecheck builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 105,
+            "label": "typecheck stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 106,
+            "label": "typecheck stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 107,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 112,
+            "label": "generated-typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 113,
+            "label": "generated-typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 114,
+            "label": "generated-typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 115,
+            "label": "generated-typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 116,
+            "label": "generated-typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 117,
+            "label": "lint model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 118,
+            "label": "lint rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 119,
+            "label": "lint rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 120,
+            "label": "lint extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 121,
+            "label": "lint model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 122,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 123,
+            "label": "lint extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 124,
+            "label": "lint extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 126,
+            "label": "test python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 127,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 128,
+            "label": "test extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 129,
+            "label": "test fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 130,
+            "label": "test python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 131,
+            "label": "test python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 132,
+            "label": "test python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 133,
+            "label": "test extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 134,
+            "label": "test model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 135,
+            "label": "test model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 136,
+            "label": "test python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 137,
+            "label": "test python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 138,
+            "label": "test python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 139,
+            "label": "test extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 140,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 141,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 142,
+            "label": "test fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 143,
+            "label": "test rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 144,
+            "label": "test rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 145,
+            "label": "test python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 146,
+            "label": "test model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 148,
+            "label": "lint python-check-base 1/1",
+            "status": "running"
+          },
+          {
+            "id": 151,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 152,
+            "label": "test test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 153,
+            "label": "format python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 154,
+            "label": "format python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 155,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 156,
+            "label": "format python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 157,
+            "label": "format python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 158,
+            "label": "format python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 159,
+            "label": "format fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 160,
+            "label": "format python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 161,
+            "label": "format fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 162,
+            "label": "format python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 163,
+            "label": "format python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 164,
+            "label": "format python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 165,
+            "label": "typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 166,
+            "label": "typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 167,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 168,
+            "label": "typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 169,
+            "label": "typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 170,
+            "label": "typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 171,
+            "label": "typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 172,
+            "label": "typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 173,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 174,
+            "label": "typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 175,
+            "label": "typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 176,
+            "label": "typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 177,
+            "label": "typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 178,
+            "label": "typecheck python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 179,
+            "label": "typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 180,
+            "label": "typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 181,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 182,
+            "label": "typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 183,
+            "label": "typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 184,
+            "label": "typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 185,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 186,
+            "label": "typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 187,
+            "label": "typecheck typecheck 1/1",
+            "status": "running"
+          },
+          {
+            "id": 190,
+            "label": "test test 3/3",
+            "status": "running"
+          }
+        ]
+      },
+      "output_tail": [
+        "#188 [generated-typecheck generated-typecheck 2/3] COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright",
+        "#188 DONE 0.5s",
+        "",
+        "#189 [test test 2/3] COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default",
+        "#189 DONE 0.5s",
+        "",
+        "#190 [test test 3/3] RUN ./pyproject python -m fido.tests_main",
+        "#190 ...",
+        "",
+        "#191 [format format 1/1] RUN ./pyproject ruff format --check .",
+        "#191 0.820 143 files already formatted",
+        "#191 DONE 0.9s",
+        "",
+        "#192 [lint lint 1/1] RUN ./pyproject ruff check .",
+        "#192 0.848 All checks passed!",
+        "#192 DONE 0.9s",
+        "",
+        "#190 [test test 3/3] RUN ./pyproject python -m fido.tests_main",
+        "#190 DONE 0.7s",
+        "",
+        "#193 [generated-typecheck generated-typecheck 3/3] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright",
+        "#193 2.512 0 errors, 0 warnings, 0 informations",
+        "#193 2.539 WARNING: there is a new pyright version available (v1.1.408 -> v1.1.409).",
+        "#193 2.539 Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`",
+        "#193 2.539 ",
+        "#193 DONE 2.6s",
+        "",
+        "#187 [typecheck typecheck 1/1] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject pyright",
+        "#187 6.483 0 errors, 0 warnings, 0 informations",
+        "#187 6.653 WARNING: there is a new pyright version available (v1.1.408 -> v1.1.409).",
+        "#187 6.653 Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`",
+        "#187 6.653 ",
+        "#187 DONE 6.7s",
+        "WARNING: No output specified for generated-typecheck, test, format, lint, typecheck target(s) with docker-container driver. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load",
+        "16:50:35 INFO  [supervisor] checking committed model mirrors",
+        "models build cache hit",
+        "16:50:35 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_test_edit",
+      "description": "Warm ./fido ci after a tiny test edit.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 13.032,
+      "step_summary": {
+        "counts": {
+          "running": 9,
+          "cached": 134
+        },
+        "steps": [
+          {
+            "id": 4,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 6,
+            "label": "rocq-repl",
+            "status": "cached"
+          },
+          {
+            "id": 11,
+            "label": "fido internal",
+            "status": "running"
+          },
+          {
+            "id": 16,
+            "label": "format internal",
+            "status": "running"
+          },
+          {
+            "id": 28,
+            "label": "test internal",
+            "status": "running"
+          },
+          {
+            "id": 36,
+            "label": "test stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 39,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 41,
+            "label": "rocq-repl rocq-repl 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 42,
+            "label": "rocq-repl rocq-repl 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 43,
+            "label": "rocq-repl rocq-repl 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 44,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 45,
+            "label": "format model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 46,
+            "label": "format python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 47,
+            "label": "format python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 48,
+            "label": "format fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 49,
+            "label": "format python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 50,
+            "label": "format fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 51,
+            "label": "format model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 52,
+            "label": "format python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 53,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 54,
+            "label": "test builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 55,
+            "label": "test stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 56,
+            "label": "lint extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 57,
+            "label": "test rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 58,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 59,
+            "label": "lint rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 60,
+            "label": "test builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 61,
+            "label": "test stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 62,
+            "label": "test builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 63,
+            "label": "lint extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 64,
+            "label": "test stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 65,
+            "label": "test rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 66,
+            "label": "lint model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 67,
+            "label": "lint model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 68,
+            "label": "lint rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 69,
+            "label": "test builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 70,
+            "label": "test stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 71,
+            "label": "lint extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 72,
+            "label": "lint model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 73,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 75,
+            "label": "test model-format 1/5",
+            "status": "cached"
+          },
+          {
+            "id": 76,
+            "label": "fido fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 77,
+            "label": "fido node-tools 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 78,
+            "label": "fido node-tools 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 79,
+            "label": "fido fido 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 80,
+            "label": "fido node-tools 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 81,
+            "label": "fido fido 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 82,
+            "label": "fido fido-python-prod 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 83,
+            "label": "fido fido-base 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 84,
+            "label": "test python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 85,
+            "label": "fido fido-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 86,
+            "label": "fido fido-python-prod 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 87,
+            "label": "fido fido 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 91,
+            "label": "test internal",
+            "status": "running"
+          },
+          {
+            "id": 92,
+            "label": "typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 93,
+            "label": "typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 94,
+            "label": "typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 95,
+            "label": "typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 96,
+            "label": "typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 97,
+            "label": "typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 98,
+            "label": "typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 99,
+            "label": "typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 100,
+            "label": "typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 101,
+            "label": "typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 102,
+            "label": "generated-typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 103,
+            "label": "generated-typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 104,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 105,
+            "label": "generated-typecheck test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 106,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 109,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "running"
+          },
+          {
+            "id": 111,
+            "label": "format rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 112,
+            "label": "format rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 113,
+            "label": "format model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 114,
+            "label": "format extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 115,
+            "label": "format extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 116,
+            "label": "format rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 117,
+            "label": "format model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 118,
+            "label": "format extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 120,
+            "label": "typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 121,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 122,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 123,
+            "label": "typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 124,
+            "label": "typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 125,
+            "label": "typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 126,
+            "label": "typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 127,
+            "label": "typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 129,
+            "label": "generated-typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 130,
+            "label": "generated-typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 131,
+            "label": "generated-typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 132,
+            "label": "generated-typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 133,
+            "label": "generated-typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 134,
+            "label": "generated-typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 135,
+            "label": "generated-typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 136,
+            "label": "generated-typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 137,
+            "label": "generated-typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 138,
+            "label": "generated-typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 139,
+            "label": "generated-typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 140,
+            "label": "generated-typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 141,
+            "label": "generated-typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 142,
+            "label": "generated-typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 143,
+            "label": "generated-typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 144,
+            "label": "generated-typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 145,
+            "label": "generated-typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 146,
+            "label": "generated-typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 150,
+            "label": "lint python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 151,
+            "label": "lint python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 152,
+            "label": "lint python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 153,
+            "label": "lint python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 154,
+            "label": "lint fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 155,
+            "label": "lint python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 156,
+            "label": "lint fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 157,
+            "label": "lint python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 158,
+            "label": "lint python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 159,
+            "label": "lint python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 160,
+            "label": "lint python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 161,
+            "label": "lint python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 162,
+            "label": "test python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 163,
+            "label": "test python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 164,
+            "label": "test extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 165,
+            "label": "test model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 166,
+            "label": "test fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 167,
+            "label": "test python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 168,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 169,
+            "label": "test python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 170,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 171,
+            "label": "test python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 172,
+            "label": "test python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 173,
+            "label": "test extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 174,
+            "label": "test test 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 175,
+            "label": "test extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 176,
+            "label": "test test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 177,
+            "label": "test python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 178,
+            "label": "test model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 179,
+            "label": "test fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 180,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 181,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 182,
+            "label": "test rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 183,
+            "label": "test model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 184,
+            "label": "test python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 185,
+            "label": "test rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 187,
+            "label": "generated-typecheck generated-typecheck 2/3",
+            "status": "running"
+          },
+          {
+            "id": 189,
+            "label": "generated-typecheck generated-typecheck 3/3",
+            "status": "running"
+          },
+          {
+            "id": 193,
+            "label": "typecheck typecheck 1/1",
+            "status": "running"
+          }
+        ]
+      },
+      "output_tail": [
+        "#187 [generated-typecheck generated-typecheck 2/3] COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright",
+        "#187 DONE 0.4s",
+        "",
+        "#189 [generated-typecheck generated-typecheck 3/3] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright",
+        "#189 ...",
+        "",
+        "#190 [format format 1/1] RUN ./pyproject ruff format --check .",
+        "#190 0.700 143 files already formatted",
+        "#190 DONE 0.8s",
+        "",
+        "#191 [lint lint 1/1] RUN ./pyproject ruff check .",
+        "#191 0.771 All checks passed!",
+        "#191 DONE 0.8s",
+        "",
+        "#192 [test test 3/3] RUN ./pyproject python -m fido.tests_main",
+        "#192 DONE 0.7s",
+        "",
+        "#193 [typecheck typecheck 1/1] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject pyright",
+        "#193 ...",
+        "",
+        "#189 [generated-typecheck generated-typecheck 3/3] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright",
+        "#189 2.377 0 errors, 0 warnings, 0 informations",
+        "#189 2.400 WARNING: there is a new pyright version available (v1.1.408 -> v1.1.409).",
+        "#189 2.400 Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`",
+        "#189 2.400 ",
+        "#189 DONE 2.5s",
+        "",
+        "#193 [typecheck typecheck 1/1] RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python     ./pyproject pyright",
+        "#193 6.620 0 errors, 0 warnings, 0 informations",
+        "#193 6.678 WARNING: there is a new pyright version available (v1.1.408 -> v1.1.409).",
+        "#193 6.678 Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`",
+        "#193 6.678 ",
+        "#193 DONE 6.7s",
+        "WARNING: No output specified for format, lint, test, typecheck, generated-typecheck target(s) with docker-container driver. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load",
+        "16:50:48 INFO  [supervisor] checking committed model mirrors",
+        "models build cache hit",
+        "16:50:48 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_launcher_metadata_edit",
+      "description": "Warm ./fido ci after a tiny launcher/metadata edit.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 16.146,
+      "step_summary": {
+        "counts": {
+          "cached": 146,
+          "running": 11
+        },
+        "steps": [
+          {
+            "id": 3,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 6,
+            "label": "rocq-image internal",
+            "status": "cached"
+          },
+          {
+            "id": 8,
+            "label": "make-rocq",
+            "status": "cached"
+          },
+          {
+            "id": 9,
+            "label": "make-rocq context rocq_models_cache",
+            "status": "running"
+          },
+          {
+            "id": 18,
+            "label": "make-rocq stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 19,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 20,
+            "label": "make-rocq stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 21,
+            "label": "make-rocq builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 22,
+            "label": "make-rocq builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 23,
+            "label": "make-rocq stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 24,
+            "label": "make-rocq rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 25,
+            "label": "make-rocq rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 26,
+            "label": "make-rocq model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 27,
+            "label": "make-rocq builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 28,
+            "label": "make-rocq stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 29,
+            "label": "make-rocq rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 30,
+            "label": "make-rocq builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 31,
+            "label": "make-rocq export 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 32,
+            "label": "make-rocq extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 33,
+            "label": "make-rocq model-format 1/5",
+            "status": "cached"
+          },
+          {
+            "id": 34,
+            "label": "make-rocq python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 35,
+            "label": "make-rocq model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 36,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 37,
+            "label": "make-rocq rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 38,
+            "label": "make-rocq extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 39,
+            "label": "make-rocq extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 40,
+            "label": "make-rocq model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 41,
+            "label": "make-rocq model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 42,
+            "label": "make-rocq stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 43,
+            "label": "make-rocq export 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 45,
+            "label": "generated-typecheck internal",
+            "status": "running"
+          },
+          {
+            "id": 50,
+            "label": "lint stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 53,
+            "label": "typecheck stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 54,
+            "label": "typecheck stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 55,
+            "label": "typecheck stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 56,
+            "label": "typecheck builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 57,
+            "label": "typecheck builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 58,
+            "label": "rocq-repl rocq-repl 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 59,
+            "label": "typecheck builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 60,
+            "label": "typecheck builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 61,
+            "label": "rocq-repl rocq-repl 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 62,
+            "label": "typecheck stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 63,
+            "label": "rocq-repl rocq-repl 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 65,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 67,
+            "label": "lint rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 68,
+            "label": "lint model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 69,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 70,
+            "label": "lint rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 71,
+            "label": "lint model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 72,
+            "label": "lint extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 73,
+            "label": "lint extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 74,
+            "label": "lint model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 75,
+            "label": "lint extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 76,
+            "label": "lint fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 77,
+            "label": "lint python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 78,
+            "label": "lint python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 79,
+            "label": "lint python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 80,
+            "label": "lint fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 81,
+            "label": "format model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 82,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 83,
+            "label": "test rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 84,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 85,
+            "label": "test rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 86,
+            "label": "typecheck rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 87,
+            "label": "typecheck rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 88,
+            "label": "test test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 89,
+            "label": "generated-typecheck test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 94,
+            "label": "lint python-workspace-base 5/9",
+            "status": "running"
+          },
+          {
+            "id": 95,
+            "label": "format python-workspace-base 6/9",
+            "status": "running"
+          },
+          {
+            "id": 96,
+            "label": "test python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 97,
+            "label": "test python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 98,
+            "label": "test python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 99,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 100,
+            "label": "test model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 101,
+            "label": "test python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 102,
+            "label": "test model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 103,
+            "label": "test fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 104,
+            "label": "test python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 105,
+            "label": "test fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 106,
+            "label": "lint python-workspace-base 7/9",
+            "status": "running"
+          },
+          {
+            "id": 108,
+            "label": "lint python-workspace-base 8/9",
+            "status": "running"
+          },
+          {
+            "id": 110,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 111,
+            "label": "test extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 112,
+            "label": "test extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 113,
+            "label": "test extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 114,
+            "label": "test model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 116,
+            "label": "generated-typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 117,
+            "label": "generated-typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 118,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 119,
+            "label": "generated-typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 120,
+            "label": "generated-typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 121,
+            "label": "generated-typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 122,
+            "label": "generated-typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 123,
+            "label": "generated-typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 124,
+            "label": "generated-typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 125,
+            "label": "generated-typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 126,
+            "label": "generated-typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 127,
+            "label": "generated-typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 128,
+            "label": "generated-typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 129,
+            "label": "generated-typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 130,
+            "label": "generated-typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 131,
+            "label": "generated-typecheck test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 132,
+            "label": "generated-typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 133,
+            "label": "generated-typecheck test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 134,
+            "label": "generated-typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 135,
+            "label": "generated-typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 136,
+            "label": "generated-typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 137,
+            "label": "generated-typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 138,
+            "label": "generated-typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 141,
+            "label": "format rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 142,
+            "label": "format extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 143,
+            "label": "format rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 144,
+            "label": "format python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 145,
+            "label": "format rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 146,
+            "label": "format python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 147,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 148,
+            "label": "format model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 149,
+            "label": "format model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 150,
+            "label": "format python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 151,
+            "label": "format python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 152,
+            "label": "format model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 153,
+            "label": "format python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 154,
+            "label": "format model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 155,
+            "label": "format python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 156,
+            "label": "format python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 157,
+            "label": "format extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 158,
+            "label": "format python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 159,
+            "label": "format fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 160,
+            "label": "format fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 161,
+            "label": "format python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 162,
+            "label": "format extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 163,
+            "label": "typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 164,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 165,
+            "label": "typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 166,
+            "label": "typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 167,
+            "label": "typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 168,
+            "label": "typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 169,
+            "label": "typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 170,
+            "label": "typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 171,
+            "label": "typecheck python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 172,
+            "label": "typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 173,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 174,
+            "label": "typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 175,
+            "label": "typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 176,
+            "label": "typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 177,
+            "label": "typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 178,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 179,
+            "label": "typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 180,
+            "label": "typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 181,
+            "label": "typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 182,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 183,
+            "label": "typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 184,
+            "label": "typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 187,
+            "label": "test test 2/3",
+            "status": "running"
+          },
+          {
+            "id": 189,
+            "label": "test test 3/3",
+            "status": "running"
+          },
+          {
+            "id": 192,
+            "label": "generated-typecheck generated-typecheck 3/3",
+            "status": "running"
+          },
+          {
+            "id": 193,
+            "label": "typecheck typecheck 1/1",
+            "status": "running"
+          }
+        ]
+      },
+      "output_tail": [
+        "#33 CACHED",
+        "",
+        "#34 [make-rocq python-base 2/2] RUN apt-get update     && apt-get install -y --no-install-recommends curl git jq libatomic1     && rm -rf /var/lib/apt/lists/*",
+        "#34 CACHED",
+        "",
+        "#35 [make-rocq model-format 5/5] RUN cd /workspace/src/fido/rocq     && find . -type f ! -name \".build-files\" -printf \"%P\\n\" | LC_ALL=C sort > .build-files",
+        "#35 CACHED",
+        "",
+        "#36 [make-rocq rocq-plugin-source 3/6] COPY --chown=opam:opam dune-workspace ./",
+        "#36 CACHED",
+        "",
+        "#37 [make-rocq rocq-plugin-source 5/6] COPY --chown=opam:opam tools/rocq_model_outputs.sh tools/",
+        "#37 CACHED",
+        "",
+        "#38 [make-rocq extract 2/3] COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/",
+        "#38 CACHED",
+        "",
+        "#39 [make-rocq extract 3/3] RUN targets=\"\"     && for model in models/*.v; do targets=\"$targets ${model%.v}.vo\"; done     && tools/rocq_model_outputs.sh models/*.v > /tmp/expected-model-outputs     && while IFS= read -r output; do         rm -f \"/workspace/_build/default/$output\";     done < /tmp/expected-model-outputs     && rm -rf /workspace/_build/default/rocq-python-extraction     && rm -f /workspace/_build/default/models/*.vo /workspace/_build/default/models/*.glob     && opam exec -- dune build $targets     && mkdir -p /tmp/model-output/src/fido/rocq     && while IFS= read -r output; do         cp \"/workspace/_build/default/$output\" /tmp/model-output/src/fido/rocq/;     done < /tmp/expected-model-outputs     && printf '%s\\n'         '\"\"\"Python extracted from Rocq models in models/.'         ''         'Rebuild with:  ./fido make-rocq'         'Source:        models/*.v (Rocq)'         'Generator:     rocq-python-extraction plugin'         '\"\"\"'         > /tmp/model-output/src/fido/rocq/__init__.py",
+        "#39 CACHED",
+        "",
+        "#40 [make-rocq model-format 4/5] COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq",
+        "#40 CACHED",
+        "",
+        "#41 [make-rocq model-format 2/5] COPY .python-version pyproject pyproject.*.toml uv.lock ./",
+        "#41 CACHED",
+        "",
+        "#42 [make-rocq stage-1 2/5] RUN apt-get update     && apt-get install -y --no-install-recommends         bash         ca-certificates         gcc         libc6-dev         libgmp-dev         linux-libc-dev         make         pkg-config         tar     && rm -rf /var/lib/apt/lists/*     && rm -rf         /usr/share/doc/*         /usr/share/info/*         /usr/share/locale/*         /usr/share/man/*     && useradd -m -s /bin/bash opam",
+        "#42 CACHED",
+        "",
+        "#43 [make-rocq export 2/2] COPY --from=extract /workspace/_build /.cache/rocq-models/context/_build",
+        "#43 CACHED",
+        "",
+        "#44 [make-rocq] exporting to client directory",
+        "#44 copying files",
+        "#44 copying files 5.39MB 0.1s done",
+        "#44 DONE 0.1s",
+        "16:51:04 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_model_edit",
+      "description": "Warm ./fido ci after a tiny Rocq model edit.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 15.547,
+      "step_summary": {
+        "counts": {
+          "running": 12,
+          "cached": 152
+        },
+        "steps": [
+          {
+            "id": 3,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 4,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 6,
+            "label": "rocq-image internal",
+            "status": "cached"
+          },
+          {
+            "id": 8,
+            "label": "make-rocq",
+            "status": "cached"
+          },
+          {
+            "id": 9,
+            "label": "make-rocq internal",
+            "status": "running"
+          },
+          {
+            "id": 16,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 18,
+            "label": "rocq-image stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 19,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 20,
+            "label": "make-rocq model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 21,
+            "label": "make-rocq rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 22,
+            "label": "make-rocq stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 23,
+            "label": "make-rocq stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 24,
+            "label": "make-rocq builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 25,
+            "label": "make-rocq rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 26,
+            "label": "make-rocq extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 27,
+            "label": "make-rocq stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 28,
+            "label": "make-rocq extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 29,
+            "label": "make-rocq builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 30,
+            "label": "make-rocq model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 31,
+            "label": "make-rocq stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 32,
+            "label": "make-rocq rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 33,
+            "label": "make-rocq model-format 1/5",
+            "status": "cached"
+          },
+          {
+            "id": 34,
+            "label": "make-rocq model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 35,
+            "label": "make-rocq extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 36,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 37,
+            "label": "make-rocq python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 38,
+            "label": "make-rocq rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 39,
+            "label": "make-rocq builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 40,
+            "label": "make-rocq model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 41,
+            "label": "make-rocq builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 42,
+            "label": "make-rocq export 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 43,
+            "label": "make-rocq export 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 44,
+            "label": "make-rocq",
+            "status": "cached"
+          },
+          {
+            "id": 45,
+            "label": "rocq-repl rocq-repl 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 46,
+            "label": "typecheck builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 47,
+            "label": "rocq-repl rocq-repl 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 48,
+            "label": "typecheck fido-python-prod 1/4",
+            "status": "cached"
+          },
+          {
+            "id": 49,
+            "label": "fido node-tools 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 50,
+            "label": "fido fido 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 51,
+            "label": "fido fido-base 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 52,
+            "label": "fido fido 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 53,
+            "label": "fido fido-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 54,
+            "label": "fido fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 55,
+            "label": "fido fido-python-prod 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 56,
+            "label": "fido fido-python-prod 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 57,
+            "label": "fido node-tools 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 58,
+            "label": "fido node-tools 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 59,
+            "label": "typecheck python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 60,
+            "label": "fido fido 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 61,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 64,
+            "label": "lint internal",
+            "status": "running"
+          },
+          {
+            "id": 71,
+            "label": "generated-typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 72,
+            "label": "generated-typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 73,
+            "label": "generated-typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 74,
+            "label": "generated-typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 75,
+            "label": "generated-typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 76,
+            "label": "generated-typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 77,
+            "label": "generated-typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 78,
+            "label": "generated-typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 79,
+            "label": "lint python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 80,
+            "label": "generated-typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 81,
+            "label": "generated-typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 82,
+            "label": "typecheck rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 83,
+            "label": "generated-typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 84,
+            "label": "typecheck rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 85,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 86,
+            "label": "generated-typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 87,
+            "label": "generated-typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 88,
+            "label": "generated-typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 89,
+            "label": "lint model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 90,
+            "label": "generated-typecheck test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 91,
+            "label": "generated-typecheck test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 93,
+            "label": "format fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 94,
+            "label": "format fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 95,
+            "label": "format python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 96,
+            "label": "format python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 97,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 98,
+            "label": "format model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 99,
+            "label": "format python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 100,
+            "label": "format python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 101,
+            "label": "format model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 102,
+            "label": "format python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 103,
+            "label": "generated-typecheck python-workspace-base 7/9",
+            "status": "running"
+          },
+          {
+            "id": 105,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "running"
+          },
+          {
+            "id": 107,
+            "label": "format extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 108,
+            "label": "format rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 109,
+            "label": "format rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 110,
+            "label": "format extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 111,
+            "label": "format model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 112,
+            "label": "format model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 113,
+            "label": "format rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 114,
+            "label": "format extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 115,
+            "label": "test python-workspace-base 9/9",
+            "status": "running"
+          },
+          {
+            "id": 117,
+            "label": "test rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 118,
+            "label": "test python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 119,
+            "label": "test model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 120,
+            "label": "test model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 121,
+            "label": "test fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 122,
+            "label": "test python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 123,
+            "label": "test python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 124,
+            "label": "test extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 125,
+            "label": "test model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 126,
+            "label": "test extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 127,
+            "label": "test python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 128,
+            "label": "test python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 129,
+            "label": "test fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 130,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 131,
+            "label": "test python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 132,
+            "label": "test extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 133,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 134,
+            "label": "test python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 135,
+            "label": "test rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 136,
+            "label": "test python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 137,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 138,
+            "label": "typecheck test 1/3",
+            "status": "running"
+          },
+          {
+            "id": 141,
+            "label": "lint python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 142,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 143,
+            "label": "lint python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 144,
+            "label": "lint python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 145,
+            "label": "lint rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 146,
+            "label": "lint python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 147,
+            "label": "lint fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 148,
+            "label": "lint python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 149,
+            "label": "lint rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 150,
+            "label": "lint model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 151,
+            "label": "lint python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 152,
+            "label": "lint model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 153,
+            "label": "lint model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 154,
+            "label": "lint python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 155,
+            "label": "lint python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 156,
+            "label": "lint extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 157,
+            "label": "lint python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 158,
+            "label": "lint python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 159,
+            "label": "lint fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 160,
+            "label": "lint model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 161,
+            "label": "lint extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 162,
+            "label": "lint extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 163,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 164,
+            "label": "test test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 165,
+            "label": "typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 166,
+            "label": "typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 167,
+            "label": "typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 168,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 169,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 170,
+            "label": "typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 171,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 172,
+            "label": "typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 173,
+            "label": "typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 174,
+            "label": "typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 175,
+            "label": "typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 176,
+            "label": "typecheck python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 177,
+            "label": "typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 178,
+            "label": "typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 179,
+            "label": "typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 180,
+            "label": "typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 181,
+            "label": "typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 182,
+            "label": "typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 183,
+            "label": "typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 184,
+            "label": "typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 185,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 186,
+            "label": "typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 187,
+            "label": "typecheck typecheck 1/1",
+            "status": "running"
+          },
+          {
+            "id": 190,
+            "label": "test test 3/3",
+            "status": "running"
+          },
+          {
+            "id": 193,
+            "label": "generated-typecheck generated-typecheck 3/3",
+            "status": "running"
+          }
+        ]
+      },
+      "output_tail": [
+        "#33 [make-rocq model-format 1/5] WORKDIR /workspace",
+        "#33 CACHED",
+        "",
+        "#34 [make-rocq model-format 2/5] COPY .python-version pyproject pyproject.*.toml uv.lock ./",
+        "#34 CACHED",
+        "",
+        "#35 [make-rocq extract 2/3] COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/",
+        "#35 CACHED",
+        "",
+        "#36 [make-rocq rocq-plugin-source 3/6] COPY --chown=opam:opam dune-workspace ./",
+        "#36 CACHED",
+        "",
+        "#37 [make-rocq python-base 2/2] RUN apt-get update     && apt-get install -y --no-install-recommends curl git jq libatomic1     && rm -rf /var/lib/apt/lists/*",
+        "#37 CACHED",
+        "",
+        "#38 [make-rocq rocq-plugin-source 5/6] COPY --chown=opam:opam tools/rocq_model_outputs.sh tools/",
+        "#38 CACHED",
+        "",
+        "#39 [make-rocq builder 2/5] RUN sudo apt-get update     && sudo apt-get install -y --no-install-recommends         make         build-essential         pkg-config         libgmp-dev         linux-libc-dev     && sudo rm -rf /var/lib/apt/lists/*",
+        "#39 CACHED",
+        "",
+        "#40 [make-rocq model-format 5/5] RUN cd /workspace/src/fido/rocq     && find . -type f ! -name \".build-files\" -printf \"%P\\n\" | LC_ALL=C sort > .build-files",
+        "#40 CACHED",
+        "",
+        "#41 [make-rocq builder 5/5] RUN opam repo add rocq-released https://rocq-prover.org/opam/released     && for attempt in 1 2 3; do          opam install -y rocq-core.9.2.0 rocq-stdlib.9.1.0 dune.3.21.1 && break;          echo \"opam install attempt $attempt failed \u2014 retrying in 20 s...\";          sleep 20;        done     && opam clean --all",
+        "#41 CACHED",
+        "",
+        "#42 [make-rocq export 1/2] COPY --from=model-format /workspace/src/fido/rocq /src/fido/rocq",
+        "#42 CACHED",
+        "",
+        "#43 [make-rocq export 2/2] COPY --from=extract /workspace/_build /.cache/rocq-models/context/_build",
+        "#43 CACHED",
+        "",
+        "#44 [make-rocq] exporting to client directory",
+        "#44 copying files 5.39MB 0.1s done",
+        "#44 DONE 0.1s",
+        "16:51:20 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_rocq_test_edit",
+      "description": "Warm ./fido ci after a tiny Rocq extraction test edit.",
+      "command": [
+        "./fido",
+        "ci"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 16.195,
+      "step_summary": {
+        "counts": {
+          "running": 13,
+          "cached": 151
+        },
+        "steps": [
+          {
+            "id": 3,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 4,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 6,
+            "label": "rocq-image internal",
+            "status": "cached"
+          },
+          {
+            "id": 8,
+            "label": "make-rocq",
+            "status": "cached"
+          },
+          {
+            "id": 9,
+            "label": "make-rocq context rocq_models_cache",
+            "status": "running"
+          },
+          {
+            "id": 15,
+            "label": "make-rocq context rocq_models_cache",
+            "status": "running"
+          },
+          {
+            "id": 18,
+            "label": "rocq-image stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 19,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 20,
+            "label": "make-rocq rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 21,
+            "label": "make-rocq extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 22,
+            "label": "make-rocq builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 23,
+            "label": "make-rocq stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 24,
+            "label": "make-rocq python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 25,
+            "label": "make-rocq rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 26,
+            "label": "make-rocq model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 27,
+            "label": "make-rocq rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 28,
+            "label": "make-rocq model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 29,
+            "label": "make-rocq stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 30,
+            "label": "make-rocq builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 31,
+            "label": "make-rocq model-format 1/5",
+            "status": "cached"
+          },
+          {
+            "id": 32,
+            "label": "make-rocq stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 33,
+            "label": "make-rocq model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 34,
+            "label": "make-rocq export 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 35,
+            "label": "make-rocq builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 36,
+            "label": "make-rocq extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 37,
+            "label": "make-rocq rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 38,
+            "label": "make-rocq builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 39,
+            "label": "make-rocq stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 40,
+            "label": "make-rocq model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 41,
+            "label": "make-rocq rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 42,
+            "label": "make-rocq extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 43,
+            "label": "make-rocq export 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 44,
+            "label": "make-rocq",
+            "status": "cached"
+          },
+          {
+            "id": 45,
+            "label": "rocq-repl internal",
+            "status": "running"
+          },
+          {
+            "id": 47,
+            "label": "rocq-image internal",
+            "status": "running"
+          },
+          {
+            "id": 49,
+            "label": "rocq-image stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 50,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 51,
+            "label": "format fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 52,
+            "label": "format python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 53,
+            "label": "format python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 54,
+            "label": "format model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 55,
+            "label": "format python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 56,
+            "label": "format python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 57,
+            "label": "format python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 58,
+            "label": "format model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 59,
+            "label": "format python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 60,
+            "label": "format fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 61,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 62,
+            "label": "lint stage-1 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 63,
+            "label": "lint stage-1 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 64,
+            "label": "rocq-repl rocq-repl 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 65,
+            "label": "lint builder 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 66,
+            "label": "lint builder 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 67,
+            "label": "rocq-repl rocq-repl 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 68,
+            "label": "lint stage-1 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 69,
+            "label": "lint builder 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 70,
+            "label": "lint stage-1 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 71,
+            "label": "lint builder 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 72,
+            "label": "rocq-repl rocq-repl 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 74,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "running"
+          },
+          {
+            "id": 77,
+            "label": "typecheck internal",
+            "status": "running"
+          },
+          {
+            "id": 78,
+            "label": "test model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 79,
+            "label": "test python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 80,
+            "label": "test fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 81,
+            "label": "test python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 82,
+            "label": "test python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 83,
+            "label": "test model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 84,
+            "label": "test fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 85,
+            "label": "test python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 86,
+            "label": "test python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 87,
+            "label": "test python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 88,
+            "label": "test python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 95,
+            "label": "generated-typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 96,
+            "label": "generated-typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 97,
+            "label": "generated-typecheck test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 98,
+            "label": "generated-typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 99,
+            "label": "generated-typecheck test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 100,
+            "label": "format model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 101,
+            "label": "format extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 102,
+            "label": "format rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 103,
+            "label": "format rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 104,
+            "label": "format rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 105,
+            "label": "format extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 106,
+            "label": "format extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 107,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 108,
+            "label": "test rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 109,
+            "label": "test model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 110,
+            "label": "test extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 111,
+            "label": "lint rocq-plugin-source 2/6",
+            "status": "cached"
+          },
+          {
+            "id": 112,
+            "label": "test extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 113,
+            "label": "test model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 114,
+            "label": "lint rocq-plugin-source 1/6",
+            "status": "cached"
+          },
+          {
+            "id": 115,
+            "label": "test rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 116,
+            "label": "test extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 117,
+            "label": "test rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 120,
+            "label": "generated-typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 121,
+            "label": "generated-typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 122,
+            "label": "generated-typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 123,
+            "label": "generated-typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 124,
+            "label": "generated-typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 125,
+            "label": "generated-typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 126,
+            "label": "generated-typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 127,
+            "label": "generated-typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 128,
+            "label": "generated-typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 129,
+            "label": "generated-typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 130,
+            "label": "generated-typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 131,
+            "label": "generated-typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 132,
+            "label": "generated-typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 133,
+            "label": "generated-typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 134,
+            "label": "generated-typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 135,
+            "label": "generated-typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 136,
+            "label": "generated-typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 137,
+            "label": "generated-typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 138,
+            "label": "lint python-check-base 1/1",
+            "status": "running"
+          },
+          {
+            "id": 141,
+            "label": "test test-extract 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 142,
+            "label": "test test-extract 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 143,
+            "label": "lint rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 144,
+            "label": "lint python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 145,
+            "label": "lint rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 146,
+            "label": "lint model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 147,
+            "label": "lint extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 148,
+            "label": "lint extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 149,
+            "label": "lint fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 150,
+            "label": "lint python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 151,
+            "label": "lint fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 152,
+            "label": "lint model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 153,
+            "label": "lint model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 154,
+            "label": "lint python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 155,
+            "label": "lint rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 156,
+            "label": "lint python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 157,
+            "label": "lint python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 158,
+            "label": "lint python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 159,
+            "label": "lint model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 160,
+            "label": "lint python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 161,
+            "label": "lint python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 162,
+            "label": "lint extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 163,
+            "label": "lint python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 164,
+            "label": "lint python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 165,
+            "label": "typecheck fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 166,
+            "label": "typecheck python-workspace-base 8/9",
+            "status": "cached"
+          },
+          {
+            "id": 167,
+            "label": "typecheck python-workspace-base 2/9",
+            "status": "cached"
+          },
+          {
+            "id": 168,
+            "label": "typecheck python-workspace-base 9/9",
+            "status": "cached"
+          },
+          {
+            "id": 169,
+            "label": "typecheck rocq-plugin-source 4/6",
+            "status": "cached"
+          },
+          {
+            "id": 170,
+            "label": "typecheck model-format 3/5",
+            "status": "cached"
+          },
+          {
+            "id": 171,
+            "label": "typecheck model-format 2/5",
+            "status": "cached"
+          },
+          {
+            "id": 172,
+            "label": "typecheck extract 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 173,
+            "label": "typecheck python-workspace-base 1/9",
+            "status": "cached"
+          },
+          {
+            "id": 174,
+            "label": "typecheck python-check-base 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 175,
+            "label": "typecheck extract 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 176,
+            "label": "typecheck model-format 4/5",
+            "status": "cached"
+          },
+          {
+            "id": 177,
+            "label": "typecheck python-workspace-base 7/9",
+            "status": "cached"
+          },
+          {
+            "id": 178,
+            "label": "typecheck rocq-plugin-source 5/6",
+            "status": "cached"
+          },
+          {
+            "id": 179,
+            "label": "typecheck python-workspace-base 3/9",
+            "status": "cached"
+          },
+          {
+            "id": 180,
+            "label": "typecheck model-format 5/5",
+            "status": "cached"
+          },
+          {
+            "id": 181,
+            "label": "typecheck extract 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 182,
+            "label": "typecheck python-workspace-base 4/9",
+            "status": "cached"
+          },
+          {
+            "id": 183,
+            "label": "typecheck python-workspace-base 6/9",
+            "status": "cached"
+          },
+          {
+            "id": 184,
+            "label": "typecheck fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 185,
+            "label": "typecheck python-workspace-base 5/9",
+            "status": "cached"
+          },
+          {
+            "id": 186,
+            "label": "typecheck rocq-plugin-source 3/6",
+            "status": "cached"
+          },
+          {
+            "id": 187,
+            "label": "format format 1/1",
+            "status": "running"
+          },
+          {
+            "id": 190,
+            "label": "test test 3/3",
+            "status": "running"
+          },
+          {
+            "id": 192,
+            "label": "generated-typecheck generated-typecheck 3/3",
+            "status": "running"
+          },
+          {
+            "id": 193,
+            "label": "typecheck typecheck 1/1",
+            "status": "running"
+          }
+        ]
+      },
+      "output_tail": [
+        "#33 CACHED",
+        "",
+        "#34 [make-rocq export 1/2] COPY --from=model-format /workspace/src/fido/rocq /src/fido/rocq",
+        "#34 CACHED",
+        "",
+        "#35 [make-rocq builder 4/5] COPY --chown=opam:opam rocq-python-extraction.opam dune-project ./",
+        "#35 CACHED",
+        "",
+        "#36 [make-rocq extract 2/3] COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/",
+        "#36 CACHED",
+        "",
+        "#37 [make-rocq rocq-plugin-source 1/6] WORKDIR /workspace",
+        "#37 CACHED",
+        "",
+        "#38 [make-rocq builder 3/5] WORKDIR /workspace",
+        "#38 CACHED",
+        "",
+        "#39 [make-rocq stage-1 2/5] RUN apt-get update     && apt-get install -y --no-install-recommends         bash         ca-certificates         gcc         libc6-dev         libgmp-dev         linux-libc-dev         make         pkg-config         tar     && rm -rf /var/lib/apt/lists/*     && rm -rf         /usr/share/doc/*         /usr/share/info/*         /usr/share/locale/*         /usr/share/man/*     && useradd -m -s /bin/bash opam",
+        "#39 CACHED",
+        "",
+        "#40 [make-rocq model-format 4/5] COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq",
+        "#40 CACHED",
+        "",
+        "#41 [make-rocq rocq-plugin-source 3/6] COPY --chown=opam:opam dune-workspace ./",
+        "#41 CACHED",
+        "",
+        "#42 [make-rocq extract 1/3] COPY --chown=opam:opam models/dune-project models/dune models/*.v models/",
+        "#42 CACHED",
+        "",
+        "#43 [make-rocq export 2/2] COPY --from=extract /workspace/_build /.cache/rocq-models/context/_build",
+        "#43 CACHED",
+        "",
+        "#44 [make-rocq] exporting to client directory",
+        "#44 copying files 3.70MB 0.1s",
+        "#44 copying files 5.39MB 0.1s done",
+        "#44 DONE 0.1s",
+        "16:51:36 INFO  [supervisor] checking generated workflow files",
+        "#1 [internal] load local bake definitions",
+        "#1 reading docker-bake.hcl 2.88kB / 2.88kB done",
+        "#1 DONE 0.0s"
+      ]
+    },
+    {
+      "name": "warm_pytest_focused",
+      "description": "Warm focused pytest run through ./fido pytest.",
+      "command": [
+        "./fido",
+        "pytest",
+        "tests/test_main.py",
+        "-q"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 13.609,
+      "step_summary": {
+        "counts": {
+          "running": 1,
+          "cached": 16
+        },
+        "steps": [
+          {
+            "id": 5,
+            "label": "internal",
+            "status": "running"
+          },
+          {
+            "id": 11,
+            "label": "fido-test 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 12,
+            "label": "fido-python-prod 3/4",
+            "status": "cached"
+          },
+          {
+            "id": 13,
+            "label": "fido-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 14,
+            "label": "fido-base 1/2",
+            "status": "cached"
+          },
+          {
+            "id": 15,
+            "label": "node-tools 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 16,
+            "label": "fido 3/3",
+            "status": "cached"
+          },
+          {
+            "id": 17,
+            "label": "node-tools 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 18,
+            "label": "fido-python-prod 2/4",
+            "status": "cached"
+          },
+          {
+            "id": 19,
+            "label": "fido-python-prod 4/4",
+            "status": "cached"
+          },
+          {
+            "id": 20,
+            "label": "python-base 2/2",
+            "status": "cached"
+          },
+          {
+            "id": 21,
+            "label": "fido 2/3",
+            "status": "cached"
+          },
+          {
+            "id": 22,
+            "label": "fido-python-prod 1/4",
+            "status": "cached"
+          },
+          {
+            "id": 23,
+            "label": "fido 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 24,
+            "label": "node-tools 1/3",
+            "status": "cached"
+          },
+          {
+            "id": 25,
+            "label": "fido-python-dev 1/1",
+            "status": "cached"
+          },
+          {
+            "id": 26,
+            "label": "fido-test 2/2",
+            "status": "cached"
+          }
+        ]
+      },
+      "output_tail": [
+        "#18 CACHED",
+        "",
+        "#19 [fido-python-prod 4/4] RUN --mount=type=cache,id=fido-uv-prod,target=/tmp/uv-cache     mkdir -p /tmp/uv-cache     && ./pyproject uv sync --frozen --no-dev --no-install-project     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache",
+        "#19 CACHED",
+        "",
+        "#20 [python-base 2/2] RUN apt-get update     && apt-get install -y --no-install-recommends curl git jq libatomic1     && rm -rf /var/lib/apt/lists/*",
+        "#20 CACHED",
+        "",
+        "#21 [fido 2/3] COPY --from=node-tools /workspace/node_modules /opt/fido-node-tools/node_modules",
+        "#21 CACHED",
+        "",
+        "#22 [fido-python-prod 1/4] WORKDIR /workspace",
+        "#22 CACHED",
+        "",
+        "#23 [fido 1/3] COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node",
+        "#23 CACHED",
+        "",
+        "#24 [node-tools 1/3] WORKDIR /workspace",
+        "#24 CACHED",
+        "",
+        "#25 [fido-python-dev 1/1] RUN --mount=type=cache,id=fido-uv-dev,target=/tmp/uv-cache     ./pyproject uv sync --frozen --no-install-project     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache",
+        "#25 CACHED",
+        "",
+        "#26 [fido-test 2/2] COPY --from=fido-python-dev /opt/uv-python /opt/uv-python",
+        "#26 CACHED",
+        "",
+        "#27 exporting to docker image format",
+        "#27 exporting layers done",
+        "#27 exporting manifest sha256:d6d23ddf2c10b593910a9a05f88747d05c833a33d75670322123afca84b4ba61 0.0s done",
+        "#27 exporting config sha256:965a421b20e6b7614f249ac872b4a38a6767a9bd91b8bf33bf6ddd601fb0b934 0.0s done",
+        "#27 sending tarball",
+        "#27 ...",
+        "",
+        "#28 importing to docker",
+        "#28 DONE 0.0s",
+        "",
+        "#27 exporting to docker image format",
+        "#27 sending tarball 5.8s done",
+        "#27 DONE 5.9s",
+        "16:51:45 INFO  [supervisor] starting container image=fido-test:local"
+      ]
+    },
+    {
+      "name": "warm_ruff_focused",
+      "description": "Warm focused ruff run through ./fido ruff.",
+      "command": [
+        "./fido",
+        "ruff",
+        "check",
+        "src/fido/fido_help.py"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 0.957,
+      "step_summary": {
+        "counts": {},
+        "steps": []
+      },
+      "output_tail": [
+        "All checks passed!",
+        "16:51:51 INFO  [supervisor] fido-test image cache hit fido-test:local",
+        "16:51:51 INFO  [supervisor] starting container image=fido-test:local"
+      ]
+    },
+    {
+      "name": "warm_pyright_focused",
+      "description": "Warm focused pyright run through ./fido pyright.",
+      "command": [
+        "./fido",
+        "pyright",
+        "src/fido/main.py"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 6.359,
+      "step_summary": {
+        "counts": {},
+        "steps": []
+      },
+      "output_tail": [
+        "0 errors, 0 warnings, 0 informations",
+        "WARNING: there is a new pyright version available (v1.1.408 -> v1.1.409).",
+        "Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`",
+        "",
+        "16:51:52 INFO  [supervisor] fido-test image cache hit fido-test:local",
+        "16:51:52 INFO  [supervisor] starting container image=fido-test:local"
+      ]
+    }
+  ]
+}

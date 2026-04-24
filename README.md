@@ -42,7 +42,8 @@ not prune automatically because the self-hosted runner's local BuildKit cache is
 the speed path.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
-sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
+sync-tasks` run directly as Python modules or host helpers; they do not depend
+on packaged `pyproject.toml` scripts baked into the image.
 Rocq navigation commands use the Rocq-capable image: `./fido rocq-lsp` serves
 stdio LSP for `.v` files through `.lsp.json`, and `./fido lsp ... --json`
 returns hover, definition, reference, caller, signature, completion, symbol,
@@ -50,9 +51,9 @@ semantic-token, code-lens, code-action, dependency-graph, explanation, rename,
 and diagnostic data for shell agents. Both routes refresh extracted Python
 through `./fido make-rocq` before answering.
 Supported dev-tool commands, `./fido ruff ...`, `./fido pyright ...`, and
-`./fido pytest ...`, run through the `fido-test` image and are passed to
-containerized `uv run`; do not use host `uv` for normal project checks. The
-production runtime image installs only production Python
+`./fido pytest ...`, run through the `fido-test` image and invoke the prebuilt
+tool binaries under the ephemeral `./pyproject` wrapper; do not use host `uv`
+for normal project checks. The production runtime image installs only production Python
 dependencies, plus pinned Node CLI tools from
 `package-lock.json` (`claude` and
 `copilot`) and the GitHub CLI. Node dependencies are built in their own Docker
@@ -113,9 +114,11 @@ produced by a Rocq stage, then ruff format, ruff lint, pyright, generated
 pyright, unit pytest, and generated Rocq pytest run as separate uv stages. The
 `ci` bake group is a meta group over those real targets, so BuildKit can run independent checks
 in parallel without scratch sentinel targets. The uv dependency layers follow
-Astral's Docker pattern: `pyproject.toml`, `uv.lock`, and `.python-version` are
-copied into `uv sync --frozen --no-install-project` layers before application
-inputs are copied. The pre-commit hook and CI both call `./fido ci`.
+Astral's Docker pattern still applies, but the repo now composes an ephemeral
+`pyproject.toml` from checked-in `pyproject.*.toml` fragments through
+`./pyproject`. Dependency layers copy the fragments, `uv.lock`,
+`.python-version`, and the composer script before application inputs are
+copied. The pre-commit hook and CI both call `./fido ci`.
 
 The internal smart-output mode is available for buildx artifact producers:
 
