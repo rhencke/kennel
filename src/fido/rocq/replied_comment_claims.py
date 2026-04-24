@@ -129,26 +129,14 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
+def _rocq_string_cons(head: str, tail: str) -> str:
+    return head + tail
 
 
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
+def _rocq_string_uncons(value: str) -> tuple[str, str]:
+    if not value:
         raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
+    return value[0], value[1:]
 
 
 def _rocq_ascii_to_int(
@@ -167,13 +155,14 @@ def _rocq_ascii_to_int(
 
 
 def _rocq_ascii_bits(
-    value: int,
+    value: str,
 ) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
+    code = ord(value)
+    if code < 0 or code > 255:
         raise ValueError("Rocq byte/ascii value out of range")
     return cast(
         tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
+        tuple(bool(code & (1 << i)) for i in range(8)),
     )
 
 

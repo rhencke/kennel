@@ -168,26 +168,14 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
+def _rocq_string_cons(head: str, tail: str) -> str:
+    return head + tail
 
 
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
+def _rocq_string_uncons(value: str) -> tuple[str, str]:
+    if not value:
         raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
+    return value[0], value[1:]
 
 
 def _rocq_ascii_to_int(
@@ -206,13 +194,14 @@ def _rocq_ascii_to_int(
 
 
 def _rocq_ascii_bits(
-    value: int,
+    value: str,
 ) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
+    code = ord(value)
+    if code < 0 or code > 255:
         raise ValueError("Rocq byte/ascii value out of range")
     return cast(
         tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
+        tuple(bool(code & (1 << i)) for i in range(8)),
     )
 
 
@@ -458,6 +447,23 @@ let py_escape_str s =
     | '\t' -> Buffer.add_string buf "\\t"
     | c    -> Buffer.add_char buf c) s;
   Buffer.contents buf
+
+(** Emit a Python double-quoted single-character string literal for an ASCII
+    code point (0–255).  Printable ASCII characters are emitted directly;
+    common escape sequences ([\\n], [\\r], [\\t]) use their symbolic form;
+    everything else uses [\\xNN]. *)
+let pp_ascii_char_lit code =
+  let escaped =
+    match Char.chr code with
+    | '"'  -> "\\\""
+    | '\\' -> "\\\\"
+    | '\n' -> "\\n"
+    | '\r' -> "\\r"
+    | '\t' -> "\\t"
+    | c when Char.code c >= 32 && Char.code c < 127 -> String.make 1 c
+    | c    -> Printf.sprintf "\\x%02x" (Char.code c)
+  in
+  str ("\"" ^ escaped ^ "\"")
 
 (** Escape bytes for Python [b"..."] literals.  Non-printable and non-ASCII
     bytes are emitted as [\\xHH] hex escapes. *)
@@ -1750,18 +1756,23 @@ let rec pp_expr state env expr =
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
       str "_rocq_string_cons(" ++ pp_expr state env head ++ str ", " ++
       pp_expr state env tail ++ str ")"
-  | MLcons (_, r, args) when is_std_ascii_cons_ref r ->
+  | MLcons (t_, r, args) when is_std_ascii_cons_ref r ->
       if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
       else
-        let pp_bool_bit a =
-          match std_bool_expr a with
-          | Some true -> str "True"
-          | Some false -> str "False"
-          | None -> pp_expr state env a
-        in
-        str "_rocq_ascii_to_int(" ++
-        prlist_with_sep (fun () -> str ", ") pp_bool_bit args ++
-        str ")"
+        (match std_ascii_expr_value (MLcons (t_, r, args)) with
+         | Some code -> pp_ascii_char_lit code
+         | None ->
+             (* Non-static bit arguments — wrap the int helper in chr() to
+                preserve the str representation contract for ascii values. *)
+             let pp_bool_bit a =
+               match std_bool_expr a with
+               | Some true -> str "True"
+               | Some false -> str "False"
+               | None -> pp_expr state env a
+             in
+             str "chr(_rocq_ascii_to_int(" ++
+             prlist_with_sep (fun () -> str ", ") pp_bool_bit args ++
+             str "))")
   | MLcons (_, r, []) when is_std_byte_cons_ref r ->
       str (string_of_int (Option.get (std_byte_constructor_value r)))
   | MLcons (_, r, args) ->
@@ -3063,7 +3074,8 @@ let rec pp_type_with state pp_tvar = function
         else if is_std_bool_type_ref r then "bool"
         else if is_std_string_type_ref r then "str"
         else if is_prim_string_type_ref r then "bytes"
-        else if is_std_ascii_type_ref r || is_std_byte_type_ref r then "int"
+        else if is_std_ascii_type_ref r then "str"
+        else if is_std_byte_type_ref r then "int"
         else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
                 is_std_N_type_ref r || is_std_Z_type_ref r then "int"
         else if is_std_Q_type_ref r then "Fraction"

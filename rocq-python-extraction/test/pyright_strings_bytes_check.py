@@ -8,6 +8,6 @@ from tail_or_empty import tail_or_empty
 
 assert_type(github_key, str)
 assert_type(payload_fragment, bytes)
-assert_type(ascii_A, int)
+assert_type(ascii_A, str)
 assert_type(byte_lf, int)
 assert_type(tail_or_empty("abc"), str)
