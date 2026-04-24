@@ -339,7 +339,7 @@ class RocqIndex:
                 python_path.resolve(),
                 _python_range_from_entry(entry, python_range),
             )
-        else:
+        elif _entry_requires_python_declaration(entry):
             self._diagnostics.append(
                 Diagnostic(
                     f"generated Python declaration missing for {python_name}", source
@@ -990,6 +990,15 @@ def _python_range_from_entry(entry: PyMapEntry, fallback: Range) -> Range:
             max(0, entry.python_end_line - 1),
             max(0, entry.python_end_col),
         ),
+    )
+
+
+def _entry_requires_python_declaration(entry: PyMapEntry) -> bool:
+    return not (
+        entry.python_start_line == 1
+        and entry.python_start_col == 0
+        and entry.python_end_line == 1
+        and entry.python_end_col == 0
     )
 
 

@@ -10,4 +10,5 @@
   retry_budget
   coord_index
   concurrency_primitives
-  replied_comment_claims))
+  replied_comment_claims
+  task_queue_rescope))

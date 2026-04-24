@@ -169,6 +169,11 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   pass over the touched code to consolidate any new duplication introduced by
   the change. Do not stop at green tests if the diff still contains obvious new
   duplicate logic that can be merged cleanly.
+- **No hacks** — do not compensate for backend, extraction, generator, or
+  runtime bugs in models, generated files, or tests. Fix the layer that is
+  wrong rather than adding a workaround in a neighboring layer.
+- **Verify upstream facts** — when a fix depends on external or standard-library
+  behavior, check the primary source instead of guessing from memory.
 - **Local entry point** — use `./fido help`. Do not call host `uv` for normal
   checks or server startup. The launcher owns buildx image selection, UID/GID
   mapping, credentials mounts, and stdin passthrough.

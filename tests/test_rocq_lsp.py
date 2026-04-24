@@ -487,7 +487,7 @@ def test_index_diagnostics_for_bad_maps_and_missing_declarations(
     os.utime(py_path, (1, 1))
     (generated / "toy.pymap").write_text(
         pymap_header
-        + "open,1,0,1,0,toy.v,1,11,1,0,extraction,toy\n"
+        + "open,1,0,1,3,toy.v,1,11,1,0,extraction,toy\n"
         + "open,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
         + "open,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
         + "open,1,0,1,0,toy.v,1,0,1,0,extraction,\n"

@@ -714,6 +714,11 @@ let is_std_list_nil_ref r =
 let is_std_list_cons_ref r =
   global_path_has_suffix r ".Init.Datatypes.cons"
 
+let is_std_list_app_ref r =
+  global_path_has_suffix r ".Lists.List.app" ||
+  global_path_has_suffix r ".Lists.ListDef.app" ||
+  global_path_has_suffix r ".Init.Datatypes.app"
+
 let is_std_prod_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.prod"
 
@@ -722,6 +727,25 @@ let is_std_prod_pair_ref r =
 
 let is_std_bool_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.bool"
+
+let is_std_nat_ref r name =
+  global_path_has_suffix r (".Init.Nat." ^ name)
+
+let is_std_ascii_ref r name =
+  global_path_has_suffix r (".Strings.Ascii." ^ name)
+
+let is_std_string_ref r name =
+  global_path_has_suffix r (".Strings.String." ^ name)
+
+let is_std_positive_ref r name =
+  global_path_has_suffix r (".PArith.BinPos.Pos." ^ name) ||
+  global_path_has_suffix r (".PArith.BinPosDef.Pos." ^ name)
+
+let is_std_primitive_compare_ref r =
+  is_std_nat_ref r "eqb" || is_std_nat_ref r "leb" || is_std_nat_ref r "ltb" ||
+  is_std_positive_ref r "eqb" || is_std_positive_ref r "leb" || is_std_positive_ref r "ltb" ||
+  is_std_ascii_ref r "eqb" || is_std_ascii_ref r "leb" || is_std_ascii_ref r "ltb" ||
+  is_std_string_ref r "eqb" || is_std_string_ref r "leb" || is_std_string_ref r "ltb"
 
 let is_positive_map_type_ref r =
   global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
@@ -764,7 +788,7 @@ let is_std_collection_term_ref r =
     (fun name ->
        is_positive_map_ref r name || is_string_map_ref r name ||
        is_positive_set_ref r name || is_string_set_ref r name)
-    names
+    names || is_std_list_app_ref r
 
 let std_byte_constructor_value r =
   let name = global_basename r in
@@ -1478,8 +1502,35 @@ let rec pp_expr state env expr =
                   pp_expr state env values ++ str ", " ++ pp_expr state env initial ++ str ")")
         | _ -> None
       in
+      let pp_list_app r =
+        match all_args with
+        | [left; right] when is_std_list_app_ref r ->
+            Some (pp_expr state env left ++ str " + " ++ pp_expr state env right)
+        | _ -> None
+      in
+      let pp_std_primitive_compare r =
+        match all_args with
+        | [left; right]
+          when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
+               is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
+            Some (pp_expr state env left ++ str " == " ++ pp_expr state env right)
+        | [left; right]
+          when is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
+               is_std_ascii_ref r "leb" || is_std_string_ref r "leb" ->
+            Some (pp_expr state env left ++ str " <= " ++ pp_expr state env right)
+        | [left; right]
+          when is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
+               is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb" ->
+            Some (pp_expr state env left ++ str " < " ++ pp_expr state env right)
+        | _ ->
+            None
+      in
       let pp_collection_expr =
         match head with
+        | MLglob r when is_std_primitive_compare_ref r ->
+            pp_std_primitive_compare r
+        | MLglob r when is_std_list_app_ref r ->
+            pp_list_app r
         | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
                         is_positive_map_ref r "remove" || is_positive_map_ref r "find" ||
                         is_positive_map_ref r "mem" || is_positive_map_ref r "cardinal" ||
@@ -1799,9 +1850,9 @@ let rec pp_expr state env expr =
       else if is_bool then
         let (_, _, body_true)  = branches.(0) in
         let (_, _, body_false) = branches.(1) in
-        pp_expr state env body_true  ++ str " if " ++
-        pp_expr state env scrutinee  ++ str " else " ++
-        pp_expr state env body_false
+        pp_ternary_operand_expr state env body_true  ++ str " if " ++
+        pp_ternary_operand_expr state env scrutinee  ++ str " else " ++
+        pp_ternary_operand_expr state env body_false
       else if is_custom_match branches then
         (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
            Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
@@ -1955,6 +2006,12 @@ and pp_branch_or_fallback_expr state env fallback = function
   | Some (ids, body) -> pp_branch_thunk_expr state env ids body
   | None -> fallback ()
 
+and pp_ternary_text pp =
+  str "(" ++ fnl () ++ indent_pp 4 pp ++ str ")"
+
+and pp_ternary_operand_expr state env expr =
+  pp_ternary_text (pp_expr state env expr)
+
 and pp_branch_pair_expr state env ids body pair_expr =
   str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
   str ")(__pair[0], __pair[1]))(" ++ pair_expr ++ str ")"
@@ -1990,8 +2047,8 @@ and pp_std_string_match_expr state env scrutinee branches =
           (str "_rocq_string_uncons(__s)")
     | None -> fallback ()
   in
-  str "(lambda __s: " ++ pp_empty ++ str " if __s == \"\" else " ++
-  pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+  str "(lambda __s: " ++ pp_ternary_text pp_empty ++ str " if __s == \"\" else " ++
+  pp_ternary_text pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
 
 and pp_std_ascii_match_expr state env scrutinee branches =
   let ascii_arm = ref None in
@@ -2045,8 +2102,8 @@ and pp_std_nat_match_expr state env scrutinee branches =
         pp_branch_call_expr state env ids body [str "__n - 1"]
     | None -> fallback ()
   in
-  str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
-  pp_succ ++ str " if __n > 0 else _rocq_numeric_domain_error(\"nat\", __n))(" ++
+  str "(lambda __n: " ++ pp_ternary_text pp_zero ++ str " if __n == 0 else " ++
+  pp_ternary_text pp_succ ++ str " if __n > 0 else _rocq_numeric_domain_error(\"nat\", __n))(" ++
   pp_expr state env scrutinee ++ str ")"
 
 and pp_std_positive_match_expr state env scrutinee branches =
@@ -2089,8 +2146,8 @@ and pp_std_positive_match_expr state env scrutinee branches =
     | None -> fallback ()
   in
   str "(lambda __p: _rocq_numeric_domain_error(\"positive\", __p) if __p <= 0 else " ++
-  pp_xh ++ str " if __p == 1 else " ++
-  pp_xo ++ str " if __p % 2 == 0 else " ++ pp_xi ++ str ")(" ++
+  pp_ternary_text pp_xh ++ str " if __p == 1 else " ++
+  pp_ternary_text pp_xo ++ str " if __p % 2 == 0 else " ++ pp_ternary_text pp_xi ++ str ")(" ++
   pp_expr state env scrutinee ++ str ")"
 
 and pp_std_N_match_expr state env scrutinee branches =
@@ -2120,8 +2177,8 @@ and pp_std_N_match_expr state env scrutinee branches =
     | Some (ids, body) -> pp_branch_call_expr state env ids body [str "__n"]
     | None -> fallback ()
   in
-  str "(lambda __n: " ++ pp_zero ++ str " if __n == 0 else " ++
-  pp_pos ++ str " if __n > 0 else _rocq_numeric_domain_error(\"N\", __n))(" ++
+  str "(lambda __n: " ++ pp_ternary_text pp_zero ++ str " if __n == 0 else " ++
+  pp_ternary_text pp_pos ++ str " if __n > 0 else _rocq_numeric_domain_error(\"N\", __n))(" ++
   pp_expr state env scrutinee ++ str ")"
 
 and pp_std_Z_match_expr state env scrutinee branches =
@@ -2159,8 +2216,8 @@ and pp_std_Z_match_expr state env scrutinee branches =
     | Some (ids, body) -> pp_branch_call_expr state env ids body [str "-__z"]
     | None -> fallback ()
   in
-  str "(lambda __z: " ++ pp_zero ++ str " if __z == 0 else " ++
-  pp_pos ++ str " if __z > 0 else " ++ pp_neg ++ str ")(" ++
+  str "(lambda __z: " ++ pp_ternary_text pp_zero ++ str " if __z == 0 else " ++
+  pp_ternary_text pp_pos ++ str " if __z > 0 else " ++ pp_ternary_text pp_neg ++ str ")(" ++
   pp_expr state env scrutinee ++ str ")"
 
 and pp_std_Q_match_expr state env scrutinee branches =
@@ -2210,7 +2267,7 @@ and pp_std_bool_match_expr state env scrutinee branches =
   let pp_false =
     pp_branch_or_fallback_expr state env fallback !false_arm
   in
-  pp_true ++ str " if " ++ pp_expr state env scrutinee ++ str " else " ++ pp_false
+  pp_ternary_text pp_true ++ str " if " ++ pp_ternary_operand_expr state env scrutinee ++ str " else " ++ pp_ternary_text pp_false
 
 and pp_std_option_match_expr state env scrutinee branches =
   let none_arm = ref None in
@@ -2240,8 +2297,13 @@ and pp_std_option_match_expr state env scrutinee branches =
         pp_branch_call_expr state env ids body [str "__option"]
     | None -> fallback ()
   in
-  str "(lambda __option: " ++ pp_none ++ str " if __option is None else " ++
-  pp_some ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+  str "(" ++ fnl () ++
+  str "    lambda __option: (" ++ fnl () ++
+  indent_pp 8 pp_none ++
+  str "        if __option is None else" ++ fnl () ++
+  indent_pp 8 pp_some ++
+  str "    )" ++ fnl () ++
+  str ")(" ++ pp_expr state env scrutinee ++ str ")"
 
 and pp_std_list_match_expr state env scrutinee branches =
   let nil_arm = ref None in
@@ -2271,8 +2333,8 @@ and pp_std_list_match_expr state env scrutinee branches =
         pp_branch_call_expr state env ids body [str "__list[0]"; str "__list[1:]"]
     | None -> fallback ()
   in
-  str "(lambda __list: " ++ pp_nil ++ str " if __list == [] else " ++
-  pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+  str "(lambda __list: " ++ pp_ternary_text pp_nil ++ str " if __list == [] else " ++
+  pp_ternary_text pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
 
 and pp_std_prod_match_expr state env scrutinee branches =
   let pair_arm = ref None in
@@ -2382,53 +2444,61 @@ let rec pp_statement_expr state env indent = function
            args)
   | MLapp (f, args) -> (
       let head, all_args = collect_app f args in
-      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
-      let collection_key kind key =
-        pp_collection_key kind (pp_expr state env key)
-      in
-      let call callee args =
-        pp_multiline_items indent callee
-          (List.map (pp_statement_expr state env (indent + 4)) args)
-      in
-      match head, all_args with
-      | MLglob r, [key; value; mapping]
-        when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
-          let kind =
-            if is_positive_map_ref r "add" then `Positive else `String
-          in
-          pp_multiline_items indent (str "_rocq_map_add")
-            [ collection_key kind key;
-              pp_statement_expr state env (indent + 4) value;
-              pp_statement_expr state env (indent + 4) mapping ]
-      | MLglob r, [key; mapping]
-        when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
-          let kind =
-            if is_positive_map_ref r "remove" then `Positive else `String
-          in
-          pp_multiline_items indent (str "_rocq_map_remove")
-            [ collection_key kind key;
-              pp_statement_expr state env (indent + 4) mapping ]
-      | MLglob r, [key; value; values]
-        when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
-          let kind =
-            if is_positive_set_ref r "add" then `Positive else `String
-          in
-          pp_multiline_items indent (str "_rocq_set_add")
-            [ collection_key kind key;
-              pp_statement_expr state env (indent + 4) value;
-              pp_statement_expr state env (indent + 4) values ]
-      | MLglob r, [key; values]
-        when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
-          let kind =
-            if is_positive_set_ref r "remove" then `Positive else `String
-          in
-          pp_multiline_items indent (str "_rocq_set_remove")
-            [ collection_key kind key;
-              pp_statement_expr state env (indent + 4) values ]
-      | _, _ when List.length all_args >= 3 ->
-          call (pp_expr state env head) all_args
+      match head with
+      | MLmagic a ->
+          pp_statement_expr state env indent (MLapp (a, all_args))
+      | MLletin (id, a1, a2) ->
+          pp_statement_expr state env indent (MLletin (id, a1, MLapp (a2, all_args)))
       | _ ->
-          pp_expr state env (MLapp (f, args)))
+          let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+          let collection_key kind key =
+            pp_collection_key kind (pp_expr state env key)
+          in
+          let call callee args =
+            pp_multiline_items indent callee
+              (List.map (pp_statement_expr state env (indent + 4)) args)
+          in
+          match head, all_args with
+          | MLglob r, [left; right] when is_std_list_app_ref r ->
+              pp_expr state env left ++ str " + " ++ pp_expr state env right
+          | MLglob r, [key; value; mapping]
+            when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
+              let kind =
+                if is_positive_map_ref r "add" then `Positive else `String
+              in
+              pp_multiline_items indent (str "_rocq_map_add")
+                [ collection_key kind key;
+                  pp_statement_expr state env (indent + 4) value;
+                  pp_statement_expr state env (indent + 4) mapping ]
+          | MLglob r, [key; mapping]
+            when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
+              let kind =
+                if is_positive_map_ref r "remove" then `Positive else `String
+              in
+              pp_multiline_items indent (str "_rocq_map_remove")
+                [ collection_key kind key;
+                  pp_statement_expr state env (indent + 4) mapping ]
+          | MLglob r, [key; value; values]
+            when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
+              let kind =
+                if is_positive_set_ref r "add" then `Positive else `String
+              in
+              pp_multiline_items indent (str "_rocq_set_add")
+                [ collection_key kind key;
+                  pp_statement_expr state env (indent + 4) value;
+                  pp_statement_expr state env (indent + 4) values ]
+          | MLglob r, [key; values]
+            when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
+              let kind =
+                if is_positive_set_ref r "remove" then `Positive else `String
+              in
+              pp_multiline_items indent (str "_rocq_set_remove")
+                [ collection_key kind key;
+                  pp_statement_expr state env (indent + 4) values ]
+          | _, _ when List.length all_args >= 3 ->
+              call (pp_expr state env head) all_args
+          | _ ->
+              pp_expr state env (MLapp (f, args)))
   | expr ->
       (match expr with
        | MLtuple items when List.length items >= 2 ->
@@ -2556,6 +2626,10 @@ let rec pp_return_body state env indent = function
       pp_return_body state env' indent a2 )
   | MLapp (f, args) -> (
       match collect_app f args with
+      | MLmagic a, all_args ->
+          pp_return_body state env indent (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          pp_return_body state env indent (MLletin (id, a1, MLapp (a2, all_args)))
       | head, all_args -> (
           let visible_args =
             List.filter (fun a -> not (is_erased_arg a)) all_args
@@ -3346,17 +3420,47 @@ let pp_term_decl state env name a typ =
     let params = List.map id_of_mlid lam_ids in
     let params', env' = push_vars params env in
     let visible_params_rev = List.rev (visible_params params') in
-    let pp_params = annotated_params_opt visible_params_rev arg_annots in
-    pp_prefix ++
-    (match pp_params with
-     | Some params -> pp_def_signature name params ret_annot
-     | None ->
-         pp_unannotated_def_signature name (List.rev params') ret_annot) ++
-    fnl () ++
-    (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
-       at 8, case bodies at 12.  The "    " prefix handles the first line only;
-       [pp_return_body] generates the rest with absolute column positions. *)
-    str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+    let missing = List.length arg_annots - List.length visible_params_rev in
+    if missing > 0 then
+      let synthetic_ids =
+        List.init missing (fun i -> Id.of_string ("arg" ^ string_of_int i))
+      in
+      let existing_count = List.length params in
+      let _, env'' = push_vars (params @ synthetic_ids) env in
+      let existing_params =
+        List.mapi
+          (fun i param -> (pp_param param, List.nth arg_annots i))
+          visible_params_rev
+      in
+      let synthetic_signature_params =
+        List.mapi
+          (fun i synthetic_id ->
+             (pp_pyid synthetic_id,
+              List.nth arg_annots (List.length visible_params_rev + i)))
+          synthetic_ids
+      in
+      let synthetic_args =
+        List.init missing (fun i -> MLrel (existing_count + missing - i))
+      in
+      let body_app =
+        MLapp (body, synthetic_args)
+      in
+      pp_prefix ++
+      pp_def_signature name (existing_params @ synthetic_signature_params) ret_annot ++
+      fnl () ++
+      str "    " ++ pp_return_body state env'' 4 body_app ++ fnl ()
+    else
+      let pp_params = annotated_params_opt visible_params_rev arg_annots in
+      pp_prefix ++
+      (match pp_params with
+       | Some params -> pp_def_signature name params ret_annot
+       | None ->
+           pp_unannotated_def_signature name (List.rev params') ret_annot) ++
+      fnl () ++
+      (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
+         at 8, case bodies at 12.  The "    " prefix handles the first line only;
+         [pp_return_body] generates the rest with absolute column positions. *)
+      str "    " ++ pp_return_body state env' 4 body ++ fnl ()
 
 let pp_method_signature ?(is_async=false) name params ret_annot =
   let def_prefix = if is_async then str "async def " else str "def " in
@@ -3735,6 +3839,7 @@ let pp_decl state = function
       if is_prop_type typ then mt ()
       else if is_runtime_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
+      else if is_std_primitive_compare_ref r then mt ()
       else if is_std_collection_term_ref r then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
@@ -3751,6 +3856,7 @@ let pp_decl state = function
         if is_prop_type typs.(i) then mt ()
         else if is_runtime_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
+        else if is_std_primitive_compare_ref rv.(i) then mt ()
         else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then
           str (pp_global state Term rv.(i)) ++ str " = " ++
@@ -3862,7 +3968,7 @@ let pp_protocol_decl_from_sig state name msig =
      str "    pass" ++ fnl ()
    else
      prlist (pp_module_sig_member state) msig) ++
-  fnl ()
+  fnl () ++ fnl ()
 
 let rec pp_named_module_type_decl state name = function
   | MTsig (mp, msig) ->
