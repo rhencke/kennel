@@ -1,7 +1,5 @@
 """Tests for fido.gh_status — GitHub profile status CLI."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

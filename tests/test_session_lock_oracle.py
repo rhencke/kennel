@@ -11,8 +11,6 @@ Proved theorems being guarded:
   ``release_only_by_owner`` — release rejected when wrong owner or Free
 """
 
-from __future__ import annotations
-
 import pytest
 
 from fido.provider import OwnedSession

@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-import json
 from io import StringIO
 from pathlib import Path
 
@@ -9,35 +6,40 @@ import pytest
 from fido import rocq_traceback
 from fido.rocq_traceback import SourceMap, TracebackAnnotator, TracebackCLI
 
+_PYMAP_HEADER = (
+    "stability,python_start_line,python_start_col,python_end_line,python_end_col,"
+    "source_file,source_start_line,source_start_col,source_end_line,"
+    "source_end_col,kind,symbol\n"
+)
+
+
+def _pymap_row(
+    py_file: Path,
+    *,
+    start: int,
+    end: int,
+    source_file: str = "source_maps.v",
+    source_start_line: int = 12,
+    source_start_col: int = 4,
+    stability: str = "open",
+    symbol: str = "source_map_runtime_error",
+) -> str:
+    return (
+        f"{stability},{start},0,{end},0,{source_file},"
+        f"{source_start_line},{source_start_col},13,7,extraction,{symbol}\n"
+    )
+
 
 def _write_map(
     py_file: Path,
     *,
     start: int = 3,
     end: int = 5,
-    version: int = 1,
+    stability: str = "open",
 ) -> Path:
     map_file = py_file.with_suffix(".pymap")
     map_file.write_text(
-        json.dumps(
-            {
-                "version": version,
-                "python_file": py_file.name,
-                "entries": [
-                    {
-                        "python_start_line": start,
-                        "python_end_line": end,
-                        "source_file": "source_maps.v",
-                        "source_start_line": 12,
-                        "source_start_col": 4,
-                        "source_end_line": 13,
-                        "source_end_col": 7,
-                        "kind": "extraction",
-                        "symbol": "source_map_runtime_error",
-                    }
-                ],
-            }
-        )
+        _PYMAP_HEADER + _pymap_row(py_file, start=start, end=end, stability=stability)
     )
     return map_file
 
@@ -46,17 +48,17 @@ class TestSourceMap:
     def test_loads_and_matches_smallest_range(self, tmp_path: Path) -> None:
         py_file = tmp_path / "boom.py"
         map_file = _write_map(py_file, start=1, end=10)
-        data = json.loads(map_file.read_text())
-        data["entries"].append(
-            {
-                "python_start_line": 4,
-                "python_end_line": 4,
-                "source_file": "inner.v",
-                "source_start_line": 20,
-                "source_start_col": 2,
-            }
+        map_file.write_text(
+            map_file.read_text()
+            + _pymap_row(
+                py_file,
+                start=4,
+                end=4,
+                source_file="inner.v",
+                source_start_line=20,
+                source_start_col=2,
+            )
         )
-        map_file.write_text(json.dumps(data))
 
         source_map = SourceMap.load(map_file)
         entry = source_map.lookup(4)
@@ -65,10 +67,10 @@ class TestSourceMap:
         assert entry.rocq_location() == "inner.v:20:2"
         assert source_map.lookup(99) is None
 
-    def test_rejects_unsupported_version(self, tmp_path: Path) -> None:
-        map_file = _write_map(tmp_path / "boom.py", version=2)
+    def test_rejects_unsupported_stability(self, tmp_path: Path) -> None:
+        map_file = _write_map(tmp_path / "boom.py", stability="closed")
 
-        with pytest.raises(ValueError, match="unsupported source map version"):
+        with pytest.raises(ValueError, match="unsupported source map stability"):
             SourceMap.load(map_file)
 
 

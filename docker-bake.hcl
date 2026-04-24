@@ -139,23 +139,10 @@ target "generated-typecheck" {
   }
 }
 
-target "test-unit" {
+target "test" {
   context = "."
   dockerfile = "models/Dockerfile"
-  target = "test-unit"
-  args = {
-    ROCQ_IMAGE = "rocq_image"
-  }
-  contexts = {
-    rocq_image = "target:rocq-image"
-    rocq_models_cache = ".cache/rocq-models/context"
-  }
-}
-
-target "test-rocq-generated" {
-  context = "."
-  dockerfile = "models/Dockerfile"
-  target = "test-rocq-generated"
+  target = "test"
   args = {
     ROCQ_IMAGE = "rocq_image"
   }
@@ -166,5 +153,5 @@ target "test-rocq-generated" {
 }
 
 group "ci" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test-unit", "test-rocq-generated", "fido", "rocq-repl"]
+  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido", "rocq-repl"]
 }

@@ -42,6 +42,8 @@ Unset Universe Polymorphism.
 (*  1. Polymorphic singly-linked list                                   *)
 (* ------------------------------------------------------------------ *)
 
+(** [MyList] is a parameterised, non-remapped list used to test generated
+    dataclass hierarchies for type-parameterised inductives. *)
 Inductive MyList (A : Set) :=
   | MNil  : MyList A
   | MCons : A -> MyList A -> MyList A.
@@ -67,6 +69,8 @@ Python Extraction mylist_is_empty.
 (*  2. Binary tree carrying nat values                                  *)
 (* ------------------------------------------------------------------ *)
 
+(** [BinTree] is a non-parameterised tree whose node payload is a remapped
+    [nat], mixing custom dataclasses with primitive Python ints. *)
 Inductive BinTree :=
   | BLeaf : BinTree
   | BNode : BinTree -> nat -> BinTree -> BinTree.
@@ -86,6 +90,9 @@ Python Extraction bintree_is_leaf.
 (*  3. Rose tree / forest (mutual, parameterised)                       *)
 (* ------------------------------------------------------------------ *)
 
+(** [RoseTree] and [RoseForest] are mutually-defined, parameterised
+    inductives.  They verify that generated type variables are shared across
+    both packets of a mutual block. *)
 Inductive RoseTree (A : Set) :=
   | RNode : A -> RoseForest A -> RoseTree A
 with RoseForest (A : Set) :=
@@ -110,6 +117,8 @@ Python Extraction roseforest_is_empty.
 (*  4. Mutual tree / forest (non-parameterised)                         *)
 (* ------------------------------------------------------------------ *)
 
+(** [MTree] and [MForest] are mutually-defined, non-parameterised inductives
+    used to test cross-packet constructor references without type variables. *)
 Inductive MTree :=
   | MLeaf : nat -> MTree
   | MNode : nat -> MForest -> MTree
@@ -131,6 +140,8 @@ Python Extraction mforest_is_empty.
 (*  5. Polymorphic option; option-of-option flatten                     *)
 (* ------------------------------------------------------------------ *)
 
+(** [MyOpt] is a local option-like inductive that is deliberately not remapped
+    to Python [None], so constructor classes are still emitted. *)
 Inductive MyOpt (A : Set) :=
   | MyNone : MyOpt A
   | MySome : A -> MyOpt A.
@@ -160,6 +171,8 @@ Python Extraction myopt_flatten.
 (*  class to [Color] in the emitted Python (PEP 8 PascalCase).         *)
 (* ------------------------------------------------------------------ *)
 
+(** [color] starts with a lowercase type name to verify that generated Python
+    base classes are capitalized without changing constructor names. *)
 Inductive color :=
   | Red   : color
   | Green : color
@@ -195,6 +208,8 @@ Python Extraction color_is_red.
 (*        both packets in alternation.                                   *)
 (* ------------------------------------------------------------------ *)
 
+(** [Even] and [Odd] are mutually-defined parity witnesses used by the mutual
+    recursive depth/counting fixtures below. *)
 Inductive Even :=
   | EvenO : Even
   | EvenS : Odd -> Even
@@ -272,6 +287,8 @@ Extract Inductive list =>
   [ "[]" "(lambda h, t: [h] + t)" ]
   "(lambda fnil, fcons, xs: fnil() if not xs else fcons(xs[0], xs[1:]))".
 
+(** [NTree] is a nested inductive: recursive children are stored inside the
+    remapped standard [list] container. *)
 Inductive NTree :=
   | NLeaf : NTree
   | NNode : list NTree -> NTree.
@@ -313,6 +330,8 @@ Python Extraction ntree_is_leaf.
 (*        both packets.                                                  *)
 (* ------------------------------------------------------------------ *)
 
+(** [STree] and [DTree] are a mutually-defined syntax/declaration tree pair
+    used by [stree_size] and [dtree_size]. *)
 Inductive STree :=
   | SLit : nat -> STree
   | SSeq : DTree -> STree -> STree

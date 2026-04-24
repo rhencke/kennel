@@ -23,23 +23,25 @@ fido-gh-status = "fido.gh_status:main"
 fido-sync-tasks = "fido.sync_tasks_cli:main"
 fido-task = "fido.cli:main"
 tests = "fido.tests_main:main"
-tests-unit = "fido.tests_main:main_unit"
-tests-rocq-generated = "fido.tests_main:main_rocq_generated"
 traceback = "fido.rocq_traceback:main"
+rocq-lsp = "fido.rocq_lsp:main_lsp"
+lsp = "fido.rocq_lsp:main_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fido"]
 
 [tool.ruff]
 target-version = "py314"
-# Generated Python from Rocq extraction — formatted by ./fido make-rocq, not by the
-# pre-commit hook.  ruff format is applied during generation; lint is skipped
-# because generated code has unused imports that are valid for richer models.
-exclude = ["src/fido/rocq"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated Rocq extraction output is format-checked by CI, but lint has
+# intentional noise: reusable runtime imports, type aliases Rocq erases, and
+# names copied from source terms.
+"src/fido/rocq/*.py" = ["E741", "F401", "F541", "F811", "F821", "F841", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "rocq-python-extraction/test"]

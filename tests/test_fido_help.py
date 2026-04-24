@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from fido.fido_help import main
 
 
@@ -15,5 +13,7 @@ def test_help_lists_commands(capsys) -> None:  # type: ignore[no-untyped-def]
     assert "gen-workflows" in out
     assert "make-rocq" in out
     assert "repl" in out
+    assert "rocq-lsp" in out
+    assert "lsp" in out
     assert "status" in out
     assert "task" in out

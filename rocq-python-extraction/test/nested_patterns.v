@@ -35,6 +35,7 @@ Unset Universe Polymorphism.
 (*  This exercises [pp_pattern] recursing into [Pcons] sub-patterns.   *)
 (* ------------------------------------------------------------------ *)
 
+(** [Tree] is a binary tree with a nat payload at every internal node. *)
 Inductive Tree :=
   | Leaf : Tree
   | Node : nat -> Tree -> Tree -> Tree.
@@ -65,6 +66,8 @@ Python Extraction has_left3.
 (*  sub-patterns drawn from a different mutual packet.                  *)
 (* ------------------------------------------------------------------ *)
 
+(** [Expr] and [Val] form a mutual expression/value language used to test
+    nested patterns that cross mutual-inductive packet boundaries. *)
 Inductive Expr :=
   | ENum  : nat -> Expr
   | EAdd  : Expr -> Expr -> Expr

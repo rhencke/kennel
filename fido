@@ -17,6 +17,7 @@ build_graph=$repo_root/tools/build_graph.sh
 need_secret=0
 named_run=0
 quiet=0
+container_entrypoint=
 restart_codes=" 3 75 "
 stop_codes=" 0 130 137 143 "
 
@@ -158,13 +159,13 @@ make_rocq_usage() {
   cat >&2 <<'EOF'
 usage:
   ./fido make-rocq [docker buildx bake args...]
-  ./fido make-rocq --smart-output DIR -- <command> [args...]
+  ./fido make-rocq --smart-output DIR [--manifest-cache FILE] -- <command> [args...]
 
 With no mode flag, builds Rocq models through buildx and writes generated
 Python to src/fido/rocq/.
 
-With --smart-output, runs the command and removes stale files from DIR only
-after the command produces a fresh output manifest or fresh files.
+With --smart-output, runs the command and removes stale files from DIR after
+the command produces a fresh output manifest or fresh files.
 EOF
 }
 
@@ -211,8 +212,31 @@ make_rocq_fingerprint() {
   printf 'generated %s\n' "$(make_rocq_generated_hash)"
 }
 
+prune_smart_output_manifest() {
+  local smart_output=$1
+  local manifest=$2
+
+  if [ ! -s "$manifest" ]; then
+    echo "smart output manifest is empty: $manifest" >&2
+    return 1
+  fi
+
+  while IFS= read -r -d '' file; do
+    local rel=${file#"$smart_output"/}
+    if [ "$rel" = ".build-files" ]; then
+      continue
+    fi
+    if ! grep -Fxq "$rel" "$manifest"; then
+      rm -f "$file"
+    fi
+  done < <(find "$smart_output" -type f -print0)
+
+  find "$smart_output" -depth -type d -empty -delete
+}
+
 make_rocq_smart_output() {
   local smart_output=
+  local manifest_cache=
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -222,6 +246,14 @@ make_rocq_smart_output() {
           return 2
         fi
         smart_output=$2
+        shift 2
+        ;;
+      --manifest-cache)
+        if [ "$#" -lt 2 ]; then
+          make_rocq_usage
+          return 2
+        fi
+        manifest_cache=$2
         shift 2
         ;;
       --)
@@ -253,23 +285,13 @@ make_rocq_smart_output() {
 
   local manifest="$smart_output/.build-files"
   if [ -f "$manifest" ]; then
-    if [ ! -s "$manifest" ]; then
-      echo "smart output manifest is empty: $manifest" >&2
-      return 1
+    if [ -n "$manifest_cache" ]; then
+      mkdir -p "$(dirname "$manifest_cache")"
+      cp "$manifest" "$manifest_cache"
     fi
 
-    while IFS= read -r -d '' file; do
-      local rel=${file#"$smart_output"/}
-      if [ "$rel" = ".build-files" ]; then
-        continue
-      fi
-      if ! grep -Fxq "$rel" "$manifest"; then
-        rm -f "$file"
-      fi
-    done < <(find "$smart_output" -type f -print0)
-
+    prune_smart_output_manifest "$smart_output" "$manifest"
     rm -f "$manifest"
-    find "$smart_output" -depth -type d -empty -delete
     return 0
   fi
 
@@ -281,11 +303,20 @@ make_rocq_smart_output() {
   find "$smart_output" -type f ! -cnewer "$marker" -delete
   rm -f "$manifest"
   find "$smart_output" -depth -type d -empty -delete
+
+  if [ -n "$manifest_cache" ]; then
+    mkdir -p "$(dirname "$manifest_cache")"
+    (
+      cd "$smart_output"
+      find . -type f -printf "%P\n" | LC_ALL=C sort > "$manifest_cache"
+    )
+  fi
 }
 
 make_rocq_models() {
   local cache_context="$repo_root/.cache/rocq-models/context"
   local manifest="$repo_root/.cache/rocq-models/manifest.sha"
+  local generated_manifest="$repo_root/.cache/rocq-models/generated-files"
   local build_args=("$@")
   mkdir -p "$cache_context/_build"
   ensure_buildx_builder
@@ -295,7 +326,10 @@ make_rocq_models() {
   if [ "${#build_args[@]}" -eq 0 ] \
     && [ -f "$manifest" ] \
     && [ "$(cat "$manifest")" = "$current" ]; then
-    echo "models build cache hit"
+    echo "models build cache hit" >&2
+    if [ -f "$generated_manifest" ]; then
+      prune_smart_output_manifest "$repo_root/src/fido/rocq" "$generated_manifest"
+    fi
     return
   fi
 
@@ -303,12 +337,16 @@ make_rocq_models() {
     cd "$repo_root"
     "$repo_root/fido" make-rocq \
       --smart-output "$repo_root/src/fido/rocq" \
+      --manifest-cache "$generated_manifest" \
       -- \
       docker buildx bake \
         "${build_args[@]}" \
         make-rocq
   )
 
+  if [ -f "$generated_manifest" ]; then
+    prune_smart_output_manifest "$repo_root/src/fido/rocq" "$generated_manifest"
+  fi
   make_rocq_fingerprint > "$manifest"
 }
 
@@ -449,6 +487,9 @@ run_container() {
   if [ "$named_run" = "1" ]; then
     run_args=(--name "$container" "${run_args[@]}")
   fi
+  if [ -n "$container_entrypoint" ]; then
+    run_args+=(--entrypoint "$container_entrypoint")
+  fi
   add_mount_if_exists "$HOME/.claude"
   add_mount_if_exists "$HOME/.claude.json"
   add_mount_if_exists "$HOME/.config/gh"
@@ -468,6 +509,11 @@ run_fido_test_image() {
   run_container "$@"
 }
 
+run_fido_test_python_image() {
+  build_image fido-test "$test_image"
+  container_entrypoint=python3 run_container "$@"
+}
+
 run_fido_cli_image() {
   run_fido_test_image "$@"
 }
@@ -480,6 +526,11 @@ run_rocq_repl_image() {
   make_rocq_models
   build_image rocq-repl "$rocq_repl_image"
   run_container "$@"
+}
+
+run_rocq_lsp_image() {
+  make_rocq_models
+  run_fido_test_python_image "$@"
 }
 
 prune_restart_buildkit_async() {
@@ -896,6 +947,12 @@ case "$command" in
     ;;
   repl)
     run_rocq_repl_image python3 -m fido.rocq_repl "${@:2}"
+    ;;
+  rocq-lsp)
+    run_rocq_lsp_image -m fido.rocq_lsp --stdio "${@:2}"
+    ;;
+  lsp)
+    run_rocq_lsp_image -m fido.rocq_lsp "${@:2}"
     ;;
   ruff|pyright|pytest)
     run_fido_test_image "$@"

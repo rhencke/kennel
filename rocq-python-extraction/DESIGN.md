@@ -341,7 +341,7 @@ preserve all significant bits.
 
 ### 2.16 `MLstring s`
 
-**What it is:** A Rocq byte-string literal (from `Coq.Strings.Byte`).
+**What it is:** A Rocq primitive byte-string literal.
 
 **Python target:** A Python `bytes` literal.
 
@@ -596,21 +596,34 @@ downstream code search for `__` to find erasure points.
 Rocq users can redirect specific types and constants to Python primitives via
 extraction hints.  The `table.ml` module stores these.
 
-Standard remappings planned for MVP:
+The Python backend also owns a small set of Stdlib remappings that are always
+available without local pragmas:
+
+| Rocq type | Python target | Notes |
+|-----------|---------------|-------|
+| `Stdlib.Strings.String.string` | `str` | UTF-8 text boundary; `String` pattern splitting raises `_RocqUtf8BoundaryError` if the tail is invalid UTF-8. |
+| `Stdlib.Strings.Ascii.ascii` | `int` | Byte value in `0..255`; `Ascii b0 ... b7` packs least-significant bit first. |
+| `Stdlib.Init.Byte.byte` | `int` | Byte constructors `x00` through `xff` lower to integer literals. |
+| primitive `%pstring` / `MLstring` | `bytes` | Byte strings are emitted as Python `bytes` literals. |
+| `Stdlib.Init.Datatypes.nat` | `int` | Non-negative integer; pattern matching rejects negative Python inputs. |
+| `Stdlib.Numbers.BinNums.positive` | `int` | Strictly positive integer; pattern matching rejects zero and negative Python inputs. |
+| `Stdlib.Numbers.BinNums.N` | `int` | Non-negative binary natural; pattern matching rejects negative Python inputs. |
+| `Stdlib.Numbers.BinNums.Z` | `int` | Arbitrary precision signed integer. |
+| `Stdlib.QArith.QArith_base.Q` | `fractions.Fraction` | Rational values use Python's normalized numerator and denominator on destructuring. |
+| `Stdlib.Reals.Rdefinitions.R` | unsupported | Raises `PYEX041`; no `float` mapping is provided for classical reals. |
+
+Other remappings currently covered by acceptance tests:
 
 | Rocq type | Python target |
 |-----------|---------------|
 | `Coq.Init.Datatypes.bool` | `bool` (`True`/`False`) |
-| `Coq.Init.Datatypes.nat` | `int` (non-negative) |
 | `Coq.Init.Datatypes.list` | `list` |
 | `Coq.Init.Datatypes.option` | `T \| None` |
 | `Coq.Init.Datatypes.prod` | `tuple[A, B]` |
 | `Coq.Init.Datatypes.unit` | `None` |
-| `Coq.Strings.String.string` | `str` |
 
-These are configured via `Extract Inductive` / `Extract Constant` pragmas in
-`.v` files — the backend does not hard-code them; `table.ml` already handles
-the lookup.
+These remain configured via `Extract Inductive` / `Extract Constant` pragmas
+in `.v` files; `table.ml` handles those lookups.
 
 ---
 

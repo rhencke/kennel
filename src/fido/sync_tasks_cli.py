@@ -1,7 +1,5 @@
 """CLI wrapper for syncing repo tasks to GitHub."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

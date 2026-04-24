@@ -28,6 +28,8 @@ Extract Inductive nat => "int"
   [ "0" "(lambda x: x + 1)" ]
   "(lambda fO, fS, n: fO() if n == 0 else fS(n - 1))".
 
+(** [wf_countdown] is defined with a termination proof.  Extraction must erase
+    proof/accessibility arguments and leave only the computational [n]. *)
 Program Fixpoint wf_countdown (n : nat) {measure n} : nat :=
   match n with
   | O => O

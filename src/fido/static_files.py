@@ -1,7 +1,5 @@
 """Static file serving with etag, last-modified, and cache-control caching."""
 
-from __future__ import annotations
-
 import dataclasses
 import hashlib
 from datetime import datetime, timezone

@@ -1,7 +1,5 @@
 """GitHub CLI wrappers — all gh subprocess calls in one place."""
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -222,9 +220,9 @@ class GitHub:
 
     def reply_to_review_comment(
         self, repo: str, pr: int | str, body: str, in_reply_to: int | str
-    ) -> None:
+    ) -> dict[str, Any]:
         """Post a reply to an inline review comment."""
-        self._post(
+        return self._post_json(
             f"/repos/{repo}/pulls/{pr}/comments",
             body=body,
             in_reply_to=int(in_reply_to),
@@ -522,9 +520,9 @@ class GitHub:
                 closed_unmerged.append(pr_num)
         return closed_unmerged
 
-    def comment_issue(self, repo: str, number: int | str, body: str) -> None:
+    def comment_issue(self, repo: str, number: int | str, body: str) -> dict[str, Any]:
         """Post a comment on an issue."""
-        self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
+        return self._post_json(f"/repos/{repo}/issues/{number}/comments", body=body)
 
     def delete_issue_comment(self, repo: str, comment_id: int | str) -> None:
         """Delete an issue/PR top-level comment by id.

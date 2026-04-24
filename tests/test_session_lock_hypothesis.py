@@ -15,8 +15,6 @@ A third "closure" property checks that every successful transition lands on
 a valid state and that the FSM never silently returns garbage.
 """
 
-from __future__ import annotations
-
 from hypothesis import given
 from hypothesis import strategies as st
 

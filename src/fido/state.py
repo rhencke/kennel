@@ -1,7 +1,5 @@
 """State file and git-dir utilities shared between worker and tasks."""
 
-from __future__ import annotations
-
 import fcntl
 import json
 import subprocess

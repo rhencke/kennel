@@ -1,7 +1,5 @@
 """Fido worker — runs one iteration of the work loop for a single repo."""
 
-from __future__ import annotations
-
 import fcntl
 import json
 import logging
@@ -19,7 +17,6 @@ from typing import IO, Any, Protocol
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.claimed import replied_comments as _webhook_claimed
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.github import GitHub
@@ -41,6 +38,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
+from fido.store import FidoStore, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.types import GitIdentity, TaskStatus, TaskType
 
@@ -1886,19 +1884,17 @@ class Worker:
         gh_user: str,
         collaborators: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """Return unresolved review threads for the comments sub-agent.
+        """Return unresolved review threads for Python-owned reply handling.
 
         A thread is included when:
         - it is not resolved,
         - it has at least one comment,
         - the last commenter is not *gh_user* (awaiting a response),
         - the last commenter is either in *collaborators* or ends with ``[bot]``, and
-        - the first comment's ID has not been claimed by the webhook handler.
+        - the first comment's ID is not claimed or completed in SQLite.
 
-        The last rule prevents the comments sub-agent from posting a duplicate
-        reply to a thread that the webhook handler already claimed — even if
-        the reply is still in-flight and not yet visible in the GitHub API
-        (which ``last_author == gh_user`` alone cannot catch).
+        The last rule prevents the worker reply path from posting a duplicate
+        reply to a thread that another webhook or worker attempt already owns.
         """
         result = []
         for node in nodes:
@@ -1915,13 +1911,15 @@ class Worker:
             if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
             first_db_id = first_comment.get("databaseId")
-            if first_db_id is not None and first_db_id in _webhook_claimed:
+            if first_db_id is not None and FidoStore(
+                self.work_dir
+            ).is_claimed_or_completed(int(first_db_id)):
                 continue
             first_login = (first_comment.get("author") or {}).get("login", "")
             result.append(
                 {
                     "id": node["id"],
-                    "is_bot": first_login.endswith("[bot]"),
+                    "is_bot": last_author.endswith("[bot]"),
                     "first_author": first_login,
                     "first_db_id": first_db_id,
                     "first_body": first_comment["body"],
@@ -1980,7 +1978,7 @@ class Worker:
         pr_number: int,
         slug: str,
     ) -> bool:
-        """Check for unresolved review threads and run the comments sub-agent.
+        """Check for unresolved review threads and handle them via Python.
 
         Returns ``True`` if unresolved threads were found and handled.  Returns
         ``False`` if there are no actionable threads.
@@ -1994,55 +1992,93 @@ class Worker:
         if not threads:
             return False
 
-        # Claim each thread's first_db_id before launching the comments
-        # sub-agent.  This makes the claim bidirectional: if the webhook
-        # handler claims a thread between _filter_threads and here we skip it;
-        # conversely, if we claim a thread here, a concurrent webhook handler
-        # will see the claim and skip its own reply.  Either way, exactly one
-        # path handles each thread.
+        # Claim each thread's first_db_id before replying.  This makes the
+        # claim bidirectional: whichever webhook or worker path prepares the
+        # SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
-        claimed_ids: list[int] = []
+        promises: list[ReplyPromiseRecord] = []
+        store = FidoStore(self.work_dir)
         for t in threads:
             first_db_id = t.get("first_db_id")
-            if first_db_id is not None and not _webhook_claimed.claim(first_db_id):
-                log.info("skipping thread %s — claimed by webhook", first_db_id)
+            if first_db_id is None:
+                claimable.append(t)
+                continue
+            promise = store.prepare_reply(
+                owner="worker",
+                comment_type="pulls",
+                anchor_comment_id=int(first_db_id),
+            )
+            if promise is None:
+                log.info("skipping thread %s — already claimed", first_db_id)
             else:
-                if first_db_id is not None:
-                    claimed_ids.append(first_db_id)
+                promises.append(promise)
                 claimable.append(t)
 
         if not claimable:
             return False
 
         log.info("unresolved threads: %d", len(claimable))
-        context = (
-            f"PR: {pr_number}\n"
-            f"Repo: {repo_ctx.repo}\n"
-            f"Owner: {repo_ctx.owner}\n"
-            f"Repo name: {repo_ctx.repo_name}\n"
-            f"Branch: {slug}\n"
-            f"Upstream: origin/{repo_ctx.default_branch}\n"
-            f"Work dir: {self.work_dir}\n"
-            f"GitHub user: {repo_ctx.gh_user}\n"
-            f"\nUnresolved threads (JSON):\n{json.dumps({'threads': claimable})}"
-        )
-        build_prompt(fido_dir, "comments", context)
-        try:
-            session_id, _ = provider_run(
-                fido_dir,
-                agent=self._provider_agent,
-                model=self._provider_agent.work_model,
-                cwd=self.work_dir,
-                session=None,
-                session_mode=self._consume_turn_session_mode(),
+        from fido import events
+
+        config = self._config
+        repo_cfg = self._repo_cfg
+        if config is None or repo_cfg is None:
+            raise RuntimeError("thread handling requires explicit config and repo_cfg")
+        pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
+        pr_title = pr_data.get("title") or ""
+        pr_body = pr_data.get("body") or ""
+        promise_by_anchor = {
+            promise.anchor_comment_id: promise
+            for promise in promises
+            if promise.anchor_comment_id > 0
+        }
+
+        for thread in claimable:
+            first_db_id = thread.get("first_db_id")
+            if not isinstance(first_db_id, int):
+                continue
+            promise = promise_by_anchor.get(first_db_id)
+            if promise is None:
+                continue
+            comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
+            if comment is None:
+                log.info("skipping thread %s — root comment missing", first_db_id)
+                store.mark_failed(promise.promise_id)
+                continue
+            action = events.build_review_comment_action(
+                repo_ctx.repo,
+                pr_number,
+                pr_title,
+                pr_body,
+                comment,
+                comment_body=thread.get("last_body"),
+                comment_author=thread.get("last_author"),
             )
-        except Exception:
-            # Release claims so a webhook redelivery (or the next worker
-            # iteration) can retry.
-            for cid in claimed_ids:
-                _webhook_claimed.release(cid)
-            raise
-        log.info("threads done (session=%s)", session_id)
+            action.context = {
+                **(action.context or {}),
+                "reply_promise_id": promise.promise_id,
+            }
+            try:
+                category, titles = events.reply_to_comment(
+                    action,
+                    config,
+                    repo_cfg,
+                    self.gh,
+                    agent=self._provider_agent,
+                )
+            except Exception:
+                store.mark_failed(promise.promise_id)
+                raise
+            events.queue_reply_tasks(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                self.gh,
+                thread=action.reply_to,
+                registry=self._registry,
+            )
+        log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 

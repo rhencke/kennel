@@ -1,6 +1,6 @@
-import Phase10Mod
+import ModuleLookupFixture
 
-module_value = Phase10Mod.Phase10Mod
+module_value = ModuleLookupFixture.ModuleLookupFixture
 nat_lookup_result: int = module_value.NatLookup.run
 succ_lookup_result: int = module_value.SuccLookup.run
 same_lookup: bool = module_value.NatLookup is module_value.NatLookupAgain

@@ -17,4 +17,9 @@ From PyExtractTest Require Export
   monads
   coinductives
   modules
-  source_maps.
+  source_maps
+  strings_bytes
+  numbers
+  finite_collections
+  io_boundaries
+  concurrency_primitives.

@@ -1,17 +1,2 @@
-{
-  "version": 1,
-  "python_file": "bool_not.py",
-  "entries": [
-    {
-      "python_start_line": 1,
-      "python_end_line": 78,
-      "source_file": "seed.v",
-      "source_start_line": 21,
-      "source_start_col": 11,
-      "source_end_line": 21,
-      "source_end_col": 19,
-      "kind": "extraction",
-      "symbol": "bool_not"
-    }
-  ]
-}
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,397,0,400,15,seed.v,21,11,21,19,extraction,bool_not,bool_not

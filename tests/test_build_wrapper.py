@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import subprocess
@@ -12,6 +10,7 @@ BAKE = REPO / "docker-bake.hcl"
 PRE_COMMIT = REPO / ".githooks" / "pre-commit"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 CI_GENERATOR = REPO / "tools" / "gen_workflows.py"
+LSP_CONFIG = REPO / ".lsp.json"
 
 
 def run_build(
@@ -166,6 +165,14 @@ class TestModelsBuildScript:
     def test_scripts_are_executable(self) -> None:
         assert os.access(FIDO, os.X_OK)
 
+    def test_lsp_config_points_to_fido_rocq_lsp(self) -> None:
+        config = json.loads(LSP_CONFIG.read_text())
+
+        rocq = config["languageServers"]["rocq"]
+        assert rocq["command"] == "./fido"
+        assert rocq["args"] == ["rocq-lsp"]
+        assert rocq["extensions"] == [".v"]
+
     def test_pre_commit_runs_ci_and_runtime_smoke(self) -> None:
         script = PRE_COMMIT.read_text()
 
@@ -224,8 +231,7 @@ class TestModelsBuildScript:
             "lint",
             "make-rocq",
             "rocq-image",
-            "test-rocq-generated",
-            "test-unit",
+            "test",
             "typecheck",
         ):
             assert target in workflow
@@ -265,6 +271,12 @@ class TestFidoLauncher:
         assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
         assert "run_fido_cli_image fido-sync-tasks" in script
+        assert "rocq-lsp)" in script
+        assert "run_rocq_lsp_image -m fido.rocq_lsp --stdio" in script
+        assert "lsp)" in script
+        assert "run_rocq_lsp_image -m fido.rocq_lsp" in script
+        assert "run_rocq_lsp_image()" in script
+        assert "run_fido_test_python_image()" in script
 
     def test_status_fast_path_renders_repo_block_without_color(
         self, tmp_path: Path
@@ -574,6 +586,8 @@ class TestFidoLauncher:
         assert 'run_fido_test_image "$@"' in script
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
+        assert "rocq-lsp" in help_text
+        assert "lsp" in help_text
         assert "ruff" in help_text
         assert "pyright" in help_text
         assert "pytest" in help_text
@@ -583,6 +597,7 @@ class TestModelDockerfile:
     def test_bake_fido_target_hides_dockerfile_path(self) -> None:
         bake = BAKE.read_text()
         script = FIDO.read_text()
+        dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
         assert 'target "fido"' in bake
         assert 'target "fido-test"' in bake
@@ -592,8 +607,7 @@ class TestModelDockerfile:
         assert 'target "lint"' in bake
         assert 'target "typecheck"' in bake
         assert 'target "generated-typecheck"' in bake
-        assert 'target "test-unit"' in bake
-        assert 'target "test-rocq-generated"' in bake
+        assert 'target "test"' in bake
         assert 'group "ci"' in bake
         assert 'dockerfile = "models/Dockerfile"' in bake
         assert 'dockerfile = "Dockerfile"' in bake
@@ -601,13 +615,13 @@ class TestModelDockerfile:
         assert 'target = "fido-test"' in bake
         assert 'target = "export"' in bake
         assert 'target = "format"' in bake
-        assert 'target = "test-unit"' in bake
-        assert 'target = "test-rocq-generated"' in bake
+        assert 'target = "test"' in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
+        assert ".lsp.json" in dockerfile
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"test-unit", "test-rocq-generated", "fido", "rocq-repl"]' in bake
+            '"test", "fido", "rocq-repl"]' in bake
         )
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
@@ -674,38 +688,36 @@ class TestModelDockerfile:
         assert "RUN chown opam:opam /workspace" in dockerfile
         assert "USER opam" in dockerfile
         assert "COPY --chown=opam:opam dune-workspace ./" in dockerfile
-        assert "rocq-python-extraction/g_python_extraction.mlg" in dockerfile
+        assert (
+            "COPY --chown=opam:opam rocq-python-extraction rocq-python-extraction"
+            in dockerfile
+        )
         assert "FROM rocq-plugin-source AS extract" in dockerfile
         assert (
             "COPY --chown=opam:opam models/dune-project models/dune models/*.v models/"
             in dockerfile
         )
         assert "FROM rocq-plugin-source AS test-extract" in dockerfile
-        assert "rocq-python-extraction/test/*.v" in dockerfile
-        assert "rocq-python-extraction/test/generated_pytest_targets.txt" in dockerfile
-        assert "rocq-python-extraction/test/generated_pyright_targets.txt" in dockerfile
+        assert (
+            "COPY --chown=opam:opam rocq-python-extraction/test rocq-python-extraction/test"
+            in dockerfile
+        )
 
     def test_python_checks_have_explicit_host_inputs(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
-        assert "FROM python-deps AS python-check-base" in dockerfile
+        assert "FROM python-deps AS python-workspace-base" in dockerfile
         assert (
-            "COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json "
+            "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
         assert "COPY models/Dockerfile models/Dockerfile" in dockerfile
         assert "COPY src src" in dockerfile
         assert "COPY tests tests" in dockerfile
-        assert (
-            "COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/"
-            in dockerfile
-        )
-        assert "FROM python-deps AS python-test-base" in dockerfile
-        assert (
-            "rocq-python-extraction/META.rocq-python-extraction.template" in dockerfile
-        )
-        assert "rocq-python-extraction/g_python_extraction.mlg" in dockerfile
+        assert "COPY rocq-python-extraction rocq-python-extraction" in dockerfile
+        assert "FROM python-workspace-base AS python-check-base" in dockerfile
+        assert "FROM python-workspace-base AS python-test-base" in dockerfile
 
     def test_fido_runtime_uses_host_uid_gid_build_args(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
@@ -723,13 +735,8 @@ class TestModelDockerfile:
         assert "FROM python-check-base AS lint" in dockerfile
         assert "FROM python-check-base AS typecheck" in dockerfile
         assert "FROM python-test-base AS generated-typecheck" in dockerfile
-        assert (
-            "COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/"
-        ) in dockerfile
-        assert "FROM python-test-base AS test-unit" in dockerfile
-        assert "FROM python-test-base AS test-rocq-generated" in dockerfile
-        assert "uv run tests-unit" in dockerfile
-        assert "uv run tests-rocq-generated" in dockerfile
+        assert "FROM python-test-base AS test" in dockerfile
+        assert "uv run tests" in dockerfile
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

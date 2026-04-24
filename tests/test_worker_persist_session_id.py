@@ -1,7 +1,5 @@
 """Tests for session-id persistence in WorkerThread (#649)."""
 
-from __future__ import annotations
-
 import json
 import subprocess
 from pathlib import Path

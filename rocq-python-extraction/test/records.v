@@ -28,6 +28,8 @@ Extract Inductive nat => "int"
 (*  1. 2-field record — basic projection and swap                      *)
 (* ------------------------------------------------------------------ *)
 
+(** [pair_r] is a two-field record used to test named-field access and record
+    construction in generated Python. *)
 Record pair_r := MkPairR { pfst_r : nat ; psnd_r : nat }.
 
 (** [proj_first]: project the first field. The single-branch MLcase triggers
@@ -59,6 +61,8 @@ Python Extraction swap_pair_r.
 (*  Python field names and attribute access (not positional _0/_1/…). *)
 (* ------------------------------------------------------------------ *)
 
+(** [point5] is a five-field record acceptance fixture for readable generated
+    field names. *)
 Record point5 := MkPoint5 {
   p5_x : nat ; p5_y : nat ; p5_z : nat ; p5_w : nat ; p5_v : nat
 }.
@@ -68,15 +72,19 @@ Record point5 := MkPoint5 {
 Definition get_p5_x (p : point5) : nat :=
   match p with MkPoint5 x _ _ _ _ => x end.
 
+(** [get_p5_y] projects the second field from [point5]. *)
 Definition get_p5_y (p : point5) : nat :=
   match p with MkPoint5 _ y _ _ _ => y end.
 
+(** [get_p5_z] projects the third field from [point5]. *)
 Definition get_p5_z (p : point5) : nat :=
   match p with MkPoint5 _ _ z _ _ => z end.
 
+(** [get_p5_w] projects the fourth field from [point5]. *)
 Definition get_p5_w (p : point5) : nat :=
   match p with MkPoint5 _ _ _ w _ => w end.
 
+(** [get_p5_v] projects the fifth field from [point5]. *)
 Definition get_p5_v (p : point5) : nat :=
   match p with MkPoint5 _ _ _ _ v => v end.
 

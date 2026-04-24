@@ -1,7 +1,5 @@
 """Tests for fido.watchdog — Watchdog class and run() entry point."""
 
-from __future__ import annotations
-
 import time
 from pathlib import Path
 from unittest.mock import MagicMock

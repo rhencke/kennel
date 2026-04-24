@@ -1,7 +1,5 @@
 """fido status — reads per-repo fido state and formats a one-shot summary."""
 
-from __future__ import annotations
-
 import fcntl
 import json
 import os

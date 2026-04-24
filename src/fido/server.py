@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import dataclasses
 import fcntl
 import hashlib
@@ -19,8 +17,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
-from fido import provider, reply_promises
-from fido.claimed import replied_comments as _replied_comments
+from fido import provider
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
@@ -28,6 +25,8 @@ from fido.events import (
     create_task,
     dispatch,
     launch_worker,
+    queue_reply_tasks,
+    reply_outcome_creates_tasks,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
@@ -47,6 +46,7 @@ from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
+from fido.store import FidoStore, ReplyPromiseRecord
 from fido.tasks import Tasks, unblock_tasks
 from fido.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -837,6 +837,47 @@ class WebhookHandler(BaseHTTPRequestHandler):
             raise TypeError(f"invalid reply promise comment id: {comment_id!r}")
         return comment_type, comment_id
 
+    def _prepare_reply(
+        self,
+        repo_cfg: RepoConfig,
+        action: Action,
+    ) -> ReplyPromiseRecord | None:
+        """Claim an action's raw comment id and attach its promise marker."""
+        promise_key = self._reply_promise(action)
+        if promise_key is None:
+            return None
+        comment_type, comment_id = promise_key
+        promise = FidoStore(repo_cfg.work_dir).prepare_reply(
+            owner="webhook",
+            comment_type=comment_type,
+            anchor_comment_id=comment_id,
+        )
+        if promise is None:
+            log.info("already replied to comment %s — skipping", comment_id)
+            return None
+        action.context = {
+            **(action.context or {}),
+            "reply_promise_id": promise.promise_id,
+        }
+        return promise
+
+    def _ack_reply(
+        self, repo_cfg: RepoConfig, promise: ReplyPromiseRecord | None
+    ) -> None:
+        """Mark a reply promise completed after its handler returns."""
+        if promise is None:
+            return
+        store = FidoStore(repo_cfg.work_dir)
+        store.mark_posted(promise.promise_id)
+        store.ack_promise(promise.promise_id)
+
+    def _fail_reply(
+        self, repo_cfg: RepoConfig, promise: ReplyPromiseRecord | None
+    ) -> None:
+        """Mark a reply promise retryable after a handler failure."""
+        if promise is not None:
+            FidoStore(repo_cfg.work_dir).mark_failed(promise.promise_id)
+
     def _process_action_inner(
         self,
         action: Action,
@@ -856,54 +897,41 @@ class WebhookHandler(BaseHTTPRequestHandler):
             titles: list[str] = []
 
             if action.reply_to:
-                promise = self._reply_promise(action)
-                cid = action.reply_to.get("comment_id")
-                if cid is not None and not _replied_comments.claim(cid):
-                    log.info("already replied to comment %s — skipping", cid)
+                promise = self._prepare_reply(repo_cfg, action)
+                if promise is None:
                     handled = True
                     category, titles = None, []
                 else:
                     activity.set_description("triaging review comment")
-                    if promise is not None:
-                        reply_promises.add_reply_promise(
-                            repo_cfg.work_dir / ".git" / "fido",
-                            promise[0],
-                            promise[1],
-                        )
                     try:
                         category, titles = type(self)._fn_reply_to_comment(
                             action, self.config, repo_cfg, gh
                         )
                     except Exception:
-                        # Release the claim so a GitHub redelivery can retry.
-                        if cid is not None:
-                            _replied_comments.release(cid)
+                        self._fail_reply(repo_cfg, promise)
                         raise
-                    if promise is not None:
-                        reply_promises.remove_reply_promise(
-                            repo_cfg.work_dir / ".git" / "fido",
-                            promise[0],
-                            promise[1],
-                        )
+                    self._ack_reply(repo_cfg, promise)
                     handled = True
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
                 # ACT, DO → add each task title to work queue.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
-                    activity.set_description(
-                        "queuing review comment tasks"
-                        if len(titles or []) != 1
-                        else "queuing review comment task"
-                    )
-                    for title in titles or []:
-                        type(self)._fn_create_task(
-                            title,
-                            self.config,
-                            repo_cfg,
-                            gh,
-                            thread=action.reply_to,
-                            registry=self.registry,
+                if category is not None:
+                    if reply_outcome_creates_tasks(category, thread=action.reply_to):
+                        activity.set_description(
+                            "queuing review comment tasks"
+                            if len(titles or []) != 1
+                            else "queuing review comment task"
                         )
+                    queue_reply_tasks(
+                        category,
+                        titles or [],
+                        self.config,
+                        repo_cfg,
+                        gh,
+                        thread=action.reply_to,
+                        registry=self.registry,
+                        create_task_fn=type(self)._fn_create_task,
+                    )
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
@@ -912,51 +940,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                promise = self._reply_promise(action)
-                cid = action.thread.get("comment_id") if action.thread else None
-                if cid is not None and not _replied_comments.claim(cid):
-                    log.info("already replied to comment %s — skipping", cid)
+                promise = self._prepare_reply(repo_cfg, action)
+                if promise is None:
                     category, titles = None, []
                 else:
                     activity.set_description("triaging PR comment")
-                    if promise is not None:
-                        reply_promises.add_reply_promise(
-                            repo_cfg.work_dir / ".git" / "fido",
-                            promise[0],
-                            promise[1],
-                        )
                     try:
                         category, titles = type(self)._fn_reply_to_issue_comment(
                             action, self.config, repo_cfg, gh
                         )
                     except Exception:
-                        # Release the claim so a GitHub redelivery can retry.
-                        if cid is not None:
-                            _replied_comments.release(cid)
+                        self._fail_reply(repo_cfg, promise)
                         raise
-                    if promise is not None:
-                        reply_promises.remove_reply_promise(
-                            repo_cfg.work_dir / ".git" / "fido",
-                            promise[0],
-                            promise[1],
-                        )
+                    self._ack_reply(repo_cfg, promise)
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                if reply_outcome_creates_tasks(category or "", thread=action.thread):
                     activity.set_description(
                         "queuing PR comment tasks"
                         if len(titles) != 1
                         else "queuing PR comment task"
                     )
-                    for title in titles:
-                        type(self)._fn_create_task(
-                            title,
-                            self.config,
-                            repo_cfg,
-                            gh,
-                            thread=action.thread,
-                            registry=self.registry,
-                        )
+                queue_reply_tasks(
+                    category or "",
+                    titles,
+                    self.config,
+                    repo_cfg,
+                    gh,
+                    thread=action.thread,
+                    registry=self.registry,
+                    create_task_fn=type(self)._fn_create_task,
+                )
 
             log.info(
                 "action outcome: handled=%s category=%s tasks=%d",

@@ -2,8 +2,6 @@
 
 # pyright: reportArgumentType=false, reportMissingParameterType=false, reportMissingTypeArgument=false, reportPrivateUsage=false, reportUnknownLambdaType=false
 
-from __future__ import annotations
-
 import fcntl
 import json
 import subprocess

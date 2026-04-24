@@ -11,8 +11,6 @@ treats fetch failures as soft errors — the previous snapshot stays put
 until the next successful refresh.
 """
 
-from __future__ import annotations
-
 import logging
 import threading
 import time

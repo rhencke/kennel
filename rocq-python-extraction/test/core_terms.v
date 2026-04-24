@@ -54,12 +54,15 @@ Extract Inductive bool => "bool" [ "True" "False" ].
 (*  Inductive type declarations (exercises Dind emission)              *)
 (* ------------------------------------------------------------------ *)
 
-(** Standard inductive: nat is already in scope. *)
+(** Standard inductive: nat is already in scope and intentionally appears in
+    later declarations to exercise the backend-owned nat remapping. *)
 
-(** Record inductive — one constructor, named fields. *)
+(** [pair_t] is a generic two-field record used to test record declaration
+    emission and keyword-style record construction. *)
 Record pair_t (A B : Type) : Type := MkPair { pfst : A ; psnd : B }.
 
-(** Coinductive type — constructor wrapped in a thunk on extraction. *)
+(** [stream] is a coinductive type whose constructor tail must be lazily
+    represented in generated Python. *)
 CoInductive stream (A : Type) : Type :=
   | SCons : A -> stream A -> stream A.
 
@@ -92,7 +95,8 @@ Definition mk_pair : nat * nat := (O, S O).
 Definition mk_pair_r : pair_t nat nat :=
   {| pfst := O ; psnd := S O |}.
 
-(** MLcons Coinductive: co-fixpoint; constructor is thunk-wrapped. *)
+(** [zeros] is a cyclic cofixpoint over [stream]; extraction must not eagerly
+    force the infinite tail. *)
 CoFixpoint zeros : stream nat := SCons nat O zeros.
 
 (** MLcase bool → ternary: [Extract Inductive bool] makes this a ternary. *)
@@ -112,16 +116,19 @@ Fixpoint nat_add (n m : nat) : nat :=
   | S n' => S (nat_add n' m)
   end.
 
-(** MLuint: 63-bit machine integer literal. *)
+(** [uint_val] triggers the legacy unsupported-primitive diagnostic path for
+    63-bit machine integers while still emitting syntactically valid Python. *)
 Definition uint_val : int := 42.
 
-(** MLfloat: IEEE 754 float literal. *)
+(** [float_val] triggers the same unsupported-primitive diagnostic path for
+    Rocq floats; tests assert the generated Python carries a PYEX003 comment. *)
 Definition float_val : float := 3.14.
 
 (** MLstring: primitive byte-string literal. *)
 Definition str_val := "hello"%pstring.
 
-(** MLaxiom: unproved assumption — extracts to [raise NotImplementedError]. *)
+(** [todo_val] is an unproved assumption; extraction must produce a runtime
+    [NotImplementedError] stub. *)
 Axiom todo_val : nat.
 
 (* ------------------------------------------------------------------ *)
@@ -139,10 +146,10 @@ Python Extraction mk_pair_r.
 (** [zeros.py]: covers stream (Dind Coinductive), MLcons Coinductive. *)
 Python Extraction zeros.
 
-(** [uint_val.py]: MLuint literal. *)
+(** [uint_val.py]: MLuint diagnostic fixture. *)
 Python Extraction uint_val.
 
-(** [float_val.py]: MLfloat literal. *)
+(** [float_val.py]: MLfloat diagnostic fixture. *)
 Python Extraction float_val.
 
 (** [str_val.py]: MLstring literal. *)

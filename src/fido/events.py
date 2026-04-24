@@ -1,16 +1,12 @@
-from __future__ import annotations
-
-import fcntl
 import logging
 import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fido import reply_promises
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -18,7 +14,9 @@ from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import ProviderAgent, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
+from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
+from fido.store import FidoStore, append_reply_promise_markers
 from fido.tasks import Tasks
 from fido.types import TaskType
 
@@ -62,7 +60,7 @@ def _pr_number_from_api_url(url: str, kind: str) -> int:
     return int(match.group(1))
 
 
-def _build_review_comment_action(
+def build_review_comment_action(
     repo: str,
     pr_number: int,
     pr_title: str,
@@ -70,9 +68,14 @@ def _build_review_comment_action(
     comment: dict[str, Any],
     *,
     comment_body: str | None = None,
+    comment_author: str | None = None,
 ) -> Action:
     """Rebuild a review-comment Action from live GitHub state."""
-    user = comment["user"]["login"]
+    user = (
+        comment_author
+        if comment_author is not None
+        else comment.get("user", {}).get("login", "")
+    )
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     return Action(
@@ -106,10 +109,12 @@ def _build_issue_comment_action(
     pr_title: str,
     pr_body: str,
     comment: dict[str, Any],
+    *,
+    comment_body: str | None = None,
 ) -> Action:
     """Rebuild a top-level PR-comment Action from live GitHub state."""
     user = comment["user"]["login"]
-    body = comment["body"] or ""
+    body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     comment_id = int(comment["id"])
     return Action(
@@ -133,6 +138,126 @@ def _build_issue_comment_action(
     )
 
 
+def _reply_promise_ids(context: dict[str, Any] | None) -> tuple[str, ...]:
+    """Return every covered promise id carried in *context*."""
+    if not context:
+        return ()
+    single = context.get("reply_promise_id")
+    many = context.get("reply_promise_ids")
+    result: list[str] = []
+    if isinstance(single, str) and single:
+        result.append(single)
+    if isinstance(many, list):
+        result.extend(str(promise_id) for promise_id in many if promise_id)
+    return tuple(dict.fromkeys(result))
+
+
+def _record_reply_artifact(
+    repo_cfg: RepoConfig,
+    *,
+    artifact_comment_id: int | None,
+    comment_type: str,
+    lane_key: str,
+    promise_ids: tuple[str, ...],
+) -> None:
+    """Persist one visible reply artifact and mark its promises posted."""
+    if artifact_comment_id is None or not promise_ids:
+        return
+    store = FidoStore(repo_cfg.work_dir)
+    store.record_artifact(
+        artifact_comment_id=artifact_comment_id,
+        comment_type=comment_type,
+        lane_key=lane_key,
+        promise_ids=promise_ids,
+    )
+    for promise_id in promise_ids:
+        store.mark_posted(promise_id)
+
+
+def _posted_comment_id(posted: object) -> int | None:
+    """Return the GitHub comment id from a post response, when available."""
+    if not isinstance(posted, dict):
+        return None
+    comment_id = posted.get("id")
+    if isinstance(comment_id, int):
+        return comment_id
+    return None
+
+
+def _review_lane_key(repo: str, pr_number: int, root_comment_id: int) -> str:
+    return f"pulls:{repo}:{pr_number}:thread:{root_comment_id}"
+
+
+def _issue_lane_key(repo: str, pr_number: int) -> str:
+    return f"issues:{repo}:{pr_number}"
+
+
+def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
+    return {
+        "ACT": oracle.ReviewAct(),
+        "DO": oracle.ReviewDo(),
+        "ASK": oracle.ReviewAsk(),
+        "ANSWER": oracle.ReviewAnswer(),
+        "DEFER": oracle.ReviewDefer(),
+        "DUMP": oracle.ReviewDump(),
+    }[category]
+
+
+def review_outcome_creates_tasks(category: str) -> bool:
+    """Return whether a review reply outcome should create task objects."""
+    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
+        return False
+    return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
+
+
+def review_outcome_resolves_thread(category: str) -> bool:
+    """Return whether a review reply outcome should resolve the thread."""
+    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
+        return False
+    return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
+
+
+def reply_outcome_creates_tasks(
+    category: str,
+    *,
+    thread: dict[str, Any] | None,
+) -> bool:
+    """Return whether a reply outcome should create task objects."""
+    if thread is not None:
+        return review_outcome_creates_tasks(category)
+    return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
+
+
+def queue_reply_tasks(
+    category: str,
+    titles: list[str],
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    *,
+    thread: dict[str, Any] | None,
+    registry: Any = None,
+    create_task_fn: Callable[..., object] | None = None,
+) -> int:
+    """Create any tasks implied by a reply outcome.
+
+    Returns the number of created task objects.
+    """
+    if not reply_outcome_creates_tasks(category, thread=thread):
+        return 0
+    task_fn = create_task if create_task_fn is None else create_task_fn
+    for title in titles:
+        task_fn(
+            title,
+            config,
+            repo_cfg,
+            gh,
+            thread=thread,
+            registry=registry,
+        )
+    return len(titles)
+
+
 def _apply_reply_result(
     category: str,
     titles: list[str],
@@ -143,18 +268,28 @@ def _apply_reply_result(
     thread: dict[str, Any] | None,
     registry: WorkerRegistry | None,
 ) -> None:
-    """Apply ACT/DO titles from a recovered reply just like webhook handling."""
-    if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
-        return
-    for title in titles:
-        create_task(
-            title,
-            config,
-            repo_cfg,
-            gh,
-            thread=thread,
-            registry=registry,
-        )
+    """Apply task side effects from a recovered reply."""
+    queue_reply_tasks(
+        category,
+        titles,
+        config,
+        repo_cfg,
+        gh,
+        thread=thread,
+        registry=registry,
+    )
+
+
+def _mark_promises_failed(store: FidoStore, promise_ids: Iterable[str]) -> None:
+    """Mark every promise in the group retryable after replay failure."""
+    for promise_id in promise_ids:
+        store.mark_failed(promise_id)
+
+
+def _ack_promises(store: FidoStore, promise_ids: Iterable[str]) -> None:
+    """Ack every promise in the group after replay success."""
+    for promise_id in promise_ids:
+        store.ack_promise(promise_id)
 
 
 def recover_reply_promises(
@@ -168,8 +303,9 @@ def recover_reply_promises(
     prompts: Prompts | None = None,
     registry: WorkerRegistry | None = None,
 ) -> bool:
-    """Recover queued webhook replies for the current PR from promise files."""
-    promises = reply_promises.list_reply_promises(fido_dir)
+    """Recover queued webhook replies for the current PR from SQLite promises."""
+    store = FidoStore(repo_cfg.work_dir)
+    promises = store.recoverable_promises()
     if not promises:
         return False
 
@@ -177,21 +313,34 @@ def recover_reply_promises(
     pr_title = pr_issue["title"]
     pr_body = pr_issue["body"] or ""
     processed_any = False
-    handled_keys: set[tuple[str, int]] = set()
-    promise_by_key = {
-        (promise.comment_type, promise.comment_id): promise for promise in promises
-    }
+    pull_entries: dict[str, tuple[dict[str, Any], int, int]] = {}
+    issue_comments: list[dict[str, Any]] = []
+    if any(p.comment_type == "issues" for p in promises):
+        issue_comments = gh.get_issue_comments(repo_cfg.name, pr_number)
+        if store.recover_from_bodies(c.get("body", "") for c in issue_comments):
+            processed_any = True
+        issue_comments_by_id = {int(c["id"]): c for c in issue_comments if c.get("id")}
+    else:
+        issue_comments_by_id = {}
 
-    pull_entries: dict[tuple[str, int], tuple[dict[str, Any], int, int]] = {}
-    issue_entries: dict[tuple[str, int], tuple[dict[str, Any], int]] = {}
+    issue_groups: dict[int, list[tuple[str, dict[str, Any]]]] = {}
 
     for promise in promises:
-        key = (promise.comment_type, promise.comment_id)
+        current = store.promise(promise.promise_id)
+        if current is None or current.state == "acked":
+            continue
         if promise.comment_type == "pulls":
-            comment = gh.get_pull_comment(repo_cfg.name, promise.comment_id)
+            fetched = gh.fetch_comment_thread(
+                repo_cfg.name, pr_number, promise.anchor_comment_id
+            )
+            if fetched and store.recover_from_bodies(
+                c.get("body", "") for c in fetched
+            ):
+                processed_any = True
+                continue
+            comment = gh.get_pull_comment(repo_cfg.name, promise.anchor_comment_id)
             if comment is None:
-                promise.path.unlink()
-                handled_keys.add(key)
+                store.mark_failed(promise.promise_id)
                 continue
             comment_pr = _pr_number_from_api_url(comment["pull_request_url"], "pulls")
             root_id = (
@@ -199,28 +348,42 @@ def recover_reply_promises(
                 if "in_reply_to_id" in comment and comment["in_reply_to_id"] is not None
                 else int(comment["id"])
             )
-            pull_entries[key] = (comment, comment_pr, root_id)
+            pull_entries[promise.promise_id] = (comment, comment_pr, root_id)
         else:
-            comment = gh.get_issue_comment(repo_cfg.name, promise.comment_id)
+            comment = issue_comments_by_id.get(promise.anchor_comment_id)
             if comment is None:
-                promise.path.unlink()
-                handled_keys.add(key)
+                comment = gh.get_issue_comment(repo_cfg.name, promise.anchor_comment_id)
+            if comment is None:
+                store.mark_failed(promise.promise_id)
                 continue
             comment_pr = _pr_number_from_api_url(comment["issue_url"], "issues")
-            issue_entries[key] = (comment, comment_pr)
-
-    for promise in promises:
-        key = (promise.comment_type, promise.comment_id)
-        if key in handled_keys:
-            continue
-
-        if promise.comment_type == "issues":
-            comment, comment_pr = issue_entries[key]
             if comment_pr != pr_number:
                 continue
-            action = _build_issue_comment_action(
-                repo_cfg.name, pr_number, pr_title, pr_body, comment
+            issue_groups.setdefault(comment_pr, []).append(
+                (promise.promise_id, comment)
             )
+
+    for comment_pr, group in issue_groups.items():
+        combined_parts: list[str] = []
+        for _, group_comment in group:
+            body = group_comment["body"] or ""
+            if body and body not in combined_parts:
+                combined_parts.append(body)
+        representative = group[-1][1]
+        action = _build_issue_comment_action(
+            repo_cfg.name,
+            pr_number,
+            pr_title,
+            pr_body,
+            representative,
+            comment_body="\n\n---\n\n".join(combined_parts) if combined_parts else None,
+        )
+        action.context = {
+            **(action.context or {}),
+            "reply_promise_id": group[0][0],
+            "reply_promise_ids": [promise_id for promise_id, _ in group],
+        }
+        try:
             category, titles = reply_to_issue_comment(
                 action,
                 config,
@@ -229,36 +392,41 @@ def recover_reply_promises(
                 agent=agent,
                 prompts=prompts,
             )
-            reply_promises.remove_reply_promise(
-                fido_dir, promise.comment_type, promise.comment_id
-            )
-            handled_keys.add(key)
-            _apply_reply_result(
-                category,
-                titles,
-                config,
-                repo_cfg,
-                gh,
-                thread=action.thread,
-                registry=registry,
-            )
-            processed_any = True
-            continue
+        except Exception:
+            _mark_promises_failed(store, (promise_id for promise_id, _ in group))
+            raise
+        _ack_promises(store, (promise_id for promise_id, _ in group))
+        _apply_reply_result(
+            category,
+            titles,
+            config,
+            repo_cfg,
+            gh,
+            thread=action.thread,
+            registry=registry,
+        )
+        processed_any = True
 
-        comment, comment_pr, root_id = pull_entries[key]
+    for promise in promises:
+        if promise.comment_type != "pulls":
+            continue
+        current = store.promise(promise.promise_id)
+        if current is None or current.state == "acked":
+            continue
+        if promise.promise_id not in pull_entries:
+            continue
+        comment, comment_pr, root_id = pull_entries[promise.promise_id]
         if comment_pr != pr_number:
             continue
 
-        group: list[tuple[reply_promises.ReplyPromise, dict[str, Any]]] = []
-        for candidate_key, (
+        group: list[tuple[str, dict[str, Any]]] = []
+        for candidate_promise_id, (
             candidate_comment,
             candidate_pr,
             candidate_root_id,
         ) in pull_entries.items():
-            if candidate_key in handled_keys:
-                continue
             if candidate_pr == pr_number and candidate_root_id == root_id:
-                group.append((promise_by_key[candidate_key], candidate_comment))
+                group.append((candidate_promise_id, candidate_comment))
 
         combined_parts: list[str] = []
         for _, group_comment in group:
@@ -267,7 +435,7 @@ def recover_reply_promises(
                 combined_parts.append(body)
         combined_body = "\n\n---\n\n".join(combined_parts) if combined_parts else None
         representative = group[-1][1]
-        action = _build_review_comment_action(
+        action = build_review_comment_action(
             repo_cfg.name,
             pr_number,
             pr_title,
@@ -275,19 +443,26 @@ def recover_reply_promises(
             representative,
             comment_body=combined_body,
         )
-        category, titles = reply_to_comment(
-            action,
-            config,
-            repo_cfg,
-            gh,
-            agent=agent,
-            prompts=prompts,
-        )
-        for group_promise, _ in group:
-            reply_promises.remove_reply_promise(
-                fido_dir, group_promise.comment_type, group_promise.comment_id
+        action.context = {
+            **(action.context or {}),
+            "reply_promise_id": promise.promise_id,
+            "reply_promise_ids": [group_promise_id for group_promise_id, _ in group],
+        }
+        try:
+            category, titles = reply_to_comment(
+                action,
+                config,
+                repo_cfg,
+                gh,
+                agent=agent,
+                prompts=prompts,
             )
-            handled_keys.add((group_promise.comment_type, group_promise.comment_id))
+        except Exception:
+            _mark_promises_failed(
+                store, (group_promise_id for group_promise_id, _ in group)
+            )
+            raise
+        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -477,13 +652,6 @@ def _open_defer_issue(gh: Any, repo: str, pr_url: str, title: str, comment: str)
     return url
 
 
-def _comment_lock(work_dir: Path, comment_id: int) -> Path:
-    """Return path to a per-comment lockfile."""
-    lock_dir = work_dir / ".git" / "fido" / "comments"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    return lock_dir / f"{comment_id}.lock"
-
-
 def maybe_react(
     comment_body: str,
     comment_id: int | str,
@@ -536,7 +704,7 @@ def reply_to_comment(
     Returns (triage_category, task_titles).
     task_titles is a list: one entry for non-task categories (used as reply
     context), or one or more entries for ACT/DO (each becomes a task).
-    Uses a per-comment lockfile to prevent concurrent replies.
+    Uses the caller's SQLite reply claim to prevent concurrent replies.
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
@@ -547,25 +715,22 @@ def reply_to_comment(
     if not info or not action.comment_body:
         return ("ACT", [action.comment_body or action.prompt])
 
-    # Per-comment lock — prevents concurrent replies
-    cid = info.get("comment_id")
-    if cid:
-        lock_path = _comment_lock(repo_cfg.work_dir, cid)
-        lock_fd = open(lock_path, "w")
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            log.info("comment %s locked by another process — skipping", cid)
-            lock_fd.close()
-            # Return empty titles so the caller creates no phantom tasks.
-            # Another process holds the lock and will handle reply + task creation.
-            return ("ACT", [])
-    else:
-        lock_fd = None
-
     comment = action.comment_body
 
     context: dict[str, Any] = dict(action.context) if action.context else {}
+    direct_promise = None
+    if context.get("reply_promise_id") is None and isinstance(
+        info.get("comment_id"), int
+    ):
+        direct_promise = FidoStore(repo_cfg.work_dir).prepare_reply(
+            owner="worker",
+            comment_type=str(info.get("comment_type", "pulls")),
+            anchor_comment_id=int(info["comment_id"]),
+        )
+        if direct_promise is None:
+            log.info("comment %s already claimed — skipping reply", info["comment_id"])
+            return ("ACT", [])
+        context["reply_promise_id"] = direct_promise.promise_id
 
     # Always fetch the full thread for this comment.
     # Normalize to list so root_body extraction below is type-safe.
@@ -681,32 +846,32 @@ def reply_to_comment(
             "concurrent handler already replied — skipping post for comment %s",
             info.get("comment_id"),
         )
-        if lock_fd:
-            lock_fd.close()
+        if direct_promise is not None:
+            FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
         return (category, titles)
 
-    # Edit the last Fido reply only if it is the most recent comment in the thread
-    # (i.e. no human has spoken since). If a human posted a new comment after
-    # Fido's last reply, post a fresh reply so the conversation stays coherent.
-    last_thread_author = (
-        thread_comments[-1].get("author", "").lower() if thread_comments else ""
+    promise_ids = _reply_promise_ids(context)
+    body = append_reply_promise_markers(body, promise_ids)
+    log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+    posted = gh.reply_to_review_comment(
+        info["repo"], info["pr"], body, info["comment_id"]
     )
-    last_fido_id = next(
-        (
-            c["id"]
-            for c in reversed(thread_comments)
-            if c.get("author", "").lower() in _fido_logins
-        ),
-        None,
+    log.info("reply posted")
+    root_comment_id = (
+        thread_comments[0]["id"] if thread_comments else info["comment_id"]
     )
-    if last_fido_id and last_thread_author in _fido_logins:
-        log.info("editing last fido reply %s on PR #%s", last_fido_id, info["pr"])
-        gh.edit_review_comment(info["repo"], last_fido_id, body)
-        log.info("reply edited")
-    else:
-        log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
-        log.info("reply posted")
+    if root_comment_id is not None:
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=_posted_comment_id(posted),
+            comment_type="pulls",
+            lane_key=_review_lane_key(
+                info["repo"], int(info["pr"]), int(root_comment_id)
+            ),
+            promise_ids=promise_ids,
+        )
+    if direct_promise is not None:
+        FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
     # Maybe react
     maybe_react(
@@ -720,21 +885,34 @@ def reply_to_comment(
         prompts=prompts,
     )
 
-    # For DUMP: also resolve the thread
-    if category == "DUMP" and info.get("comment_id"):
-        _try_resolve_thread(info, config)
-
-    # Release comment lock (keep file so concurrent callers see it was claimed)
-    if lock_fd:
-        lock_fd.close()
+    if review_outcome_resolves_thread(category) and info.get("comment_id"):
+        _try_resolve_thread(info, gh)
 
     return (category, titles)
 
 
-def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
-    """Best-effort resolve a review thread via GraphQL."""
-    # Thread node_id not available in webhook payload — skip
-    pass
+def _try_resolve_thread(info: dict[str, Any], gh: GitHub) -> None:
+    """Best-effort resolve the review thread containing a comment."""
+    repo = info.get("repo")
+    pr = info.get("pr")
+    comment_id = info.get("comment_id")
+    if not isinstance(repo, str) or not isinstance(comment_id, int):
+        return
+    if pr is None:
+        return
+    if not isinstance(pr, int):
+        try:
+            pr = int(pr)
+        except TypeError, ValueError:
+            return
+    owner, repo_name = repo.split("/", 1)
+    for node in gh.get_review_threads(owner, repo_name, pr):
+        if node.get("isResolved"):
+            continue
+        comments = node.get("comments", {}).get("nodes", [])
+        if any(c.get("databaseId") == comment_id for c in comments):
+            gh.resolve_thread(node["id"])
+            return
 
 
 def reply_to_review(
@@ -920,6 +1098,19 @@ def reply_to_issue_comment(
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
+    context = dict(action.context) if action.context else {}
+    direct_promise = None
+    comment_id = context.get("comment_id")
+    if context.get("reply_promise_id") is None and isinstance(comment_id, int):
+        direct_promise = FidoStore(repo_cfg.work_dir).prepare_reply(
+            owner="worker",
+            comment_type="issues",
+            anchor_comment_id=comment_id,
+        )
+        if direct_promise is None:
+            log.info("comment %s already claimed — skipping issue reply", comment_id)
+            return ("ACT", [])
+        context["reply_promise_id"] = direct_promise.promise_id
 
     # Extract PR number from prompt
     m = re.search(r"#(\d+)", action.prompt)
@@ -950,7 +1141,6 @@ def reply_to_issue_comment(
             )
 
     # Merge conversation context into triage context
-    context = dict(action.context) if action.context else {}
     if conversation_context:
         context["conversation"] = conversation_context
 
@@ -992,19 +1182,22 @@ def reply_to_issue_comment(
             f"issue-comment reply: run_turn returned empty for PR #{number}"
         )
 
+    promise_ids = _reply_promise_ids(context)
+    body = append_reply_promise_markers(body, promise_ids)
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
-    gh.comment_issue(repo_full, number, body)
+    posted = gh.comment_issue(repo_full, number, body)
     log.info("reply posted on PR #%s", number)
+    _record_reply_artifact(
+        repo_cfg,
+        artifact_comment_id=_posted_comment_id(posted),
+        comment_type="issues",
+        lane_key=_issue_lane_key(repo_full, int(number)),
+        promise_ids=promise_ids,
+    )
+    if direct_promise is not None:
+        FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-    # Write durable claim file so a fido restart doesn't re-pick this comment.
-    # Without this, backfill_missed_pr_comments re-queues comments triaged as
-    # ANSWER/DUMP/ASK because those paths create no tasks.json entry for the
-    # Tasks.add dedup to match against.  This mirrors the claim-file pattern used
-    # by reply_to_comment for review comments (closes #834).
     _cid = (action.context or {}).get("comment_id")
-    if _cid is not None:
-        _comment_lock(repo_cfg.work_dir, _cid).touch(exist_ok=True)
-        log.info("wrote durable claim for issue comment %s", _cid)
     if _cid:
         log.info(
             "reply_to_issue_comment: adding reaction on PR #%s comment %s", number, _cid
@@ -1531,9 +1724,8 @@ def backfill_missed_pr_comments(
     iteration by ``Worker.handle_threads``, so the worker loop backfills
     those on its own — only issue-comments are invisible to the loop.
 
-    Idempotent: comments with a durable claim file
-    (``.git/fido/comments/<id>.lock``) are skipped — fido already replied
-    to them.  Comments handled with a task (ACT/DO) are additionally
+    Idempotent: comments with a completed SQLite claim are skipped — Fido
+    already replied to them.  Comments handled with a task (ACT/DO) are additionally
     deduped by :func:`create_task` via ``comment_id`` in ``tasks.json``.
     This function is intended to run **once per WorkerThread lifetime** (at
     startup) — not every iteration.
@@ -1553,11 +1745,8 @@ def backfill_missed_pr_comments(
         comment_id = c.get("id")
         if comment_id is None:
             continue
-        # Skip comments fido already replied to (claim file written by
-        # reply_to_issue_comment after posting).  Without this check,
-        # ANSWER/DUMP/ASK replies — which create no tasks.json entry —
-        # would be re-queued on every fido restart (closes #834).
-        if _comment_lock(repo_cfg.work_dir, comment_id).exists():
+        # Skip comments Fido already claimed or completed in the SQLite store.
+        if FidoStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
             log.info("backfill: comment %s already claimed — skipping", comment_id)
             continue
         body = c.get("body", "") or ""

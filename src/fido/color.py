@@ -9,8 +9,6 @@ value) disables color.  ``FORCE_COLOR=1`` overrides both TTY detection and
 ``NO_COLOR`` so that tools like ``watch -c`` work without extra flags.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 

@@ -1,17 +1,2 @@
-{
-  "version": 1,
-  "python_file": "transition.py",
-  "entries": [
-    {
-      "python_start_line": 1,
-      "python_end_line": 168,
-      "source_file": "session_lock.v",
-      "source_start_line": 67,
-      "source_start_col": 11,
-      "source_end_line": 67,
-      "source_end_col": 21,
-      "kind": "extraction",
-      "symbol": "transition"
-    }
-  ]
-}
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,452,0,454,18,session_lock.v,67,11,67,21,extraction,transition,transition

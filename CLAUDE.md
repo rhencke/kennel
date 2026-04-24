@@ -27,6 +27,8 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
 | `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
 | `./fido repl <model.v>` | Open a Python REPL with that model's extracted symbols preloaded and compare supported expressions against OCaml reference extraction. |
+| `./fido rocq-lsp` | Run the stdio LSP server for `.v` model navigation. `.lsp.json` points editor/agent LSP clients here. |
+| `./fido lsp hover|definition|references|callers|signature|completion|symbols|tokens|codelens|codeactions|graph|explain|rename|diagnostics ... --json` | Query Rocq model navigation as JSON for shell agents. |
 | `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
 | `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
 | `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |
@@ -120,7 +122,6 @@ Markdown instruction files passed to sub-Claude as system prompts:
 | `setup.md` | Task planning |
 | `task.md` | Single task implementation |
 | `ci.md` | CI failure fixing |
-| `comments.md` | Review thread handling |
 | `resume.md` | PR resumption |
 
 ## Task type system
@@ -174,6 +175,15 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   invocation and lean on the pre-commit hook: just attempt the commit (without
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
+- **Do a dedup pass before commit** — after the feature works, do one explicit
+  pass over the touched code to consolidate any new duplication introduced by
+  the change. Do not stop at green tests if the diff still contains obvious new
+  duplicate logic that can be merged cleanly.
+- **No hacks** — do not compensate for backend, extraction, generator, or
+  runtime bugs in models, generated files, or tests. Fix the layer that is
+  wrong rather than adding a workaround in a neighboring layer.
+- **Verify upstream facts** — when a fix depends on external or standard-library
+  behavior, check the primary source instead of guessing from memory.
 - **Local entry point** — use `./fido help`. Do not call host `uv` for normal
   checks or server startup. The launcher owns buildx image selection, UID/GID
   mapping, credentials mounts, and stdin passthrough.

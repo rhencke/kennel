@@ -12,6 +12,8 @@ Extract Inductive list => "list"
   [ "[]" "(lambda h, t: [h] + t)" ]
   "(lambda fnil, fcons, xs: fnil() if xs == [] else fcons(xs[0], xs[1:]))".
 
+(** [list_map] is a rank-1 polymorphic list map.  The generated Python should
+    expose TypeVars for [A] and [B] and pyright-check successfully. *)
 Fixpoint list_map {A B : Set} (f : A -> B) (xs : list A) : list B :=
   match xs with
   | nil => nil

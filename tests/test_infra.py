@@ -1,7 +1,5 @@
 """Tests for fido.infra — infrastructure port protocols and real implementations."""
 
-from __future__ import annotations
-
 import signal
 import subprocess
 from pathlib import Path

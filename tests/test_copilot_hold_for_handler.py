@@ -1,7 +1,5 @@
 """Reentrance + hold_for_handler tests for CopilotCLISession (#658)."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest

@@ -112,6 +112,12 @@ Remediation: Extract a computational member of the mutual block or remove the pr
 ## PYEX036 Unsupported Bytes Literal Encoding
 Remediation: Restrict extracted strings to byte strings or provide a Python remapping.
 
+Runtime note: Rocq `String.string` extracts to Python `str` at a UTF-8 text
+boundary. A generated pattern match that destructs a Python string raises
+`_RocqUtf8BoundaryError` when the split would leave an invalid UTF-8 tail, such
+as matching `String _ rest` against a string whose first character is encoded
+with multiple bytes.
+
 ## PYEX037 Unsupported Float Literal
 Remediation: Avoid NaN/infinity payloads that cannot round-trip or remap the constant explicitly.
 
@@ -123,3 +129,15 @@ Remediation: Rename one Rocq declaration or extract through a module namespace.
 
 ## PYEX040 Unclassified Extraction Failure
 Remediation: Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure.
+
+## PYEX041 Unsupported Real Number Extraction
+Remediation: Use nat, positive, N, Z, or Q for extracted computation; Rocq R has no faithful Python runtime mapping.
+
+## PYEX042 Unsupported IO Effect Extraction
+Remediation: Keep IO values at an async boundary or provide an explicit IO adapter remapping.
+
+## PYEX043 Unsupported Concurrency Scheduling Extraction
+Remediation: Model deterministic wrapper boundaries only; do not extract scheduler interleavings as executable Python.
+
+## PYEX044 Concurrency Marker Arity Mismatch
+Remediation: Use supported __PYCONC_* markers with the documented number of computational arguments.

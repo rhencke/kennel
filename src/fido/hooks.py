@@ -1,7 +1,5 @@
 """settings.local.json hook management for fido workers."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any

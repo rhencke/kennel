@@ -1,7 +1,5 @@
 """Top-level fido entry point — dispatches to 'serve' or 'task'."""
 
-from __future__ import annotations
-
 import sys
 
 

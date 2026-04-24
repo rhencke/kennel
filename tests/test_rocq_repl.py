@@ -1,6 +1,5 @@
 # pyright: reportPrivateUsage=false
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from io import StringIO
@@ -477,7 +476,12 @@ def test_cli_reports_errors() -> None:
 
 def test_source_map_symbols_ignore_entries_without_symbol(tmp_path: Path) -> None:
     path = tmp_path / "x.pymap"
-    path.write_text(json.dumps({"entries": [[], {"source_file": "x.v"}]}))
+    path.write_text(
+        "stability,python_start_line,python_start_col,python_end_line,"
+        "python_end_col,source_file,source_start_line,source_start_col,"
+        "source_end_line,source_end_col,kind,symbol\n"
+        "open,1,0,1,0,x.v,1,0,1,0,extraction,\n"
+    )
 
     assert ModelLoader(REPO, StringIO())._symbols_from_map(path) == {}
 

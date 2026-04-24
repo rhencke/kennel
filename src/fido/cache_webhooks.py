@@ -15,8 +15,6 @@ Required webhook subscriptions (verify per repo at startup):
   cache itself does not currently track PRs)
 """
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from typing import Any
 

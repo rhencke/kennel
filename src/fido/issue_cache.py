@@ -14,8 +14,6 @@ Thread-safe under Python 3.14t (free-threaded, no GIL): a single
 independent — pass each repo its own :class:`IssueTreeCache`.
 """
 
-from __future__ import annotations
-
 import logging
 import threading
 from collections.abc import Iterable
