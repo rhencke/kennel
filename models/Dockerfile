@@ -5,7 +5,7 @@ ARG ROCQ_IMAGE=rocq-python-extraction:ci
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS python-base
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git libatomic1 \
+    && apt-get install -y --no-install-recommends curl git jq libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
@@ -48,7 +48,7 @@ ARG GH_VERSION=2.89.0
 WORKDIR /workspace
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl jq \
     && curl -fsSL -o /tmp/gh.deb "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb" \
     && apt-get install -y --no-install-recommends /tmp/gh.deb \
     && rm -f /tmp/gh.deb \
@@ -207,15 +207,7 @@ RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
     && grep -F "PYTHON_EXTRACTION_DIAGNOSTIC_JSON:" /tmp/concurrency-interleave-unsupported.log \
     && grep -F '"code": "PYEX043"' /tmp/concurrency-interleave-unsupported.log
 
-FROM python-base AS python-deps
-
-WORKDIR /workspace
-COPY .python-version pyproject.toml uv.lock ./
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
-
-FROM python-deps AS python-workspace-base
+FROM fido-python-dev AS python-workspace-base
 
 WORKDIR /workspace
 COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./

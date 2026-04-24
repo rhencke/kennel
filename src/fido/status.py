@@ -1216,11 +1216,3 @@ def format_status(status: FidoStatus) -> str:
         lines.extend(section)
 
     return "\n".join(lines)
-
-
-def main() -> None:
-    print(format_status(collect()))
-
-
-if __name__ == "__main__":
-    main()

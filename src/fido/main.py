@@ -16,10 +16,6 @@ def main(
         from fido.github import GitHub
 
         task_main(args[1:], _GitHub=_GitHub or GitHub)
-    elif args and args[0] == "status":
-        from fido.status import main as status_main
-
-        status_main()
     elif args and args[0] == "gh-status":
         from fido.gh_status import main as gh_status_main
 

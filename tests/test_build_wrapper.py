@@ -25,6 +25,25 @@ def run_build(
     )
 
 
+def run_status(
+    payload: dict, tmp_path: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    payload_path = tmp_path / "status.json"
+    payload_path.write_text(json.dumps(payload))
+    merged_env = os.environ.copy()
+    merged_env["FIDO_STATUS_URL"] = payload_path.resolve().as_uri()
+    if env is not None:
+        merged_env.update(env)
+    return subprocess.run(
+        [str(FIDO), "status"],
+        cwd=REPO,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=merged_env,
+    )
+
+
 class TestBuildWrapper:
     def test_removes_stale_files_after_new_output(self, tmp_path: Path) -> None:
         output = tmp_path / "out"
@@ -246,7 +265,8 @@ class TestFidoLauncher:
         assert "prune)" in script
         assert "prune_buildkit" in script
         assert "status)" in script
-        assert "run_fido_cli_image_quiet --no-sync python -m fido.status" in script
+        assert "status_fast_path" in script
+        assert "http://127.0.0.1:${port}/status.json" in script
         assert "task)" in script
         assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
@@ -257,6 +277,189 @@ class TestFidoLauncher:
         assert "run_rocq_lsp_image -m fido.rocq_lsp" in script
         assert "run_rocq_lsp_image()" in script
         assert "run_fido_test_python_image()" in script
+
+    def test_status_fast_path_renders_repo_block_without_color(
+        self, tmp_path: Path
+    ) -> None:
+        result = run_status(
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 2,
+                        "last_crash_error": "RuntimeError: boom",
+                        "is_stuck": True,
+                        "worker_uptime_seconds": 125,
+                        "webhook_activities": [
+                            {
+                                "description": "triaging comment on PR #9",
+                                "elapsed_seconds": 12,
+                                "thread_id": 1,
+                            },
+                            {
+                                "description": "replying to review",
+                                "elapsed_seconds": 3,
+                                "thread_id": 2,
+                            },
+                        ],
+                        "session_owner": "worker-1",
+                        "session_alive": True,
+                        "session_pid": 4242,
+                        "session_dropped_count": 1,
+                        "claude_talker": {
+                            "repo_name": "owner/repo",
+                            "thread_id": 2,
+                            "kind": "webhook",
+                            "description": "one-shot",
+                            "claude_pid": 4242,
+                            "started_at": "2026-04-24T12:00:00+00:00",
+                        },
+                        "provider": "claude-code",
+                        "provider_status": {
+                            "provider": "claude-code",
+                            "window_name": "five_hour",
+                            "pressure": 0.96,
+                            "percent_used": 96,
+                            "resets_at": "2026-04-24T14:00:00+00:00",
+                            "unavailable_reason": None,
+                            "level": "paused",
+                            "warning": False,
+                            "paused": True,
+                        },
+                        "rescoping": True,
+                        "issue_cache": {
+                            "loaded": True,
+                            "open_issues": 7,
+                            "events_applied": 11,
+                            "events_dropped_stale": 2,
+                            "last_event_at": "2026-04-24T12:00:00+00:00",
+                            "last_reconcile_at": "2026-04-24T12:01:00+00:00",
+                            "last_reconcile_drift": 3,
+                        },
+                        "fido_running": True,
+                        "issue": 1,
+                        "issue_title": "Fix the thing",
+                        "issue_elapsed_seconds": 3661,
+                        "pr_number": 99,
+                        "pr_title": "Improve the thing",
+                        "pending": 2,
+                        "completed": 3,
+                        "current_task": "Do thing",
+                        "task_number": 1,
+                        "task_total": 4,
+                    }
+                ],
+                "rate_limit": {
+                    "rest": {
+                        "name": "core",
+                        "used": 7,
+                        "limit": 5000,
+                        "resets_at": "2026-04-24T13:00:00+00:00",
+                    },
+                    "graphql": {
+                        "name": "graphql",
+                        "used": 22,
+                        "limit": 5000,
+                        "resets_at": "2026-04-24T14:00:00+00:00",
+                    },
+                    "fetched_at": "2026-04-24T12:00:00+00:00",
+                },
+                "fido_uptime_seconds": 7322,
+            },
+            tmp_path,
+            env={"NO_COLOR": "1"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "\x1b[" not in result.stdout
+        assert "fido: UP (uptime 2h2m)" in result.stdout
+        assert (
+            "limits: claude-code 96% (five hour, resets 2026-04-24 14:00:00 UTC)"
+            in result.stdout
+        )
+        assert (
+            "GitHub: REST 7/5000 (2026-04-24 13:00:00 UTC), GraphQL 22/5000"
+            " (2026-04-24 14:00:00 UTC)" in result.stdout
+        )
+        assert (
+            "owner/repo: fido running — claude-code, crashes 2, up 2m, BUSY,"
+            " last crash: RuntimeError: boom" in result.stdout
+        )
+        assert "  claude-code: pid 4242 (dropped session 1)" in result.stdout
+        assert (
+            "  Cache:  7 open, applied 11, stale-dropped 2, reconciled drift 3"
+            in result.stdout
+        )
+        assert "  Issue: #1 — Fix the thing (elapsed 1h1m)" in result.stdout
+        assert "  PR:     #99 — Improve the thing" in result.stdout
+        assert (
+            "* Worker: paused for claude-code reset until 2026-04-24 14:00:00 UTC"
+            in result.stdout
+        )
+        assert "  ├─ webhook: replying to review (3s)" in result.stdout
+        assert "  └─ webhook: triaging comment on PR #9 (12s)" in result.stdout
+        assert "host: cpu load " in result.stdout
+
+    def test_status_fast_path_renders_with_force_color(self, tmp_path: Path) -> None:
+        result = run_status(
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                        "worker_uptime_seconds": None,
+                        "webhook_activities": [],
+                        "session_owner": None,
+                        "session_alive": False,
+                        "session_pid": None,
+                        "session_dropped_count": 0,
+                        "claude_talker": None,
+                        "provider": "claude-code",
+                        "provider_status": {
+                            "provider": "claude-code",
+                            "window_name": "five_hour",
+                            "pressure": 0.96,
+                            "percent_used": 96,
+                            "resets_at": "2026-04-24T14:00:00+00:00",
+                            "unavailable_reason": None,
+                            "level": "paused",
+                            "warning": False,
+                            "paused": True,
+                        },
+                        "rescoping": False,
+                        "issue_cache": None,
+                        "fido_running": True,
+                        "issue": None,
+                        "issue_title": None,
+                        "issue_elapsed_seconds": None,
+                        "pr_number": None,
+                        "pr_title": None,
+                        "pending": 0,
+                        "completed": 0,
+                        "current_task": None,
+                        "task_number": None,
+                        "task_total": None,
+                    }
+                ],
+                "rate_limit": None,
+                "fido_uptime_seconds": 1,
+            },
+            tmp_path,
+            env={"FORCE_COLOR": "1"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "\x1b[" in result.stdout
+        assert "\x1b[1mfido:\x1b[0m" in result.stdout
+        assert "\x1b[32mUP\x1b[0m" in result.stdout
+        assert "\x1b[1mhost:\x1b[0m" in result.stdout
+        assert "no assigned issues" in result.stdout
 
     def test_supervises_foreground_container_and_down_stops_by_name(self) -> None:
         script = FIDO.read_text()
@@ -503,7 +706,8 @@ class TestModelDockerfile:
     def test_python_checks_have_explicit_host_inputs(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
-        assert "FROM python-deps AS python-workspace-base" in dockerfile
+        assert "FROM fido-python-dev AS python-workspace-base" in dockerfile
+        assert "FROM python-deps AS python-workspace-base" not in dockerfile
         assert (
             "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
