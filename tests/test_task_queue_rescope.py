@@ -682,3 +682,160 @@ def test_cleanup_aborted_task() -> None:
     order_with_extras = [3, 1, 3, 2, 1]
     stripped = oracle.remove_from_order(1, order_with_extras)
     assert stripped == [3, 3, 2]
+
+
+def test_create_task_dedup_and_abort_decision_integration() -> None:
+    """Full integration: enqueue tasks with dedup, acquire a lease, then
+    enqueue higher/lower/equal priority tasks and check abort decisions."""
+    order: list[int] = []
+    rows: dict[int, object] = {}
+
+    # --- Phase 1: build a realistic queue via enqueue_task ---
+
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    thread_row = oracle.TaskRow(
+        task_title="Review follow-up",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=42,
+    )
+    ci_row = oracle.TaskRow(
+        task_title="Fix CI",
+        task_description="",
+        task_kind=oracle.TaskCI(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+
+    # Enqueue spec task (id 1)
+    order, rows, created_spec = _enqueue(1, spec_row, order, rows)
+    assert created_spec == 1
+
+    # Enqueue thread task (id 2)
+    order, rows, created_thread = _enqueue(2, thread_row, order, rows)
+    assert created_thread == 2
+    assert order == [1, 2]
+
+    # Dedup: re-enqueue same comment_id → returns existing thread task
+    thread_row_dup = oracle.TaskRow(
+        task_title="Different title same comment",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=42,
+    )
+    order, rows, dup_thread = _enqueue(3, thread_row_dup, order, rows)
+    assert dup_thread == 2  # deduped to existing
+    assert 3 not in [rows.get(k) for k in rows]  # task 3 never added to rows
+
+    # Dedup: re-enqueue same spec title while pending → returns existing
+    spec_row_dup = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="different desc",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, dup_spec = _enqueue(4, spec_row_dup, order, rows)
+    assert dup_spec == 1  # deduped to existing
+    assert order == [1, 2]
+
+    # Complete spec task, then re-enqueue same title → no dedup (original completed)
+    lease = oracle.begin_task(1, None, rows)
+    _, rows = oracle.complete_task(1, lease, rows)
+    order, rows, new_spec = _enqueue(5, spec_row, order, rows)
+    assert new_spec == 5  # fresh entry, not deduped
+    assert order == [1, 2, 5]
+
+    # --- Phase 2: acquire lease on spec task 5, test abort decisions ---
+
+    lease = oracle.begin_task(5, None, rows)
+    assert lease == 5
+
+    # CI task (rank 0) preempts spec (rank 2) → should abort
+    order, rows, created_ci = _enqueue(6, ci_row, order, rows)
+    assert created_ci == 6
+    assert oracle.should_abort_for_new_task(6, lease, rows) is True
+
+    # Thread task (rank 1) preempts spec (rank 2) → should abort
+    thread_row2 = oracle.TaskRow(
+        task_title="Another review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=99,
+    )
+    order, rows, created_thread2 = _enqueue(7, thread_row2, order, rows)
+    assert oracle.should_abort_for_new_task(7, lease, rows) is True
+
+    # Spec task (rank 2) does NOT preempt spec (rank 2) → no abort
+    spec_row2 = oracle.TaskRow(
+        task_title="Another feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_spec2 = _enqueue(8, spec_row2, order, rows)
+    assert oracle.should_abort_for_new_task(8, lease, rows) is False
+
+    # ASK task (no rank) does NOT cause abort
+    ask_row = oracle.TaskRow(
+        task_title="ASK: expand scope?",
+        task_description="",
+        task_kind=oracle.TaskAsk(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_ask = _enqueue(9, ask_row, order, rows)
+    assert oracle.should_abort_for_new_task(9, lease, rows) is False
+
+    # DEFER task (no rank) does NOT cause abort
+    defer_row = oracle.TaskRow(
+        task_title="DEFER: out of scope",
+        task_description="",
+        task_kind=oracle.TaskDefer(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_defer = _enqueue(10, defer_row, order, rows)
+    assert oracle.should_abort_for_new_task(10, lease, rows) is False
+
+    # Same task as active lease → no abort (self-reference)
+    assert oracle.should_abort_for_new_task(5, lease, rows) is False
+
+    # No lease held → no abort regardless of priority
+    assert oracle.should_abort_for_new_task(6, None, rows) is False
+
+    # --- Phase 3: abort, pick next, verify CI-first ordering ---
+
+    aborted_lease = oracle.abort_task(5, lease)
+    assert aborted_lease is None
+
+    # pick_next_task should select CI (rank 0) first
+    next_task = oracle.pick_next_task(order, rows)
+    assert next_task == 6  # CI task
+
+    # --- Phase 4: switch lease to CI, thread no longer preempts ---
+
+    ci_lease = oracle.begin_task(6, None, rows)
+    assert ci_lease == 6
+    # Thread (rank 1) does NOT preempt CI (rank 0)
+    assert oracle.should_abort_for_new_task(7, ci_lease, rows) is False
+    # Another CI (rank 0) does NOT preempt CI (rank 0)
+    ci_row2 = oracle.TaskRow(
+        task_title="Fix CI again",
+        task_description="",
+        task_kind=oracle.TaskCI(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_ci2 = _enqueue(11, ci_row2, order, rows)
+    assert oracle.should_abort_for_new_task(11, ci_lease, rows) is False
