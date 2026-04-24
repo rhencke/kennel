@@ -10,6 +10,7 @@ from before the copilot provider existed; they were moved here once both
 providers needed them so the naming stopped lying about scope.
 """
 
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from fido.rocq.transition import State as _FsmState
 from fido.rocq.transition import WorkerAcquire as _FsmWorkerAcquire
 from fido.rocq.transition import WorkerRelease as _FsmWorkerRelease
 from fido.rocq.transition import transition as _fsm_transition
+
+log = logging.getLogger(__name__)
 
 
 class ProviderID(StrEnum):
@@ -815,6 +818,47 @@ class ProviderAgent(Protocol):
     def extract_session_id(self, output: str) -> str:
         """Extract a session id from provider-specific raw one-shot output."""
         ...
+
+
+def safe_voice_turn(
+    agent: ProviderAgent,
+    content: str,
+    *,
+    model: ProviderModel | None = None,
+    system_prompt: str | None = None,
+    log_prefix: str = "safe_voice_turn",
+) -> str | None:
+    """Run a voice turn with ``retry_on_preempt=True``; return ``None`` on empty.
+
+    Drop-in replacement for ``agent.run_turn(...)`` call sites that previously
+    raised on empty output.  Callers that used to do::
+
+        result = agent.run_turn(prompt, model=..., retry_on_preempt=True)
+        if not result:
+            raise ValueError("...")
+
+    can instead do::
+
+        result = safe_voice_turn(agent, prompt, model=..., log_prefix="...")
+        if result is None:
+            # handle empty — fall back, skip, or re-raise as appropriate
+            ...
+
+    The ``log_prefix`` is included in the warning so call-site context shows
+    up in the log without importing or constructing anything extra.
+    """
+    result = agent.run_turn(
+        content,
+        model=model,
+        system_prompt=system_prompt,
+        retry_on_preempt=True,
+    )
+    if not result:
+        log.warning(
+            "%s: run_turn returned empty after retries — falling back", log_prefix
+        )
+        return None
+    return result
 
 
 class ProviderAPI(Protocol):

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 from fido.provider import (
     ProviderID,
@@ -6,6 +7,7 @@ from fido.provider import (
     ProviderLimitWindow,
     ProviderModel,
     ProviderPressureStatus,
+    safe_voice_turn,
 )
 
 
@@ -213,3 +215,56 @@ class TestProviderPalette:
                     f"{pid}: bright_fg={palette.bright_fg} vs black → {ratio:.2f}:1"
                 )
         assert not failures, "\n".join(failures)
+
+
+class TestSafeVoiceTurn:
+    """safe_voice_turn: retry_on_preempt + None-on-empty contract."""
+
+    def _agent(self, return_value: str = "ok") -> MagicMock:
+        agent = MagicMock()
+        agent.run_turn.return_value = return_value
+        agent.voice_model = "claude-opus-4-6"
+        return agent
+
+    def test_returns_result_on_non_empty_output(self) -> None:
+        agent = self._agent("Hello!")
+        result = safe_voice_turn(agent, "prompt", model=agent.voice_model)
+        assert result == "Hello!"
+
+    def test_always_passes_retry_on_preempt(self) -> None:
+        agent = self._agent("reply")
+        safe_voice_turn(agent, "prompt", model=agent.voice_model)
+        _, kwargs = agent.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
+
+    def test_returns_none_on_empty_string(self) -> None:
+        agent = self._agent("")
+        result = safe_voice_turn(agent, "prompt")
+        assert result is None
+
+    def test_warns_on_empty_output(self, caplog) -> None:
+        import logging
+
+        agent = self._agent("")
+        with caplog.at_level(logging.WARNING, logger="fido.provider"):
+            safe_voice_turn(agent, "prompt", log_prefix="my_caller")
+        assert "my_caller" in caplog.text
+        assert "empty" in caplog.text
+
+    def test_passes_model_and_system_prompt(self) -> None:
+        from fido.provider import ProviderModel
+
+        agent = self._agent("ok")
+        model = ProviderModel("claude-haiku-4-5")
+        safe_voice_turn(agent, "prompt", model=model, system_prompt="be brief")
+        _, kwargs = agent.run_turn.call_args
+        assert kwargs["model"] == model
+        assert kwargs["system_prompt"] == "be brief"
+
+    def test_default_log_prefix_used_when_not_specified(self, caplog) -> None:
+        import logging
+
+        agent = self._agent("")
+        with caplog.at_level(logging.WARNING, logger="fido.provider"):
+            safe_voice_turn(agent, "prompt")
+        assert "safe_voice_turn" in caplog.text
