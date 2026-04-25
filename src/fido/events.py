@@ -11,7 +11,12 @@ from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
-from fido.provider import ProviderAgent, safe_voice_turn, set_thread_repo
+from fido.provider import (
+    ProviderAgent,
+    safe_voice_turn,
+    set_thread_kind,
+    set_thread_repo,
+)
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
@@ -1595,6 +1600,12 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
+        # Register as "webhook" so the session talker reflects the true nature of
+        # this thread: it is triggered by webhooks and should not be treated as the
+        # worker for preemption purposes.  Without this, current_thread_kind()
+        # defaults to "worker", causing real webhooks to fire _fire_worker_cancel
+        # against the reorder thread and misidentify it as the running worker (#955).
+        set_thread_kind("webhook")
         if repo_cfg is not None:
             set_thread_repo(repo_cfg.name)
         if registry is not None and repo_cfg is not None:
@@ -1614,6 +1625,7 @@ def _reorder_tasks_background(
                 registry.set_rescoping(repo_cfg.name, False)
             if repo_cfg is not None:
                 set_thread_repo(None)
+            set_thread_kind(None)
 
     t = threading.Thread(
         target=run_loop,

@@ -848,6 +848,26 @@ class TestClaudeSessionSend:
         user_idx = next(i for i, w in enumerate(writes) if '"fresh message"' in w)
         assert control_idx < user_idx
 
+    def test_skips_write_when_cancel_set_after_drain(self, tmp_path: Path) -> None:
+        """If a preempt fires during _drain_to_boundary, send() must not write
+        the new message to the dirty stream (#955)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True  # prior turn in flight
+        # selector returns no data; we rely on _cancel short-circuiting drain
+        session._selector = MagicMock(return_value=([], [], []))
+
+        # Simulate preempt firing: drain returns early, _cancel stays set
+        session._cancel.set()
+        session._preempt_pending.set()
+
+        session.send("should not be written")
+        # No user message written to stdin — only the control_request
+        writes = [c.args[0] for c in proc.stdin.write.call_args_list]
+        assert not any('"should not be written"' in w for w in writes)
+        # _in_turn left True (drain bailed early) — iter_events will handle it
+        assert session._in_turn is True
+
 
 class TestClaudeSessionDrainToBoundary:
     def test_returns_early_when_proc_dead(self, tmp_path: Path) -> None:
@@ -939,6 +959,24 @@ class TestClaudeSessionDrainToBoundary:
             session._drain_to_boundary(deadline=0.01)
         mock_recover.assert_called_once()
         assert session._in_turn is False
+
+    def test_returns_early_on_cancel_set(self, tmp_path: Path) -> None:
+        """When _cancel fires mid-drain, _drain_to_boundary exits without
+        clearing _in_turn so send() can detect the cancel and skip writing."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._in_turn = True
+        # selector returns no-data so we hit the cancel check on each loop
+        session._selector = MagicMock(return_value=([], [], []))
+        # Set cancel immediately — simulates preempt arriving during drain
+        session._cancel.set()
+        session._preempt_pending.set()
+        with patch.object(session, "recover") as mock_recover:
+            session._drain_to_boundary(deadline=5.0)
+        # _in_turn stays True so send() knows not to write
+        assert session._in_turn is True
+        # recover was NOT called — we exited early, not via timeout
+        mock_recover.assert_not_called()
 
     def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
         import json as _json

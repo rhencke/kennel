@@ -4121,6 +4121,76 @@ class TestReorderTasksBackground:
         self._run_thread(started)
         assert seen == [None]
 
+    def test_sets_thread_kind_webhook_during_reorder(self, tmp_path: Path) -> None:
+        """Thread kind is set to 'webhook' while the reorder loop runs (#955).
+
+        The reorder thread must not register as 'worker' in the session talker —
+        real webhooks would fire the cancel mechanism against it thinking it is
+        the actual worker."""
+        from fido.provider import current_thread_kind
+
+        started: list = []
+        seen: list = []
+
+        def mock_reorder(work_dir, commit_summary, **kwargs):
+            seen.append(current_thread_kind())
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        assert seen == ["webhook"]
+
+    def test_clears_thread_kind_after_reorder(self, tmp_path: Path) -> None:
+        """Thread kind is cleared in the finally block after the reorder loop."""
+        from fido.provider import current_thread_kind, set_thread_kind
+
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+
+        set_thread_kind("webhook")  # pre-set to confirm the finally block clears it
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+        )
+        self._run_thread(started)
+        # run_loop must clear kind in its finally block so the caller's
+        # thread-local state is not polluted.
+        assert current_thread_kind() == "worker"  # default when not set
+
+    def test_clears_thread_kind_on_reorder_exception(self, tmp_path: Path) -> None:
+        """Thread kind is cleared even when reorder raises."""
+        from fido.provider import current_thread_kind
+
+        started: list = []
+
+        def boom(work_dir, commit_summary, **kwargs):
+            raise RuntimeError("reorder exploded")
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=boom,
+            _coalesce_state={},
+        )
+        with pytest.raises(RuntimeError, match="reorder exploded"):
+            self._run_thread(started)
+        assert current_thread_kind() == "worker"  # default when not set
+
 
 class TestNotifyThreadChange:
     def _cfg(self, tmp_path: Path) -> Config:

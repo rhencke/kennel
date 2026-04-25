@@ -1034,7 +1034,22 @@ class CopilotCLISession(OwnedSession):
             # worker — matches the shared decision gate used for claude.
             # Another webhook waiting behind a webhook just queues on the
             # lock; workers never cancel anyone.
-            provider.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+            preempted, current_kind = provider.try_preempt_worker(
+                self._repo_name, self._fire_worker_cancel
+            )
+            if preempted:
+                log.info(
+                    "CopilotCLISession: preempting worker (tid=%d, repo=%s)",
+                    threading.get_ident(),
+                    self._repo_name,
+                )
+            else:
+                log.info(
+                    "CopilotCLISession: queuing behind %s holder (tid=%d, repo=%s)",
+                    current_kind or "none",
+                    threading.get_ident(),
+                    self._repo_name,
+                )
             self._lock.acquire()
         self._thread_state.waited = waited
         with self._owner_lock:

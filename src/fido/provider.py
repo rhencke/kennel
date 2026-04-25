@@ -649,10 +649,28 @@ class OwnedSession:
         When *preempt_worker* is true, fires the caller's
         :meth:`_fire_worker_cancel` once upfront (via
         :func:`try_preempt_worker`) so a currently-running worker turn
-        aborts immediately rather than being waited out.
+        aborts immediately rather than being waited out.  Logs the
+        outcome — preempted vs. queuing — so webhook latency spikes
+        are visible in the log without needing to trace ``session.prompt``
+        calls (fixes the missing diagnostic from #955).
         """
         if preempt_worker:
-            try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+            preempted, current_kind = try_preempt_worker(
+                self._repo_name, self._fire_worker_cancel
+            )
+            if preempted:
+                log.info(
+                    "hold_for_handler: preempting worker (tid=%d, repo=%s)",
+                    threading.get_ident(),
+                    self._repo_name,
+                )
+            else:
+                log.info(
+                    "hold_for_handler: queuing behind %s holder (tid=%d, repo=%s)",
+                    current_kind or "none",
+                    threading.get_ident(),
+                    self._repo_name,
+                )
         with self:  # type: ignore[attr-defined]
             yield self
 
