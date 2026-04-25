@@ -481,6 +481,13 @@ class ClaudeSession(OwnedSession):
         # other sessions' access — a plain threading.Lock self-deadlocks).
         self._lock = threading.RLock()
         self._cancel = threading.Event()
+        # Thread id that most recently fired :attr:`_cancel` via
+        # :meth:`_fire_worker_cancel`.  Used by :meth:`__enter__` to clear
+        # the signal when the firing thread itself acquires the lock — that
+        # cancel was meant for the previous holder (who has since released),
+        # not for the firer's own first turn (#973).  ``None`` when no
+        # outstanding firing.
+        self._cancel_fired_by_tid: int | None = None
         self._repo_name = repo_name
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
@@ -776,6 +783,15 @@ class ClaudeSession(OwnedSession):
         # We hold the lock now; any preempter waiting on this
         # (wait_for_pending_preempt) can wake.
         self._preempt_pending.clear()
+        # If the entering thread is the same one that fired the most recent
+        # cancel, that signal was meant for the previous holder (who has
+        # since released the lock).  Clear it so the firer's own first turn
+        # is not aborted by it (#973).  When the cancel was fired by some
+        # other thread (the #786 lock-handoff race), leave it set —
+        # iter_events will gate on _preempt_pending and consume it.
+        if self._cancel_fired_by_tid == threading.get_ident():
+            self._cancel.clear()
+            self._cancel_fired_by_tid = None
         depth = self._bump_entry_depth()
         if depth == 1:
             kind = self._pending_talker_kind or provider.current_thread_kind()
@@ -927,6 +943,7 @@ class ClaudeSession(OwnedSession):
         hang the next :meth:`consume_until_result` indefinitely.
         """
         self._cancel.set()
+        self._cancel_fired_by_tid = threading.get_ident()
         self._preempt_pending.set()
         self._wake()
         if self._in_turn:
