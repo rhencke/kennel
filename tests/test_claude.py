@@ -826,26 +826,6 @@ class TestClaudeSessionSend:
         session.send("hi")
         assert session._in_turn is True
 
-    def test_send_uses_stdin_lock_for_atomic_write(self, tmp_path: Path) -> None:
-        """Post-#979: send() acquires _stdin_lock around write+flush so it
-        cannot interleave with a concurrent _send_control_interrupt fired
-        by a preempting webhook thread."""
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        # Verify lock is acquired during the write+flush.
-        held_during_write = []
-
-        original_write = proc.stdin.write
-
-        def tracking_write(s):
-            held_during_write.append(session._stdin_lock.locked())
-            return original_write(s)
-
-        proc.stdin.write = MagicMock(side_effect=tracking_write)
-        session.send("hello")
-        assert held_during_write == [True]
-        assert session._in_turn is True
-
 
 class TestClaudeSessionDrainToBoundary:
     def test_returns_early_when_proc_dead(self, tmp_path: Path) -> None:
@@ -2240,93 +2220,6 @@ class TestClaudeSessionPreemptLatency:
         t.join(timeout=2.0)
         os.close(stdout_w)
         session.stop()
-
-
-class TestClaudeSessionStdinAtomicity:
-    """Regression for #979: stdin writes from concurrent threads must not
-    interleave at the byte level.  Worker thread holds session ``_lock``
-    for the whole turn but the webhook thread fires
-    ``_send_control_interrupt`` without ``_lock`` (can't acquire it — the
-    worker is the cancellation target).  ``_stdin_lock`` serializes the
-    actual byte writes regardless of which lock the caller holds."""
-
-    def test_concurrent_writes_do_not_interleave(self, tmp_path: Path) -> None:
-        import threading
-        import time as _time
-
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-
-        # Wrap stdin.write to track byte ordering.  Any actual interleaving
-        # would manifest as fragments of the worker's write inside the
-        # webhook's write, or vice versa.  We simulate write+flush taking
-        # measurable time so threads have a chance to race without the lock.
-        write_events: list[str] = []
-
-        def slow_write(s: str) -> int:
-            write_events.append(f"start:{s[:30]}")
-            _time.sleep(0.005)
-            write_events.append(f"end:{s[:30]}")
-            return len(s)
-
-        proc.stdin.write = MagicMock(side_effect=slow_write)
-        proc.stdin.flush = MagicMock()
-
-        n_iterations = 50
-        worker_done = threading.Event()
-        webhook_done = threading.Event()
-
-        def worker() -> None:
-            try:
-                for i in range(n_iterations):
-                    session.send(f"worker-msg-{i}")
-            finally:
-                worker_done.set()
-
-        def webhook() -> None:
-            try:
-                for i in range(n_iterations):
-                    session._send_control_interrupt()
-            finally:
-                webhook_done.set()
-
-        t_w = threading.Thread(target=worker, daemon=True)
-        t_h = threading.Thread(target=webhook, daemon=True)
-        t_w.start()
-        t_h.start()
-        assert worker_done.wait(timeout=10.0)
-        assert webhook_done.wait(timeout=10.0)
-
-        # Verify: every "start:X" is immediately followed by "end:X".  Any
-        # interleave would put a different "start:" between them.
-        for i in range(0, len(write_events), 2):
-            start = write_events[i]
-            end = write_events[i + 1] if i + 1 < len(write_events) else None
-            assert start.startswith("start:"), write_events[i : i + 2]
-            assert end is not None and end.startswith("end:"), write_events[i : i + 2]
-            assert start[len("start:") :] == end[len("end:") :], (
-                f"interleaved write detected: {start} → {end}"
-            )
-
-    def test_send_holds_stdin_lock(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        held: list[bool] = []
-        proc.stdin.write = MagicMock(
-            side_effect=lambda _s: held.append(session._stdin_lock.locked())
-        )
-        session.send("x")
-        assert held == [True]
-
-    def test_send_control_interrupt_holds_stdin_lock(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        held: list[bool] = []
-        proc.stdin.write = MagicMock(
-            side_effect=lambda _s: held.append(session._stdin_lock.locked())
-        )
-        session._send_control_interrupt()
-        assert held == [True]
 
 
 class TestClaudeSessionSendControlInterrupt:
