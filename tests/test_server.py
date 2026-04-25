@@ -2956,6 +2956,111 @@ class TestProcessAction:
         mock_unblock.assert_not_called()
 
 
+class TestSynchronousPreemption:
+    """Verify that preemption fires on the HTTP handler thread, before the
+    background thread spawns (#955).
+
+    ``_do_post_inner`` calls ``session.preempt_worker()`` synchronously, then
+    delegates to ``_fn_spawn_bg``.  The ordering guarantee is what fixes the
+    race: the cancel signal reaches the provider *before* the handler thread
+    can be de-scheduled and the worker turn can complete.
+    """
+
+    def _payload(self, repo_owner: str = "owner") -> dict:
+        return {
+            "repository": {
+                "full_name": f"{repo_owner}/repo",
+                "owner": {"login": repo_owner},
+            },
+        }
+
+    def _issue_comment_payload(self, comment_id: int = 900) -> dict:
+        """An issue_comment on a PR — produces an Action with ``comment_body``
+        set, so ``_action_uses_model`` returns True."""
+        return {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": comment_id,
+                "body": "please fix this",
+                "user": {"login": "owner"},
+                "html_url": f"https://github.com/owner/repo/pull/80#issuecomment-{comment_id}",
+            },
+            "issue": {
+                "number": 80,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/owner/repo/pulls/80"
+                },
+            },
+        }
+
+    def test_preempt_fires_before_background_spawn(self, server: tuple) -> None:
+        """``session.preempt_worker()`` must be called before ``_fn_spawn_bg``
+        for a model-needing webhook action."""
+        url, cfg = server
+
+        call_order: list[str] = []
+
+        mock_session = MagicMock()
+        mock_session.preempt_worker.side_effect = lambda: call_order.append("preempt")
+        WebhookHandler.registry.get_session.return_value = mock_session
+
+        original_spawn = _capturing_spawn_bg
+
+        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+            call_order.append("spawn")
+            original_spawn(fn, args)
+
+        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
+        assert status == 200
+        assert call_order == ["preempt", "spawn"]
+
+    def test_no_preempt_for_non_model_action(self, server: tuple) -> None:
+        """A PR-merge webhook does not use the model — ``preempt_worker`` must
+        NOT be called."""
+        url, cfg = server
+
+        mock_session = MagicMock()
+        WebhookHandler.registry.get_session.return_value = mock_session
+        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler._fn_create_task = MagicMock()
+
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 81, "merged": True},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        mock_session.preempt_worker.assert_not_called()
+
+    def test_no_preempt_when_session_is_none(self, server: tuple) -> None:
+        """If ``registry.get_session()`` returns None, the handler must not
+        crash — there is simply no session to preempt."""
+        url, cfg = server
+
+        WebhookHandler.registry.get_session.return_value = None
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(
+            url, cfg, "issue_comment", self._issue_comment_payload(901)
+        )
+        assert status == 200
+
+
 class TestPopulateMemberships:
     def test_populates_from_get_collaborators(self, tmp_path: Path) -> None:
         from fido.config import RepoMembership

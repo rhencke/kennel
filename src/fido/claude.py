@@ -903,12 +903,13 @@ class ClaudeSession(OwnedSession):
         self.recover()
 
     def _fire_worker_cancel(self) -> None:
-        """Provider-specific cancel mechanism handed to
-        :func:`try_preempt_worker`.  Sets the cancel event, wakes the
-        worker's ``select()`` so it exits its turn early, and — when a
-        turn is actually in flight — writes a stream-json
-        ``control_request`` so claude aborts the running tool on its
-        side rather than completing it first.
+        """Provider-specific cancel mechanism used by
+        :meth:`~fido.provider.OwnedSession.preempt_worker` and
+        :meth:`~fido.provider.OwnedSession.hold_for_handler`.  Sets the cancel
+        event, wakes the worker's ``select()`` so it exits its turn early, and
+        — when a turn is actually in flight — writes a stream-json
+        ``control_request`` so claude aborts the running tool on its side
+        rather than completing it first.
 
         Also sets :attr:`_preempt_pending` so :meth:`iter_events` does
         not clobber the cancel signal at the start of the very next
@@ -920,8 +921,7 @@ class ClaudeSession(OwnedSession):
 
         Gated on :attr:`_in_turn` because ``control_request`` sent to an
         idle subprocess never elicits a ``type=result`` back and would
-        hang the next :meth:`consume_until_result` indefinitely (hazard
-        called out in the original :meth:`prompt` docstring).
+        hang the next :meth:`consume_until_result` indefinitely.
         """
         self._cancel.set()
         self._preempt_pending.set()
@@ -984,45 +984,18 @@ class ClaudeSession(OwnedSession):
         """Send *content* as a user message on the persistent session and
         return the result.
 
-        The preempt path is kind-aware (fix for #637):
-
-        - **Webhook caller + worker currently holding the session** — set the
-          cancel event, wake the worker's ``select()``, and send a stream-json
-          ``control_request`` interrupt so claude aborts the running tool
-          immediately instead of completing it first.  This converts the old
-          yield-at-boundary behaviour (which waited for the current tool — a
-          pytest or long ``rg`` — to finish) into genuine mid-tool preemption.
-        - **Webhook caller + another webhook currently holding the session**
-          — do NOT cancel.  Webhooks never preempt each other; the second
-          webhook queues on the lock.  Without this guard a bursty webhook
-          stream makes every handler cancel the previous one and nobody's
-          reply lands.
-        - **Worker caller (its own retry after being preempted, etc.)** —
-          also do NOT cancel.  Workers wait on the lock naturally rather
-          than cancelling whichever webhook is serving a reply.
-
-        After the preempt decision, acquires the session lock and runs one
-        turn: optional :meth:`switch_model`, :meth:`send` (which drains any
-        lingering boundary events from the aborted turn), and
+        Acquires the session lock and runs one turn: optional
+        :meth:`switch_model`, :meth:`send` (which drains any lingering
+        boundary events from a prior aborted turn), and
         :meth:`consume_until_result`.
+
+        Preemption (cancelling a running worker turn so a webhook handler can
+        acquire the lock promptly) is handled upstream: the HTTP handler fires
+        :meth:`~fido.provider.OwnedSession.preempt_worker` synchronously
+        (#955), and :meth:`~fido.provider.OwnedSession.hold_for_handler` fires
+        a second preemption as a safety net before acquiring the lock (#658).
+        There is no preemption logic here.
         """
-        preempted, current_kind = provider.try_preempt_worker(
-            self._repo_name, self._fire_worker_cancel
-        )
-        if preempted:
-            self._preempt_pending.set()
-            log.info(
-                "session.prompt: preempting worker (tid=%d, model=%s)",
-                threading.get_ident(),
-                self._model if model is None else model_name(model),
-            )
-        else:
-            log.info(
-                "session.prompt: queuing behind %s holder (tid=%d, model=%s)",
-                current_kind or "none",
-                threading.get_ident(),
-                self._model if model is None else model_name(model),
-            )
         self._pending_talker_kind = provider.current_thread_kind()
         tid = threading.get_ident()
         t_start = time.monotonic()

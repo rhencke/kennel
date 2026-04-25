@@ -317,6 +317,14 @@ class PromptSession(Protocol):
         #658)."""
         ...
 
+    def preempt_worker(self) -> bool:
+        """Fire the cancel signal synchronously if a worker currently holds
+        the session.  Safe to call from any thread — does not require the
+        caller's thread kind to be set.  Returns True if a worker was
+        preempted, False if the session was idle or held by a webhook.
+        Implemented by :class:`OwnedSession` (fix for #955)."""
+        ...
+
 
 # ── Provider-neutral session coordination ────────────────────────────────────
 # At most one thread per repo may be "talking to" a provider subprocess at any
@@ -633,6 +641,41 @@ class OwnedSession:
         """Abort the current lock-holder's turn.  Subclasses override
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
+
+    def preempt_worker(self) -> bool:
+        """Fire the cancel signal synchronously if a worker currently holds
+        the session.
+
+        Intended to be called from the HTTP handler thread in
+        :meth:`~fido.server.WebhookHandler._do_post_inner`, **before** the
+        background handler thread is spawned, so the cancel fires at
+        webhook-arrival time rather than at background-thread-schedule time
+        (fix for #955).
+
+        Does not require the caller's thread kind to be ``"webhook"`` —
+        the caller *is* the HTTP handler, so we know it's a webhook context
+        without checking :func:`current_thread_kind`.
+
+        Returns ``True`` if a worker was preempted, ``False`` if the session
+        was idle or already held by another webhook.
+        """
+        current = get_talker(self._repo_name) if self._repo_name else None
+        current_kind = current.kind if current is not None else None
+        if current_kind == "worker":
+            self._fire_worker_cancel()
+            log.info(
+                "webhook: preempting worker synchronously (repo=%s, tid=%d)",
+                self._repo_name,
+                threading.get_ident(),
+            )
+            return True
+        log.info(
+            "webhook: no worker to preempt — holder is %s (repo=%s, tid=%d)",
+            current_kind or "none",
+            self._repo_name,
+            threading.get_ident(),
+        )
+        return False
 
     @contextmanager
     def hold_for_handler(

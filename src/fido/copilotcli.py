@@ -1008,11 +1008,12 @@ class CopilotCLISession(OwnedSession):
         self._runtime.stop()
 
     def _fire_worker_cancel(self) -> None:
-        """Provider-specific cancel mechanism handed to
-        :func:`provider.try_preempt_worker`.  Asks the Copilot ACP runtime to
-        cancel the currently-active prompt so the worker's turn returns with
-        ``stop_reason="cancelled"`` and releases the session lock.  No-op if
-        there is no active session id or the runtime is already down.
+        """Provider-specific cancel mechanism used by
+        :meth:`~fido.provider.OwnedSession.preempt_worker` and
+        :meth:`~fido.provider.OwnedSession.hold_for_handler`.  Asks the Copilot
+        ACP runtime to cancel the currently-active prompt so the worker's turn
+        returns with ``stop_reason="cancelled"`` and releases the session lock.
+        No-op if there is no active session id or the runtime is already down.
         """
         session_id = self._session_id
         if session_id is not None and self._runtime.is_alive():
@@ -1030,26 +1031,10 @@ class CopilotCLISession(OwnedSession):
         if waited:
             with self._preempt_condition:
                 self._pending_preempts += 1
-            # Only fire the runtime cancel when a webhook is preempting a
-            # worker — matches the shared decision gate used for claude.
-            # Another webhook waiting behind a webhook just queues on the
-            # lock; workers never cancel anyone.
-            preempted, current_kind = provider.try_preempt_worker(
-                self._repo_name, self._fire_worker_cancel
-            )
-            if preempted:
-                log.info(
-                    "CopilotCLISession: preempting worker (tid=%d, repo=%s)",
-                    threading.get_ident(),
-                    self._repo_name,
-                )
-            else:
-                log.info(
-                    "CopilotCLISession: queuing behind %s holder (tid=%d, repo=%s)",
-                    current_kind or "none",
-                    threading.get_ident(),
-                    self._repo_name,
-                )
+            # Preemption (cancelling a running worker turn) is handled
+            # upstream: the HTTP handler fires preempt_worker() synchronously
+            # (#955) and hold_for_handler fires a second preemption before the
+            # lock is acquired (#658).  Nothing to do here except wait.
             self._lock.acquire()
         self._thread_state.waited = waited
         with self._owner_lock:

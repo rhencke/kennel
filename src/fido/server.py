@@ -705,6 +705,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
         elif is_default_push:
             self._self_restart(repo_name, reason=f"push to {default_branch}")
 
+        # Fire the preemption signal synchronously on the HTTP handler thread
+        # BEFORE spawning the background thread (#955).  If a worker turn is
+        # in flight, this cancels it immediately — eliminating the race where
+        # the background thread might be delayed past the end of the turn and
+        # arrive too late to preempt.  The background thread's hold_for_handler
+        # still fires a second preempt in case the worker starts a new turn in
+        # the window between this cancel and the background thread acquiring
+        # the session lock.
+        if action and self._action_uses_model(action):
+            session = self.registry.get_session(repo_cfg.name)
+            if session is not None:
+                session.preempt_worker()
+
         # Process in background thread so we don't block the server.
         if action:
             type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
