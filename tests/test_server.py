@@ -3210,6 +3210,56 @@ class TestBootstrapIssueCaches:
         # Second repo should still be bootstrapped.
         mock_cache_r2.load_inventory.assert_called_once()
 
+    def test_wakes_worker_after_successful_load(self, tmp_path: Path) -> None:
+        """Worker is woken after a successful cache load so it rescans immediately (#995)."""
+        from fido.server import bootstrap_issue_caches
+
+        repos = self._make_repos(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.return_value = []
+        mock_registry = MagicMock()
+        mock_registry.get_issue_cache.return_value = MagicMock()
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        mock_registry.wake.assert_called_once_with("owner/repo")
+
+    def test_wakes_each_repo_worker_on_success(self, tmp_path: Path) -> None:
+        """Each successfully-loaded repo wakes its own worker thread (#995)."""
+        from fido.server import bootstrap_issue_caches
+
+        repos = {
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
+        }
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.return_value = []
+        mock_registry = MagicMock()
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        assert mock_registry.wake.call_count == 2
+        mock_registry.wake.assert_any_call("a/r1")
+        mock_registry.wake.assert_any_call("b/r2")
+
+    def test_does_not_wake_worker_on_failed_load(self, tmp_path: Path) -> None:
+        """A failed bootstrap must not wake the worker — the cache is cold (#995)."""
+        from fido.server import bootstrap_issue_caches
+
+        repos = {
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
+        }
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_registry = MagicMock()
+        mock_registry.get_issue_cache.return_value = MagicMock()
+
+        bootstrap_issue_caches(repos, mock_gh, mock_registry)
+
+        # Only b/r2 succeeded — only that worker should be woken.
+        mock_registry.wake.assert_called_once_with("b/r2")
+
 
 class TestRun:
     """Tests for the run() entry point."""
