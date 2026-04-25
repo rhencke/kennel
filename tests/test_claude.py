@@ -1824,6 +1824,47 @@ class TestClaudeSessionLock:
         session._lock.release()
         session.stop()
 
+    def test_enter_uses_thread_kind_not_shared_attribute(self, tmp_path: Path) -> None:
+        """Regression for #981: __enter__ must read the talker kind from
+        the calling thread's thread-local (provider.current_thread_kind()),
+        NOT from any session-level shared attribute that another thread
+        could have written.
+
+        Pre-fix the session had a ``_pending_talker_kind`` instance
+        attribute that prompt() wrote and __enter__ read.  Cross-thread
+        race: a webhook thread's "webhook" write could clobber a worker
+        thread's "worker" write between the worker's prompt() and the
+        worker's __enter__, registering the worker with kind="webhook".
+
+        This test simulates that hazard directly: the *current thread* is
+        a worker, but a session-level "webhook" annotation has been
+        applied (representing what another thread might have written).
+        With the fix, __enter__ ignores any such annotation and uses the
+        current thread's kind.  Without the fix, __enter__ would read the
+        annotation and mis-register.
+        """
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        # Plant a stale "webhook" annotation as if another thread wrote it.
+        # Modern (fix) code has no such attribute; setting it must be a
+        # no-op for the kind decision.
+        session._pending_talker_kind = "webhook"  # type: ignore[attr-defined]
+
+        provider.set_thread_kind("worker")
+        try:
+            session.__enter__()
+            talker = provider.get_talker(session._repo_name)
+            assert talker is not None
+            assert talker.kind == "worker", (
+                f"worker thread mis-registered as {talker.kind!r} — "
+                "kind was read from session-shared state, not the "
+                "thread's own thread-local"
+            )
+            session.__exit__(None, None, None)
+        finally:
+            provider.set_thread_kind(None)
+        session.stop()
+
     def test_enter_preserves_cancel_event(self, tmp_path: Path) -> None:
         # __enter__ must NOT clear _cancel — a signal that lands between one
         # holder's __exit__ and the next holder's iter_events() must survive.

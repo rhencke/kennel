@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import requests as _requests
 
@@ -549,10 +549,6 @@ class ClaudeSession(OwnedSession):
         # :attr:`_cancel` — starving the preempter for a full worker turn.
         # See yield-starvation discussion in #499 comments.
         self._preempt_pending = threading.Event()
-        # Set by :meth:`prompt` just before entering the lock context so
-        # :meth:`__enter__` can register the talker with the correct kind
-        # (``"worker"`` vs ``"webhook"``).  Cleared inside :meth:`__enter__`.
-        self._pending_talker_kind: Literal["worker", "webhook"] | None = None
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
@@ -784,11 +780,16 @@ class ClaudeSession(OwnedSession):
         """Acquire the session lock, serializing send/receive across threads.
 
         On the outermost entry (via the :class:`OwnedSession`
-        reentrance counter), registers a :class:`provider.SessionTalker` with the
-        kind set by :meth:`prompt` via :attr:`_pending_talker_kind`
-        (falling back to the thread-local kind otherwise).  Nested entries
-        (from :meth:`hold_for_handler`) re-acquire the RLock and skip the
-        talker re-registration.
+        reentrance counter), registers a :class:`provider.SessionTalker`
+        whose ``kind`` is read directly from the calling thread's
+        thread-local in :func:`provider.current_thread_kind` — never via
+        any session-shared attribute.  This is load-bearing: a shared
+        attribute would let a worker's ``"worker"`` write get clobbered
+        by a webhook's ``"webhook"`` write (or vice versa) in the window
+        between writing and lock-acquire, leading to a worker registered
+        with ``kind="webhook"`` and a broken ``preempt_worker`` check
+        (#981).  Nested entries (from :meth:`hold_for_handler`) re-acquire
+        the RLock and skip the talker re-registration.
 
         Does *not* clear the cancel event — that is deferred to
         :meth:`iter_events` so a signal that lands between one holder's
@@ -815,8 +816,7 @@ class ClaudeSession(OwnedSession):
             self._cancel_fired_by_tid = None
         depth = self._bump_entry_depth()
         if depth == 1:
-            kind = self._pending_talker_kind or provider.current_thread_kind()
-            self._pending_talker_kind = None
+            kind = provider.current_thread_kind()
             if self._repo_name is not None:
                 try:
                     provider.register_talker(
@@ -1095,7 +1095,6 @@ class ClaudeSession(OwnedSession):
         a second preemption as a safety net before acquiring the lock (#658).
         There is no preemption logic here.
         """
-        self._pending_talker_kind = provider.current_thread_kind()
         tid = threading.get_ident()
         t_start = time.monotonic()
         try:
