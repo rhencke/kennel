@@ -202,20 +202,12 @@ _RETURNCODE_IDLE_TIMEOUT = -1
 """Sentinel returncode used in :class:`ClaudeStreamError` when the process is
 killed due to an idle timeout rather than exiting with a real non-zero code."""
 
-_RETURNCODE_SET_MODEL_TIMEOUT = -2
-# Returned by :class:`ClaudeStreamError` when ``iter_events`` was draining a
-# cancelled turn to its ``type=result`` boundary but claude did not emit one
-# within :data:`_CANCEL_DRAIN_TIMEOUT` seconds.  Treated as a wedged
-# subprocess by the caller; triggers :meth:`recover`.
-_RETURNCODE_CANCEL_DRAIN_TIMEOUT = -3
+_RETURNCODE_CANCEL_DRAIN_TIMEOUT = -2
 # How long ``iter_events`` waits, after the cancel signal arrives, for
 # claude to emit the ``type=result`` event that closes the cancelled turn.
 # Claude normally responds to ``control_request interrupt`` in <1s, so 5s
 # is generous; if it elapses the subprocess is wedged and must be recovered.
 _CANCEL_DRAIN_TIMEOUT = 5.0
-"""Sentinel returncode used in :class:`ClaudeStreamError` when a
-``control_request`` ``set_model`` times out waiting for the matching
-``control_response``, or the subprocess exits unexpectedly during the wait."""
 
 
 class ClaudeStreamError(Exception):
@@ -503,8 +495,8 @@ class ClaudeSession(OwnedSession):
             ProviderModel("claude-opus-4-6") if model is None else model
         )
         # Latest session_id seen in a stream-json event.  Updated inside
-        # :meth:`iter_events` and :meth:`_send_control_set_model` so
-        # :meth:`recover` and :meth:`reset` can pass ``--resume <sid>``
+        # :meth:`iter_events` so :meth:`recover`, :meth:`reset`, and
+        # :meth:`switch_model` can pass ``--resume <sid>``
         # to :meth:`_spawn` and keep conversation context across a
         # subprocess restart.  Seeded from the *session_id* constructor
         # kwarg so the first :meth:`_spawn` can ``--resume`` a durable
@@ -1027,67 +1019,6 @@ class ClaudeSession(OwnedSession):
         self._proc.stdin.flush()
         return request_id
 
-    def _send_control_set_model(self, model: str) -> None:
-        """Write a ``control_request`` ``set_model`` to stdin and drain stdout
-        until the matching ``control_response`` arrives.
-
-        Switches the model on the running subprocess in-place — no kill, no
-        restart, no init-handshake delay, no session-id loss.  Call while
-        holding :attr:`_lock` and between turns (``_in_turn`` must be
-        ``False``).
-
-        Raises :class:`ClaudeStreamError` with
-        :data:`_RETURNCODE_SET_MODEL_TIMEOUT` if the subprocess exits or the
-        ``control_response`` is not received within :attr:`_idle_timeout`
-        seconds.
-        """
-        request_id = str(uuid.uuid4())
-        msg = json.dumps(
-            {
-                "type": "control_request",
-                "request_id": request_id,
-                "request": {"subtype": "set_model", "model": model},
-            }
-        )
-        assert self._proc.stdin is not None
-        assert self._proc.stdout is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
-        deadline = time.monotonic() + self._idle_timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
-            ready, _, _ = self._selector(
-                [self._proc.stdout], [], [], min(remaining, _SELECT_POLL_INTERVAL)
-            )
-            if self._proc.stdout not in ready:
-                if self._proc.poll() is not None:
-                    raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
-                continue
-            line = self._proc.stdout.readline()
-            if not line:
-                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            self._log_event(obj)
-            sid = obj.get("session_id")
-            if isinstance(sid, str) and sid:
-                self._session_id = sid
-            if obj.get("type") == "control_response":
-                # Real claude-code (verified against 2.1.120) emits
-                # request_id nested inside the response payload, not at the
-                # top level:
-                #   {"type": "control_response",
-                #    "response": {"subtype": "success", "request_id": "..."}}
-                # Without this, the predicate never matches and every
-                # switch_model call hangs until idle_timeout (#975).
-                response = obj.get("response") or {}
-                if response.get("request_id") == request_id:
-                    return
-
     def interrupt(self, content: str) -> None:
         """Interrupt the in-flight turn at the protocol level, then send *content*.
 
@@ -1169,13 +1100,21 @@ class ClaudeSession(OwnedSession):
                 self._preempt_cond.notify_all()
 
     def switch_model(self, model: ProviderModel | str) -> None:
-        """Switch the active model via a ``control_request`` ``set_model``
-        message — no kill, no respawn, no init-handshake delay, no
-        session-id loss.
+        """Switch the active model by respawning the claude subprocess
+        with ``--model <new> --resume <session_id>``.
 
-        Holds :attr:`_lock` for the duration so callers waiting on
-        :meth:`__enter__` block gracefully until the switch is complete.
-        Must be called between turns (``_in_turn`` must be ``False``).
+        The in-place ``control_request`` ``set_model`` path was removed
+        because claude-code 2.1.114 wedges its set_model handler after
+        the first turn: any second real model switch on the same
+        subprocess never receives its ``control_response`` and hangs
+        until the idle timeout.  Probes against the raw claude binary
+        confirmed the wedge is independent of fido's protocol handling.
+
+        Respawn-with-resume preserves conversation context (claude
+        re-reads the session transcript via ``--resume``) at the cost of
+        one claude boot per switch (~1.4s).  Must be called between
+        turns (``_in_turn`` must be ``False``); :meth:`_respawn` clears
+        ``_in_turn`` defensively.
 
         No-op when *model* equals the current model.
         """
@@ -1183,13 +1122,16 @@ class ClaudeSession(OwnedSession):
         if target_model == self._model:
             return
         log.info(
-            "switch_model: %s → %s (control_request)",
+            "switch_model: %s → %s (respawn-with-resume)",
             self._model,
             target_model,
         )
         with self._lock:
-            self._send_control_set_model(target_model)
             self._model = target_model
+            self._respawn(
+                clear_session_id=False,
+                reason=f"switching model to {target_model}",
+            )
         log.info("switch_model: now on model=%s", target_model)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
