@@ -203,6 +203,16 @@ _RETURNCODE_IDLE_TIMEOUT = -1
 killed due to an idle timeout rather than exiting with a real non-zero code."""
 
 _RETURNCODE_SET_MODEL_TIMEOUT = -2
+# Returned by :class:`ClaudeStreamError` when ``iter_events`` was draining a
+# cancelled turn to its ``type=result`` boundary but claude did not emit one
+# within :data:`_CANCEL_DRAIN_TIMEOUT` seconds.  Treated as a wedged
+# subprocess by the caller; triggers :meth:`recover`.
+_RETURNCODE_CANCEL_DRAIN_TIMEOUT = -3
+# How long ``iter_events`` waits, after the cancel signal arrives, for
+# claude to emit the ``type=result`` event that closes the cancelled turn.
+# Claude normally responds to ``control_request interrupt`` in <1s, so 5s
+# is generous; if it elapses the subprocess is wedged and must be recovered.
+_CANCEL_DRAIN_TIMEOUT = 5.0
 """Sentinel returncode used in :class:`ClaudeStreamError` when a
 ``control_request`` ``set_model`` times out waiting for the matching
 ``control_response``, or the subprocess exits unexpectedly during the wait."""
@@ -480,6 +490,17 @@ class ClaudeSession(OwnedSession):
         # lock, then calls switch_model which also needs to serialize with
         # other sessions' access — a plain threading.Lock self-deadlocks).
         self._lock = threading.RLock()
+        # Byte-level serialization lock for stdin writes.  Held BRIEFLY per
+        # write+flush, separately from :attr:`_lock` (which guards the
+        # whole-turn ownership).  Required because :meth:`_fire_worker_cancel`
+        # must write a ``control_request`` interrupt while a worker thread
+        # holds :attr:`_lock` for its in-flight turn — the worker can't be
+        # asked to release its lock first (it's the one being cancelled).
+        # Without this lock the cancel write interleaves with the worker's
+        # mid-turn writes at the kernel pipe layer (Linux only guarantees
+        # atomicity under PIPE_BUF=4096 bytes), corrupting the protocol
+        # stream and silently wedging claude (#979).
+        self._stdin_lock = threading.Lock()
         self._cancel = threading.Event()
         # Thread id that most recently fired :attr:`_cancel` via
         # :meth:`_fire_worker_cancel`.  Used by :meth:`__enter__` to clear
@@ -830,26 +851,19 @@ class ClaudeSession(OwnedSession):
     def send(self, content: str) -> None:
         """Write a user message to the session stdin, flushing immediately.
 
-        If the prior turn was cancelled without draining (:attr:`_in_turn`
-        still True), abort it via ``control_request`` and read events until
-        the turn boundary first — otherwise the next
-        :meth:`consume_until_result` would return that prior turn's
-        ``type=result`` and the caller would receive stale content as its
-        own (the stream-leak in #499).
+        Any prior cancelled turn is drained to its ``type=result`` boundary
+        inside :meth:`iter_events` itself (cancel no longer breaks early —
+        see #979 / #955 cascade).  By the time :meth:`send` is called the
+        previous turn is closed and the stream is clean, so this method
+        only needs to atomically place a single user message on stdin.
         """
-        if self._in_turn:
-            self._drain_to_boundary()
-        if self._cancel.is_set():
-            # A preempt fired during (or just before) the drain — do not write
-            # a new message onto the dirty stream.  iter_events will see
-            # _cancel and break; _last_turn_cancelled lets run_turn retry.
-            return
         msg = json.dumps(
             {"type": "user", "message": {"role": "user", "content": content}}
         )
         assert self._proc.stdin is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
+        with self._stdin_lock:
+            self._proc.stdin.write(msg + "\n")
+            self._proc.stdin.flush()
         self._in_turn = True
 
     def _drain_to_boundary(self, deadline: float = 10.0) -> None:
@@ -957,8 +971,10 @@ class ClaudeSession(OwnedSession):
 
         Tells the Claude subprocess to abort the current turn at the protocol
         level.  The subprocess responds with a ``control_response`` on stdout
-        and then emits a ``type=result`` to close the turn.  Call this while
-        holding the session lock so it does not race with other stdin writes.
+        and then emits a ``type=result`` to close the turn.  Atomicity is
+        guaranteed via :attr:`_stdin_lock` so this can be called from a
+        thread that does not hold :attr:`_lock` (e.g. the webhook thread
+        firing a preempt while the worker still owns the session).
         """
         msg = json.dumps(
             {
@@ -968,8 +984,9 @@ class ClaudeSession(OwnedSession):
             }
         )
         assert self._proc.stdin is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
+        with self._stdin_lock:
+            self._proc.stdin.write(msg + "\n")
+            self._proc.stdin.flush()
 
     def _send_control_set_model(self, model: str) -> None:
         """Write a ``control_request`` ``set_model`` to stdin and drain stdout
@@ -995,8 +1012,9 @@ class ClaudeSession(OwnedSession):
         )
         assert self._proc.stdin is not None
         assert self._proc.stdout is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
+        with self._stdin_lock:
+            self._proc.stdin.write(msg + "\n")
+            self._proc.stdin.flush()
         deadline = time.monotonic() + self._idle_timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -1207,15 +1225,36 @@ class ClaudeSession(OwnedSession):
             self._cancel.clear()
         self._last_turn_cancelled = False
         last_activity = time.monotonic()
+        cancelled_at: float | None = None
 
         while True:
-            if self._cancel.is_set():
-                log.debug("ClaudeSession: cancelled — exiting turn early")
+            # NOTE: do NOT break on _cancel.is_set() here.  When a preempt
+            # fires, claude has already received the control_request
+            # interrupt and is about to emit ``control_response`` and
+            # ``type=result`` to close the turn.  We need to KEEP READING
+            # so the boundary is consumed inside this turn — otherwise the
+            # next send() inherits stale events on stdout (#979).  Record
+            # the cancel time so a wedged subprocess (no type=result after
+            # _CANCEL_DRAIN_TIMEOUT) gets killed instead of looping
+            # forever; caller's run_turn checks ``_last_turn_cancelled``
+            # to decide whether to retry.
+            if self._cancel.is_set() and not self._last_turn_cancelled:
+                log.debug("ClaudeSession: cancel signal seen, draining to boundary")
                 self._last_turn_cancelled = True
-                # Intentionally leave _in_turn = True: the caller who set
-                # _cancel will have the next send() drain the boundary
-                # we're abandoning here.
-                break
+                cancelled_at = time.monotonic()
+            if (
+                cancelled_at is not None
+                and time.monotonic() - cancelled_at > _CANCEL_DRAIN_TIMEOUT
+            ):
+                log.warning(
+                    "ClaudeSession: no type=result %.1fs after cancel — recovering",
+                    _CANCEL_DRAIN_TIMEOUT,
+                )
+                self._proc.kill()
+                self._proc.wait()
+                self._in_turn = False
+                self.recover()
+                raise ClaudeStreamError(_RETURNCODE_CANCEL_DRAIN_TIMEOUT)
             ready, _, _ = self._selector(
                 [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )

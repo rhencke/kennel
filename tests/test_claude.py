@@ -826,47 +826,24 @@ class TestClaudeSessionSend:
         session.send("hi")
         assert session._in_turn is True
 
-    def test_drains_stale_turn_before_sending_new(self, tmp_path: Path) -> None:
-        """Send() must drain any unfinished prior turn so the next
-        consume_until_result doesn't read stale events as its own (#499)."""
-        import json as _json
-
-        stale_result = (
-            _json.dumps({"type": "result", "result": "stale", "session_id": "s1"})
-            + "\n"
-        )
-        proc = _make_session_proc([stale_result])
-        session = _make_session(tmp_path, proc)
-        session._in_turn = True  # simulate cancelled-prior-turn state
-        session.send("fresh message")
-        assert session._in_turn is True
-        # control_request was written before the new user message
-        writes = [c.args[0] for c in proc.stdin.write.call_args_list]
-        assert any("control_request" in w for w in writes)
-        assert any('"fresh message"' in w for w in writes)
-        # The control_request must come first
-        control_idx = next(i for i, w in enumerate(writes) if "control_request" in w)
-        user_idx = next(i for i, w in enumerate(writes) if '"fresh message"' in w)
-        assert control_idx < user_idx
-
-    def test_skips_write_when_cancel_set_after_drain(self, tmp_path: Path) -> None:
-        """If a preempt fires during _drain_to_boundary, send() must not write
-        the new message to the dirty stream (#955)."""
+    def test_send_uses_stdin_lock_for_atomic_write(self, tmp_path: Path) -> None:
+        """Post-#979: send() acquires _stdin_lock around write+flush so it
+        cannot interleave with a concurrent _send_control_interrupt fired
+        by a preempting webhook thread."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._in_turn = True  # prior turn in flight
-        # selector returns no data; we rely on _cancel short-circuiting drain
-        session._selector = MagicMock(return_value=([], [], []))
+        # Verify lock is acquired during the write+flush.
+        held_during_write = []
 
-        # Simulate preempt firing: drain returns early, _cancel stays set
-        session._cancel.set()
-        session._preempt_pending.set()
+        original_write = proc.stdin.write
 
-        session.send("should not be written")
-        # No user message written to stdin — only the control_request
-        writes = [c.args[0] for c in proc.stdin.write.call_args_list]
-        assert not any('"should not be written"' in w for w in writes)
-        # _in_turn left True (drain bailed early) — iter_events will handle it
+        def tracking_write(s):
+            held_during_write.append(session._stdin_lock.locked())
+            return original_write(s)
+
+        proc.stdin.write = MagicMock(side_effect=tracking_write)
+        session.send("hello")
+        assert held_during_write == [True]
         assert session._in_turn is True
 
 
@@ -1289,11 +1266,11 @@ class TestClaudeSessionIterEvents:
         assert not session._cancel.is_set()
         session.stop()
 
-    def test_cancel_preserved_when_preempt_pending(self, tmp_path: Path) -> None:
-        """Fix for #786: when a preempter is actively waiting, the cancel
-        signal targeting the current holder must survive iter_events' start
-        so the first poll cycle respects it — otherwise the turn runs to
-        full completion before the preempter ever gets the lock.
+    def test_cancel_drains_to_boundary(self, tmp_path: Path) -> None:
+        """Post-#979: iter_events on cancel does NOT break early — it keeps
+        reading until ``type=result`` so the cancelled turn closes cleanly
+        with no stale events in the pipe.  Just sets ``_last_turn_cancelled``
+        so callers (run_turn) know to retry.
         """
         import json as _json
 
@@ -1303,16 +1280,16 @@ class TestClaudeSessionIterEvents:
         ]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        # Simulate the exact webhook preempt race: _fire_worker_cancel has
-        # set both events on the target thread's side.
         session._cancel.set()
         session._preempt_pending.set()
         events = list(session.iter_events())
-        # Loop must bail immediately — no events consumed — because the
-        # pending-preempter branch kept the cancel signal intact.
-        assert events == []
-        assert session._cancel.is_set()
+        # Both events were consumed — pipe is clean for the next holder.
+        assert len(events) == 2
+        assert events[0]["type"] == "assistant"
+        assert events[1]["type"] == "result"
         assert session._last_turn_cancelled is True
+        # _in_turn cleared by the type=result event, not by cancel.
+        assert session._in_turn is False
         session.stop()
 
     def test_cancel_still_cleared_when_no_preempt_pending(self, tmp_path: Path) -> None:
@@ -1340,13 +1317,21 @@ class TestClaudeSessionIterEvents:
         assert session._preempt_pending.is_set()
         session.stop()
 
-    def test_stops_when_cancel_set_during_turn(self, tmp_path: Path) -> None:
-        # A cancel set AFTER iter_events() starts (i.e., during polling) must
-        # abort the loop on the next cycle.
+    def test_recovers_when_cancel_drain_times_out(self, tmp_path: Path) -> None:
+        """Post-#979: iter_events drains to ``type=result`` after cancel.
+        If claude is wedged and never emits the boundary, the drain times
+        out at ``_CANCEL_DRAIN_TIMEOUT`` seconds and the subprocess is
+        killed + recovered (raises ``ClaudeStreamError``).
+        """
+        import fido.claude as _claude_mod
+        from fido.claude import _RETURNCODE_CANCEL_DRAIN_TIMEOUT
+
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=None)  # never exits on its own
+        proc.poll = MagicMock(return_value=None)
+        proc.kill = MagicMock()
+        proc.wait = MagicMock(return_value=0)
         fake_popen = MagicMock(return_value=proc)
 
         session_ref: list[ClaudeSession] = []
@@ -1354,17 +1339,26 @@ class TestClaudeSessionIterEvents:
         def selector_that_cancels(
             *_args: object, **_kwargs: object
         ) -> tuple[list, list, list]:
-            # Set cancel on first poll — simulates an interrupt arriving mid-turn
             session_ref[0]._cancel.set()
             return ([], [], [])
 
-        session = ClaudeSession(
-            system_file, popen=fake_popen, selector=selector_that_cancels
-        )
-        session_ref.append(session)
-        events = list(session.iter_events())
-        assert events == []
-        session.stop()
+        # Use a fast deadline so the test doesn't wait 5 real seconds.
+        fast_drain = _claude_mod._CANCEL_DRAIN_TIMEOUT
+        try:
+            _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
+            session = ClaudeSession(
+                system_file, popen=fake_popen, selector=selector_that_cancels
+            )
+            session_ref.append(session)
+            session._recover = MagicMock()  # type: ignore[method-assign]
+            session.recover = MagicMock()  # type: ignore[method-assign]
+            with pytest.raises(ClaudeStreamError) as exc_info:
+                list(session.iter_events())
+            assert exc_info.value.returncode == _RETURNCODE_CANCEL_DRAIN_TIMEOUT
+            assert proc.kill.called
+            session.stop()
+        finally:
+            _claude_mod._CANCEL_DRAIN_TIMEOUT = fast_drain
 
     def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
         import json as _json
@@ -1392,16 +1386,23 @@ class TestClaudeSessionIterEvents:
         assert all(session._wakeup_r in inputs for inputs in select_inputs)
         session.stop()
 
-    def test_wakeup_only_ready_continues_to_cancel_check(self, tmp_path: Path) -> None:
-        """When only the wakeup pipe fires, iter_events loops back and checks cancel."""
+    def test_wakeup_only_ready_marks_cancel(self, tmp_path: Path) -> None:
+        """When only the wakeup pipe fires, iter_events records the cancel
+        but keeps reading until the boundary or the cancel-drain timeout.
+        Post-#979 the loop no longer breaks early on cancel; the wedged
+        subprocess case is handled via the cancel-drain timeout instead.
+        """
+        import fido.claude as _claude_mod
+
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=None)  # never exits
+        proc.poll = MagicMock(return_value=None)
+        proc.kill = MagicMock()
+        proc.wait = MagicMock(return_value=0)
         fake_popen = MagicMock(return_value=proc)
 
         session_ref: list[ClaudeSession] = []
-        call_count = [0]
 
         def staged_selector(
             rlist: list[object],
@@ -1409,24 +1410,27 @@ class TestClaudeSessionIterEvents:
             xlist: list[object],
             timeout: float,
         ) -> tuple[list[object], list[object], list[object]]:
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # First call: only wakeup pipe ready, then set cancel so next
-                # iteration exits cleanly
-                wakeup_r = next(x for x in rlist if x != proc.stdout)
-                session_ref[0]._cancel.set()
-                return ([wakeup_r], [], [])
-            return ([], [], [])  # should not reach here
+            wakeup_r = next(x for x in rlist if x != proc.stdout)
+            session_ref[0]._cancel.set()
+            return ([wakeup_r], [], [])
 
-        session = ClaudeSession(system_file, popen=fake_popen, selector=staged_selector)
-        session_ref.append(session)
-        os.write(session._wakeup_w, b"\x00")
-        events = list(session.iter_events())
-        assert events == []
-        assert session._last_turn_cancelled is True
-        # readline was never called because stdout was not in the ready list
-        assert proc.stdout.readline.call_count == 0
-        session.stop()
+        fast_drain = _claude_mod._CANCEL_DRAIN_TIMEOUT
+        try:
+            _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
+            session = ClaudeSession(
+                system_file, popen=fake_popen, selector=staged_selector
+            )
+            session_ref.append(session)
+            session.recover = MagicMock()  # type: ignore[method-assign]
+            os.write(session._wakeup_w, b"\x00")
+            with pytest.raises(ClaudeStreamError):
+                list(session.iter_events())
+            assert session._last_turn_cancelled is True
+            # readline was never called because stdout was not in the ready list
+            assert proc.stdout.readline.call_count == 0
+            session.stop()
+        finally:
+            _claude_mod._CANCEL_DRAIN_TIMEOUT = fast_drain
 
 
 class TestClaudeSessionStop:
@@ -2123,9 +2127,13 @@ class TestClaudeSessionPreemptLatency:
         # Wait for worker to actually be blocking in select
         assert worker_in_select.wait(timeout=2.0), "worker never entered select"
 
-        # Now preempt — this is the critical path we're measuring
+        # Now preempt and feed claude's response to the interrupt — in
+        # production claude emits type=result within <1s of receiving
+        # the control_request interrupt.  iter_events drains to that
+        # boundary and exits cleanly (post-#979).
         start = time.monotonic()
         session._cancel.set()
+        os.write(stdout_w, b'{"type":"result","result":"interrupted"}\n')
         session._wake()
 
         assert worker_exited_lock.wait(timeout=5.0), "worker did not release lock"
@@ -2141,6 +2149,93 @@ class TestClaudeSessionPreemptLatency:
         t.join(timeout=2.0)
         os.close(stdout_w)
         session.stop()
+
+
+class TestClaudeSessionStdinAtomicity:
+    """Regression for #979: stdin writes from concurrent threads must not
+    interleave at the byte level.  Worker thread holds session ``_lock``
+    for the whole turn but the webhook thread fires
+    ``_send_control_interrupt`` without ``_lock`` (can't acquire it — the
+    worker is the cancellation target).  ``_stdin_lock`` serializes the
+    actual byte writes regardless of which lock the caller holds."""
+
+    def test_concurrent_writes_do_not_interleave(self, tmp_path: Path) -> None:
+        import threading
+        import time as _time
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+
+        # Wrap stdin.write to track byte ordering.  Any actual interleaving
+        # would manifest as fragments of the worker's write inside the
+        # webhook's write, or vice versa.  We simulate write+flush taking
+        # measurable time so threads have a chance to race without the lock.
+        write_events: list[str] = []
+
+        def slow_write(s: str) -> int:
+            write_events.append(f"start:{s[:30]}")
+            _time.sleep(0.005)
+            write_events.append(f"end:{s[:30]}")
+            return len(s)
+
+        proc.stdin.write = MagicMock(side_effect=slow_write)
+        proc.stdin.flush = MagicMock()
+
+        n_iterations = 50
+        worker_done = threading.Event()
+        webhook_done = threading.Event()
+
+        def worker() -> None:
+            try:
+                for i in range(n_iterations):
+                    session.send(f"worker-msg-{i}")
+            finally:
+                worker_done.set()
+
+        def webhook() -> None:
+            try:
+                for i in range(n_iterations):
+                    session._send_control_interrupt()
+            finally:
+                webhook_done.set()
+
+        t_w = threading.Thread(target=worker, daemon=True)
+        t_h = threading.Thread(target=webhook, daemon=True)
+        t_w.start()
+        t_h.start()
+        assert worker_done.wait(timeout=10.0)
+        assert webhook_done.wait(timeout=10.0)
+
+        # Verify: every "start:X" is immediately followed by "end:X".  Any
+        # interleave would put a different "start:" between them.
+        for i in range(0, len(write_events), 2):
+            start = write_events[i]
+            end = write_events[i + 1] if i + 1 < len(write_events) else None
+            assert start.startswith("start:"), write_events[i : i + 2]
+            assert end is not None and end.startswith("end:"), write_events[i : i + 2]
+            assert start[len("start:") :] == end[len("end:") :], (
+                f"interleaved write detected: {start} → {end}"
+            )
+
+    def test_send_holds_stdin_lock(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        held: list[bool] = []
+        proc.stdin.write = MagicMock(
+            side_effect=lambda _s: held.append(session._stdin_lock.locked())
+        )
+        session.send("x")
+        assert held == [True]
+
+    def test_send_control_interrupt_holds_stdin_lock(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        held: list[bool] = []
+        proc.stdin.write = MagicMock(
+            side_effect=lambda _s: held.append(session._stdin_lock.locked())
+        )
+        session._send_control_interrupt()
+        assert held == [True]
 
 
 class TestClaudeSessionSendControlInterrupt:

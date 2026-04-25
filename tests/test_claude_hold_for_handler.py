@@ -304,13 +304,15 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Regression for #973: after hold_for_handler(preempt_worker=True) fires
-    the cancel signal at the worker, the handler's own prompt() must run to
-    completion — _cancel was meant for the previous holder, not for the
-    handler's first turn."""
+    """Post-#979: after hold_for_handler(preempt_worker=True) fires the
+    cancel signal, the handler's own prompt() must run to completion.  In
+    the new design the prior turn's boundary is drained inside iter_events
+    itself (cancel no longer breaks early), so by the time the handler
+    enters the stream is clean.  The cancel signal that was set for the
+    previous holder is consumed at the start of the handler's iter_events
+    via the existing ``_preempt_pending`` gate."""
     session = _setup_session(tmp_path)
 
-    # Simulate the worker as the current talker so preempt_worker fires.
     def fake_talker(kind: str) -> SessionTalker:
         return SessionTalker(
             repo_name="owner/repo",
@@ -323,48 +325,32 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
 
     monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
 
-    # Simulate the state immediately after a worker turn was cancelled:
-    # _in_turn is True (worker was mid-turn) and the proc still has a stale
-    # leftover result event in the pipe from the cancelled turn.
-    proc = _make_session_proc(
-        [
-            # First readline: stale empty result from the cancelled turn.
-            '{"type":"result","result":""}\n',
-            # Second readline: the handler's actual triage response.
-            '{"type":"result","result":"triage-reply"}\n',
-        ]
-    )
+    # Pipe contains exactly the handler's own response — no stale events
+    # from the prior turn (those were drained inside iter_events when the
+    # worker turn closed cleanly on type=result).
+    proc = _make_session_proc(['{"type":"result","result":"triage-reply"}\n'])
     proc.pid = 55555
     monkeypatch.setattr(session, "_proc", proc)
     monkeypatch.setattr(
         session, "_selector", MagicMock(return_value=([proc.stdout], [], []))
     )
-    session._in_turn = True  # worker had an in-flight turn that was cancelled
 
     provider.set_thread_kind("webhook")
     try:
         with session.hold_for_handler(preempt_worker=True):
-            # _fire_worker_cancel set _cancel + _preempt_pending.
-            # Handler's first prompt() must actually send and read its own
-            # response — not be aborted by leftover cancel and silently
-            # return the stale result from the previous (worker) turn.
+            # _fire_worker_cancel set _cancel + _preempt_pending.  Handler's
+            # first prompt() must actually send and read its own response.
             result = session.prompt("triage this please")
     finally:
         provider.set_thread_kind(None)
         session.stop()
 
-    # The handler's prompt must have written its own user message to stdin.
+    # The handler must have written its user message to stdin (atomicity
+    # guaranteed by _stdin_lock — see #979).
     write_calls = [c.args[0] for c in proc.stdin.write.call_args_list]
     user_writes = [w for w in write_calls if "triage this please" in w]
-    assert user_writes, (
-        f"handler prompt never wrote its message — cancel-leak aborted send. "
-        f"writes={write_calls}"
-    )
-    # And the result returned must be the handler's own response, not the
-    # stale empty result from the cancelled worker turn.
-    assert result == "triage-reply", (
-        f"handler prompt got stale result from previous turn — got {result!r}"
-    )
+    assert user_writes, f"handler prompt never wrote its message — writes={write_calls}"
+    assert result == "triage-reply", f"handler prompt got wrong result — got {result!r}"
 
 
 def test_hold_reraises_leak_error_and_releases_lock(
