@@ -8822,6 +8822,56 @@ class TestExecuteTask:
         # complete_with_resolve still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(task["id"], worker.gh)
 
+    def test_does_not_treat_in_progress_task_as_externally_completed(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression for #969: after #965 transitions tasks to IN_PROGRESS at
+        # start, the resume loop must not treat IN_PROGRESS as "externally
+        # completed". Only COMPLETED counts as external completion. Without
+        # this fix the worker breaks out of the resume loop on the first
+        # iteration and (downstream) closes its own PR.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Real work")
+        in_progress_task = {**task, "status": "in_progress"}
+        # HEAD changes on the second rev-parse so the resume loop terminates
+        # naturally after one retry — proving it did not short-circuit on
+        # the IN_PROGRESS status check.
+        head_calls = iter(["aaa", "aaa", "bbb", "bbb", "bbb"])
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout=next(head_calls) if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+        # Picker sees PENDING; resume loop's re-check sees IN_PROGRESS.
+        list_tasks_calls = iter([[task], [in_progress_task]])
+        with (
+            patch(
+                "fido.tasks.Tasks.list",
+                side_effect=lambda *a, **kw: next(list_tasks_calls),
+            ),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                side_effect=[
+                    ("sess-1", "o1"),
+                    ("sess-1", "o2"),
+                ],
+            ) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # Initial dispatch + the retry — proves the resume loop did NOT
+        # short-circuit on the IN_PROGRESS status check.
+        assert mock_run.call_count == 2
+        mock_complete.assert_called_once()
+
     def test_uses_fresh_session_mode_once_after_repeated_no_commit_nudges(
         self, tmp_path: Path
     ) -> None:

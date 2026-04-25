@@ -2383,8 +2383,8 @@ class Worker:
             # complete`) while we were waiting, stop retrying — the work is
             # already recorded as done and no commits will ever appear.
             current_task_list = self._tasks.list()
-            if not any(
-                t["id"] == task["id"] and t.get("status") == TaskStatus.PENDING
+            if any(
+                t["id"] == task["id"] and t.get("status") == TaskStatus.COMPLETED
                 for t in current_task_list
             ):
                 log.info(
