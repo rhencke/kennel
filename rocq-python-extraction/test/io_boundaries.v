@@ -49,5 +49,11 @@ Extract Constant read_text =>
 Extract Constant http_status =>
   "(lambda url: IO.from_sync(lambda: 2 if url == ""https://ok.example"" else 0))".
 
-Python Extraction read_file_echo.
-Python Extraction http_status_ok.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [io_boundaries.py] module.      *)
+(* ------------------------------------------------------------------ *)
+
+(** [io_boundaries.py]: covers [IO] sequencing via [io_bind]/[io_pure], file
+    and HTTP adapter boundaries, and the async-facade wrapper pattern. *)
+Python File Extraction io_boundaries "read_file_echo http_status_ok".

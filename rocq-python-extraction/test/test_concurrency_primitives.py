@@ -1,17 +1,19 @@
 import asyncio
 from pathlib import Path
 
-from future_done_after_set import Future as DoneFuture
-from future_done_after_set import _io_future_done_after_set, future_done_after_set
-from lock_channel_future_demo import (
+from concurrency_primitives import (
     Channel,
     Future,
     Mutex,
+    _io_future_done_after_set,
     _io_lock_channel_future_demo,
+    future_done_after_set,
     lock_channel_future_demo,
 )
 
 from fido.rocq.concurrency_primitives import _io_roundtrip_message, roundtrip_message
+
+DoneFuture = Future
 
 
 def test_lock_channel_future_demo_extracts_to_threading_wrappers() -> None:
@@ -31,7 +33,7 @@ def test_future_done_after_set_observes_completion() -> None:
 def test_generated_concurrency_source_documents_runtime_assumptions(
     build_default: Path,
 ) -> None:
-    source = (build_default / "lock_channel_future_demo.py").read_text()
+    source = (build_default / "concurrency_primitives.py").read_text()
 
     assert "import threading" in source
     assert "import queue" in source

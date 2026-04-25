@@ -1,14 +1,13 @@
 from typing import cast
 
-from future_done_after_set import IO as DoneIO
-from future_done_after_set import Future as DoneFuture
-from future_done_after_set import _io_future_done_after_set, future_done_after_set
-from lock_channel_future_demo import (
+from concurrency_primitives import (
     IO,
     Channel,
     Future,
     Mutex,
+    _io_future_done_after_set,
     _io_lock_channel_future_demo,
+    future_done_after_set,
     lock_channel_future_demo,
 )
 
@@ -55,9 +54,9 @@ async def check_lock_channel_future_demo() -> None:
 
 async def check_future_done_after_set() -> None:
     done: bool = await future_done_after_set()
-    io_done: DoneIO[bool] = _io_future_done_after_set
-    future_io: DoneIO[DoneFuture[int]] = DoneFuture[int].new()
+    io_done: IO[bool] = _io_future_done_after_set
+    future_io: IO[Future[int]] = Future[int].new()
 
     assert isinstance(done, bool)
-    assert isinstance(io_done, DoneIO)
-    assert isinstance(future_io, DoneIO)
+    assert isinstance(io_done, IO)
+    assert isinstance(future_io, IO)

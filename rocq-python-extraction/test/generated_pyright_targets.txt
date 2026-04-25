@@ -1,5 +1,7 @@
 polymorphism.py
 strings_bytes.py
+io_boundaries.py
+concurrency_primitives.py
 ModuleLookupFixture.py
 nat_pred_or_zero.py
 positive_case.py
@@ -9,7 +11,3 @@ q_half.py
 q_num.py
 q_den.py
 FiniteCollectionFixtures.py
-read_file_echo.py
-http_status_ok.py
-lock_channel_future_demo.py
-future_done_after_set.py

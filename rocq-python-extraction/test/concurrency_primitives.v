@@ -105,5 +105,12 @@ Extract Constant future_set => "__PYCONC_FUTURE_SET__".
 Extract Constant future_result => "__PYCONC_FUTURE_RESULT__".
 Extract Constant future_done => "__PYCONC_FUTURE_DONE__".
 
-Python Extraction lock_channel_future_demo.
-Python Extraction future_done_after_set.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [concurrency_primitives.py]     *)
+(*  module.                                                           *)
+(* ------------------------------------------------------------------ *)
+
+(** [concurrency_primitives.py]: covers [Mutex], [Channel], [Future],
+    [io_bracket], and deterministic lock/channel/future boundary sequences. *)
+Python File Extraction concurrency_primitives "lock_channel_future_demo future_done_after_set".
