@@ -475,11 +475,10 @@ class ClaudeSession(OwnedSession):
         self._system_file = system_file
         self._work_dir = work_dir
         self._popen_fn = popen
-        # Reentrant so :meth:`switch_model` and :meth:`restart` can
-        # reacquire while called from inside a ``with session:`` block
-        # (e.g. ``prompt()`` acquires the lock, then calls switch_model
-        # which also needs to serialize with other sessions' access —
-        # a plain threading.Lock self-deadlocks).
+        # Reentrant so :meth:`switch_model` can reacquire while called from
+        # inside a ``with session:`` block (e.g. ``prompt()`` acquires the
+        # lock, then calls switch_model which also needs to serialize with
+        # other sessions' access — a plain threading.Lock self-deadlocks).
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._repo_name = repo_name
@@ -487,9 +486,10 @@ class ClaudeSession(OwnedSession):
             ProviderModel("claude-opus-4-6") if model is None else model
         )
         # Latest session_id seen in a stream-json event.  Updated inside
-        # :meth:`iter_events` so a subsequent :meth:`switch_model` can
-        # restart with ``--resume <sid>`` and keep conversation context
-        # across the model swap.  Seeded from the *session_id* constructor
+        # :meth:`iter_events` and :meth:`_send_control_set_model` so
+        # :meth:`recover` and :meth:`reset` can pass ``--resume <sid>``
+        # to :meth:`_spawn` and keep conversation context across a
+        # subprocess restart.  Seeded from the *session_id* constructor
         # kwarg so the first :meth:`_spawn` can ``--resume`` a durable
         # claude conversation persisted across fido restarts (#649).
         # Empty until the first claude event with a session_id arrives.
@@ -615,12 +615,10 @@ class ClaudeSession(OwnedSession):
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
 
-        Model is set via ``--model`` at spawn time — the runtime ``/model``
-        slash command isn't honored in stream-json mode (claude echoes
-        "Unknown command: /model" and hangs without producing a turn
-        boundary).  When :attr:`_session_id` is non-empty the new process
-        resumes the prior conversation via ``--resume`` so context
-        survives a model swap.
+        Model is set via ``--model`` at spawn time.  When
+        :attr:`_session_id` is non-empty the new process resumes the
+        prior conversation via ``--resume`` so context survives a
+        subprocess restart (e.g. :meth:`recover` or :meth:`reset`).
         """
         cmd = [
             "claude",
@@ -1211,9 +1209,9 @@ class ClaudeSession(OwnedSession):
                 obj = json.loads(line)
                 self._log_event(obj)
                 last_activity = time.monotonic()
-                # Track the latest session_id so :meth:`switch_model` can
-                # restart with ``--resume <sid>`` and keep conversation
-                # context across the swap.
+                # Track the latest session_id so :meth:`recover` and
+                # :meth:`reset` can resume via ``--resume <sid>`` on the
+                # next :meth:`_spawn`.
                 sid = obj.get("session_id")
                 if isinstance(sid, str) and sid:
                     self._session_id = sid
