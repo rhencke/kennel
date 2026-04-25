@@ -1,8 +1,4 @@
-from get_p5_v import get_p5_v
-from get_p5_w import get_p5_w
-from get_p5_x import Point5, get_p5_x
-from get_p5_y import get_p5_y
-from get_p5_z import get_p5_z
+from records import Point5, get_p5_v, get_p5_w, get_p5_x, get_p5_y, get_p5_z
 
 
 def test_point5_round_trip() -> None:

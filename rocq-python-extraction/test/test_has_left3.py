@@ -1,4 +1,4 @@
-from has_left3 import Leaf, Node, Tree, has_left3
+from nested_patterns import Leaf, Node, Tree, has_left3
 
 
 def test_has_left3_round_trip() -> None:

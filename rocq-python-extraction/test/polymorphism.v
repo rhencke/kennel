@@ -20,4 +20,10 @@ Fixpoint list_map {A B : Set} (f : A -> B) (xs : list A) : list B :=
   | x :: tl => f x :: list_map f tl
   end.
 
-Python Extraction list_map.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [polymorphism.py] module.       *)
+(* ------------------------------------------------------------------ *)
+
+(** [polymorphism.py]: covers rank-1 polymorphism with TypeVar output. *)
+Python File Extraction polymorphism "list_map".

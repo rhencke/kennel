@@ -47,8 +47,6 @@ Definition has_left3 (t : Tree) : bool :=
   | _ => false
   end.
 
-Python Extraction has_left3.
-
 (* ------------------------------------------------------------------ *)
 (*  2. Expr/Val mutual inductive — cross-type nested pattern            *)
 (*                                                                      *)
@@ -83,4 +81,11 @@ Definition expr_is_num_pair (e : Expr) : bool :=
   | _ => false
   end.
 
-Python Extraction expr_is_num_pair.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [nested_patterns.py] module.    *)
+(* ------------------------------------------------------------------ *)
+
+(** [nested_patterns.py]: covers 3-level deep nested patterns (Tree)
+    and cross-type nested patterns over a mutual Expr/Val group. *)
+Python File Extraction nested_patterns "has_left3 expr_is_num_pair".

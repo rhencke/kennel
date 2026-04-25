@@ -50,10 +50,6 @@ Definition swap_pair_r (p : pair_r) : pair_r :=
   | MkPairR f s => {| pfst_r := s ; psnd_r := f |}
   end.
 
-Python Extraction proj_first.
-Python Extraction proj_second.
-Python Extraction swap_pair_r.
-
 (* ------------------------------------------------------------------ *)
 (*  2. 5-field record — acceptance criterion for issue #720            *)
 (*                                                                     *)
@@ -88,8 +84,11 @@ Definition get_p5_w (p : point5) : nat :=
 Definition get_p5_v (p : point5) : nat :=
   match p with MkPoint5 _ _ _ _ v => v end.
 
-Python Extraction get_p5_x.
-Python Extraction get_p5_y.
-Python Extraction get_p5_z.
-Python Extraction get_p5_w.
-Python Extraction get_p5_v.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [records.py] module.            *)
+(* ------------------------------------------------------------------ *)
+
+(** [records.py]: covers 2-field record projection and swap, and
+    5-field record individual field projections (issue #720). *)
+Python File Extraction records "proj_first proj_second swap_pair_r get_p5_x get_p5_y get_p5_z get_p5_w get_p5_v".
