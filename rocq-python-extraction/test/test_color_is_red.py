@@ -1,4 +1,4 @@
-from color_is_red import Blue, Color, Green, Red, color_is_red
+from datatypes import Blue, Color, Green, Red, color_is_red
 
 
 def test_color_is_red_round_trip() -> None:

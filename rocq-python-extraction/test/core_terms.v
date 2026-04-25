@@ -132,28 +132,12 @@ Definition str_val := "hello"%pstring.
 Axiom todo_val : nat.
 
 (* ------------------------------------------------------------------ *)
-(*  Extraction commands                                                *)
-(*  Each writes a .py file to the project's build root.               *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [core_terms.py] module.          *)
 (* ------------------------------------------------------------------ *)
 
-(** [nat_add.py]: covers nat (Dind Standard), MLfix, MLcase Standard,
-    MLcase bool ternary, MLrel, MLglob, MLdummy, MLapp. *)
-Python Extraction nat_add.
-
-(** [mk_pair_r.py]: covers pair_t (Dind Record), MLcons Record. *)
-Python Extraction mk_pair_r.
-
-(** [zeros.py]: covers stream (Dind Coinductive), MLcons Coinductive. *)
-Python Extraction zeros.
-
-(** [uint_val.py]: MLuint diagnostic fixture. *)
-Python Extraction uint_val.
-
-(** [float_val.py]: MLfloat diagnostic fixture. *)
-Python Extraction float_val.
-
-(** [str_val.py]: MLstring literal. *)
-Python Extraction str_val.
-
-(** [todo_val.py]: MLaxiom. *)
-Python Extraction todo_val.
+(** [core_terms.py]: covers nat (Dind Standard), pair_t (Dind Record),
+    stream (Dind Coinductive), MLfix, MLcase Standard, MLcase bool
+    ternary, MLrel, MLglob, MLdummy, MLapp, MLcons Record, MLcons
+    Coinductive, MLuint, MLfloat, MLstring, MLaxiom. *)
+Python File Extraction core_terms "nat_add mk_pair_r zeros uint_val float_val str_val todo_val".

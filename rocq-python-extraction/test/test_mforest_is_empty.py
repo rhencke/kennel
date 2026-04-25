@@ -1,4 +1,4 @@
-from mforest_is_empty import FCons, FNil, MLeaf, mforest_is_empty
+from datatypes import FCons, FNil, MLeaf, mforest_is_empty
 
 
 def test_mforest_is_empty_round_trip() -> None:

@@ -1,4 +1,4 @@
-from bintree_is_leaf import BLeaf, BNode, bintree_is_leaf
+from datatypes import BLeaf, BNode, bintree_is_leaf
 
 
 def test_bintree_is_leaf_round_trip() -> None:

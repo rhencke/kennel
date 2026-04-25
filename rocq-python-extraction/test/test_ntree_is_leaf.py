@@ -1,4 +1,4 @@
-from ntree_is_leaf import NLeaf, NNode, NTree, ntree_is_leaf
+from datatypes import NLeaf, NNode, NTree, ntree_is_leaf
 
 
 def test_ntree_is_leaf_round_trip() -> None:

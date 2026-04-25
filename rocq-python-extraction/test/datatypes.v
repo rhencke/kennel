@@ -63,8 +63,6 @@ Definition mylist_is_empty {A : Set} (l : MyList A) : bool :=
   | MCons _ _ => false
   end.
 
-Python Extraction mylist_is_empty.
-
 (* ------------------------------------------------------------------ *)
 (*  2. Binary tree carrying nat values                                  *)
 (* ------------------------------------------------------------------ *)
@@ -83,8 +81,6 @@ Definition bintree_is_leaf (t : BinTree) : bool :=
   | BLeaf       => true
   | BNode _ _ _ => false
   end.
-
-Python Extraction bintree_is_leaf.
 
 (* ------------------------------------------------------------------ *)
 (*  3. Rose tree / forest (mutual, parameterised)                       *)
@@ -111,8 +107,6 @@ Definition roseforest_is_empty {A : Set} (f : RoseForest A) : bool :=
   | RFCons _ _ => false
   end.
 
-Python Extraction roseforest_is_empty.
-
 (* ------------------------------------------------------------------ *)
 (*  4. Mutual tree / forest (non-parameterised)                         *)
 (* ------------------------------------------------------------------ *)
@@ -133,8 +127,6 @@ Definition mforest_is_empty (f : MForest) : bool :=
   | FNil      => true
   | FCons _ _ => false
   end.
-
-Python Extraction mforest_is_empty.
 
 (* ------------------------------------------------------------------ *)
 (*  5. Polymorphic option; option-of-option flatten                     *)
@@ -159,8 +151,6 @@ Definition myopt_flatten {A : Set} (o : MyOpt (MyOpt A)) : MyOpt A :=
   | MyNone   => MyNone
   | MySome x => x
   end.
-
-Python Extraction myopt_flatten.
 
 (* ------------------------------------------------------------------ *)
 (*  6. Lowercase-first inductive — capitalization smoke test           *)
@@ -189,8 +179,6 @@ Definition color_is_red (c : color) : bool :=
   | Green => false
   | Blue  => false
   end.
-
-Python Extraction color_is_red.
 
 (* ------------------------------------------------------------------ *)
 (*  7. Even/Odd mutual inductive — mutual types + mutual fixpoint       *)
@@ -231,8 +219,6 @@ with odd_depth (o : Odd) : nat :=
   | OddS e => S (even_depth e)
   end.
 
-Python Extraction even_depth.
-
 (** [is_even]: Boolean parity check via mutual fixpoint over nat.
     [is_even] and [is_odd] are mutually recursive: each pattern-matches
     on nat and delegates the successor case to the other.
@@ -251,8 +237,6 @@ with is_odd (n : nat) : bool :=
   | O    => false
   | S n' => is_even n'
   end.
-
-Python Extraction is_even.
 
 (* ------------------------------------------------------------------ *)
 (*  9. Nested inductive — tree carrying a list of subtrees             *)
@@ -303,8 +287,6 @@ Definition ntree_is_leaf (t : NTree) : bool :=
   | NLeaf   => true
   | NNode _ => false
   end.
-
-Python Extraction ntree_is_leaf.
 
 (* ------------------------------------------------------------------ *)
 (*  10. STree / DTree (mutual, non-parameterised)                       *)
@@ -358,4 +340,4 @@ with dtree_size (d : DTree) : nat :=
   | DDecl s t => stree_size s + dtree_size t
   end.
 
-Python Extraction stree_size.
+Python File Extraction datatypes "mylist_is_empty bintree_is_leaf roseforest_is_empty mforest_is_empty myopt_flatten color_is_red even_depth is_even ntree_is_leaf stree_size".

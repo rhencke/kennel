@@ -1,4 +1,4 @@
-from is_even import is_even
+from datatypes import is_even
 
 
 def test_is_even_round_trip() -> None:

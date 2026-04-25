@@ -1,4 +1,4 @@
-from myopt_flatten import MyNone, MySome, myopt_flatten
+from datatypes import MyNone, MySome, myopt_flatten
 
 
 def test_myopt_flatten_round_trip() -> None:

@@ -1,4 +1,4 @@
-from stree_size import DDecl, DEnd, DTree, SLit, SSeq, STree, stree_size
+from datatypes import DDecl, DEnd, DTree, SLit, SSeq, STree, stree_size
 
 
 def test_stree_size_round_trip() -> None:

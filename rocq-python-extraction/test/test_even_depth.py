@@ -1,4 +1,4 @@
-from even_depth import Even, EvenO, EvenS, Odd, OddS, even_depth
+from datatypes import Even, EvenO, EvenS, Odd, OddS, even_depth
 
 
 def test_even_depth_round_trip() -> None:
