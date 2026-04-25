@@ -10473,9 +10473,15 @@ class TestHandlePromoteMerge:
         assert result == 0
         gh.pr_ready.assert_not_called()
 
-    def test_draft_pending_tasks_with_real_commits_can_promote(
+    def test_draft_pending_tasks_block_promote_even_with_real_commits(
         self, tmp_path: Path
     ) -> None:
+        """Pending tasks block promote regardless of branch commit count.
+
+        The previous "branch has real commits → promote anyway" loophole
+        was removed (#988): the PR body literally lists the unchecked
+        task, so shipping past it is wrong. Workers retry on next loop.
+        """
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {
@@ -10483,9 +10489,6 @@ class TestHandlePromoteMerge:
             "commits": [{}, {}],
             "isDraft": True,
         }
-        gh.pr_checks.return_value = []
-        gh.get_required_checks.return_value = []
-        gh.get_review_threads.return_value = []
         tasks_list = [
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
@@ -10494,12 +10497,17 @@ class TestHandlePromoteMerge:
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
-        assert result == 1
-        gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
+        assert result == 0
+        gh.pr_ready.assert_not_called()
 
-    def test_draft_pending_tasks_with_real_commits_requests_review(
-        self, tmp_path: Path
-    ) -> None:
+    def test_draft_in_progress_task_blocks_promote(self, tmp_path: Path) -> None:
+        """A task the worker is actively executing (in_progress) blocks
+        promote even though its status is not 'pending'.
+
+        Without this, fido marks the PR ready while the trailing task is
+        mid-execution; the task completes seconds later but the PR body
+        checkbox never gets re-synced before reviewers see it (#988).
+        """
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {
@@ -10507,67 +10515,39 @@ class TestHandlePromoteMerge:
             "commits": [{}, {}],
             "isDraft": True,
         }
-        gh.pr_checks.return_value = []
-        gh.get_required_checks.return_value = []
-        gh.get_review_threads.return_value = []
         tasks_list = [
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
-            {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
+            {"id": "t2", "title": "Running", "status": "in_progress", "type": "spec"},
+        ]
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+        gh.pr_ready.assert_not_called()
+
+    def test_merge_blocked_while_task_in_progress(self, tmp_path: Path) -> None:
+        """Approved + ready PR with an in_progress task does NOT merge."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-04-25T20:00:00Z",
+                }
+            ],
+            "commits": [{}],
+            "isDraft": False,
+        }
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
+            {"id": "t2", "title": "Running", "status": "in_progress", "type": "spec"},
         ]
         with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
-
-    def test_has_substantive_branch_commits_true_for_multiple_commits(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        assert (
-            worker._has_substantive_branch_commits([{}, {}], "origin", "main") is True
-        )
-
-    def test_has_substantive_branch_commits_false_when_merge_base_fails(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        failed = MagicMock(returncode=1, stdout="")
-        with patch.object(worker, "_git", return_value=failed):
-            assert (
-                worker._has_substantive_branch_commits([{}], "origin", "main") is False
-            )
-
-    def test_has_substantive_branch_commits_false_when_log_fails(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        merge_base = MagicMock(returncode=0, stdout="base000\n")
-        failed_log = MagicMock(returncode=1, stdout="")
-        with patch.object(worker, "_git", side_effect=[merge_base, failed_log]):
-            assert (
-                worker._has_substantive_branch_commits([{}], "origin", "main") is False
-            )
-
-    def test_has_substantive_branch_commits_false_for_only_wip(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        merge_base = MagicMock(returncode=0, stdout="base000\n")
-        log_result = MagicMock(returncode=0, stdout="wip: start\n")
-        with patch.object(worker, "_git", side_effect=[merge_base, log_result]):
-            assert (
-                worker._has_substantive_branch_commits([{}], "origin", "main") is False
-            )
-
-    def test_has_substantive_branch_commits_true_for_single_real_commit(
-        self, tmp_path: Path
-    ) -> None:
-        worker, _ = self._make_worker(tmp_path)
-        merge_base = MagicMock(returncode=0, stdout="base000\n")
-        log_result = MagicMock(returncode=0, stdout="feat: real work\n")
-        with patch.object(worker, "_git", side_effect=[merge_base, log_result]):
-            assert (
-                worker._has_substantive_branch_commits([{}], "origin", "main") is True
-            )
+        gh.pr_merge.assert_not_called()
 
     # --- CI gate on draft promotion ---
 

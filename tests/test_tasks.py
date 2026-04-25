@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1080,6 +1080,26 @@ class TestTasksCompleteWithResolve:
     def test_nonexistent_id_does_not_raise(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         Tasks(work_dir).complete_with_resolve("nonexistent-id", MagicMock())
+
+    def test_triggers_background_sync(self, tmp_path: Path) -> None:
+        """Every completion fires sync_tasks_background so the PR body
+        checkbox flips even when the worker loop doesn't sync between
+        the completion and the PR-ready/merge step (#988)."""
+        work_dir = self._work_dir(tmp_path)
+        task = add_task(work_dir, "task", TaskType.SPEC)
+        gh = MagicMock()
+        with patch("fido.tasks.sync_tasks_background") as mock_sync:
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        mock_sync.assert_called_once_with(work_dir, gh)
+
+    def test_triggers_background_sync_even_for_unknown_id(self, tmp_path: Path) -> None:
+        """Sync still fires even when the task_id isn't found — caller
+        intent ('I just tried to complete something') is the trigger."""
+        work_dir = self._work_dir(tmp_path)
+        gh = MagicMock()
+        with patch("fido.tasks.sync_tasks_background") as mock_sync:
+            Tasks(work_dir).complete_with_resolve("nonexistent-id", gh)
+        mock_sync.assert_called_once_with(work_dir, gh)
 
     def test_resolves_thread_when_we_are_last(self, tmp_path: Path, caplog) -> None:
         import logging

@@ -2572,35 +2572,6 @@ class Worker:
         self.gh.comment_issue(repo, issue, body)
         log.info("posted pickup comment on issue #%s", issue)
 
-    def _has_substantive_branch_commits(
-        self,
-        commits: list[dict[str, Any]],
-        remote: str,
-        default_branch: str,
-    ) -> bool:
-        """Return True when the branch has work beyond the empty wip sentinel."""
-        if len(commits) > 1:
-            return True
-        if not commits:
-            return False
-        base = self._git(
-            ["merge-base", "HEAD", f"{remote}/{default_branch}"],
-            check=False,
-        )
-        if base.returncode != 0:
-            return False
-        base_sha = base.stdout.strip()
-        log_result = self._git(
-            ["log", "--format=%s", f"{base_sha}..HEAD", "--reverse"],
-            check=False,
-        )
-        if log_result.returncode != 0:
-            return False
-        subjects = [
-            line.strip() for line in log_result.stdout.splitlines() if line.strip()
-        ]
-        return any(subject != "wip: start" for subject in subjects)
-
     def handle_promote_merge(
         self,
         fido_dir: Path,
@@ -2643,9 +2614,18 @@ class Worker:
         )
         is_approved = latest_state == "APPROVED"
         task_list = self._tasks.list()
-        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
+        # In-flight work (in_progress) blocks promote/merge as much as
+        # pending work — a task the worker is actively executing right
+        # now is unfinished, even though its status is not "pending".
+        # Without this, fido marks the PR ready (and runs the body
+        # checkbox sync) before the trailing task finishes (#988).
+        pending = [
+            t
+            for t in task_list
+            if t.get("status") in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+        ]
 
-        # Merge only if: approved + not draft + no pending tasks
+        # Merge only if: approved + not draft + no incomplete tasks
         if is_approved and not is_draft and not pending:
             pr_info = self.gh.get_pr(repo_ctx.repo, pr_number)
             merge_state = pr_info.get("mergeStateStatus", "")
@@ -2720,22 +2700,13 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            has_real_branch_work = self._has_substantive_branch_commits(
-                commits, "origin", repo_ctx.default_branch
-            )
-            if pending and not has_real_branch_work:
+            if pending:
                 log.info(
-                    "PR #%s: %d tasks still pending — not promoting yet",
+                    "PR #%s: %d tasks still pending or in-progress — not promoting yet",
                     pr_number,
                     len(pending),
                 )
                 return 0
-            if pending:
-                log.info(
-                    "PR #%s: %d tasks still pending, but branch has real commits — continuing promote checks",
-                    pr_number,
-                    len(pending),
-                )
             checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
             required = self.gh.get_required_checks(
                 repo_ctx.repo, repo_ctx.default_branch

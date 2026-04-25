@@ -700,8 +700,14 @@ class Tasks(JsonFileStore):
         so both the worker and CLI share one path.  If the task has no thread
         metadata, or we are not the last commenter, the resolve step is skipped
         silently.
+
+        Always triggers a background :func:`sync_tasks` after the completion
+        so the PR body checkbox flips even when the worker loop doesn't run
+        another sync between this completion and the PR-ready/merge step
+        (#988).
         """
         thread = self.complete_by_id(task_id)
+        sync_tasks_background(self._work_dir, gh)
         if not thread:
             return
         repo = thread.get("repo", "")
