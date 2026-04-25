@@ -12,7 +12,6 @@ from fido import provider
 from fido.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
-    _RETURNCODE_SET_MODEL_TIMEOUT,
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
@@ -1499,68 +1498,46 @@ class TestClaudeSessionStop:
 
 
 class TestClaudeSessionSwitchModel:
-    _REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-
-    def _make_response_line(self, request_id: str) -> str:
-        import json as _json
-
-        # Real claude-code emits request_id nested under response (#975).
-        return (
-            _json.dumps(
-                {
-                    "type": "control_response",
-                    "response": {"subtype": "success", "request_id": request_id},
-                }
-            )
-            + "\n"
-        )
+    """switch_model now respawns the claude subprocess with
+    ``--model <new> --resume <session_id>``.  The in-place
+    ``control_request`` ``set_model`` path was removed because
+    claude-code 2.1.114 wedges its set_model handler after the first
+    turn (the second real switch never returns a ``control_response``).
+    """
 
     def test_same_model_is_noop(self, tmp_path: Path) -> None:
-        """When the target matches the current model, nothing happens."""
+        """When the target matches the current model, no respawn happens."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)  # default model claude-opus-4-6
-        current_proc = session._proc
-        session.switch_model("claude-opus-4-6")
-        assert session._proc is current_proc
-        # No control_request is written for a noop switch.
-        assert proc.stdin.write.call_count == 0
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_model("claude-opus-4-6")
+        mock_respawn.assert_not_called()
+        assert session._proc is proc
 
-    def test_different_model_sends_control_request(self, tmp_path: Path) -> None:
-        """Switching model writes a set_model control_request to stdin and
-        updates _model — no kill, no respawn."""
-        import json as _json
-
-        response = self._make_response_line(self._REQUEST_ID)
+    def test_different_model_respawns_preserving_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Switching model updates ``_model`` and triggers ``_respawn``
+        with ``clear_session_id=False`` so ``--resume <sid>`` keeps
+        conversation context across the new boot."""
         proc = _make_session_proc([])
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
         session = _make_session(tmp_path, proc)
-        original_proc = session._proc
-
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
+        with patch.object(session, "_respawn") as mock_respawn:
             session.switch_model("claude-sonnet-4-6")
-
-        # Proc is unchanged — no kill, no respawn.
-        assert session._proc is original_proc
         assert session._model == "claude-sonnet-4-6"
-        # stdin got a control_request with set_model subtype and correct model.
-        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
-        assert obj["type"] == "control_request"
-        assert obj["request"]["subtype"] == "set_model"
-        assert obj["request"]["model"] == "claude-sonnet-4-6"
-        session.stop()
+        mock_respawn.assert_called_once()
+        kwargs = mock_respawn.call_args.kwargs
+        assert kwargs["clear_session_id"] is False
+        assert "claude-sonnet-4-6" in kwargs["reason"]
 
-    def test_switch_propagates_stream_error(self, tmp_path: Path) -> None:
-        """ClaudeStreamError from _send_control_set_model propagates to the caller."""
-        # EOF immediately → _RETURNCODE_SET_MODEL_TIMEOUT
+    def test_switch_propagates_respawn_error(self, tmp_path: Path) -> None:
+        """Errors raised by ``_respawn`` (e.g. kill timeout) propagate."""
         proc = _make_session_proc([])
-        proc.stdout.readline = MagicMock(return_value="")
         session = _make_session(tmp_path, proc)
-        with pytest.raises(ClaudeStreamError) as exc_info:
-            session.switch_model("claude-sonnet-4-6")
-        assert exc_info.value.returncode == _RETURNCODE_SET_MODEL_TIMEOUT
+        boom = OSError("kill failed")
+        with patch.object(session, "_respawn", side_effect=boom):
+            with pytest.raises(OSError, match="kill failed"):
+                session.switch_model("claude-sonnet-4-6")
 
 
 class TestClaudeSessionConsumeUntilResult:
@@ -2251,299 +2228,6 @@ class TestClaudeSessionSendControlInterrupt:
         session._send_control_interrupt()
         obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
         assert isinstance(obj.get("request_id"), str) and obj["request_id"]
-        session.stop()
-
-
-class TestClaudeSessionSendControlSetModel:
-    """Tests for ClaudeSession._send_control_set_model."""
-
-    _REQUEST_ID = "12345678-1234-5678-1234-567812345678"
-
-    def _make_response_line(self, request_id: str, **extra: object) -> str:
-        import json as _json
-
-        # Real claude-code emits request_id nested under response (#975).
-        return (
-            _json.dumps(
-                {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        **extra,
-                    },
-                }
-            )
-            + "\n"
-        )
-
-    def _make_custom_session(
-        self,
-        tmp_path: Path,
-        proc: MagicMock,
-        *,
-        idle_timeout: float = 1800.0,
-        selector_side_effect: object = None,
-    ) -> ClaudeSession:
-        """Build a ClaudeSession with an injectable selector side_effect."""
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        fake_popen = MagicMock(return_value=proc)
-        if selector_side_effect is not None:
-            fake_selector = MagicMock(side_effect=selector_side_effect)
-        else:
-            fake_selector = MagicMock(return_value=([proc.stdout], [], []))
-        return ClaudeSession(
-            system_file,
-            work_dir=tmp_path,
-            popen=fake_popen,
-            selector=fake_selector,
-            idle_timeout=idle_timeout,
-        )
-
-    def test_writes_control_request_type(self, tmp_path: Path) -> None:
-        import json as _json
-
-        proc = _make_session_proc([])
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")
-        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
-        assert obj["type"] == "control_request"
-        session.stop()
-
-    def test_writes_set_model_subtype(self, tmp_path: Path) -> None:
-        import json as _json
-
-        proc = _make_session_proc([])
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")
-        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
-        assert obj["request"]["subtype"] == "set_model"
-        session.stop()
-
-    def test_writes_model_in_request(self, tmp_path: Path) -> None:
-        import json as _json
-
-        proc = _make_session_proc([])
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")
-        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
-        assert obj["request"]["model"] == "claude-sonnet-4-6"
-        session.stop()
-
-    def test_includes_request_id(self, tmp_path: Path) -> None:
-        import json as _json
-
-        proc = _make_session_proc([])
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")
-        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
-        assert isinstance(obj.get("request_id"), str) and obj["request_id"]
-        session.stop()
-
-    def test_returns_on_matching_control_response(self, tmp_path: Path) -> None:
-        """Returns without raising when a matching control_response arrives."""
-        proc = _make_session_proc([])
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        session.stop()
-
-    def test_skips_non_matching_response_and_reads_next(self, tmp_path: Path) -> None:
-        """Keeps reading past a control_response with a different request_id."""
-        proc = _make_session_proc([])
-        wrong_response = self._make_response_line(
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        )
-        right_response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(
-            side_effect=[wrong_response, right_response, ""]
-        )
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        assert proc.stdout.readline.call_count == 2
-        session.stop()
-
-    def test_skips_non_control_response_events(self, tmp_path: Path) -> None:
-        """Skips unrelated event types before the control_response."""
-        import json as _json
-
-        proc = _make_session_proc([])
-        other_event = _json.dumps({"type": "system", "subtype": "init"}) + "\n"
-        right_response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[other_event, right_response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        assert proc.stdout.readline.call_count == 2
-        session.stop()
-
-    def test_ignores_top_level_request_id_in_control_response(
-        self, tmp_path: Path
-    ) -> None:
-        """Regression for #975: real claude-code emits request_id nested under
-        ``response``, not at the top level.  A malformed top-level placement
-        must NOT match — otherwise we silently accept stale or mis-routed
-        responses.  Sequence: malformed top-level shape, then the real nested
-        shape — only the nested one should satisfy the wait."""
-        import json as _json
-
-        proc = _make_session_proc([])
-        malformed = (
-            _json.dumps({"type": "control_response", "request_id": self._REQUEST_ID})
-            + "\n"
-        )
-        correct = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[malformed, correct, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        # Both lines were read — the malformed one was skipped.
-        assert proc.stdout.readline.call_count == 2
-        session.stop()
-
-    def test_skips_empty_lines(self, tmp_path: Path) -> None:
-        """Empty (whitespace-only) stdout lines are skipped without error."""
-        proc = _make_session_proc([])
-        right_response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=["\n", right_response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        session.stop()
-
-    def test_raises_on_eof_while_waiting(self, tmp_path: Path) -> None:
-        """EOF (empty readline) before control_response raises ClaudeStreamError."""
-        proc = _make_session_proc([])
-        proc.stdout.readline = MagicMock(return_value="")
-        session = _make_session(tmp_path, proc)
-        with pytest.raises(ClaudeStreamError) as exc_info:
-            session._send_control_set_model("claude-sonnet-4-6")
-        assert exc_info.value.returncode == _RETURNCODE_SET_MODEL_TIMEOUT
-        session.stop()
-
-    def test_raises_on_timeout(self, tmp_path: Path) -> None:
-        """ClaudeStreamError raised when idle_timeout expires before response."""
-        proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=None)
-        session = self._make_custom_session(
-            tmp_path,
-            proc,
-            idle_timeout=0.0,
-            selector_side_effect=[([], [], [])],
-        )
-        with pytest.raises(ClaudeStreamError) as exc_info:
-            session._send_control_set_model("claude-sonnet-4-6")
-        assert exc_info.value.returncode == _RETURNCODE_SET_MODEL_TIMEOUT
-        session.stop()
-
-    def test_raises_when_process_exits_while_waiting(self, tmp_path: Path) -> None:
-        """ClaudeStreamError raised when subprocess exits without sending response."""
-        proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=1)
-        session = self._make_custom_session(
-            tmp_path,
-            proc,
-            selector_side_effect=[([], [], [])],
-        )
-        with pytest.raises(ClaudeStreamError) as exc_info:
-            session._send_control_set_model("claude-sonnet-4-6")
-        assert exc_info.value.returncode == _RETURNCODE_SET_MODEL_TIMEOUT
-        session.stop()
-
-    def test_continues_when_stdout_not_ready_and_proc_alive(
-        self, tmp_path: Path
-    ) -> None:
-        """Loops past a not-ready select() if the subprocess is still alive."""
-        proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=None)
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
-        session = self._make_custom_session(
-            tmp_path,
-            proc,
-            selector_side_effect=[
-                ([], [], []),  # first call: not ready, proc alive
-                ([proc.stdout], [], []),  # second call: ready
-            ],
-        )
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
-        session.stop()
-
-    def test_updates_session_id_from_response(self, tmp_path: Path) -> None:
-        """session_id at the top level of a stream-json event is tracked on
-        the session.  Real claude-code emits session_id on system/result
-        events, not control_response — but the wait loop processes any event
-        that lands while it polls, so an event with session_id must update
-        the session before the matching control_response closes the wait."""
-        import json as _json
-
-        proc = _make_session_proc([])
-        side_event = (
-            _json.dumps(
-                {
-                    "type": "system",
-                    "subtype": "init",
-                    "session_id": "new-session-42",
-                }
-            )
-            + "\n"
-        )
-        response = self._make_response_line(self._REQUEST_ID)
-        proc.stdout.readline = MagicMock(side_effect=[side_event, response, ""])
-        session = _make_session(tmp_path, proc)
-        with patch(
-            "fido.claude.uuid.uuid4",
-            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
-        ):
-            session._send_control_set_model("claude-sonnet-4-6")
-        assert session._session_id == "new-session-42"
         session.stop()
 
 
