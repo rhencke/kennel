@@ -1225,6 +1225,9 @@ def bootstrap_issue_caches(
     whose worker resumes on an existing issue and never calls
     ``find_next_issue`` during the current fido run.
 
+    After each successful load, the worker thread is woken so it rescans
+    immediately rather than waiting out the 60-second idle timeout (#995).
+
     Per-repo failures are swallowed (logged, not raised): a single GitHub
     API hiccup must not prevent fido from starting.  The hourly
     :class:`~fido.watchdog.ReconcileWatchdog` will heal any cold repo
@@ -1238,6 +1241,7 @@ def bootstrap_issue_caches(
             log.info("startup: bootstrapping issue cache for %s", name)
             inventory = gh.find_all_open_issues(owner, repo_name)
             cache.load_inventory(inventory, snapshot_started_at=snapshot_started_at)
+            registry.wake(name)
         except Exception:
             log.exception(
                 "startup: failed to bootstrap issue cache for %s — "
