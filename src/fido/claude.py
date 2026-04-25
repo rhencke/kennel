@@ -820,6 +820,11 @@ class ClaudeSession(OwnedSession):
         """
         if self._in_turn:
             self._drain_to_boundary()
+        if self._cancel.is_set():
+            # A preempt fired during (or just before) the drain — do not write
+            # a new message onto the dirty stream.  iter_events will see
+            # _cancel and break; _last_turn_cancelled lets run_turn retry.
+            return
         msg = json.dumps(
             {"type": "user", "message": {"role": "user", "content": content}}
         )
@@ -857,6 +862,13 @@ class ClaudeSession(OwnedSession):
                 [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
             self._drain_wakeup()
+            if self._cancel.is_set():
+                # Preempt fired — exit early without clearing _in_turn so
+                # send() skips writing and iter_events() breaks on the cancel.
+                log.debug(
+                    "ClaudeSession._drain_to_boundary: cancel set — aborting drain early"
+                )
+                return
             if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
