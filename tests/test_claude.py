@@ -1520,8 +1520,15 @@ class TestClaudeSessionSwitchModel:
     def _make_response_line(self, request_id: str) -> str:
         import json as _json
 
+        # Real claude-code emits request_id nested under response (#975).
         return (
-            _json.dumps({"type": "control_response", "request_id": request_id}) + "\n"
+            _json.dumps(
+                {
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": request_id},
+                }
+            )
+            + "\n"
         )
 
     def test_same_model_is_noop(self, tmp_path: Path) -> None:
@@ -2176,8 +2183,18 @@ class TestClaudeSessionSendControlSetModel:
     def _make_response_line(self, request_id: str, **extra: object) -> str:
         import json as _json
 
+        # Real claude-code emits request_id nested under response (#975).
         return (
-            _json.dumps({"type": "control_response", "request_id": request_id, **extra})
+            _json.dumps(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        **extra,
+                    },
+                }
+            )
             + "\n"
         )
 
@@ -2318,6 +2335,33 @@ class TestClaudeSessionSendControlSetModel:
         assert proc.stdout.readline.call_count == 2
         session.stop()
 
+    def test_ignores_top_level_request_id_in_control_response(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #975: real claude-code emits request_id nested under
+        ``response``, not at the top level.  A malformed top-level placement
+        must NOT match — otherwise we silently accept stale or mis-routed
+        responses.  Sequence: malformed top-level shape, then the real nested
+        shape — only the nested one should satisfy the wait."""
+        import json as _json
+
+        proc = _make_session_proc([])
+        malformed = (
+            _json.dumps({"type": "control_response", "request_id": self._REQUEST_ID})
+            + "\n"
+        )
+        correct = self._make_response_line(self._REQUEST_ID)
+        proc.stdout.readline = MagicMock(side_effect=[malformed, correct, ""])
+        session = _make_session(tmp_path, proc)
+        with patch(
+            "fido.claude.uuid.uuid4",
+            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
+        ):
+            session._send_control_set_model("claude-sonnet-4-6")  # must not raise
+        # Both lines were read — the malformed one was skipped.
+        assert proc.stdout.readline.call_count == 2
+        session.stop()
+
     def test_skips_empty_lines(self, tmp_path: Path) -> None:
         """Empty (whitespace-only) stdout lines are skipped without error."""
         proc = _make_session_proc([])
@@ -2394,21 +2438,26 @@ class TestClaudeSessionSendControlSetModel:
         session.stop()
 
     def test_updates_session_id_from_response(self, tmp_path: Path) -> None:
-        """session_id in control_response is tracked on the session."""
+        """session_id at the top level of a stream-json event is tracked on
+        the session.  Real claude-code emits session_id on system/result
+        events, not control_response — but the wait loop processes any event
+        that lands while it polls, so an event with session_id must update
+        the session before the matching control_response closes the wait."""
         import json as _json
 
         proc = _make_session_proc([])
-        response = (
+        side_event = (
             _json.dumps(
                 {
-                    "type": "control_response",
-                    "request_id": self._REQUEST_ID,
+                    "type": "system",
+                    "subtype": "init",
                     "session_id": "new-session-42",
                 }
             )
             + "\n"
         )
-        proc.stdout.readline = MagicMock(side_effect=[response, ""])
+        response = self._make_response_line(self._REQUEST_ID)
+        proc.stdout.readline = MagicMock(side_effect=[side_event, response, ""])
         session = _make_session(tmp_path, proc)
         with patch(
             "fido.claude.uuid.uuid4",

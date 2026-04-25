@@ -1020,11 +1020,17 @@ class ClaudeSession(OwnedSession):
             sid = obj.get("session_id")
             if isinstance(sid, str) and sid:
                 self._session_id = sid
-            if (
-                obj.get("type") == "control_response"
-                and obj.get("request_id") == request_id
-            ):
-                return
+            if obj.get("type") == "control_response":
+                # Real claude-code (verified against 2.1.120) emits
+                # request_id nested inside the response payload, not at the
+                # top level:
+                #   {"type": "control_response",
+                #    "response": {"subtype": "success", "request_id": "..."}}
+                # Without this, the predicate never matches and every
+                # switch_model call hangs until idle_timeout (#975).
+                response = obj.get("response") or {}
+                if response.get("request_id") == request_id:
+                    return
 
     def interrupt(self, content: str) -> None:
         """Interrupt the in-flight turn at the protocol level, then send *content*.
