@@ -282,7 +282,8 @@ class PromptSession(Protocol):
         ...
 
     def switch_model(self, model: ProviderModel) -> None:
-        """Switch the live session to *model* without resetting session state."""
+        """Switch the live session to *model* in-place without kill, respawn,
+        or session-state loss."""
         ...
 
     def recover(self) -> None:
