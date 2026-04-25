@@ -2359,6 +2359,7 @@ class Worker:
         )
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
+        self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
         session_id, _output = provider_run(
             fido_dir,
             agent=self._provider_agent,
