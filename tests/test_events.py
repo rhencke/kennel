@@ -7,6 +7,7 @@ from fido.claude import ClaudeClient
 from fido.config import Config, RepoMembership
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
+    WEBHOOK_ALLOWED_TOOLS,
     Action,
     _apply_reply_result,
     _configured_agent,
@@ -146,6 +147,14 @@ class TestNeedsMoreContext:
         client = _client("YES")
         needs_more_context("same", agent=client)
         assert client.run_toolless_turn.call_args.kwargs["model"] == "claude-haiku-4-5"
+
+    def test_passes_webhook_allowed_tools(self) -> None:
+        client = _client("YES")
+        needs_more_context("same", agent=client)
+        assert (
+            client.run_toolless_turn.call_args.kwargs["allowed_tools"]
+            == WEBHOOK_ALLOWED_TOOLS
+        )
 
     def test_requires_agent(self) -> None:
         with pytest.raises(ValueError, match="needs_more_context requires agent"):
@@ -1460,6 +1469,12 @@ class TestSummarizeAsActionItem:
         client.run_toolless_turn.assert_called()
         client.run_turn.assert_not_called()
 
+    def test_passes_webhook_allowed_tools(self) -> None:
+        client = _client("add tests")
+        _summarize_as_action_item("add some tests", agent=client)
+        for call in client.run_toolless_turn.call_args_list:
+            assert call.kwargs.get("allowed_tools") == WEBHOOK_ALLOWED_TOOLS
+
     def test_shorten_empty_raises(self) -> None:
         """If shorten returns empty, safe_toolless_turn raises ValueError."""
         long_title = "a" * 81
@@ -1533,6 +1548,14 @@ class TestTriage:
         assert cat == "DO"
         assert "DO" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
+
+    def test_passes_webhook_allowed_tools(self) -> None:
+        agent = _client("ACT: add tests")
+        _triage("please add tests", is_bot=False, agent=agent)
+        assert (
+            agent.run_toolless_turn.call_args.kwargs["allowed_tools"]
+            == WEBHOOK_ALLOWED_TOOLS
+        )
 
     def test_requires_agent(self) -> None:
         with pytest.raises(ValueError, match="_triage requires agent"):
@@ -1677,12 +1700,23 @@ class TestMaybeReact:
     def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client("NONE")
+            factory_cls.return_value.create_toolless_agent.return_value = _client(
+                "NONE"
+            )
             maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
-        factory_cls.return_value.create_agent.assert_called_once_with(
+        factory_cls.return_value.create_toolless_agent.assert_called_once_with(
             cfg.repos["owner/repo"],
-            work_dir=tmp_path,
-            repo_name="owner/repo",
+        )
+
+    def test_passes_webhook_allowed_tools(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        agent = _client("heart")
+        maybe_react(
+            "great work!", 99, "pulls", "owner/repo", cfg, MagicMock(), agent=agent
+        )
+        assert (
+            agent.run_toolless_turn.call_args.kwargs["allowed_tools"]
+            == WEBHOOK_ALLOWED_TOOLS
         )
 
     def test_missing_repo_config_raises(self, tmp_path: Path) -> None:
@@ -2360,6 +2394,9 @@ class TestReplyToComment:
         )
         agent.run_toolless_turn.assert_called()
         agent.run_turn.assert_not_called()
+        # All webhook voice turns must pass the read-only tool set.
+        for call in agent.run_toolless_turn.call_args_list:
+            assert call.kwargs.get("allowed_tools") == WEBHOOK_ALLOWED_TOOLS
 
 
 class TestReplyToReview:
@@ -2614,16 +2651,14 @@ class TestReplyToIssueComment:
             return "ok"
 
         with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client(
+            factory_cls.return_value.create_toolless_agent.return_value = _client(
                 side_effect=fake_pp
             )
             cat, titles = reply_to_issue_comment(
                 action, cfg, self._repo_cfg(tmp_path), MagicMock()
             )
-        factory_cls.return_value.create_agent.assert_called_once_with(
+        factory_cls.return_value.create_toolless_agent.assert_called_once_with(
             self._repo_cfg(tmp_path),
-            work_dir=tmp_path,
-            repo_name="owner/repo",
         )
         assert cat == "ACT"
 
@@ -2724,6 +2759,8 @@ class TestReplyToIssueComment:
         )
         agent.run_toolless_turn.assert_called()
         agent.run_turn.assert_not_called()
+        for call in agent.run_toolless_turn.call_args_list:
+            assert call.kwargs.get("allowed_tools") == WEBHOOK_ALLOWED_TOOLS
 
     def test_writes_durable_claim_after_reply(self, tmp_path: Path) -> None:
         """After posting a reply, the comment id is completed in SQLite."""
@@ -4213,6 +4250,8 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, agent=agent)
         agent.run_toolless_turn.assert_called()
         agent.run_turn.assert_not_called()
+        for call in agent.run_toolless_turn.call_args_list:
+            assert call.kwargs.get("allowed_tools") == WEBHOOK_ALLOWED_TOOLS
 
     def test_review_comment_empty_opus_raises(self, tmp_path: Path) -> None:
         """Empty toolless reply raises — no silent swallowing."""
@@ -4303,12 +4342,12 @@ class TestNotifyThreadChange:
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
         with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client("Auto reply")
+            factory_cls.return_value.create_toolless_agent.return_value = _client(
+                "Auto reply"
+            )
             _notify_thread_change(change, cfg, mock_gh)
-        factory_cls.return_value.create_agent.assert_called_once_with(
+        factory_cls.return_value.create_toolless_agent.assert_called_once_with(
             cfg.repos["owner/repo"],
-            work_dir=tmp_path,
-            repo_name="owner/repo",
         )
         mock_gh.reply_to_review_comment.assert_called_once_with(
             "owner/repo", 42, "Auto reply", 999

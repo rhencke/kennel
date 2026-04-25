@@ -21,6 +21,22 @@ from fido.types import TaskType
 
 log = logging.getLogger(__name__)
 
+# Read-only tools available to webhook voice turns.  These let triage and
+# reply generation read code, search the web, and query GitHub — but cannot
+# write files, run arbitrary commands, or push to git.
+WEBHOOK_ALLOWED_TOOLS: tuple[str, ...] = (
+    "Read",
+    "Grep",
+    "Glob",
+    "WebSearch",
+    "WebFetch",
+    "Bash(git log*)",
+    "Bash(git show*)",
+    "Bash(git diff*)",
+    "Bash(gh issue*)",
+    "Bash(gh pr*)",
+)
+
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
 _reorder_coalesce: dict[str, dict[str, Any]] = {}
@@ -666,7 +682,9 @@ def maybe_react(
         prompts = Prompts(_load_persona(config))
     reaction = (
         agent.run_toolless_turn(
-            prompts.react_prompt(comment_body), model=agent.voice_model
+            prompts.react_prompt(comment_body),
+            model=agent.voice_model,
+            allowed_tools=WEBHOOK_ALLOWED_TOOLS,
         )
         .lower()
         .split("\n")[0]
@@ -802,6 +820,7 @@ def reply_to_comment(
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        allowed_tools=WEBHOOK_ALLOWED_TOOLS,
         log_prefix="reply_to_comment",
     )
     log.info(
@@ -961,7 +980,9 @@ def needs_more_context(
         "Reply with exactly YES or NO."
     )
     log.info("needs-more-context check: requesting haiku")
-    answer = agent.run_toolless_turn(prompt, model=agent.brief_model).upper()
+    answer = agent.run_toolless_turn(
+        prompt, model=agent.brief_model, allowed_tools=WEBHOOK_ALLOWED_TOOLS
+    ).upper()
     log.info(
         "needs-more-context check: returned %d chars (answer=%r)",
         len(answer),
@@ -990,7 +1011,11 @@ def _summarize_as_action_item(
     )
     log.info("summarize-action-item: requesting initial title from opus")
     raw = safe_toolless_turn(
-        agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
+        agent,
+        prompt,
+        model=agent.voice_model,
+        allowed_tools=WEBHOOK_ALLOWED_TOOLS,
+        log_prefix="_summarize_as_action_item",
     )
     result = raw.strip()
     log.info(
@@ -1010,6 +1035,7 @@ def _summarize_as_action_item(
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
+            allowed_tools=WEBHOOK_ALLOWED_TOOLS,
             log_prefix="_summarize_as_action_item/shorten",
         )
         result = shortened.strip()
@@ -1041,7 +1067,9 @@ def _triage(
         prompts = Prompts("")
     prompt = prompts.triage_prompt(comment_body, is_bot, context)
     log.info("triage classifier: requesting category from opus")
-    text = agent.run_toolless_turn(prompt, model=agent.voice_model)
+    text = agent.run_toolless_turn(
+        prompt, model=agent.voice_model, allowed_tools=WEBHOOK_ALLOWED_TOOLS
+    )
     log.info(
         "triage classifier: returned %d chars (preview=%r)",
         len(text or ""),
@@ -1163,6 +1191,7 @@ def reply_to_issue_comment(
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        allowed_tools=WEBHOOK_ALLOWED_TOOLS,
         log_prefix="reply_to_issue_comment",
     )
     log.info(
@@ -1362,6 +1391,7 @@ def _notify_thread_change(
         prompts.persona_wrap(instruction),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        allowed_tools=WEBHOOK_ALLOWED_TOOLS,
         log_prefix="_notify_thread_change",
     )
     try:

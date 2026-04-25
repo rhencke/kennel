@@ -1557,13 +1557,16 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         *,
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
+        allowed_tools: tuple[str, ...] | None = None,
     ) -> str:
-        """Run a one-shot ``claude --print`` turn with no tool access.
+        """Run a one-shot ``claude --print`` turn.
 
         Writes *content* (and optionally *system_prompt*) to temporary files and
-        invokes ``claude --print`` via :attr:`_streaming_runner`.  Because
-        ``--print`` mode has no tool access by design, the provider cannot use
-        Edit, Bash, or git tools regardless of prompt instructions.
+        invokes ``claude --print`` via :attr:`_streaming_runner`.
+
+        When *allowed_tools* is ``None`` the turn has no tool access at all.
+        When a tuple of tool specifiers is provided, those tools are enabled via
+        ``--allowedTools`` so the provider can read code and search but not write.
 
         Unlike :meth:`run_turn`, this does **not** touch the persistent session.
         """
@@ -1582,6 +1585,8 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
                 "--dangerously-skip-permissions",
                 "--print",
             ]
+            if allowed_tools is not None:
+                cmd += ["--allowedTools", *allowed_tools]
             if system_prompt is not None:
                 system_file = tmp / "system.md"
                 system_file.write_text(system_prompt)

@@ -299,3 +299,16 @@ class TestSafeToollessTurn:
         safe_toolless_turn(agent, "prompt")
         _, kwargs = agent.run_toolless_turn.call_args
         assert "retry_on_preempt" not in kwargs
+
+    def test_passes_allowed_tools(self) -> None:
+        agent = self._agent("ok")
+        tools = ("Read", "Grep", "Bash(git log*)")
+        safe_toolless_turn(agent, "prompt", allowed_tools=tools)
+        _, kwargs = agent.run_toolless_turn.call_args
+        assert kwargs["allowed_tools"] == tools
+
+    def test_allowed_tools_defaults_to_none(self) -> None:
+        agent = self._agent("ok")
+        safe_toolless_turn(agent, "prompt")
+        _, kwargs = agent.run_toolless_turn.call_args
+        assert kwargs["allowed_tools"] is None

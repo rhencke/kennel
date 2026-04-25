@@ -1555,6 +1555,17 @@ class TestCopilotCLIClientRunToollessTurn:
         assert "sys" in captured[0]
         assert "content" in captured[0]
 
+    def test_allowed_tools_accepted_but_ignored(self, tmp_path: Path) -> None:
+        """Copilot CLI has no tool support; allowed_tools is accepted for protocol compat."""
+        runner = MagicMock(return_value=_completed(_copilot_output("ok")))
+        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        result = client.run_toolless_turn(
+            "hi",
+            model=client.voice_model,
+            allowed_tools=("Read", "Grep"),
+        )
+        assert extract_result_text(result) == "ok"
+
 
 class TestCopilotCLI:
     def test_default_provider_id_and_injected_components(self) -> None:

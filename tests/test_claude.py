@@ -3028,6 +3028,21 @@ class TestClaudeClientRunToollessTurn:
         with pytest.raises(ClaudeStreamError):
             client.run_toolless_turn("hi", model="claude-opus-4-6")
 
+    def test_allowed_tools_passed_as_flag(self) -> None:
+        client, mock_stream = self._client("ok")
+        tools = ("Read", "Grep", "Bash(git log*)")
+        client.run_toolless_turn("hi", model="claude-opus-4-6", allowed_tools=tools)
+        cmd = mock_stream.call_args[0][0]
+        assert "--allowedTools" in cmd
+        idx = cmd.index("--allowedTools")
+        assert cmd[idx + 1 : idx + 4] == ["Read", "Grep", "Bash(git log*)"]
+
+    def test_no_allowed_tools_flag_by_default(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi", model="claude-opus-4-6")
+        cmd = mock_stream.call_args[0][0]
+        assert "--allowedTools" not in cmd
+
     def test_content_written_to_stdin_file(self) -> None:
         """The prompt content must reach the streaming runner as the stdin file arg."""
         captured: list[str] = []

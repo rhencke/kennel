@@ -1260,13 +1260,15 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         *,
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
+        allowed_tools: tuple[str, ...] | None = None,
     ) -> str:
-        """Run a one-shot Copilot CLI turn with no tool access.
+        """Run a one-shot Copilot CLI turn.
 
         Copilot CLI is a text-only tool that does not have file-system tool access,
-        so this uses :meth:`_run_cli_prompt` directly.  If *system_prompt* is given,
-        it is prepended via :func:`_combine_prompt`.
+        so *allowed_tools* is accepted for protocol compatibility but has no effect.
+        If *system_prompt* is given, it is prepended via :func:`_combine_prompt`.
         """
+        del allowed_tools  # Copilot CLI has no tool support
         effective_model = self.voice_model if model is None else model
         prompt = _combine_prompt(content, system_prompt=system_prompt)
         return self._run_cli_prompt(prompt, model=effective_model, timeout=30)

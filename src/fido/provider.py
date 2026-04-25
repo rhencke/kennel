@@ -741,13 +741,18 @@ class ProviderAgent(Protocol):
         *,
         model: ProviderModel | None = None,
         system_prompt: str | None = None,
+        allowed_tools: tuple[str, ...] | None = None,
     ) -> str:
-        """Run a one-shot text-only turn without tool access and return the result.
+        """Run a one-shot turn and return the result.
 
         Unlike :meth:`run_turn`, this method uses a one-shot subprocess invocation
-        (``claude --print`` for Claude, the CLI tool for Copilot) that has no tool
-        access by design.  Webhook handlers must use this method for triage and reply
-        generation so that Claude cannot use Edit, Bash, or git tools inline.
+        (``claude --print`` for Claude, the CLI tool for Copilot) that does **not**
+        use the persistent session.
+
+        When *allowed_tools* is ``None`` (the default), the turn has no tool access
+        at all.  When a tuple of tool specifiers is provided, only those tools are
+        available — use this for webhook handlers that need read-only tools (e.g.
+        ``("Read", "Grep", "Bash(git log*)")``).
         """
         ...
 
@@ -868,14 +873,16 @@ def safe_toolless_turn(
     *,
     model: ProviderModel | None = None,
     system_prompt: str | None = None,
+    allowed_tools: tuple[str, ...] | None = None,
     log_prefix: str = "safe_toolless_turn",
 ) -> str:
-    """Run a toolless one-shot turn; raise on empty.
+    """Run a one-shot turn; raise on empty.
 
     Calls :meth:`~ProviderAgent.run_toolless_turn` which uses a one-shot subprocess
-    with no tool access (``claude --print`` for Claude).  Webhook handlers should use
-    this instead of :func:`safe_voice_turn` for triage and reply generation so that
-    the provider cannot use Edit, Bash, or git tools inline.
+    (``claude --print`` for Claude).  When *allowed_tools* is ``None``, no tools are
+    available; when provided, only the listed tools are enabled.  Webhook handlers
+    pass a curated read-only tool set so that triage can read code and search but
+    cannot use Edit, Bash (write), or git push.
 
     Raises :exc:`ValueError` if the provider returns an empty result.
     """
@@ -883,6 +890,7 @@ def safe_toolless_turn(
         content,
         model=model,
         system_prompt=system_prompt,
+        allowed_tools=allowed_tools,
     )
     if not result:
         raise ValueError(f"{log_prefix}: run_toolless_turn returned empty")
