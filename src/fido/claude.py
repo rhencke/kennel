@@ -549,6 +549,15 @@ class ClaudeSession(OwnedSession):
         # :attr:`_cancel` — starving the preempter for a full worker turn.
         # See yield-starvation discussion in #499 comments.
         self._preempt_pending = threading.Event()
+        # Condition that serializes the "set pending → check pending → acquire
+        # lock" handshake between webhook (priority) and worker (yields)
+        # threads at lock-handoff time.  Webhooks set ``_preempt_pending`` and
+        # ``notify_all`` under this mutex; workers ``wait_for(not pending)``
+        # under it.  After acquiring the lock, workers re-check pending under
+        # this mutex and yield (release+retry) if a webhook arrived during
+        # the gap — closes the race that #983 reported (worker won the lock
+        # handoff between two webhooks because RLock isn't FIFO).
+        self._preempt_cond = threading.Condition()
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
@@ -801,10 +810,34 @@ class ClaudeSession(OwnedSession):
         session lock is released before raising so the prior holder isn't
         deadlocked.
         """
-        self._lock.acquire()
-        # We hold the lock now; any preempter waiting on this
-        # (wait_for_pending_preempt) can wake.
-        self._preempt_pending.clear()
+        is_worker = provider.current_thread_kind() == "worker"
+        # Webhook-priority handoff (#983): worker threads yield to any
+        # queued webhook by waiting on _preempt_cond before acquiring
+        # _lock, AND re-checking under the cond mutex after acquiring —
+        # if a webhook set _preempt_pending during the gap, release the
+        # lock and retry.  Webhook callers skip the wait (they're the
+        # priority lane).
+        while True:
+            if is_worker:
+                with self._preempt_cond:
+                    self._preempt_cond.wait_for(
+                        lambda: not self._preempt_pending.is_set(),
+                        timeout=30.0,
+                    )
+            self._lock.acquire()
+            if is_worker:
+                with self._preempt_cond:
+                    if self._preempt_pending.is_set():
+                        # A webhook arrived between our wait and acquire —
+                        # let it in.  Release and re-wait.
+                        self._lock.release()
+                        continue
+            break
+        # We hold the lock now; clear the pending flag (under the cond
+        # mutex so a concurrent webhook setting it sees a coherent state).
+        with self._preempt_cond:
+            self._preempt_pending.clear()
+            self._preempt_cond.notify_all()
         # If the entering thread is the same one that fired the most recent
         # cancel, that signal was meant for the previous holder (who has
         # since released the lock).  Clear it so the firer's own first turn
@@ -958,13 +991,27 @@ class ClaudeSession(OwnedSession):
         """
         self._cancel.set()
         self._cancel_fired_by_tid = threading.get_ident()
-        self._preempt_pending.set()
+        self._signal_pending_preempt()
         self._wake()
         if self._in_turn:
             try:
                 self._send_control_interrupt()
             except (BrokenPipeError, OSError) as exc:
                 log.warning("session.prompt: early control_request failed: %s", exc)
+
+    def _signal_pending_preempt(self) -> None:
+        """Set :attr:`_preempt_pending` and wake any worker waiting in
+        :meth:`__enter__` so the worker yields to the queued webhook.
+
+        Held under :attr:`_preempt_cond` so the worker's wait+acquire
+        handshake sees a coherent state (closes #983 — RLock isn't FIFO,
+        so a webhook arriving while another webhook is the holder needs
+        an explicit signal to make the next worker re-acquire wait its
+        turn).
+        """
+        with self._preempt_cond:
+            self._preempt_pending.set()
+            self._preempt_cond.notify_all()
 
     def _send_control_interrupt(self) -> None:
         """Write a stream-json ``control_request`` interrupt to subprocess stdin.
@@ -1124,8 +1171,11 @@ class ClaudeSession(OwnedSession):
         finally:
             # If an exception blew us out of `with self:` before __enter__
             # could clear the event, do it here so a stuck event doesn't
-            # trap the worker forever.
-            self._preempt_pending.clear()
+            # trap the worker forever.  Notify under _preempt_cond so any
+            # worker blocked in __enter__'s wait_for is unblocked.
+            with self._preempt_cond:
+                self._preempt_pending.clear()
+                self._preempt_cond.notify_all()
 
     def switch_model(self, model: ProviderModel | str) -> None:
         """Switch the active model via a ``control_request`` ``set_model``

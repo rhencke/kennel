@@ -643,6 +643,16 @@ class OwnedSession:
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
 
+    def _signal_pending_preempt(self) -> None:
+        """Signal that a webhook caller is queued for the lock so workers
+        contending for the same lock yield (#983).  Distinct from
+        :meth:`_fire_worker_cancel`, which only fires when there is an
+        active worker to interrupt — this signal also covers the case
+        where the current holder is itself a webhook and a second webhook
+        is queueing behind it.  Subclasses with priority-aware locking
+        override; default is a no-op for backends that don't need it."""
+        return
+
     def preempt_worker(self) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
         the session.
@@ -709,6 +719,11 @@ class OwnedSession:
                     self._repo_name,
                 )
             else:
+                # No worker to cancel (holder is another webhook, or no
+                # one).  Still signal pending preempt so worker threads
+                # contending for the same lock yield to this webhook
+                # (#983 — webhook→webhook handoff has to skip the worker).
+                self._signal_pending_preempt()
                 log.info(
                     "hold_for_handler: queuing behind %s holder (tid=%d, repo=%s)",
                     current_kind or "none",

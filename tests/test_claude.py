@@ -1824,6 +1824,56 @@ class TestClaudeSessionLock:
         session._lock.release()
         session.stop()
 
+    def test_hold_for_handler_signals_pending_when_queueing_behind_webhook(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #983: when ``hold_for_handler(preempt_worker=True)``
+        finds the current holder is itself a webhook (no worker to cancel),
+        it must still call ``_signal_pending_preempt`` to set
+        ``_preempt_pending``.  Without this signal, a worker thread
+        contending for the same lock would freely re-acquire between
+        webhook A and webhook B, breaking the webhook→webhook handoff.
+
+        Deterministic: drives ``hold_for_handler`` synchronously with
+        ``try_preempt_worker`` patched to return ``(False, "webhook")``
+        (the queueing case) and the session's ``__enter__``/``__exit__``
+        no-op'd so we don't actually contend for a lock.  Asserts:
+
+        - ``_signal_pending_preempt`` was called exactly once.
+        - ``_preempt_pending`` is set after the call.
+        """
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        provider.set_thread_kind("webhook")
+        try:
+            with patch(
+                "fido.provider.try_preempt_worker", return_value=(False, "webhook")
+            ):
+                with patch.object(
+                    session,
+                    "_signal_pending_preempt",
+                    wraps=session._signal_pending_preempt,
+                ) as mock_signal:
+                    # __enter__/__exit__ no-op'd so the test doesn't depend
+                    # on real lock contention.
+                    with (
+                        patch.object(type(session), "__enter__", return_value=session),
+                        patch.object(type(session), "__exit__", return_value=False),
+                    ):
+                        with session.hold_for_handler(preempt_worker=True):
+                            pass
+                    assert mock_signal.call_count == 1, (
+                        f"_signal_pending_preempt called {mock_signal.call_count}x "
+                        "— expected 1 (hold_for_handler queueing branch must "
+                        "signal pending so workers yield, #983)"
+                    )
+                    assert session._preempt_pending.is_set(), (
+                        "_preempt_pending should be set after queueing"
+                    )
+        finally:
+            provider.set_thread_kind(None)
+            session.stop()
+
     def test_enter_uses_thread_kind_not_shared_attribute(self, tmp_path: Path) -> None:
         """Regression for #981: __enter__ must read the talker kind from
         the calling thread's thread-local (provider.current_thread_kind()),
