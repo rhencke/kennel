@@ -969,7 +969,7 @@ class TestReorderTasks:
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
         mock_prompts.rescope_duplicate_nudge.assert_called_once_with(
-            ["Shared name"], attempts_remaining=0
+            ["Shared name"], attempts_remaining=2
         )
         assert client.run_turn.call_count == 2
         tasks = list_tasks(tmp_path)
@@ -988,15 +988,42 @@ class TestReorderTasks:
             ]
         )
         client = _client()
-        client.run_turn.side_effect = [dup_response, dup_response]
+        # All 3 nudge responses still have duplicates → exhaust all retries
+        client.run_turn.side_effect = [dup_response] * 4
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        # All 3 nudges fired (1 initial + 3 nudge calls = 4 total)
+        assert client.run_turn.call_count == 4
         # _apply_reorder's silent fallback: first occurrence wins, second keeps original
         tasks = list_tasks(tmp_path)
         assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+
+    def test_attempts_remaining_decrements_across_nudges(self, tmp_path: Path) -> None:
+        from unittest.mock import call
+
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        dup_response = self._response(
+            [
+                {"id": t1["id"], "title": "Shared name", "description": ""},
+                {"id": t2["id"], "title": "Shared name", "description": ""},
+            ]
+        )
+        client = _client()
+        client.run_turn.side_effect = [dup_response] * 4
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        # Nudge calls: attempts_remaining 2 → 1 → 0
+        assert mock_prompts.rescope_duplicate_nudge.call_count == 3
+        calls = mock_prompts.rescope_duplicate_nudge.call_args_list
+        assert calls[0] == call(["Shared name"], attempts_remaining=2)
+        assert calls[1] == call(["Shared name"], attempts_remaining=1)
+        assert calls[2] == call(["Shared name"], attempts_remaining=0)
 
     def test_proceeds_with_original_when_nudge_returns_empty(
         self, tmp_path: Path

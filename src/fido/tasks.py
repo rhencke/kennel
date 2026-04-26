@@ -26,6 +26,9 @@ from fido.types import TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
 
+# Maximum number of nudge retries when Opus proposes duplicate task titles.
+_RESCOPE_MAX_NUDGES = 3
+
 
 def _task_file(work_dir: Path) -> Path:
     return work_dir / ".git" / "fido" / "tasks.json"
@@ -568,32 +571,42 @@ def reorder_tasks(
         log.warning("reorder_tasks: could not parse Opus response — skipping")
         return
 
-    # Nudge Opus once if it proposed duplicate titles.  The next turn runs in
-    # the same conversation so the model sees its previous (flawed) response.
-    # If the nudge still yields duplicates, _apply_reorder's silent fallback
+    # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
+    # titles.  Each turn runs in the same conversation so the model sees its
+    # prior responses and the remaining-attempt count in each nudge.
+    # If duplicates remain after all nudges, _apply_reorder's silent fallback
     # handles them as a last resort.
-    duplicates = _find_duplicate_titles(ordered_items)
-    if duplicates:
+    for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
+        duplicates = _find_duplicate_titles(ordered_items)
+        if not duplicates:
+            break
+        attempts_remaining = _RESCOPE_MAX_NUDGES - nudge_attempt - 1
         log.warning(
-            "reorder_tasks: Opus proposed duplicate titles %r — nudging",
+            "reorder_tasks: Opus proposed duplicate titles %r — nudging "
+            "(attempt %d/%d, %d remaining after this)",
             duplicates,
+            nudge_attempt + 1,
+            _RESCOPE_MAX_NUDGES,
+            attempts_remaining,
         )
-        nudge = prompts.rescope_duplicate_nudge(duplicates, attempts_remaining=0)
+        nudge = prompts.rescope_duplicate_nudge(
+            duplicates, attempts_remaining=attempts_remaining
+        )
         nudge_raw = agent.run_turn(nudge, model=agent.voice_model)
         if not nudge_raw:
             log.warning(
                 "reorder_tasks: empty response after duplicate nudge — "
                 "proceeding with fallback"
             )
-        else:
-            nudge_items = _parse_reorder_response(nudge_raw)
-            if nudge_items is None:
-                log.warning(
-                    "reorder_tasks: unparseable response after duplicate nudge — "
-                    "proceeding with fallback"
-                )
-            else:
-                ordered_items = nudge_items
+            break
+        nudge_items = _parse_reorder_response(nudge_raw)
+        if nudge_items is None:
+            log.warning(
+                "reorder_tasks: unparseable response after duplicate nudge — "
+                "proceeding with fallback"
+            )
+            break
+        ordered_items = nudge_items
 
     path = _task_file(work_dir)
     inprogress_affected = False
