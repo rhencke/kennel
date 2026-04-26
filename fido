@@ -827,6 +827,10 @@ status_fast_path() {
                  (if ($repo.session_dropped_count // 0) > 0
                   then red_bold("dropped " + (if $repo.session_dropped_count == 1 then "session " else "sessions " end) + ($repo.session_dropped_count|tostring))
                   else empty
+                  end),
+                 (if (($repo.session_sent_count // 0) > 0 or ($repo.session_received_count // 0) > 0)
+                  then dim((($repo.session_sent_count // 0)|tostring) + " sent, " + (($repo.session_received_count // 0)|tostring) + " received")
+                  else empty
                   end)]
                 | map(select(. != null and . != ""))
                 | if length > 0 then " " + dim("(") + join(", ") + dim(")") else "" end)
