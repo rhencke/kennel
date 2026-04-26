@@ -820,10 +820,12 @@ class TestClaudeSessionSend:
         assert written.endswith("\n")
 
     def test_marks_in_turn_after_send(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session.send("hi")
-        assert session._in_turn is True
+        assert isinstance(session._stream_state, stream_fsm.Sending)
 
 
 class TestClaudeSessionMessageCounts:
@@ -838,10 +840,20 @@ class TestClaudeSessionMessageCounts:
         assert session.received_count == 0
 
     def test_sent_count_increments_on_send(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
+        import json as _json
+
+        # Two complete turns: each send is followed by an iter_events that
+        # drains to the result boundary, so the FSM returns to Idle before
+        # the next send (otherwise Send is rejected from Sending).
+        lines = [
+            _json.dumps({"type": "result", "result": "a"}) + "\n",
+            _json.dumps({"type": "result", "result": "b"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
         session.send("msg one")
         assert session.sent_count == 1
+        list(session.iter_events())
         session.send("msg two")
         assert session.sent_count == 2
 
@@ -901,24 +913,30 @@ class TestClaudeSessionMessageCounts:
 
 class TestClaudeSessionDrainToBoundary:
     def test_returns_early_when_proc_dead(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([], poll_returns=0)
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
         # No control_request sent to a dead process
         proc.stdin.write.assert_not_called()
 
     def test_returns_on_control_request_failure(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         proc.stdin.write.side_effect = BrokenPipeError("pipe closed")
         session._drain_to_boundary()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
 
     def test_reads_until_type_result(self, tmp_path: Path) -> None:
         import json as _json
+
+        from fido.rocq import claude_session as stream_fsm
 
         lines = [
             _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
@@ -927,23 +945,27 @@ class TestClaudeSessionDrainToBoundary:
         ]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
         assert session._session_id == "s9"
 
     def test_reads_until_type_error(self, tmp_path: Path) -> None:
         import json as _json
 
+        from fido.rocq import claude_session as stream_fsm
+
         lines = [_json.dumps({"type": "error", "error": "boom"}) + "\n"]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
 
     def test_skips_blank_and_invalid_json(self, tmp_path: Path) -> None:
         import json as _json
+
+        from fido.rocq import claude_session as stream_fsm
 
         lines = [
             "\n",
@@ -952,63 +974,73 @@ class TestClaudeSessionDrainToBoundary:
         ]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
 
     def test_breaks_on_eof(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])  # readline returns "" (EOF)
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
-        # EOF path restarts the session at the deadline check, but the
-        # initial readline returning "" just exits the drain loop.
-        # _in_turn gets cleared by the restart fallback path.
+        # EOF path falls through to the deadline branch which calls
+        # _stream_reset() before recover().
 
     def test_breaks_when_proc_exits_mid_drain(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         # selector reports no pending data; proc.poll() says alive initially
         # (for the front-door check) then exited once drain loop polls.
         session._selector = MagicMock(return_value=([], [], []))
         poll_results = iter([None] + [0] * 10)
         proc.poll = MagicMock(side_effect=lambda: next(poll_results))
         session._drain_to_boundary(deadline=1.0)
-        # Loop exits on proc.poll() == 0 (EOF). _in_turn stays True because
-        # we only clear it on type=result/error — recover path would clear
-        # it, but EOF-only exit doesn't.
+        # Loop exits on proc.poll() == 0 (EOF), then deadline path resets FSM.
 
     def test_recovers_on_deadline(self, tmp_path: Path) -> None:
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         # No pending data, process stays alive → loop just times out
         session._selector = MagicMock(return_value=([], [], []))
         with patch.object(session, "recover") as mock_recover:
             session._drain_to_boundary(deadline=0.01)
         mock_recover.assert_called_once()
-        assert session._in_turn is False
+        assert isinstance(session._stream_state, stream_fsm.Idle)
 
     def test_returns_early_on_cancel_set(self, tmp_path: Path) -> None:
-        """When _cancel fires mid-drain, _drain_to_boundary exits without
-        clearing _in_turn so send() can detect the cancel and skip writing."""
+        """When _cancel fires mid-drain, _drain_to_boundary exits leaving the
+        FSM in Draining (CancelFire fired before the drain loop) so send()
+        can detect the cancelled state and acknowledge it."""
+        from fido.rocq import claude_session as stream_fsm
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         # selector returns no-data so we hit the cancel check on each loop
         session._selector = MagicMock(return_value=([], [], []))
         # Set cancel immediately — simulates preempt arriving during drain
         session._cancel.set()
         with patch.object(session, "recover") as mock_recover:
             session._drain_to_boundary(deadline=5.0)
-        # _in_turn stays True so send() knows not to write
-        assert session._in_turn is True
+        # CancelFire fires unconditionally before the drain loop, so the
+        # FSM is now in Draining; the cancel-set check then aborts before
+        # the boundary arrives.
+        assert isinstance(session._stream_state, stream_fsm.Draining)
         # recover was NOT called — we exited early, not via timeout
         mock_recover.assert_not_called()
 
     def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
         import json as _json
+
+        from fido.rocq import claude_session as stream_fsm
 
         lines = [_json.dumps({"type": "result", "result": "done"}) + "\n"]
         proc = _make_session_proc(lines)
@@ -1028,7 +1060,7 @@ class TestClaudeSessionDrainToBoundary:
         session = ClaudeSession(
             system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
         )
-        session._in_turn = True
+        session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
         assert all(session._wakeup_r in inputs for inputs in select_inputs)
         session.stop()
@@ -1286,26 +1318,89 @@ class TestClaudeSessionIterEvents:
     def test_cancel_drains_to_boundary(self, tmp_path: Path) -> None:
         """Post-#979: iter_events on cancel does NOT break early — it keeps
         reading until ``type=result`` so the cancelled turn closes cleanly
-        with no stale events in the pipe.  Just sets ``_last_turn_cancelled``
-        so callers (run_turn) know to retry.
+        with no stale events in the pipe.  The stream FSM ends in
+        ``Cancelled`` so callers (run_turn) know to retry via
+        ``last_turn_cancelled``.
+
+        The test arms ``_cancel`` from inside the selector (after
+        iter_events has already cleared the entry-time signal) so the
+        cancel-block at the top of the next loop iteration fires
+        ``CancelFire``, sends the control_request, and the replayed
+        ``control_response`` ack closes the cancelled turn cleanly.
         """
         import json as _json
 
-        lines = [
-            _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
-            _json.dumps({"type": "result", "result": "done"}) + "\n",
-        ]
-        proc = _make_session_proc(lines)
+        from fido.rocq import claude_session as stream_fsm
+
+        proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._cancel.set()
+        # Already past Sending so the cancel transitions AwaitingReply →
+        # Draining (covers the worker's typical mid-turn cancel path).
+        session._stream_state = stream_fsm.AwaitingReply()
+        # Capture the request_id chosen by _send_control_interrupt so the
+        # mocked stdout can replay a matching control_response.
+        captured_rid: list[str] = []
+        original_write = proc.stdin.write
+
+        def capture_write(s: str) -> int:
+            stripped = s.strip()
+            if stripped:
+                obj = _json.loads(stripped)
+                if obj.get("type") == "control_request":
+                    captured_rid.append(obj["request_id"])
+            return original_write(s)
+
+        proc.stdin.write = MagicMock(side_effect=capture_write)
+        readlines_list: list[str | None] = [
+            None,  # ack — emitted lazily once rid known
+            _json.dumps({"type": "result", "result": "done"}) + "\n",
+            "",
+        ]
+
+        def fake_readline() -> str:
+            line = readlines_list.pop(0)
+            if line is None:
+                line = (
+                    _json.dumps(
+                        {
+                            "type": "control_response",
+                            "response": {"request_id": captured_rid[0]},
+                        }
+                    )
+                    + "\n"
+                )
+            return line
+
+        proc.stdout.readline = MagicMock(side_effect=fake_readline)
+
+        call_count = [0]
+
+        def selector_arming_cancel(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            call_count[0] += 1
+            # First select: arm the cancel and report no-data so the loop
+            # comes back to the top, where the cancel-block fires
+            # CancelFire and writes the control_request (populating
+            # captured_rid).  Subsequent selects report stdout ready so
+            # readline can deliver the ack and the result.
+            if call_count[0] == 1:
+                session._cancel.set()
+                return ([], [], [])
+            return ([proc.stdout], [], [])
+
+        session._selector = selector_arming_cancel
         events = list(session.iter_events())
-        # Both events were consumed — pipe is clean for the next holder.
-        assert len(events) == 2
-        assert events[0]["type"] == "assistant"
-        assert events[1]["type"] == "result"
-        assert session._last_turn_cancelled is True
-        # _in_turn cleared by the type=result event, not by cancel.
-        assert session._in_turn is False
+        types = [e["type"] for e in events]
+        assert "control_response" in types
+        assert "result" in types
+        # Cancel observed mid-turn → CancelFire (AwaitingReply → Draining)
+        # → TurnReturn (Draining → Cancelled).
+        assert isinstance(session._stream_state, stream_fsm.Cancelled)
+        assert session.last_turn_cancelled is True
         session.stop()
 
     def test_cancel_still_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
@@ -1426,11 +1521,19 @@ class TestClaudeSessionIterEvents:
                 system_file, popen=fake_popen, selector=staged_selector
             )
             session_ref.append(session)
+            # Put the FSM in an active turn state so the cancel triggers
+            # CancelFire → Draining (mirrors what a real send() would do).
+            from fido.rocq import claude_session as stream_fsm
+
+            session._stream_state = stream_fsm.Sending()
             session.recover = MagicMock()  # type: ignore[method-assign]
             os.write(session._wakeup_w, b"\x00")
             with pytest.raises(ClaudeStreamError):
                 list(session.iter_events())
-            assert session._last_turn_cancelled is True
+            # Cancel-drain timeout reset the FSM to Idle.  The cancel was
+            # observed (CancelFire fired); the boundary never arrived so
+            # last_turn_cancelled is False after the recover-style reset.
+            assert isinstance(session._stream_state, stream_fsm.Idle)
             # readline was never called because stdout was not in the ready list
             assert proc.stdout.readline.call_count == 0
             session.stop()

@@ -13,6 +13,8 @@ issue (if any) that should absorb the work.
 **Status (2026-04-26):** Empirical bug citations added to all listed
 D-series issues: D1 (#739), D2 (#740), D3 (#741), D9 (#747), D10 (#748),
 D11 (#749), D13 (#751), D16 (#888), D18 (#890).
+Cluster B modeled and live: `claude_session.v` + oracle in `ClaudeSession`
+([#1052](https://github.com/FidoCanCode/home/pull/1052)).
 
 ---
 
@@ -46,17 +48,19 @@ masquerading as success.
 
 **Bugs.** #973, #975, #979, #1032 (false alarm but same neighborhood).
 
-**Status.** Hand-fixed by lock discipline + cancel-clear in `prompt()`.
-Not modeled. Highest-value next target — 4 bugs, all subtle, all
-mid-session-protocol.
+**Status.** Modeled in `claude_session.v`. Live in production
+([#1052](https://github.com/FidoCanCode/home/pull/1052), validated
+2026-04-26). Four invariants formally proved: `single_writer`,
+`cancel_does_not_persist_across_turns`, `empty_result_is_not_completion`,
+`drain_terminates`. FSM oracle wired into `ClaudeSession._stream_transition`
+— crashes loudly on any protocol violation. Regression tests in
+`tests/test_claude_stream_fsm_oracle.py`.
 
-**Proposed model.** `claude_session.v` — states `Idle | Sending |
+**Model.** `claude_session.v` — states `Idle | Sending |
 AwaitingReply | Draining | Cancelled`; events `Send | ReplyChunk |
-ReplyEnd | CancelFire | DrainObserve | TurnReturn`. Theorems:
-`single_writer`, `cancel_does_not_persist_across_turns`,
-`empty_result_is_not_completion`.
+ReplyEnd | CancelFire | DrainObserve | TurnReturn`.
 
-**New issue filed:** [#1041](https://github.com/FidoCanCode/home/issues/1041)
+**Closed:** [#1041](https://github.com/FidoCanCode/home/issues/1041)
 — Rocq→Python — claude protocol stream FSM (claude_session.v).
 
 ---
@@ -280,7 +284,7 @@ plumbing; not coordination.
 | Cluster | Invariant focus | Bugs | Already covered | Action |
 |---|---|---|---|---|
 | A | Session ownership FIFO | 3 | ✓ session_lock.v live | trim logs (#1037) |
-| **B** | **Claude protocol stream + cancel scope** | **4** | **#1041 filed** | **claude_session.v** |
+| B | Claude protocol stream + cancel scope | 4 | ✓ claude_session.v live (#1052) | — |
 | C | Talker-kind coherence | 1 | folded into A? | audit session_lock.v |
 | D | Task status FSM | 2 | partial in D3 | extend D3 (#741) |
 | E | PR body ↔ tasks.json | 2 | D10 (#748) | cite bugs in issue |
@@ -296,7 +300,7 @@ plumbing; not coordination.
 | O | Build cache | 1 | (CI, not coordination) | standard fix |
 
 **New issues filed (as of this survey):**
-- [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation)
+- [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation) — **closed** ([#1052](https://github.com/FidoCanCode/home/pull/1052))
 - [#1042](https://github.com/FidoCanCode/home/issues/1042) — D9b: webhook handlers must not do implementation inline (cluster H)
 
 **Existing issues to enrich with bug references:**

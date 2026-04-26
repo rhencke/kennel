@@ -31,6 +31,7 @@ from fido.provider import (
     TurnSessionMode,
     model_name,
 )
+from fido.rocq import claude_session as stream_fsm
 from fido.session_agent import SessionBackedAgent
 
 log = logging.getLogger(__name__)
@@ -491,24 +492,15 @@ class ClaudeSession(OwnedSession):
         # claude conversation persisted across fido restarts (#649).
         # Empty until the first claude event with a session_id arrives.
         self._session_id = session_id or ""
-        # True when the most recent :meth:`iter_events` call exited early
-        # because :attr:`_cancel` was set (i.e. another thread preempted the
-        # turn via :meth:`prompt`).  Cleared at the start of each turn.
-        # Callers use this to distinguish "turn completed with empty result"
-        # from "turn was interrupted and should be retried once the lock is
-        # free again".
-        self._last_turn_cancelled = False
-        # True when a :meth:`send` has been issued whose ``type=result``
-        # boundary has not yet been consumed.  Cleared when
-        # :meth:`iter_events` sees ``type=result``/``type=error``/EOF.  When
-        # still True at the start of the next :meth:`send`, the prior turn
-        # was cancelled without draining — its result (and any tail events)
-        # is still on stdout and would be read by the next caller's
-        # :meth:`consume_until_result` as its own.  That's the stream-leak
-        # root cause in #499: without this flag we can't tell the stream
-        # is dirty.  :meth:`send` drains to the boundary before writing new
-        # content so every turn starts on a clean slate.
-        self._in_turn = False
+        # Stream-protocol FSM state — replaces the ad-hoc ``_in_turn`` and
+        # ``_last_turn_cancelled`` flags.  See ``models/claude_session.v``
+        # for the formal transition table.  In short: ``Idle`` between
+        # turns, ``Sending`` after :meth:`send` until the first reply
+        # event, ``AwaitingReply`` while events flow, ``Draining`` after a
+        # cancel until the boundary, and ``Cancelled`` once a cancelled
+        # turn has closed cleanly (consumed by the next :meth:`send`).
+        self._stream_lock = threading.Lock()
+        self._stream_state: stream_fsm.State = stream_fsm.Idle()
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
@@ -547,18 +539,62 @@ class ClaudeSession(OwnedSession):
         """Repo this session belongs to, for :class:`provider.SessionTalker` registration."""
         return self._repo_name
 
+    def _stream_transition(self, event: stream_fsm.Event) -> stream_fsm.State:
+        """Fire *event* on the stream-protocol FSM, raising ``AssertionError``
+        if the transition is rejected by the formal model.
+
+        Single oracle for every FSM transition in :class:`ClaudeSession`,
+        so a coordination bug surfaces as a crash rather than as silent
+        protocol drift.
+        """
+        with self._stream_lock:
+            prev = self._stream_state
+            new_state = stream_fsm.transition(prev, event)
+            if new_state is None:
+                raise AssertionError(
+                    f"claude_session FSM: {type(event).__name__} rejected in "
+                    f"state {type(prev).__name__}"
+                )
+            self._stream_state = new_state
+            log.debug(
+                "ClaudeSession[%s]: stream %s →%s via %s",
+                self._repo_name or "?",
+                type(prev).__name__,
+                type(new_state).__name__,
+                type(event).__name__,
+            )
+            return new_state
+
+    def _stream_reset(self) -> None:
+        """Reset the stream FSM directly to ``Idle``.
+
+        Only legal on crash/kill/respawn paths — the formal model has no
+        edge that transitions arbitrary states back to ``Idle`` because
+        that would mask protocol bugs.  The respawn itself is the
+        invariant-restoring event: the subprocess is gone, so any prior
+        in-flight turn is moot.
+        """
+        with self._stream_lock:
+            self._stream_state = stream_fsm.Idle()
+
     @property
     def last_turn_cancelled(self) -> bool:
         """``True`` when the most recent :meth:`iter_events` call exited
         early because another thread set the cancel event (preempted the
         turn via :meth:`prompt` or :meth:`interrupt`).
 
+        Backed by the stream FSM: a turn that observed ``CancelFire`` and
+        reached its ``TurnReturn`` ends in ``Cancelled``; a normal turn
+        ends in ``Idle``.  The next :meth:`send` consumes the ``Cancelled``
+        state by firing ``TurnReturn`` to return to ``Idle``.
+
         Callers that want resumption semantics can check this after a turn
         and re-send the same content once the session lock is free again —
         effectively 'hand the session back to the worker and ask it to
         resume what it was doing'.
         """
-        return self._last_turn_cancelled
+        with self._stream_lock:
+            return isinstance(self._stream_state, stream_fsm.Cancelled)
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
@@ -683,9 +719,10 @@ class ClaudeSession(OwnedSession):
                 raise
         if clear_session_id:
             self._session_id = ""
-        # Fresh subprocess has no in-flight turn, so next send() skips
-        # the drain path.
-        self._in_turn = False
+        # Fresh subprocess has no in-flight turn — reset the stream FSM
+        # directly to ``Idle`` so the next send() starts a new turn from a
+        # clean slate.
+        self._stream_reset()
         # Message counters are cumulative since boot — do NOT reset on
         # respawn.  Per-subprocess counts would bounce to zero on every
         # model switch or recovery, making wedge detection meaningless.
@@ -791,14 +828,27 @@ class ClaudeSession(OwnedSession):
         see #979 / #955 cascade).  By the time :meth:`send` is called the
         previous turn is closed and the stream is clean, so this method
         only needs to atomically place a single user message on stdin.
+
+        FSM: if the prior turn ended ``Cancelled``, fire ``TurnReturn`` to
+        return to ``Idle`` (acknowledging the cancellation), then fire
+        ``Send`` to enter ``Sending`` for the new turn.
         """
+        # Acknowledge a prior cancelled turn: Cancelled → Idle.
+        with self._stream_lock:
+            if isinstance(self._stream_state, stream_fsm.Cancelled):
+                new_state = stream_fsm.transition(
+                    self._stream_state, stream_fsm.TurnReturn()
+                )
+                assert new_state is not None
+                self._stream_state = new_state
+        # Idle → Sending.
+        self._stream_transition(stream_fsm.Send())
         msg = json.dumps(
             {"type": "user", "message": {"role": "user", "content": content}}
         )
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
-        self._in_turn = True
         self._sent_count += 1
 
     def _drain_to_boundary(self, deadline: float = 10.0) -> None:
@@ -814,7 +864,7 @@ class ClaudeSession(OwnedSession):
         """
         assert self._proc.stdout is not None
         if self._proc.poll() is not None:
-            self._in_turn = False
+            self._stream_reset()
             return
         try:
             self._send_control_interrupt()
@@ -822,8 +872,21 @@ class ClaudeSession(OwnedSession):
             log.warning(
                 "ClaudeSession._drain_to_boundary: control_request failed: %s", exc
             )
-            self._in_turn = False
+            self._stream_reset()
             return
+        # Calling _drain_to_boundary means "we're cancelling the current
+        # turn".  Fire CancelFire on the FSM only when the current state
+        # accepts it (Sending or AwaitingReply); other states (e.g. Idle
+        # in test scaffolding) leave the FSM untouched.
+        with self._stream_lock:
+            if isinstance(
+                self._stream_state, stream_fsm.Sending | stream_fsm.AwaitingReply
+            ):
+                new_state = stream_fsm.transition(
+                    self._stream_state, stream_fsm.CancelFire()
+                )
+                assert new_state is not None
+                self._stream_state = new_state
         end_time = time.monotonic() + deadline
         while time.monotonic() < end_time:
             ready, _, _ = self._selector(
@@ -831,7 +894,7 @@ class ClaudeSession(OwnedSession):
             )
             self._drain_wakeup()
             if self._cancel.is_set():
-                # Preempt fired — exit early without clearing _in_turn so
+                # Preempt fired — exit early without changing FSM state so
                 # send() skips writing and iter_events() breaks on the cancel.
                 log.debug(
                     "ClaudeSession._drain_to_boundary: cancel set — aborting drain early"
@@ -859,7 +922,7 @@ class ClaudeSession(OwnedSession):
                         "ClaudeSession: drained stale %s event",
                         obj.get("type"),
                     )
-                    self._in_turn = False
+                    self._stream_reset()
                     return
             elif self._proc.poll() is not None:
                 break
@@ -867,7 +930,7 @@ class ClaudeSession(OwnedSession):
             "ClaudeSession._drain_to_boundary: no boundary after %.1fs — restarting",
             deadline,
         )
-        self._in_turn = False
+        self._stream_reset()
         self.recover()
 
     def _fire_worker_cancel(self) -> None:
@@ -987,7 +1050,7 @@ class ClaudeSession(OwnedSession):
                 tid,
                 time.monotonic() - t_start,
                 len(result or ""),
-                self._last_turn_cancelled,
+                self.last_turn_cancelled,
             )
             return result
 
@@ -1005,8 +1068,8 @@ class ClaudeSession(OwnedSession):
         Respawn-with-resume preserves conversation context (claude
         re-reads the session transcript via ``--resume``) at the cost of
         one claude boot per switch (~1.4s).  Must be called between
-        turns (``_in_turn`` must be ``False``); :meth:`_respawn` clears
-        ``_in_turn`` defensively.
+        turns (the stream FSM must be ``Idle`` or ``Cancelled``);
+        :meth:`_respawn` resets the FSM defensively.
 
         No-op when *model* equals the current model.
         """
@@ -1095,7 +1158,6 @@ class ClaudeSession(OwnedSession):
         # previous holder — the FSM's FIFO handler queue ensures the next
         # holder's turn starts clean without needing a separate pending flag.
         self._cancel.clear()
-        self._last_turn_cancelled = False
         last_activity = time.monotonic()
         cancelled_at: float | None = None
         cancel_request_id: str | None = None
@@ -1119,9 +1181,24 @@ class ClaudeSession(OwnedSession):
                     "ClaudeSession: cancel signal seen — sending interrupt and "
                     "draining to boundary"
                 )
-                self._last_turn_cancelled = True
                 cancelled_at = time.monotonic()
-                if self._in_turn:
+                # Fire CancelFire on the FSM only when the current state
+                # accepts it (Sending or AwaitingReply, i.e. an actual
+                # in-flight turn).  When iter_events is invoked outside a
+                # send-driven turn (test scaffolding, recovery paths) the
+                # FSM stays put.
+                with self._stream_lock:
+                    in_turn = isinstance(
+                        self._stream_state,
+                        stream_fsm.Sending | stream_fsm.AwaitingReply,
+                    )
+                    if in_turn:
+                        new_state = stream_fsm.transition(
+                            self._stream_state, stream_fsm.CancelFire()
+                        )
+                        assert new_state is not None
+                        self._stream_state = new_state
+                if in_turn:
                     try:
                         cancel_request_id = self._send_control_interrupt()
                     except (BrokenPipeError, OSError) as exc:
@@ -1139,7 +1216,7 @@ class ClaudeSession(OwnedSession):
                 )
                 self._proc.kill()
                 self._proc.wait()
-                self._in_turn = False
+                self._stream_reset()
                 self.recover()
                 raise ClaudeStreamError(_RETURNCODE_CANCEL_DRAIN_TIMEOUT)
             ready, _, _ = self._selector(
@@ -1149,7 +1226,7 @@ class ClaudeSession(OwnedSession):
             if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
-                    self._in_turn = False
+                    self._stream_reset()
                     break  # EOF
                 line = line.strip()
                 if not line:
@@ -1159,6 +1236,16 @@ class ClaudeSession(OwnedSession):
                 self._log_event(obj)
                 self._received_count += 1
                 last_activity = time.monotonic()
+                # First non-empty event after Send transitions Sending →
+                # AwaitingReply.  Other states (AwaitingReply, Draining,
+                # Idle scaffolding) leave the FSM untouched.
+                with self._stream_lock:
+                    if isinstance(self._stream_state, stream_fsm.Sending):
+                        new_state = stream_fsm.transition(
+                            self._stream_state, stream_fsm.ReplyChunk()
+                        )
+                        assert new_state is not None
+                        self._stream_state = new_state
                 # Track the latest session_id so :meth:`recover` and
                 # :meth:`reset` can resume via ``--resume <sid>`` on the
                 # next :meth:`_spawn`.
@@ -1180,7 +1267,24 @@ class ClaudeSession(OwnedSession):
                     cancel_ack_seen = True
                 yield obj
                 if obj.get("type") in ("result", "error"):
-                    self._in_turn = False
+                    # Fire TurnReturn on the FSM where the model accepts it:
+                    # AwaitingReply → Idle for normal turns, Draining →
+                    # Cancelled for cancelled turns.  Other states (Idle,
+                    # Cancelled, Sending) leave the FSM untouched — the test
+                    # scaffolding can call iter_events without a prior send,
+                    # and Sending here would mean we never observed a
+                    # streaming chunk before the boundary, which the FSM
+                    # treats as an invalid path.
+                    with self._stream_lock:
+                        if isinstance(
+                            self._stream_state,
+                            stream_fsm.AwaitingReply | stream_fsm.Draining,
+                        ):
+                            new_state = stream_fsm.transition(
+                                self._stream_state, stream_fsm.TurnReturn()
+                            )
+                            assert new_state is not None
+                            self._stream_state = new_state
                     if cancelled_at is not None and cancel_request_id is not None:
                         # The cancelled turn must have closed cleanly: we
                         # sent the interrupt, claude acked it, and now
@@ -1199,7 +1303,7 @@ class ClaudeSession(OwnedSession):
                             raise ClaudeStreamError(_RETURNCODE_CANCEL_DRAIN_TIMEOUT)
                     break
             elif self._proc.poll() is not None:
-                self._in_turn = False
+                self._stream_reset()
                 break  # process exited
             elif time.monotonic() - last_activity > self._idle_timeout:
                 log.warning(
