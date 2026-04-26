@@ -2,7 +2,21 @@
 
     This model exercises backend-owned finite-map and finite-set extraction for
     the identifier shapes Fido uses most often: numeric GitHub IDs and string
-    repo/provider/task IDs. *)
+    repo/provider/task IDs.
+
+    The primitives here underpin two invariant clusters from the bug-mined
+    survey ([BUG_MINED_INVARIANTS.md]):
+
+      - Cluster F (reply/claim dedup, D1 #739): [add_claim] / [remove_claim] /
+        [has_claim] — the finite-set operations that [replied_comment_claims.v]
+        uses to enforce exactly-once replies.
+
+      - Cluster G (picker eligibility, D16 #888): [assign_issue] /
+        [unassign_issue] / [issue_owner] — the finite-map operations that
+        track which GitHub issue each repo's worker is responsible for.
+
+    Neither cluster is proved here; this file provides the extracted primitives
+    on which the proving models build. *)
 
 Declare ML Module "rocq-python-extraction".
 Declare ML Module "rocq-runtime.plugins.extraction".
@@ -18,9 +32,13 @@ Open Scope positive_scope.
 Open Scope string_scope.
 Import ListNotations.
 
-(** [add_claim] records that a numeric thread/claim id is currently owned.
+(** * Claim-set primitives (cluster F — reply/claim dedup, D1 #739)
+
+    [add_claim] records that a numeric thread/claim id is currently owned.
     The caller supplies the current set; no claim ids are known at compile
-    time. *)
+    time.  The full dedup model — which proves at-most-one-reply per anchor —
+    lives in [replied_comment_claims.v]; these three operations are its
+    extracted building blocks. *)
 Definition add_claim (thread : positive) (claims : PositiveSet.t) : PositiveSet.t :=
   PositiveSet.add thread claims.
 
@@ -34,9 +52,13 @@ Definition remove_claim (thread : positive) (claims : PositiveSet.t) : PositiveS
 Definition has_claim (claims : PositiveSet.t) (thread : positive) : bool :=
   PositiveSet.mem thread claims.
 
-(** [assign_issue] associates a runtime GitHub issue id with a runtime owner
+(** * Issue-owner map primitives (cluster G — picker eligibility, D16 #888)
+
+    [assign_issue] associates a runtime GitHub issue id with a runtime owner
     string in the caller-provided issue-owner map.  PR task/checklist state is
-    deliberately separate from this GitHub issue coordination index. *)
+    deliberately separate from this GitHub issue coordination index.  The
+    picker-eligibility model (D16 #888) uses these operations to verify that
+    fresh-retry re-checks live assignment rather than a cached snapshot. *)
 Definition assign_issue (issue : positive) (owner : String.string)
     (owners : PositiveMap.t String.string) : PositiveMap.t String.string :=
   PositiveMap.add issue owner owners.
@@ -52,7 +74,9 @@ Definition issue_owner (owners : PositiveMap.t String.string)
     (issue : positive) : option String.string :=
   PositiveMap.find issue owners.
 
-(** [repo_entry] is one CLI-provided repo tuple: owner/repo, path on disk, and
+(** * Repo-list primitives
+
+    [repo_entry] is one CLI-provided repo tuple: owner/repo, path on disk, and
     provider.  The repo collection is supplied at runtime, so this type is
     only the shape of one entry, not a compile-time repo list. *)
 Definition repo_entry : Type :=
