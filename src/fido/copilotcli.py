@@ -970,17 +970,6 @@ class CopilotCLISession(OwnedSession):
     def last_turn_cancelled(self) -> bool:
         return self._last_turn_cancelled
 
-    def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        """Compatibility stub — the FSM handles priority ordering; always returns False.
-
-        The old :class:`threading.RLock`-based implementation polled
-        ``_preempt_condition`` to let webhook callers win the lock before the
-        worker retried.  The FSM's handler-priority queue makes that polling
-        unnecessary: workers already yield to any queued handler inside
-        :meth:`~provider.OwnedSession._fsm_acquire_worker`.
-        """
-        return False
-
     def prompt(
         self,
         content: str,
@@ -1249,7 +1238,6 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
                 or getattr(session, "last_turn_cancelled", False) is not True
             ):
                 return result
-            session.wait_for_pending_preempt()
             attempt += 1
             log.info(
                 "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt

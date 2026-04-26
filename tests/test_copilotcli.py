@@ -1030,13 +1030,10 @@ class TestCopilotCLISession:
                     break
                 time.sleep(0.01)
             assert runtime.cancel_calls == ["sess-created"]
-            assert session.wait_for_pending_preempt(timeout=0.01) is False
             session.__exit__(None, None, None)
             acquired.wait(timeout=1.0)
-            assert session.wait_for_pending_preempt(timeout=0.01) is False
             release.set()
             thread.join(timeout=1.0)
-            assert session.wait_for_pending_preempt(timeout=1.0) is False
         finally:
             provider.set_thread_kind(None)
 
@@ -1396,7 +1393,6 @@ class TestCopilotCLIClient:
         session.prompt.side_effect = prompt
         client = CopilotCLIClient(session=session)
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
-        session.wait_for_pending_preempt.assert_called_once_with()
 
     def test_run_turn_recovers_and_retries_after_connection_loss(self) -> None:
         session = MagicMock()

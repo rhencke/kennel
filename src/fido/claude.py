@@ -530,17 +530,6 @@ class ClaudeSession(OwnedSession):
         self._proc = self._spawn()
         _register_child(self._proc)
 
-    def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        """Compatibility stub — the FSM handles priority ordering; always returns False.
-
-        The old :class:`threading.RLock`-based implementation polled
-        ``_preempt_pending`` to let webhook callers win the lock before the
-        worker retried.  The FSM's handler-priority queue makes that polling
-        unnecessary: workers already yield to any queued handler inside
-        :meth:`~provider.OwnedSession._fsm_acquire_worker`.
-        """
-        return False
-
     def _wake(self) -> None:
         """Write a byte to the wakeup pipe to kick select() awake."""
         try:
@@ -1560,7 +1549,6 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
                 or getattr(session, "last_turn_cancelled", False) is not True
             ):
                 return result
-            session.wait_for_pending_preempt()
             attempt += 1
             log.info("ClaudeClient.run_turn: preempted mid-flight — retry %d", attempt)
 

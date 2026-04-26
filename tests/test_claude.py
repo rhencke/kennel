@@ -1167,19 +1167,6 @@ class TestClaudeSessionLogEvent:
         assert "claude error: kaboom" in caplog.text
 
 
-class TestClaudeSessionWaitForPendingPreempt:
-    def test_always_returns_false(self, tmp_path: Path) -> None:
-        """wait_for_pending_preempt is a compatibility stub that always returns False.
-
-        The FSM handles priority ordering; polling is gone.
-        """
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        assert session.wait_for_pending_preempt(timeout=0.01) is False
-        assert session.wait_for_pending_preempt(timeout=1.0) is False
-        session.stop()
-
-
 class TestClaudeSessionIterEvents:
     def test_yields_parsed_json_events(self, tmp_path: Path) -> None:
         import json as _json

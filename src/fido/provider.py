@@ -296,10 +296,6 @@ class PromptSession(Protocol):
         """Report whether the most recent turn was cancelled by preemption."""
         ...
 
-    def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        """Wait for any queued preemption work to drain before retrying a turn."""
-        ...
-
     def switch_model(self, model: ProviderModel) -> None:
         """Switch the live session to *model* in-place without kill, respawn,
         or session-state loss."""
