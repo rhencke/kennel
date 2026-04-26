@@ -826,6 +826,77 @@ class TestClaudeSessionSend:
         assert session._in_turn is True
 
 
+class TestClaudeSessionMessageCounts:
+    def test_sent_count_starts_at_zero(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert session.sent_count == 0
+
+    def test_received_count_starts_at_zero(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert session.received_count == 0
+
+    def test_sent_count_increments_on_send(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.send("msg one")
+        assert session.sent_count == 1
+        session.send("msg two")
+        assert session.sent_count == 2
+
+    def test_received_count_increments_per_event(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [
+            _json.dumps({"type": "assistant", "text": "thinking"}) + "\n",
+            _json.dumps({"type": "result", "result": "done"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        session = _make_session(tmp_path, proc)
+        list(session.iter_events())
+        assert session.received_count == 2
+
+    def test_received_count_accumulates_across_turns(self, tmp_path: Path) -> None:
+        import json as _json
+
+        # First turn: one event
+        lines_turn1 = [_json.dumps({"type": "result", "result": "a"}) + "\n"]
+        # Second turn: two events
+        lines_turn2 = [
+            _json.dumps({"type": "assistant", "text": "b"}) + "\n",
+            _json.dumps({"type": "result", "result": "c"}) + "\n",
+        ]
+        proc = _make_session_proc(lines_turn1 + lines_turn2)
+        session = _make_session(tmp_path, proc)
+        list(session.iter_events())
+        assert session.received_count == 1
+        list(session.iter_events())
+        assert session.received_count == 3
+
+    def test_counters_reset_on_respawn(self, tmp_path: Path) -> None:
+        import json as _json
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc(
+            [_json.dumps({"type": "result", "result": "done"}) + "\n"]
+        )
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([old_proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.send("hello")
+        list(session.iter_events())
+        assert session.sent_count == 1
+        assert session.received_count == 1
+        session.reset()
+        assert session.sent_count == 0
+        assert session.received_count == 0
+
+
 class TestClaudeSessionDrainToBoundary:
     def test_returns_early_when_proc_dead(self, tmp_path: Path) -> None:
         proc = _make_session_proc([], poll_returns=0)

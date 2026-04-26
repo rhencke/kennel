@@ -549,6 +549,13 @@ class ClaudeSession(OwnedSession):
         self._wakeup_r, self._wakeup_w = os.pipe()
         os.set_blocking(self._wakeup_r, False)
         os.set_blocking(self._wakeup_w, False)
+        # Message counters — reset on each :meth:`_respawn` so they reflect
+        # the current subprocess lifetime.  Guarded by a dedicated lock so
+        # the status reader (running in a different thread) never has to
+        # contend with the long-lived :attr:`_lock` held during a full turn.
+        self._counts_lock = threading.Lock()
+        self._sent_count: int = 0
+        self._received_count: int = 0
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -718,6 +725,18 @@ class ClaudeSession(OwnedSession):
         """Claude stream-json sessions do not track dropped resume tokens."""
         return 0
 
+    @property
+    def sent_count(self) -> int:
+        """Number of user messages sent to the current subprocess since spawn."""
+        with self._counts_lock:
+            return self._sent_count
+
+    @property
+    def received_count(self) -> int:
+        """Number of stream-json events received from the current subprocess since spawn."""
+        with self._counts_lock:
+            return self._received_count
+
     def _respawn(self, *, clear_session_id: bool, reason: str) -> None:
         """Stop the current subprocess and spawn a replacement."""
         log.info("ClaudeSession: %s (model=%s)", reason, self._model)
@@ -735,6 +754,10 @@ class ClaudeSession(OwnedSession):
             # Fresh subprocess has no in-flight turn, so next send() skips
             # the drain path.
             self._in_turn = False
+            # Reset message counters — each subprocess lifetime starts fresh.
+            with self._counts_lock:
+                self._sent_count = 0
+                self._received_count = 0
             self._proc = self._spawn()
             _register_child(self._proc)
         log.info("ClaudeSession: respawn complete, new pid %d", self._proc.pid)
@@ -884,6 +907,8 @@ class ClaudeSession(OwnedSession):
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
         self._in_turn = True
+        with self._counts_lock:
+            self._sent_count += 1
 
     def _drain_to_boundary(self, deadline: float = 10.0) -> None:
         """Abort the in-flight turn and read events until ``type=result`` /
@@ -1278,6 +1303,8 @@ class ClaudeSession(OwnedSession):
                     continue
                 obj = json.loads(line)
                 self._log_event(obj)
+                with self._counts_lock:
+                    self._received_count += 1
                 last_activity = time.monotonic()
                 # Track the latest session_id so :meth:`recover` and
                 # :meth:`reset` can resume via ``--resume <sid>`` on the
