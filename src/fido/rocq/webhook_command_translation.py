@@ -95,59 +95,59 @@ class WebhookEvent:
 
 
 @dataclass(frozen=True)
-class WevReviewComment(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_pr: int
-    wev_comment_id: int
-    wev_author: str
-    wev_is_bot: bool
+class EvtReviewComment(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_pr: int
+    evt_comment_id: int
+    evt_author: str
+    evt_is_bot: bool
 
 
 @dataclass(frozen=True)
-class WevIssueComment(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_pr: int
-    wev_comment_id: int
-    wev_author: str
-    wev_is_bot: bool
+class EvtIssueComment(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_pr: int
+    evt_comment_id: int
+    evt_author: str
+    evt_is_bot: bool
 
 
 @dataclass(frozen=True)
-class WevCIFailure(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_check_name: str
-    wev_conclusion: CheckConclusion
-    wev_pr_numbers: list[int]
+class EvtCIFailure(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_check_name: str
+    evt_conclusion: CheckConclusion
+    evt_pr_numbers: list[int]
 
 
 @dataclass(frozen=True)
-class WevPRMerged(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_pr: int
+class EvtPRMerged(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_pr: int
 
 
 @dataclass(frozen=True)
-class WevIssueAssigned(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_issue: int
-    wev_assignee: str
+class EvtIssueAssigned(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_issue: int
+    evt_assignee: str
 
 
 @dataclass(frozen=True)
-class WevReviewSubmitted(WebhookEvent):
-    wev_delivery: deliveryId
-    wev_pr: int
-    wev_review_id: int
-    wev_author: str
+class EvtReviewSubmitted(WebhookEvent):
+    evt_delivery: deliveryId
+    evt_pr: int
+    evt_review_id: int
+    evt_author: str
 
 
 WebhookEventT = (
-    WevReviewComment
-    | WevIssueComment
-    | WevCIFailure
-    | WevPRMerged
-    | WevIssueAssigned
-    | WevReviewSubmitted
+    EvtReviewComment
+    | EvtIssueComment
+    | EvtCIFailure
+    | EvtPRMerged
+    | EvtIssueAssigned
+    | EvtReviewSubmitted
 )
 
 
@@ -217,7 +217,7 @@ def cmd_delivery_id(cmd: WebhookCommand) -> deliveryId:
 
 def translate(ev: WebhookEvent) -> WebhookCommand:
     match ev:
-        case WevReviewComment(d, pr, cid, author, is_bot):
+        case EvtReviewComment(d, pr, cid, author, is_bot):
             return CmdComment(
                 d,
                 pr,
@@ -226,7 +226,7 @@ def translate(ev: WebhookEvent) -> WebhookCommand:
                 is_bot,
                 ReviewLine(),
             )
-        case WevIssueComment(d, pr, cid, author, is_bot):
+        case EvtIssueComment(d, pr, cid, author, is_bot):
             return CmdComment(
                 d,
                 pr,
@@ -235,25 +235,25 @@ def translate(ev: WebhookEvent) -> WebhookCommand:
                 is_bot,
                 TopLevelPR(),
             )
-        case WevCIFailure(d, name, conclusion, pr_nums):
+        case EvtCIFailure(d, name, conclusion, pr_nums):
             return CmdCIFailure(
                 d,
                 name,
                 conclusion,
                 pr_nums,
             )
-        case WevPRMerged(d, pr):
+        case EvtPRMerged(d, pr):
             return CmdPRMerged(
                 d,
                 pr,
             )
-        case WevIssueAssigned(d, issue, assignee):
+        case EvtIssueAssigned(d, issue, assignee):
             return CmdIssueAssigned(
                 d,
                 issue,
                 assignee,
             )
-        case WevReviewSubmitted(d, pr, rid, author):
+        case EvtReviewSubmitted(d, pr, rid, author):
             return CmdReviewSubmitted(
                 d,
                 pr,
@@ -294,19 +294,19 @@ def cmd_to_contender(cmd: WebhookCommand) -> Contender:
             assert_never(__impossible)
 
 
-def wev_delivery_id(ev: WebhookEvent) -> deliveryId:
+def evt_delivery_id(ev: WebhookEvent) -> deliveryId:
     match ev:
-        case WevReviewComment(d, wev_pr, wev_comment_id, wev_author, wev_is_bot):
+        case EvtReviewComment(d, evt_pr, evt_comment_id, evt_author, evt_is_bot):
             return d
-        case WevIssueComment(d, wev_pr, wev_comment_id, wev_author, wev_is_bot):
+        case EvtIssueComment(d, evt_pr, evt_comment_id, evt_author, evt_is_bot):
             return d
-        case WevCIFailure(d, wev_check_name, wev_conclusion, wev_pr_numbers):
+        case EvtCIFailure(d, evt_check_name, evt_conclusion, evt_pr_numbers):
             return d
-        case WevPRMerged(d, wev_pr):
+        case EvtPRMerged(d, evt_pr):
             return d
-        case WevIssueAssigned(d, wev_issue, wev_assignee):
+        case EvtIssueAssigned(d, evt_issue, evt_assignee):
             return d
-        case WevReviewSubmitted(d, wev_pr, wev_review_id, wev_author):
+        case EvtReviewSubmitted(d, evt_pr, evt_review_id, evt_author):
             return d
         case __impossible:
             assert_never(__impossible)

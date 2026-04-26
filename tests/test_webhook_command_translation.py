@@ -7,7 +7,7 @@ violated invariant.
 
 Proved theorems covered:
   ``translate_total``              — every WebhookEvent yields a WebhookCommand
-  ``translate_preserves_delivery`` — cmd_delivery_id(translate(ev)) == wev_delivery_id(ev)
+  ``translate_preserves_delivery`` — cmd_delivery_id(translate(ev)) == evt_delivery_id(ev)
   ``same_delivery_refl``           — same_delivery(cmd, cmd) is True
   ``same_delivery_sym``            — same_delivery(c1, c2) == same_delivery(c2, c1)
   ``cmd_to_contender_is_handler``  — every webhook command maps to Handler
@@ -21,21 +21,21 @@ from fido.rocq.webhook_command_translation import (
     CmdIssueAssigned,
     CmdPRMerged,
     CmdReviewSubmitted,
+    EvtCIFailure,
+    EvtIssueAssigned,
+    EvtIssueComment,
+    EvtPRMerged,
+    EvtReviewComment,
+    EvtReviewSubmitted,
     Handler,
     ReviewLine,
     TopLevelPR,
     WebhookEvent,
-    WevCIFailure,
-    WevIssueAssigned,
-    WevIssueComment,
-    WevPRMerged,
-    WevReviewComment,
-    WevReviewSubmitted,
     cmd_delivery_id,
     cmd_to_contender,
+    evt_delivery_id,
     same_delivery,
     translate,
-    wev_delivery_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -46,32 +46,32 @@ _D1 = 1  # synthetic delivery id for event 1
 _D2 = 42  # synthetic delivery id for event 2
 
 
-def _review_comment(d: int = _D1) -> WevReviewComment:
-    return WevReviewComment(d, 7, 101, "owner", False)
+def _review_comment(d: int = _D1) -> EvtReviewComment:
+    return EvtReviewComment(d, 7, 101, "owner", False)
 
 
-def _issue_comment(d: int = _D1) -> WevIssueComment:
-    return WevIssueComment(d, 7, 102, "owner", False)
+def _issue_comment(d: int = _D1) -> EvtIssueComment:
+    return EvtIssueComment(d, 7, 102, "owner", False)
 
 
-def _ci_failure(d: int = _D1) -> WevCIFailure:
-    return WevCIFailure(d, "test-suite", CIFailure(), [3, 5])
+def _ci_failure(d: int = _D1) -> EvtCIFailure:
+    return EvtCIFailure(d, "test-suite", CIFailure(), [3, 5])
 
 
-def _ci_timed_out(d: int = _D1) -> WevCIFailure:
-    return WevCIFailure(d, "slow-check", CITimedOut(), [])
+def _ci_timed_out(d: int = _D1) -> EvtCIFailure:
+    return EvtCIFailure(d, "slow-check", CITimedOut(), [])
 
 
-def _pr_merged(d: int = _D1) -> WevPRMerged:
-    return WevPRMerged(d, 9)
+def _pr_merged(d: int = _D1) -> EvtPRMerged:
+    return EvtPRMerged(d, 9)
 
 
-def _issue_assigned(d: int = _D1) -> WevIssueAssigned:
-    return WevIssueAssigned(d, 12, "fido")
+def _issue_assigned(d: int = _D1) -> EvtIssueAssigned:
+    return EvtIssueAssigned(d, 12, "fido")
 
 
-def _review_submitted(d: int = _D1) -> WevReviewSubmitted:
-    return WevReviewSubmitted(d, 7, 55, "owner")
+def _review_submitted(d: int = _D1) -> EvtReviewSubmitted:
+    return EvtReviewSubmitted(d, 7, 55, "owner")
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ def _review_submitted(d: int = _D1) -> WevReviewSubmitted:
 
 class TestTranslateTotal:
     def test_review_comment_becomes_cmd_comment_review_line(self) -> None:
-        """WevReviewComment → CmdComment(ReviewLine).
+        """EvtReviewComment → CmdComment(ReviewLine).
 
         translate_total + structural equality for the ReviewLine kind.
         """
@@ -90,7 +90,7 @@ class TestTranslateTotal:
         assert isinstance(cmd.cmd_kind, ReviewLine), "translate_total"
 
     def test_issue_comment_becomes_cmd_comment_top_level_pr(self) -> None:
-        """WevIssueComment → CmdComment(TopLevelPR).
+        """EvtIssueComment → CmdComment(TopLevelPR).
 
         translate_total + structural equality for the TopLevelPR kind.
         """
@@ -99,27 +99,27 @@ class TestTranslateTotal:
         assert isinstance(cmd.cmd_kind, TopLevelPR), "translate_total"
 
     def test_ci_failure_becomes_cmd_ci_failure(self) -> None:
-        """WevCIFailure(CIFailure) → CmdCIFailure."""
+        """EvtCIFailure(CIFailure) → CmdCIFailure."""
         cmd = translate(_ci_failure())
         assert isinstance(cmd, CmdCIFailure), "translate_total"
 
     def test_ci_timed_out_becomes_cmd_ci_failure(self) -> None:
-        """WevCIFailure(CITimedOut) → CmdCIFailure."""
+        """EvtCIFailure(CITimedOut) → CmdCIFailure."""
         cmd = translate(_ci_timed_out())
         assert isinstance(cmd, CmdCIFailure), "translate_total"
 
     def test_pr_merged_becomes_cmd_pr_merged(self) -> None:
-        """WevPRMerged → CmdPRMerged."""
+        """EvtPRMerged → CmdPRMerged."""
         cmd = translate(_pr_merged())
         assert isinstance(cmd, CmdPRMerged), "translate_total"
 
     def test_issue_assigned_becomes_cmd_issue_assigned(self) -> None:
-        """WevIssueAssigned → CmdIssueAssigned."""
+        """EvtIssueAssigned → CmdIssueAssigned."""
         cmd = translate(_issue_assigned())
         assert isinstance(cmd, CmdIssueAssigned), "translate_total"
 
     def test_review_submitted_becomes_cmd_review_submitted(self) -> None:
-        """WevReviewSubmitted → CmdReviewSubmitted."""
+        """EvtReviewSubmitted → CmdReviewSubmitted."""
         cmd = translate(_review_submitted())
         assert isinstance(cmd, CmdReviewSubmitted), "translate_total"
 
@@ -131,8 +131,8 @@ class TestTranslateTotal:
 
 class TestTranslateFields:
     def test_review_comment_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevReviewComment."""
-        cmd = translate(WevReviewComment(99, 7, 101, "alice", True))
+        """translate threads all payload fields from EvtReviewComment."""
+        cmd = translate(EvtReviewComment(99, 7, 101, "alice", True))
         assert isinstance(cmd, CmdComment)
         assert cmd.cmd_delivery == 99
         assert cmd.cmd_pr == 7
@@ -142,8 +142,8 @@ class TestTranslateFields:
         assert isinstance(cmd.cmd_kind, ReviewLine)
 
     def test_issue_comment_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevIssueComment."""
-        cmd = translate(WevIssueComment(88, 3, 202, "bob", False))
+        """translate threads all payload fields from EvtIssueComment."""
+        cmd = translate(EvtIssueComment(88, 3, 202, "bob", False))
         assert isinstance(cmd, CmdComment)
         assert cmd.cmd_delivery == 88
         assert cmd.cmd_pr == 3
@@ -153,8 +153,8 @@ class TestTranslateFields:
         assert isinstance(cmd.cmd_kind, TopLevelPR)
 
     def test_ci_failure_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevCIFailure."""
-        cmd = translate(WevCIFailure(77, "lint", CIFailure(), [1, 2]))
+        """translate threads all payload fields from EvtCIFailure."""
+        cmd = translate(EvtCIFailure(77, "lint", CIFailure(), [1, 2]))
         assert isinstance(cmd, CmdCIFailure)
         assert cmd.cmd_delivery == 77
         assert cmd.cmd_check_name == "lint"
@@ -162,23 +162,23 @@ class TestTranslateFields:
         assert cmd.cmd_pr_numbers == [1, 2]
 
     def test_pr_merged_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevPRMerged."""
-        cmd = translate(WevPRMerged(66, 5))
+        """translate threads all payload fields from EvtPRMerged."""
+        cmd = translate(EvtPRMerged(66, 5))
         assert isinstance(cmd, CmdPRMerged)
         assert cmd.cmd_delivery == 66
         assert cmd.cmd_pr == 5
 
     def test_issue_assigned_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevIssueAssigned."""
-        cmd = translate(WevIssueAssigned(55, 12, "carol"))
+        """translate threads all payload fields from EvtIssueAssigned."""
+        cmd = translate(EvtIssueAssigned(55, 12, "carol"))
         assert isinstance(cmd, CmdIssueAssigned)
         assert cmd.cmd_delivery == 55
         assert cmd.cmd_issue == 12
         assert cmd.cmd_assignee == "carol"
 
     def test_review_submitted_fields_preserved(self) -> None:
-        """translate threads all payload fields from WevReviewSubmitted."""
-        cmd = translate(WevReviewSubmitted(44, 7, 55, "dave"))
+        """translate threads all payload fields from EvtReviewSubmitted."""
+        cmd = translate(EvtReviewSubmitted(44, 7, 55, "dave"))
         assert isinstance(cmd, CmdReviewSubmitted)
         assert cmd.cmd_delivery == 44
         assert cmd.cmd_pr == 7
@@ -192,31 +192,31 @@ class TestTranslateFields:
 
 
 class TestTranslatePreservesDelivery:
-    """cmd_delivery_id(translate(ev)) == wev_delivery_id(ev) for all ev."""
+    """cmd_delivery_id(translate(ev)) == evt_delivery_id(ev) for all ev."""
 
     def _assert_preserves(self, ev: WebhookEvent) -> None:
         cmd = translate(ev)
-        assert cmd_delivery_id(cmd) == wev_delivery_id(ev), (
+        assert cmd_delivery_id(cmd) == evt_delivery_id(ev), (
             "translate_preserves_delivery"
         )
 
     def test_review_comment(self) -> None:
-        self._assert_preserves(WevReviewComment(10, 1, 1, "u", False))
+        self._assert_preserves(EvtReviewComment(10, 1, 1, "u", False))
 
     def test_issue_comment(self) -> None:
-        self._assert_preserves(WevIssueComment(20, 1, 1, "u", False))
+        self._assert_preserves(EvtIssueComment(20, 1, 1, "u", False))
 
     def test_ci_failure(self) -> None:
-        self._assert_preserves(WevCIFailure(30, "c", CIFailure(), []))
+        self._assert_preserves(EvtCIFailure(30, "c", CIFailure(), []))
 
     def test_pr_merged(self) -> None:
-        self._assert_preserves(WevPRMerged(40, 1))
+        self._assert_preserves(EvtPRMerged(40, 1))
 
     def test_issue_assigned(self) -> None:
-        self._assert_preserves(WevIssueAssigned(50, 1, "u"))
+        self._assert_preserves(EvtIssueAssigned(50, 1, "u"))
 
     def test_review_submitted(self) -> None:
-        self._assert_preserves(WevReviewSubmitted(60, 1, 1, "u"))
+        self._assert_preserves(EvtReviewSubmitted(60, 1, 1, "u"))
 
 
 # ---------------------------------------------------------------------------
@@ -316,25 +316,25 @@ class TestCmdDeliveryId:
 
 
 # ---------------------------------------------------------------------------
-# wev_delivery_id: accessor extracts the right id from each constructor
+# evt_delivery_id: accessor extracts the right id from each constructor
 # ---------------------------------------------------------------------------
 
 
-class TestWevDeliveryId:
-    def test_wev_review_comment(self) -> None:
-        assert wev_delivery_id(WevReviewComment(10, 1, 1, "u", False)) == 10
+class TestEvtDeliveryId:
+    def test_evt_review_comment(self) -> None:
+        assert evt_delivery_id(EvtReviewComment(10, 1, 1, "u", False)) == 10
 
-    def test_wev_issue_comment(self) -> None:
-        assert wev_delivery_id(WevIssueComment(20, 1, 1, "u", False)) == 20
+    def test_evt_issue_comment(self) -> None:
+        assert evt_delivery_id(EvtIssueComment(20, 1, 1, "u", False)) == 20
 
-    def test_wev_ci_failure(self) -> None:
-        assert wev_delivery_id(WevCIFailure(30, "c", CIFailure(), [])) == 30
+    def test_evt_ci_failure(self) -> None:
+        assert evt_delivery_id(EvtCIFailure(30, "c", CIFailure(), [])) == 30
 
-    def test_wev_pr_merged(self) -> None:
-        assert wev_delivery_id(WevPRMerged(40, 1)) == 40
+    def test_evt_pr_merged(self) -> None:
+        assert evt_delivery_id(EvtPRMerged(40, 1)) == 40
 
-    def test_wev_issue_assigned(self) -> None:
-        assert wev_delivery_id(WevIssueAssigned(50, 1, "u")) == 50
+    def test_evt_issue_assigned(self) -> None:
+        assert evt_delivery_id(EvtIssueAssigned(50, 1, "u")) == 50
 
-    def test_wev_review_submitted(self) -> None:
-        assert wev_delivery_id(WevReviewSubmitted(60, 1, 1, "u")) == 60
+    def test_evt_review_submitted(self) -> None:
+        assert evt_delivery_id(EvtReviewSubmitted(60, 1, 1, "u")) == 60

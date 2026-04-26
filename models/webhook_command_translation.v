@@ -92,58 +92,58 @@ Inductive CommentKind : Type :=
     Typed event descriptors extracted from raw GitHub webhook JSON.  One
     constructor per (event-type, action) pair that Fido may act on.
 
-    The [wev_delivery] field is the idempotence key shared by every
+    The [evt_delivery] field is the idempotence key shared by every
     constructor.  It uniquely identifies one GitHub delivery attempt and
     is the dedup anchor for detecting redeliveries.
 
     Constructors match the six branches of [events.py:dispatch]:
-      [WevReviewComment]    — pull_request_review_comment / created
-      [WevIssueComment]     — issue_comment / created (on PR)
-      [WevCIFailure]        — check_run / completed (failure or timed_out)
-      [WevPRMerged]         — pull_request / closed (merged)
-      [WevIssueAssigned]    — issues / assigned
-      [WevReviewSubmitted]  — pull_request_review / submitted *)
+      [EvtReviewComment]    — pull_request_review_comment / created
+      [EvtIssueComment]     — issue_comment / created (on PR)
+      [EvtCIFailure]        — check_run / completed (failure or timed_out)
+      [EvtPRMerged]         — pull_request / closed (merged)
+      [EvtIssueAssigned]    — issues / assigned
+      [EvtReviewSubmitted]  — pull_request_review / submitted *)
 Inductive WebhookEvent : Type :=
 
-| WevReviewComment
-    (wev_delivery   : DeliveryId)
-    (wev_pr         : positive)
-    (wev_comment_id : positive)
-    (wev_author     : string)
-    (wev_is_bot     : bool)
+| EvtReviewComment
+    (evt_delivery   : DeliveryId)
+    (evt_pr         : positive)
+    (evt_comment_id : positive)
+    (evt_author     : string)
+    (evt_is_bot     : bool)
     : WebhookEvent
 
-| WevIssueComment
-    (wev_delivery   : DeliveryId)
-    (wev_pr         : positive)
-    (wev_comment_id : positive)
-    (wev_author     : string)
-    (wev_is_bot     : bool)
+| EvtIssueComment
+    (evt_delivery   : DeliveryId)
+    (evt_pr         : positive)
+    (evt_comment_id : positive)
+    (evt_author     : string)
+    (evt_is_bot     : bool)
     : WebhookEvent
 
-| WevCIFailure
-    (wev_delivery   : DeliveryId)
-    (wev_check_name : string)
-    (wev_conclusion : CheckConclusion)
-    (wev_pr_numbers : list positive)
+| EvtCIFailure
+    (evt_delivery   : DeliveryId)
+    (evt_check_name : string)
+    (evt_conclusion : CheckConclusion)
+    (evt_pr_numbers : list positive)
     : WebhookEvent
 
-| WevPRMerged
-    (wev_delivery : DeliveryId)
-    (wev_pr       : positive)
+| EvtPRMerged
+    (evt_delivery : DeliveryId)
+    (evt_pr       : positive)
     : WebhookEvent
 
-| WevIssueAssigned
-    (wev_delivery : DeliveryId)
-    (wev_issue    : positive)
-    (wev_assignee : string)
+| EvtIssueAssigned
+    (evt_delivery : DeliveryId)
+    (evt_issue    : positive)
+    (evt_assignee : string)
     : WebhookEvent
 
-| WevReviewSubmitted
-    (wev_delivery  : DeliveryId)
-    (wev_pr        : positive)
-    (wev_review_id : positive)
-    (wev_author    : string)
+| EvtReviewSubmitted
+    (evt_delivery  : DeliveryId)
+    (evt_pr        : positive)
+    (evt_review_id : positive)
+    (evt_author    : string)
     : WebhookEvent.
 
 (** * WebhookCommand
@@ -157,7 +157,7 @@ Inductive WebhookEvent : Type :=
     must not double-act — the dedup predicate (Task 2) formalises this
     obligation.
 
-    [CmdComment] covers both [WevReviewComment] and [WevIssueComment];
+    [CmdComment] covers both [EvtReviewComment] and [EvtIssueComment];
     [cmd_kind] routes the reply to the correct GitHub API surface.
 
     [CmdReviewSubmitted] is kept separate from [CmdComment] because the
@@ -232,8 +232,8 @@ Definition cmd_delivery_id (cmd : WebhookCommand) : DeliveryId :=
 
     [translate_total] (proved below) states the existence witness.
 
-    Delivery id threading: [translate] preserves [wev_delivery]
-    unchanged into [cmd_delivery_id (translate ev) = wev_delivery_id ev].
+    Delivery id threading: [translate] preserves [evt_delivery]
+    unchanged into [cmd_delivery_id (translate ev) = evt_delivery_id ev].
     This is the idempotence anchor — a redelivered event with the same
     [DeliveryId] yields a command with the same [cmd_delivery_id], so
     the dedup check in [same_delivery] is delivery-stable.  Proved
@@ -241,22 +241,22 @@ Definition cmd_delivery_id (cmd : WebhookCommand) : DeliveryId :=
 Definition translate (ev : WebhookEvent) : WebhookCommand :=
   match ev with
 
-  | WevReviewComment d pr cid author is_bot =>
+  | EvtReviewComment d pr cid author is_bot =>
       CmdComment d pr cid author is_bot ReviewLine
 
-  | WevIssueComment d pr cid author is_bot =>
+  | EvtIssueComment d pr cid author is_bot =>
       CmdComment d pr cid author is_bot TopLevelPR
 
-  | WevCIFailure d name conclusion pr_nums =>
+  | EvtCIFailure d name conclusion pr_nums =>
       CmdCIFailure d name conclusion pr_nums
 
-  | WevPRMerged d pr =>
+  | EvtPRMerged d pr =>
       CmdPRMerged d pr
 
-  | WevIssueAssigned d issue assignee =>
+  | EvtIssueAssigned d issue assignee =>
       CmdIssueAssigned d issue assignee
 
-  | WevReviewSubmitted d pr rid author =>
+  | EvtReviewSubmitted d pr rid author =>
       CmdReviewSubmitted d pr rid author
 
   end.
@@ -305,24 +305,24 @@ Definition cmd_to_contender (cmd : WebhookCommand) : Contender :=
   | CmdReviewSubmitted _ _ _ _     => Handler
   end.
 
-(** * wev_delivery_id
+(** * evt_delivery_id
 
     Uniform accessor that extracts the [DeliveryId] from any [WebhookEvent].
     The symmetric counterpart to [cmd_delivery_id]; used to state
     [translate_preserves_delivery] without pattern-matching on each
     constructor individually. *)
-Definition wev_delivery_id (ev : WebhookEvent) : DeliveryId :=
+Definition evt_delivery_id (ev : WebhookEvent) : DeliveryId :=
   match ev with
-  | WevReviewComment   d _ _ _ _ => d
-  | WevIssueComment    d _ _ _ _ => d
-  | WevCIFailure       d _ _ _   => d
-  | WevPRMerged        d _       => d
-  | WevIssueAssigned   d _ _     => d
-  | WevReviewSubmitted d _ _ _   => d
+  | EvtReviewComment   d _ _ _ _ => d
+  | EvtIssueComment    d _ _ _ _ => d
+  | EvtCIFailure       d _ _ _   => d
+  | EvtPRMerged        d _       => d
+  | EvtIssueAssigned   d _ _     => d
+  | EvtReviewSubmitted d _ _ _   => d
   end.
 
 Python File Extraction webhook_command_translation
-  "translate same_delivery cmd_to_contender cmd_delivery_id wev_delivery_id".
+  "translate same_delivery cmd_to_contender cmd_delivery_id evt_delivery_id".
 
 (** * Proved invariants
 
@@ -347,11 +347,11 @@ Qed.
 
 (** [translate_preserves_delivery]: [translate] threads the [DeliveryId]
     from the event into the command unchanged.  This is the idempotence
-    anchor: a redelivered event (same [wev_delivery_id]) yields a command
+    anchor: a redelivered event (same [evt_delivery_id]) yields a command
     with the same [cmd_delivery_id], so [same_delivery] is delivery-stable. *)
 Lemma translate_preserves_delivery :
   forall ev : WebhookEvent,
-    cmd_delivery_id (translate ev) = wev_delivery_id ev.
+    cmd_delivery_id (translate ev) = evt_delivery_id ev.
 Proof.
   intro ev; destruct ev; reflexivity.
 Qed.
