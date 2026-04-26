@@ -1,14 +1,13 @@
-(** Webhook-to-command translation types.
+(** Webhook-to-command translation types and FIFO bridge.
 
     Models GitHub webhook payloads as typed event descriptors and the typed
-    commands they translate to.  The [translate] function lives in a later
-    commit; this file defines the shapes that the translation boundary
-    consumes and produces.
+    commands they translate to, then bridges each command to the D4
+    session-ownership FIFO contender kind it should be [Enqueue]d as.
 
     Design boundary: raw GitHub webhook JSON enters [dispatch] in
     [events.py] and exits as a typed [WebhookCommand].  [WebhookCommand]
-    is what the D4 session-ownership FIFO [Enqueue]s; its payload is what
-    the handler acts on when it [Dequeue]s.
+    is what the D4 session-ownership FIFO [Enqueue]s via [cmd_to_contender];
+    its payload is what the handler acts on when it [Dequeue]s.
 
     D5 lands as specification ahead of implementation.  Today's [dispatch]
     returns a loosely-typed [Action] dataclass; the model is the intended
@@ -18,12 +17,20 @@
     Six handled (event-type, action) pairs map to five command kinds.
     Unknown or silently-filtered events — wrong action, missing required
     fields, self-comment, non-allowed author, non-PR issue comments,
-    non-failure CI conclusion, non-merged PR close — produce [None] from
-    [translate] (Task 2).  This is the fail-closed contract: unrecognised
-    shapes never yield commands. *)
+    non-failure CI conclusion, non-merged PR close — cannot be constructed
+    as [WebhookEvent] values at all, so [translate] is total (no [None]).
+    This is the fail-closed contract: unrecognised shapes never yield
+    commands.
+
+    This is the second cross-[.v] import in the repo (after D4's
+    [session_ownership_fifo] importing [replied_comment_claims]): D5
+    imports [session_ownership_fifo] to access [Contender] for
+    [cmd_to_contender]. *)
 
 Declare ML Module "rocq-python-extraction".
 Declare ML Module "rocq-runtime.plugins.extraction".
+
+From FidoModels Require Import session_ownership_fifo.
 
 From Stdlib Require Import
   Lists.List
@@ -159,7 +166,7 @@ Inductive WebhookEvent : Type :=
     record the arrival and support future per-review triage.
 
     The mapping from [WebhookCommand] to a D4 [Contender] (for [Enqueue])
-    is added in Task 3 once the cross-model import is wired up. *)
+    is [cmd_to_contender] below. *)
 Inductive WebhookCommand : Type :=
 
 | CmdComment
@@ -268,3 +275,33 @@ Definition translate (ev : WebhookEvent) : WebhookCommand :=
     in Task 4. *)
 Definition same_delivery (c1 c2 : WebhookCommand) : bool :=
   Pos.eqb (cmd_delivery_id c1) (cmd_delivery_id c2).
+
+(** * cmd_to_contender
+
+    Total bridge from [WebhookCommand] to the D4 [Contender] kind that
+    should be passed to [Enqueue] for this command.
+
+    Every webhook-originated command maps to [Handler].  From
+    [session_ownership_fifo]:
+      [Handler] — covers webhook-handler and CI-fix turns; CI failures are
+                  folded into [Handler] (no rank ordering inside the FIFO
+                  queue — arrival timestamp is the only ordering).
+      [CronSweep] — reserved for the periodic idle-drain sweep; never
+                    produced from a webhook.
+
+    This function is total — every constructor maps to exactly one
+    [Contender].  The exhaustive match ensures that adding a new
+    [WebhookCommand] constructor without updating [cmd_to_contender]
+    is a compile-time error.
+
+    The key property ([cmd_to_contender_is_handler], proved in Task 4):
+    [∀ cmd, cmd_to_contender cmd = Handler].  This is the formal statement
+    that webhooks never enqueue a [CronSweep] contender. *)
+Definition cmd_to_contender (cmd : WebhookCommand) : Contender :=
+  match cmd with
+  | CmdComment         _ _ _ _ _ _ => Handler
+  | CmdCIFailure       _ _ _ _     => Handler
+  | CmdPRMerged        _ _         => Handler
+  | CmdIssueAssigned   _ _ _       => Handler
+  | CmdReviewSubmitted _ _ _ _     => Handler
+  end.
