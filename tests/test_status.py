@@ -2173,9 +2173,11 @@ class TestFormatStatus:
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
-        # First webhook uses ├─ (not last), second uses └─ (last).
-        assert "├─ webhook: triaging comment on PR #9 (12s)" in output
-        assert "└─ webhook: replying to review (3s)" in output
+        # Webhook lines are plain peer siblings without tree characters.
+        assert "webhook: triaging comment on PR #9 (12s)" in output
+        assert "webhook: replying to review (3s)" in output
+        assert "├─" not in output
+        assert "└─" not in output
 
     def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)

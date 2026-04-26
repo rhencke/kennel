@@ -1065,7 +1065,7 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
     2. ``Issue:  #N — title  (elapsed Xm)``
     3. ``PR:     #N — title``
     4. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
-    5. Webhook threads (indented ``├─`` / ``└─``), up to
+    5. Webhook threads (plain peer siblings), up to
        :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to the agent
        sorts to the top and gets an ANSI background-highlighted label; overflow
        rolled into ``+N more webhook(s)``.
@@ -1185,18 +1185,17 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     shown = webhooks[:_WEBHOOK_DISPLAY_CAP]
     overflow = len(webhooks) - len(shown)
     lines: list[str] = []
-    for i, w in enumerate(shown):
-        branch = color(DIM, "└─" if overflow == 0 and i == len(shown) - 1 else "├─")
+    for w in shown:
         is_talker = talker_tid is not None and w.thread_id == talker_tid
         wh_label = (
             color(YELLOW_BG, "webhook:") if is_talker else color(BOLD, "webhook:")
         )
         elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
-        line = f"  {branch} {wh_label} {w.description} {elapsed}"
+        line = f"  {wh_label} {w.description} {elapsed}"
         lines.append(line)
     if overflow > 0:
         lines.append(
-            color(DIM, f"  └─ +{overflow} more webhook{'s' if overflow != 1 else ''}")
+            color(DIM, f"  +{overflow} more webhook{'s' if overflow != 1 else ''}")
         )
     return lines
 
