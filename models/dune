@@ -16,4 +16,5 @@
   worker_claude_lifecycle
   webhook_command_translation
   claude_session
-  watchdog_transitions))
+  watchdog_transitions
+  worker_registry_crash))

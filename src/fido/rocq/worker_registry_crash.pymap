@@ -1,0 +1,12 @@
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,22,0,23,8,worker_registry_crash.v,92,10,92,15,extraction,State,State
+open,27,0,28,8,worker_registry_crash.v,93,2,93,8,extraction,Absent,Absent
+open,32,0,33,8,worker_registry_crash.v,94,2,94,8,extraction,Active,Active
+open,37,0,38,8,worker_registry_crash.v,95,2,95,9,extraction,Crashed,Crashed
+open,42,0,43,8,worker_registry_crash.v,96,2,96,9,extraction,Stopped,Stopped
+open,49,0,50,8,worker_registry_crash.v,110,10,110,15,extraction,Event,Event
+open,54,0,55,8,worker_registry_crash.v,111,2,111,8,extraction,Launch,Launch
+open,59,0,60,8,worker_registry_crash.v,112,2,112,8,extraction,Rescue,Rescue
+open,64,0,65,8,worker_registry_crash.v,113,2,113,12,extraction,ThreadDies,ThreadDies
+open,69,0,70,8,worker_registry_crash.v,114,2,114,13,extraction,ThreadStops,ThreadStops
+open,76,0,78,18,worker_registry_crash.v,132,11,132,21,extraction,transition,transition
