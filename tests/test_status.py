@@ -1581,6 +1581,33 @@ class TestFormatAgentLine:
         assert line is not None
         assert line.startswith("  ")
 
+    def test_includes_sent_and_received_counts_when_nonzero(self) -> None:
+        repo = self._repo(
+            claude_pid=42, session_sent_count=5, session_received_count=12
+        )
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "5 sent, 12 received" in line
+
+    def test_omits_sent_and_received_counts_when_both_zero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=0)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "sent" not in line
+        assert "received" not in line
+
+    def test_includes_counts_when_only_sent_is_nonzero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=3, session_received_count=0)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "3 sent, 0 received" in line
+
+    def test_includes_counts_when_only_received_is_nonzero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=7)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "0 sent, 7 received" in line
+
 
 class TestFormatStatus:
     def _repo(self, **kwargs) -> RepoStatus:

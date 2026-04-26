@@ -852,6 +852,13 @@ def _format_agent_line(repo: RepoStatus) -> str | None:
     if repo.session_dropped_count > 0:
         noun = "session" if repo.session_dropped_count == 1 else "sessions"
         parts.append(color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
+    if repo.session_sent_count > 0 or repo.session_received_count > 0:
+        parts.append(
+            color(
+                DIM,
+                f"{repo.session_sent_count} sent, {repo.session_received_count} received",
+            )
+        )
 
     pid_str = (
         color(DIM, f"pid {repo.claude_pid}")
