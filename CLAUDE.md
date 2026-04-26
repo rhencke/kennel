@@ -194,6 +194,10 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
 - **Local entry point** — use `./fido help`. Do not call host `uv` for normal
   checks or server startup. The launcher owns buildx image selection, UID/GID
   mapping, credentials mounts, and stdin passthrough.
+- **No `--no-cache` with docker buildx** — never pass `--no-cache` to
+  `./fido ci`, `./fido make-rocq`, or any other buildx-backed command.  The
+  flag bypasses BuildKit's layer cache and destroys rebuild time.  Incremental
+  builds are fast by design; trust the cache.
 - **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
 - **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
 - **Thread safety (Python 3.14t, free-threaded, no GIL)** — Fido runs on
