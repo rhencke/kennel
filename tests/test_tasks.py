@@ -968,7 +968,9 @@ class TestReorderTasks:
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
-        mock_prompts.rescope_duplicate_nudge.assert_called_once_with(["Shared name"])
+        mock_prompts.rescope_duplicate_nudge.assert_called_once_with(
+            ["Shared name"], attempts_remaining=0
+        )
         assert client.run_turn.call_count == 2
         tasks = list_tasks(tmp_path)
         assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Fixed Alpha"

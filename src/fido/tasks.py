@@ -578,7 +578,7 @@ def reorder_tasks(
             "reorder_tasks: Opus proposed duplicate titles %r — nudging",
             duplicates,
         )
-        nudge = prompts.rescope_duplicate_nudge(duplicates)
+        nudge = prompts.rescope_duplicate_nudge(duplicates, attempts_remaining=0)
         nudge_raw = agent.run_turn(nudge, model=agent.voice_model)
         if not nudge_raw:
             log.warning(
