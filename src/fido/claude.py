@@ -509,9 +509,6 @@ class ClaudeSession(OwnedSession):
         # is dirty.  :meth:`send` drains to the boundary before writing new
         # content so every turn starts on a clean slate.
         self._in_turn = False
-        # Set by :meth:`prompt` right after :attr:`_cancel` and before it
-        # blocks on :attr:`_lock`.  Cleared inside :meth:`__enter__` once the
-        # preempter actually acquires the lock.  Workers check this in their
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).

@@ -1311,9 +1311,9 @@ class TestClaudeSessionIterEvents:
     def test_cancel_still_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
         """Cancel is always unconditionally cleared at the start of iter_events.
 
-        The FSM's FIFO handler queue ensures the next holder's turn starts clean
-        without needing a separate _preempt_pending gate.  A stale cancel set
-        before this holder acquired the lock is cleared here so the new turn runs.
+        The FSM's FIFO handler queue ensures the next holder's turn starts clean.
+        A stale cancel set before this holder acquired the lock is cleared here
+        so the new turn runs.
         """
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
@@ -1810,9 +1810,7 @@ class TestClaudeSessionLock:
     def test_hold_for_handler_enters_fsm_owned_by_handler(self, tmp_path: Path) -> None:
         """hold_for_handler acquires FSM ownership as handler.
 
-        Verifies the FSM state reflects OwnedByHandler while the
-        hold is active, replacing the old _signal_pending_preempt /
-        _preempt_pending assertions.
+        Verifies the FSM state reflects OwnedByHandler while the hold is active.
         """
         from fido.rocq.transition import OwnedByHandler
 

@@ -1,17 +1,10 @@
-"""Tests for the session-lock FSM coordination in OwnedSession.
+"""Tests for the FSM-driven lock coordination in OwnedSession.
 
-Covers two layers:
-
-1. **Oracle methods** (``_oracle_on_acquire`` / ``_oracle_on_release``) —
-   backward-compatible wrappers used by subclasses that still maintain a
-   provider-specific RLock.  They update ``_fsm_state`` under ``_fsm_lock``
-   and crash with a theorem name when the FSM rejects the event.
-
-2. **FSM coordination methods** (``_fsm_acquire_worker`` /
-   ``_fsm_acquire_handler`` / ``_fsm_release``) — the authoritative
-   lock coordinator extracted from ``models/session_lock.v``.  Workers
-   block until Free with no queued handlers; handlers block until Free
-   (FIFO queue for handler-on-handler ordering).
+Covers the FSM coordination methods (``_fsm_acquire_worker`` /
+``_fsm_acquire_handler`` / ``_fsm_release``) — the authoritative
+lock coordinator extracted from ``models/session_lock.v``.  Workers
+block until Free with no queued handlers; handlers block until Free
+(FIFO queue for handler-on-handler ordering).
 
 Proved theorems being guarded:
   ``no_dual_ownership``     — acquisition rejected when session already owned
@@ -56,108 +49,6 @@ def test_fsm_state_starts_free() -> None:
     """FSM initialises to Free — nobody holds the session."""
     session = _FakeSession()
     assert isinstance(session._fsm_state, Free)
-
-
-# ---------------------------------------------------------------------------
-# Oracle: happy-path worker acquire → release
-# ---------------------------------------------------------------------------
-
-
-def test_oracle_worker_acquire_and_release() -> None:
-    """Worker acquire transitions Free → OwnedByWorker; release → Free."""
-    session = _FakeSession()
-
-    session._oracle_on_acquire("worker")
-    assert isinstance(session._fsm_state, OwnedByWorker)
-
-    session._oracle_on_release()
-    assert isinstance(session._fsm_state, Free)
-
-
-# ---------------------------------------------------------------------------
-# Oracle: happy-path handler (webhook) acquire → release
-# ---------------------------------------------------------------------------
-
-
-def test_oracle_handler_acquire_and_release() -> None:
-    """Handler acquire transitions Free → OwnedByHandler; release → Free."""
-    session = _FakeSession()
-
-    session._oracle_on_acquire("webhook")
-    assert isinstance(session._fsm_state, OwnedByHandler)
-
-    session._oracle_on_release()
-    assert isinstance(session._fsm_state, Free)
-
-
-# ---------------------------------------------------------------------------
-# Oracle theorem: no_dual_ownership
-# ---------------------------------------------------------------------------
-
-
-def test_oracle_no_dual_ownership_worker_then_worker() -> None:
-    """Worker cannot acquire an already worker-owned session.
-
-    Proved by ``no_dual_ownership`` in ``models/session_lock.v``.
-    """
-    session = _FakeSession()
-    session._oracle_on_acquire("worker")  # Free → OwnedByWorker
-
-    with pytest.raises(RuntimeError, match="no_dual_ownership"):
-        session._oracle_on_acquire("worker")  # OwnedByWorker + WorkerAcquire → None
-
-
-def test_oracle_no_dual_ownership_worker_then_handler() -> None:
-    """Handler cannot acquire a worker-owned session without preemption.
-
-    Proved by ``no_dual_ownership`` in ``models/session_lock.v``.
-    """
-    session = _FakeSession()
-    session._oracle_on_acquire("worker")  # Free → OwnedByWorker
-
-    with pytest.raises(RuntimeError, match="no_dual_ownership"):
-        session._oracle_on_acquire("webhook")  # OwnedByWorker + HandlerAcquire → None
-
-
-def test_oracle_no_dual_ownership_handler_then_worker() -> None:
-    """Worker cannot acquire a handler-owned session.
-
-    Proved by ``no_dual_ownership`` in ``models/session_lock.v``.
-    """
-    session = _FakeSession()
-    session._oracle_on_acquire("webhook")  # Free → OwnedByHandler
-
-    with pytest.raises(RuntimeError, match="no_dual_ownership"):
-        session._oracle_on_acquire("worker")  # OwnedByHandler + WorkerAcquire → None
-
-
-def test_oracle_no_dual_ownership_handler_then_handler() -> None:
-    """Handler cannot acquire an already handler-owned session.
-
-    Proved by ``no_dual_ownership`` in ``models/session_lock.v``.
-    """
-    session = _FakeSession()
-    session._oracle_on_acquire("webhook")  # Free → OwnedByHandler
-
-    with pytest.raises(RuntimeError, match="no_dual_ownership"):
-        session._oracle_on_acquire("webhook")  # OwnedByHandler + HandlerAcquire → None
-
-
-# ---------------------------------------------------------------------------
-# Oracle theorem: release_only_by_owner
-# ---------------------------------------------------------------------------
-
-
-def test_oracle_release_only_by_owner_spurious_from_free() -> None:
-    """Releasing from Free is rejected (spurious release).
-
-    Covered by the Free cases in ``release_only_by_owner``.
-    """
-    session = _FakeSession()
-    # State is Free; _oracle_on_release() will send HandlerRelease because
-    # Free is not OwnedByWorker — transition(Free, HandlerRelease) = None.
-    with pytest.raises(RuntimeError, match="release_only_by_owner"):
-        session._oracle_on_release()
 
 
 # ---------------------------------------------------------------------------

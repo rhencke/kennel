@@ -340,8 +340,8 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     provider.set_thread_kind("webhook")
     try:
         with session.hold_for_handler(preempt_worker=True):
-            # _fire_worker_cancel set _cancel + _preempt_pending.  Handler's
-            # first prompt() must actually send and read its own response.
+            # _fire_worker_cancel set _cancel.  Handler's first prompt() must
+            # actually send and read its own response.
             result = session.prompt("triage this please")
     finally:
         provider.set_thread_kind(None)
