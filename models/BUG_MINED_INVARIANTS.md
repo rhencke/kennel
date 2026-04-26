@@ -15,6 +15,8 @@ D-series issues: D1 (#739), D2 (#740), D3 (#741), D9 (#747), D10 (#748),
 D11 (#749), D13 (#751), D16 (#888), D18 (#890).
 Cluster B modeled and live: `claude_session.v` + oracle in `ClaudeSession`
 ([#1052](https://github.com/FidoCanCode/home/pull/1052)).
+Cluster P modeled and live: `worker_registry_crash.v` + oracle in `WorkerRegistry`
+([#1056](https://github.com/FidoCanCode/home/pull/1056)).
 
 ---
 
@@ -279,6 +281,47 @@ plumbing; not coordination.
 
 ---
 
+## P. Worker registry slot lifecycle + crash recovery
+
+**Invariant.** Each per-repo slot in `_threads` passes through a
+forward-only FSM: `Absent → Active → (Crashed | Stopped) → Active`.
+Four guarantees hold simultaneously:
+`rescue_requires_prior_crash` — `Rescue` (i.e., `detach_provider`) is
+accepted only from `Crashed`; an absent, live, or orderly-stopped slot
+has no rescuable provider.
+`no_start_while_active` — both `Launch` and `Rescue` are rejected from
+`Active`; a live thread must exit before the slot can be reused, closing
+the fido-lockfile race where a replacement thread starts before the old
+one has a chance to exit.
+`crash_must_rescue` — `Launch` is rejected from `Crashed`; a crashed
+predecessor demands `Rescue` so the still-live provider subprocess is
+not orphaned and session intent on the dead thread is not lost.
+`crash_recovery_is_total` — `Rescue` from `Crashed` always yields
+`Active`; every detected crash has a well-defined recovery path with no
+stuck intermediate state.
+
+**Bugs.** Lockfile race (old thread still alive when new one starts),
+provider-orphaning on bypassed rescue path — both motivated the
+`no_start_while_active` and `crash_must_rescue` invariants.
+
+**Status.** Modeled in `worker_registry_crash.v`. Live in production
+([#1056](https://github.com/FidoCanCode/home/pull/1056), validated
+2026-04-26). Five invariants formally proved:
+`rescue_requires_prior_crash`, `no_start_while_active`,
+`crash_must_rescue`, `thread_events_only_from_active`,
+`crash_recovery_is_total`. FSM oracle wired into
+`WorkerRegistry._registry_fsm_transition` — crashes loudly on any slot
+lifecycle violation. Regression tests in
+`tests/test_registry_fsm_oracle.py`.
+
+**Model.** `worker_registry_crash.v` — states `Absent | Active |
+Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
+
+**Closed:** [#745](https://github.com/FidoCanCode/home/issues/745)
+— D7: Rocq→Python — model multi-repo worker registry + crash recovery.
+
+---
+
 ## Summary
 
 | Cluster | Invariant focus | Bugs | Already covered | Action |
@@ -298,10 +341,12 @@ plumbing; not coordination.
 | M | Status display | 2 | (UI, not Rocq) | standard fix |
 | N | Single runtime path | 1 | (deploy, not runtime) | mention in D8 (#746) |
 | O | Build cache | 1 | (CI, not coordination) | standard fix |
+| P | Worker registry slot lifecycle + crash recovery | lockfile race, provider orphan | ✓ worker_registry_crash.v live (#1056) | — |
 
 **New issues filed (as of this survey):**
 - [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation) — **closed** ([#1052](https://github.com/FidoCanCode/home/pull/1052))
 - [#1042](https://github.com/FidoCanCode/home/issues/1042) — D9b: webhook handlers must not do implementation inline (cluster H)
+- [#745](https://github.com/FidoCanCode/home/issues/745) — D7: worker_registry_crash.v model (cluster P, lockfile race + provider orphan) — **closed** ([#1056](https://github.com/FidoCanCode/home/pull/1056))
 
 **Existing issues to enrich with bug references:**
 D3 (#741), D9 (#747), D10 (#748), D11 (#749), D13 (#751), D16 (#888), D18 (#890).
