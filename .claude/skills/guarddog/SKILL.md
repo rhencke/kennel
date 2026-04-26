@@ -24,8 +24,9 @@ checks. Keep it running and sample every 2 minutes:
 ### Collect status
 Run `./fido status` from `/home/rhencke/home-runner`.
 
-Also watch `~/log/fido.log` in the same monitor session so status changes and
-fresh errors are observed together.
+Also watch fido's logs in the same monitor session so status changes and
+fresh errors are observed together. Logs go to user-mode journald, tagged
+`fido`. Live tail: `journalctl --user -t fido -f`.
 
 ### All good — report deltas only
 Compare to the previous check. Report only what changed:
@@ -48,7 +49,7 @@ sampling until the window opens or the user intervenes.
 
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
-- inspect recent errors in `~/log/fido.log`
+- inspect recent errors in journald: `journalctl --user -t fido -p warning -S '10 minutes ago'`
 - Check if the Fido session is still producing output
 - Check git status of managed repos for unexpected state
 
@@ -85,7 +86,7 @@ cd /home/rhencke/home-runner
 ```
 
 ### Step 3: Diagnose
-- Read the last 30 lines of `~/log/fido.log` (filter out `{"type` JSON blobs)
+- Read recent fido output: `journalctl --user -t fido -n 30 -S '10 minutes ago' --no-pager` (filter `{"type` JSON blobs separately)
 - Check `tasks.json` state: `cat /home/rhencke/workspace/home/.git/fido/tasks.json`
 - Check `state.json`: `cat /home/rhencke/workspace/home/.git/fido/state.json`
 - Check git status and recent commits of managed repos
