@@ -1671,8 +1671,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "limits: claude-code 91% (five hour)" in output
-        assert "owner/repo: fido waiting — claude-code" in output
-        assert "owner/repo: fido waiting — claude-code 91% (five hour)" not in output
+        assert "owner/repo: claude-code" in output
+        assert "owner/repo: claude-code 91% (five hour)" not in output
 
     def test_includes_provider_reset_time_in_summary(self) -> None:
         provider_status = ProviderPressureStatus(
@@ -1714,8 +1714,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "claude-code limits unknown" in output
-        assert "owner/repo: fido waiting — claude-code" in output
-        assert "owner/repo: fido waiting — claude-code limits unknown" not in output
+        assert "owner/repo: claude-code" in output
+        assert "owner/repo: claude-code limits unknown" not in output
 
     def test_includes_copilot_unknown_summary(self) -> None:
         provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
@@ -1731,8 +1731,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "copilot-cli limits unknown" in output
-        assert "owner/repo: fido waiting — copilot-cli" in output
-        assert "owner/repo: fido waiting — copilot-cli limits unknown" not in output
+        assert "owner/repo: copilot-cli" in output
+        assert "owner/repo: copilot-cli limits unknown" not in output
 
     def test_fido_up_no_uptime(self) -> None:
         status = FidoStatus(fido_pid=12345, fido_uptime=None, repos=[])
@@ -1751,7 +1751,7 @@ class TestFormatStatus:
             repos=[self._repo(name="owner/myrepo")],
         )
         output = format_status(status)
-        assert "owner/myrepo: fido waiting" in output
+        assert "owner/myrepo: claude-code" in output
         assert "no assigned issues" in output
 
     def test_repo_fido_running_no_issue(self) -> None:
@@ -1761,7 +1761,7 @@ class TestFormatStatus:
             repos=[self._repo(fido_running=True)],
         )
         output = format_status(status)
-        assert "fido running" in output
+        assert "owner/repo: claude-code" in output
 
     def test_repo_with_issue_and_task(self) -> None:
         repo = self._repo(
@@ -1857,8 +1857,8 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue: #3" in output
-        # Worker is running but has no task → shows waiting for work
-        assert "Worker: waiting for work" in output
+        # Worker is running but has no task → hidden (idle workers are noise)
+        assert "Worker:" not in output
 
     def test_claude_pid_on_agent_line_when_no_talker(self) -> None:
         """Agent info appears on a dedicated body line, not as a header suffix."""

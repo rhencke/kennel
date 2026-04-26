@@ -923,6 +923,8 @@ class CopilotCLISession(OwnedSession):
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
+        self._sent_count: int = 0
+        self._received_count: int = 0
         # Resume an existing Copilot ACP session when *session_id* is given
         # (fix for #649 — persisted across fido restarts in state.json).
         # When the id is no longer known to Copilot, ensure_session falls
@@ -949,6 +951,24 @@ class CopilotCLISession(OwnedSession):
     @property
     def dropped_session_count(self) -> int:
         return self._runtime.dropped_session_count
+
+    @property
+    def sent_count(self) -> int:
+        """Cumulative number of user turns sent to Copilot since boot.
+
+        Accumulates across session switches and recoveries — model changes and
+        resets do not reset the count.
+        """
+        return self._sent_count
+
+    @property
+    def received_count(self) -> int:
+        """Cumulative number of responses received from Copilot since boot.
+
+        Accumulates across session switches and recoveries — model changes and
+        resets do not reset the count.
+        """
+        return self._received_count
 
     @property
     def last_turn_cancelled(self) -> bool:
@@ -1113,11 +1133,13 @@ class CopilotCLISession(OwnedSession):
             "%s",
             _transcript_block("copilot prompt", prompt),
         )
+        self._sent_count += 1
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
             prompt,
             effective_model,
         )
+        self._received_count += 1
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)

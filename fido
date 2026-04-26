@@ -827,6 +827,10 @@ status_fast_path() {
                  (if ($repo.session_dropped_count // 0) > 0
                   then red_bold("dropped " + (if $repo.session_dropped_count == 1 then "session " else "sessions " end) + ($repo.session_dropped_count|tostring))
                   else empty
+                  end),
+                 (if (($repo.session_sent_count // 0) > 0 or ($repo.session_received_count // 0) > 0)
+                  then dim((($repo.session_sent_count // 0)|tostring) + " sent, " + (($repo.session_received_count // 0)|tostring) + " received")
+                  else empty
                   end)]
                 | map(select(. != null and . != ""))
                 | if length > 0 then " " + dim("(") + join(", ") + dim(")") else "" end)
@@ -845,6 +849,10 @@ status_fast_path() {
         else
           "waiting for work"
         end;
+      def should_show_worker($repo):
+        $repo.current_task != null
+        or worker_is_agent_talker($repo)
+        or (($repo.provider_status // {}).paused // false);
       def worker_line($repo):
         (if $repo.current_task != null or worker_is_agent_talker($repo)
          then (if $color then "" else "* " end) + green_bg("Worker:")
@@ -873,8 +881,6 @@ status_fast_path() {
       def repo_header($repo):
         bold("\($repo.repo_name):")
         + " "
-        + (if $repo.fido_running then green("fido running") else dim("fido waiting") end)
-        + " — "
         + ([provider_status_style($repo.provider_status; ($repo.provider // "unknown")),
             (if ($repo.crash_count // 0) > 0 then red_bold("crashes \($repo.crash_count)") else empty end),
             (if $repo.worker_uptime_seconds != null then dim("up " + uptime($repo.worker_uptime_seconds)) else empty end),
@@ -910,7 +916,7 @@ status_fast_path() {
            cache_line(.),
            (if .issue == null then "  no assigned issues" else issue_line(.) end),
            pr_line(.),
-           (if .issue == null then empty else worker_line(.) end)]
+           (if .issue == null or (should_show_worker(.) | not) then empty else worker_line(.) end)]
           + (if .issue == null then [] else webhook_lines(.) end)
         ) | flatten)
       | map(select(. != null and . != ""))

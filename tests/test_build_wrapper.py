@@ -398,7 +398,7 @@ class TestFidoLauncher:
             " (2026-04-24 14:00:00 UTC)" in result.stdout
         )
         assert (
-            "owner/repo: fido running — claude-code, crashes 2, up 2m, BUSY,"
+            "owner/repo: claude-code, crashes 2, up 2m, BUSY,"
             " last crash: RuntimeError: boom" in result.stdout
         )
         assert "  claude-code: pid 4242 (dropped session 1)" in result.stdout
@@ -415,6 +415,62 @@ class TestFidoLauncher:
         assert "  ├─ webhook: replying to review (3s)" in result.stdout
         assert "  └─ webhook: triaging comment on PR #9 (12s)" in result.stdout
         assert "host: cpu load " in result.stdout
+
+    def test_status_fast_path_renders_session_message_counts(
+        self, tmp_path: Path
+    ) -> None:
+        result = run_status(
+            {
+                "activities": [
+                    {
+                        "repo_name": "owner/repo",
+                        "what": "Working on: #1",
+                        "busy": True,
+                        "crash_count": 0,
+                        "last_crash_error": None,
+                        "is_stuck": False,
+                        "worker_uptime_seconds": 60,
+                        "webhook_activities": [],
+                        "session_owner": "worker-1",
+                        "session_alive": True,
+                        "session_pid": 5555,
+                        "session_dropped_count": 0,
+                        "session_sent_count": 42,
+                        "session_received_count": 128,
+                        "claude_talker": {
+                            "repo_name": "owner/repo",
+                            "thread_id": 1,
+                            "kind": "worker",
+                            "description": "task turn",
+                            "claude_pid": 5555,
+                            "started_at": "2026-04-24T12:00:00+00:00",
+                        },
+                        "provider": "claude-code",
+                        "provider_status": None,
+                        "rescoping": False,
+                        "issue_cache": None,
+                        "fido_running": True,
+                        "issue": 7,
+                        "issue_title": "Do thing",
+                        "issue_elapsed_seconds": 120,
+                        "pr_number": None,
+                        "pr_title": None,
+                        "pending": 1,
+                        "completed": 0,
+                        "current_task": "Step one",
+                        "task_number": 1,
+                        "task_total": 1,
+                    }
+                ],
+                "rate_limit": None,
+                "fido_uptime_seconds": 300,
+            },
+            tmp_path,
+            env={"NO_COLOR": "1"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "42 sent, 128 received" in result.stdout
 
     def test_status_fast_path_renders_with_force_color(self, tmp_path: Path) -> None:
         result = run_status(

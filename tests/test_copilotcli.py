@@ -946,6 +946,30 @@ class TestCopilotCLISession:
         session.stop()
         assert runtime.stop_called is True
 
+    def test_sent_and_received_counts(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        assert session.sent_count == 0
+        assert session.received_count == 0
+
+        runtime.next_prompt = ("result-1", "end_turn", "sess-2")
+        session.prompt("first", model=None, system_prompt=None)
+        assert session.sent_count == 1
+        assert session.received_count == 1
+
+        # cancelled turns still count — the send went out and the response came back
+        runtime.next_prompt = ("result-2", "cancelled", "sess-3")
+        session.prompt("second", model=None, system_prompt=None)
+        assert session.sent_count == 2
+        assert session.received_count == 2
+
     def test_prompt_blanks_cancel_sentinel_even_without_cancelled_stop_reason(
         self, tmp_path: Path
     ) -> None:

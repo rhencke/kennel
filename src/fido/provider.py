@@ -255,6 +255,24 @@ class PromptSession(Protocol):
         """Return how many stale persistent session ids were dropped, if tracked."""
         ...
 
+    @property
+    def sent_count(self) -> int:
+        """Return cumulative number of user turns sent to the provider since boot.
+
+        Accumulates across subprocess respawns — model switches and recoveries
+        do not reset the count.
+        """
+        ...
+
+    @property
+    def received_count(self) -> int:
+        """Return cumulative number of responses/events received from the provider since boot.
+
+        Accumulates across subprocess respawns — model switches and recoveries
+        do not reset the count.
+        """
+        ...
+
     def prompt(
         self,
         content: str,

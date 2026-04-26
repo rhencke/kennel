@@ -1028,7 +1028,7 @@ def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str
 
 
 def _format_repo_header(repo: RepoStatus) -> str:
-    """Top line per repo: ``<name>: fido <state> — <stats>[ → <claude>]``.
+    """Top line per repo: ``<name>: <stats>``.
 
     Stats list is comma-separated and only shows what matters right now:
     ``crashes N`` (skipped when 0), ``up X`` (worker thread uptime), ``BUSY``
@@ -1036,8 +1036,6 @@ def _format_repo_header(repo: RepoStatus) -> str:
     line when crash_count > 0.  If nobody is currently talking to the agent,
     the generic pid/uptime suffix appears on this line.
     """
-    state_word = "running" if repo.fido_running else "waiting"
-    state_style = GREEN if repo.fido_running else DIM
     stats: list[str] = [_styled_repo_provider(repo)]
     if repo.crash_count > 0:
         stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
@@ -1049,10 +1047,9 @@ def _format_repo_header(repo: RepoStatus) -> str:
         stats.append(color(RED_BOLD, f"last crash: {repo.last_crash_error}"))
 
     name_styled = color(BOLD, f"{repo.name}:")
-    state_styled = color(state_style, f"fido {state_word}")
-    header = f"{name_styled} {state_styled}"
+    header = name_styled
     if stats:
-        header += " — " + ", ".join(stats)
+        header += " " + ", ".join(stats)
     return header
 
 
@@ -1099,12 +1096,32 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             pr_line += f" {color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
-    if repo.worker_what is not None:
+    if _should_show_worker_line(repo):
         body.append(_format_worker_thread_line(repo))
 
     body.extend(_format_webhook_lines(repo))
 
     return body
+
+
+def _should_show_worker_line(repo: RepoStatus) -> bool:
+    """True when the Worker line has meaningful state to display.
+
+    Hides the line when the worker is idle (no task, not the agent talker,
+    not paused for a provider reset).  "waiting for work" is the default
+    state and not worth a line in the output — the interesting states are
+    active task, paused, or actively prompting the session.
+    """
+    if repo.worker_what is None:
+        return False
+    if repo.current_task is not None:
+        return True
+    if _worker_is_agent_talker(repo):
+        return True
+    ps = repo.provider_status
+    if ps is not None and ps.paused:
+        return True
+    return False
 
 
 def _format_worker_thread_line(repo: RepoStatus) -> str:
