@@ -835,18 +835,29 @@ def reply_to_comment(
                 len(thread_comments),
             )
 
-    # Skip posting if a concurrent handler already replied during triage.
-    # A Fido reply ID in the re-fetched thread that was not in the initial
-    # snapshot means another handler handled this comment — adding a second
-    # reply would be a duplicate.  Return early with the triage result so
-    # the caller can still queue tasks based on the category.
-    current_fido_ids: set[int] = {
-        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+    # Skip posting if a concurrent handler already replied to *this specific*
+    # comment during triage.  A Fido reply with ``in_reply_to_id`` matching
+    # this comment id, that wasn't in the initial snapshot, means another
+    # handler handled it — adding a second reply would be a duplicate.
+    #
+    # The check used to count *any* new Fido reply in the thread, but that
+    # false-positived on multi-inline-comment reviews: sibling handlers
+    # running in parallel posted to *their own* comments, and the slowest
+    # handler saw those siblings in the re-fetched snapshot, mistakenly
+    # concluded "someone replied to MY comment", and silently dropped its
+    # own reply while still ack'ing the promise.  Closes #1004; mirrors
+    # the original double-post fix in #518.
+    target_id = info.get("comment_id")
+    current_fido_target_ids: set[int] = {
+        c["id"]
+        for c in thread_comments
+        if c.get("author", "").lower() in _fido_logins
+        and c.get("in_reply_to_id") == target_id
     }
-    if current_fido_ids - initial_fido_ids:
+    if current_fido_target_ids - initial_fido_ids:
         log.info(
             "concurrent handler already replied — skipping post for comment %s",
-            info.get("comment_id"),
+            target_id,
         )
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)

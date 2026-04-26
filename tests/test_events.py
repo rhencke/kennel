@@ -5281,10 +5281,16 @@ class TestReplyToCommentThreadRefetch:
                     {"id": 507, "author": "reviewer", "body": "please add docstrings"}
                 ]
             else:
-                # Re-fetch: concurrent handler posted a Fido reply during triage
+                # Re-fetch: concurrent handler posted a Fido reply to THIS
+                # comment (in_reply_to_id == 507) during triage.
                 return [
                     {"id": 507, "author": "reviewer", "body": "please add docstrings"},
-                    {"id": 508, "author": "fidocancode", "body": "On it!"},
+                    {
+                        "id": 508,
+                        "author": "fidocancode",
+                        "body": "On it!",
+                        "in_reply_to_id": 507,
+                    },
                 ]
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
@@ -5303,6 +5309,64 @@ class TestReplyToCommentThreadRefetch:
         # Triage result is still returned so the caller can queue tasks
         assert cat == "ACT"
         assert titles == ["Add docstrings"]
+
+    def test_no_skip_when_concurrent_reply_is_to_sibling_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """A Fido reply that appeared during triage but targets a *different*
+        comment (sibling in the same review) must NOT trip the skip — that
+        was the #1004 silent-drop bug.  Closes #1004."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 507},
+            comment_body="please add docstrings",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add docstrings"
+            if "Convert this PR review comment" in prompt:
+                return "Add docstrings"
+            return "Woof, on it!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [
+                    {"id": 507, "author": "reviewer", "body": "please add docstrings"}
+                ]
+            # Re-fetch: a sibling comment (id 600) got a fido reply (id 601)
+            # while we were triaging — that's NOT a reply to OUR comment.
+            return [
+                {"id": 507, "author": "reviewer", "body": "please add docstrings"},
+                {
+                    "id": 601,
+                    "author": "fidocancode",
+                    "body": "Sibling reply",
+                    "in_reply_to_id": 600,
+                },
+            ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Sibling-comment reply must NOT skip our post — we still reply.
+        mock_gh.reply_to_review_comment.assert_called_once()
 
     def test_no_skip_when_fido_reply_was_already_in_initial_fetch(
         self, tmp_path: Path
@@ -5376,10 +5440,16 @@ class TestReplyToCommentThreadRefetch:
             if call_count == 1:
                 return [{"id": 511, "author": "reviewer", "body": "fix the typo"}]
             else:
-                # Concurrent reply from the fido-can-code login variant
+                # Concurrent reply from the fido-can-code login variant,
+                # threaded under THIS comment.
                 return [
                     {"id": 511, "author": "reviewer", "body": "fix the typo"},
-                    {"id": 512, "author": "fido-can-code", "body": "Fixed!"},
+                    {
+                        "id": 512,
+                        "author": "fido-can-code",
+                        "body": "Fixed!",
+                        "in_reply_to_id": 511,
+                    },
                 ]
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
