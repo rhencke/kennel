@@ -531,6 +531,36 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
+    def test_rejects_duplicate_title_preserves_original_when_different(self) -> None:
+        # Opus renames both tasks to the same new name; second keeps its own original
+        current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
+        items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
+        result = _apply_reorder(current, items)
+        assert next(t for t in result if t["id"] == "1")["title"] == "Shared name"
+        assert next(t for t in result if t["id"] == "2")["title"] == "Beta task"
+
+    def test_unique_titles_all_applied(self) -> None:
+        # No duplicates → all Opus-proposed titles go through unchanged
+        current = [self._t("1", "Old A"), self._t("2", "Old B"), self._t("3", "Old C")]
+        items = [
+            self._item("1", "New A"),
+            self._item("2", "New B"),
+            self._item("3", "New C"),
+        ]
+        result = _apply_reorder(current, items)
+        titles = {t["id"]: t["title"] for t in result}
+        assert titles == {"1": "New A", "2": "New B", "3": "New C"}
+
+    def test_duplicate_title_logs_warning(self, caplog) -> None:
+        import logging
+
+        current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
+        items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
+        with caplog.at_level(logging.WARNING, logger="fido.tasks"):
+            _apply_reorder(current, items)
+        assert "rejecting rewrite" in caplog.text
+        assert "Shared name" in caplog.text
+
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
 
