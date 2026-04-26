@@ -1096,12 +1096,32 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             pr_line += f" {color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
-    if repo.worker_what is not None:
+    if _should_show_worker_line(repo):
         body.append(_format_worker_thread_line(repo))
 
     body.extend(_format_webhook_lines(repo))
 
     return body
+
+
+def _should_show_worker_line(repo: RepoStatus) -> bool:
+    """True when the Worker line has meaningful state to display.
+
+    Hides the line when the worker is idle (no task, not the agent talker,
+    not paused for a provider reset).  "waiting for work" is the default
+    state and not worth a line in the output — the interesting states are
+    active task, paused, or actively prompting the session.
+    """
+    if repo.worker_what is None:
+        return False
+    if repo.current_task is not None:
+        return True
+    if _worker_is_agent_talker(repo):
+        return True
+    ps = repo.provider_status
+    if ps is not None and ps.paused:
+        return True
+    return False
 
 
 def _format_worker_thread_line(repo: RepoStatus) -> str:

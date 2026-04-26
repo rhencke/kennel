@@ -1857,8 +1857,8 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue: #3" in output
-        # Worker is running but has no task → shows waiting for work
-        assert "Worker: waiting for work" in output
+        # Worker is running but has no task → hidden (idle workers are noise)
+        assert "Worker:" not in output
 
     def test_claude_pid_on_agent_line_when_no_talker(self) -> None:
         """Agent info appears on a dedicated body line, not as a header suffix."""

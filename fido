@@ -849,6 +849,10 @@ status_fast_path() {
         else
           "waiting for work"
         end;
+      def should_show_worker($repo):
+        $repo.current_task != null
+        or worker_is_agent_talker($repo)
+        or (($repo.provider_status // {}).paused // false);
       def worker_line($repo):
         (if $repo.current_task != null or worker_is_agent_talker($repo)
          then (if $color then "" else "* " end) + green_bg("Worker:")
@@ -912,7 +916,7 @@ status_fast_path() {
            cache_line(.),
            (if .issue == null then "  no assigned issues" else issue_line(.) end),
            pr_line(.),
-           (if .issue == null then empty else worker_line(.) end)]
+           (if .issue == null or (should_show_worker(.) | not) then empty else worker_line(.) end)]
           + (if .issue == null then [] else webhook_lines(.) end)
         ) | flatten)
       | map(select(. != null and . != ""))
