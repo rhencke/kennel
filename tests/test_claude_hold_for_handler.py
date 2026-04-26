@@ -353,6 +353,124 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     assert result == "triage-reply", f"handler prompt got wrong result — got {result!r}"
 
 
+def test_inner_prompt_preserves_queued_webhook_pending_flag(
+    tmp_path: Path,
+) -> None:
+    """Regression for #1017: _preempt_pending set by a second webhook
+    queuing behind an active hold_for_handler must survive inner prompt()
+    calls made by the holder.
+
+    The old code had two paths that unconditionally cleared _preempt_pending:
+    (1) reentrant __enter__ inside hold_for_handler, and (2) prompt()'s
+    finally block.  Either path wiped the second webhook's pending signal
+    while the first webhook's hold was still active.  When the hold released,
+    the worker saw _preempt_pending=False and won the lock over the queued
+    webhook, leaving the reviewer's comment unanswered."""
+    session = _setup_session(tmp_path)
+    provider.set_thread_kind("webhook")
+    try:
+        with session.hold_for_handler(preempt_worker=False):
+            # Simulate webhook B queuing behind this hold_for_handler.
+            session._signal_pending_preempt()
+            assert session._preempt_pending.is_set(), "sanity: pending set"
+            # Inner prompt() — old code cleared _preempt_pending here.
+            session.prompt("triage this issue")
+            # After returning, pending must still be set so the worker
+            # blocks in __enter__'s wait_for and yields to webhook B.
+            assert session._preempt_pending.is_set(), (
+                "_preempt_pending cleared by inner prompt() inside "
+                "hold_for_handler — worker would win lock over queued "
+                "webhook (bug #1017 regression)"
+            )
+    finally:
+        provider.set_thread_kind(None)
+        session.stop()
+
+
+def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
+    tmp_path: Path,
+) -> None:
+    """Regression for #1017 (threading): webhook B queuing behind an active
+    hold_for_handler acquires the lock before the worker, even after the
+    holder makes inner prompt() calls while B's pending signal is live.
+
+    Timing is made deterministic by ensuring _preempt_pending is already set
+    before the worker thread enters __enter__ — this forces the worker into
+    _preempt_cond.wait_for() rather than racing directly on _lock.acquire()."""
+    session = _setup_session(tmp_path)
+
+    webhook_a_holding = threading.Event()
+    webhook_b_queued = threading.Event()
+    order: list[str] = []
+    errors: list[Exception] = []
+
+    def webhook_a() -> None:
+        provider.set_thread_kind("webhook")
+        try:
+            with session.hold_for_handler(preempt_worker=False):
+                webhook_a_holding.set()
+                # Wait until webhook B has queued (pending set) before
+                # making the inner prompt — this is the ordering that
+                # triggers the bug: B sets pending, then A's inner prompt
+                # used to clear it.
+                assert webhook_b_queued.wait(timeout=2.0), "webhook_b_queued timed out"
+                session.prompt("inner turn from webhook A")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            provider.set_thread_kind(None)
+
+    def webhook_b() -> None:
+        provider.set_thread_kind("webhook")
+        try:
+            assert webhook_a_holding.wait(timeout=2.0), "webhook_a_holding timed out"
+            # Queue behind webhook A — sets _preempt_pending so the worker
+            # yields priority.
+            session._signal_pending_preempt()
+            webhook_b_queued.set()
+            # Now block waiting for webhook A's hold to release.
+            with session:
+                order.append("webhook_b")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            provider.set_thread_kind(None)
+
+    def worker() -> None:
+        provider.set_thread_kind("worker")
+        try:
+            # Wait until B has set _preempt_pending before entering __enter__.
+            # This guarantees the worker hits _preempt_cond.wait_for() instead
+            # of racing on _lock.acquire() — making the handoff deterministic.
+            assert webhook_b_queued.wait(timeout=2.0), "webhook_b_queued timed out"
+            with session:
+                order.append("worker")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            provider.set_thread_kind(None)
+
+    t_a = threading.Thread(target=webhook_a, daemon=True)
+    t_b = threading.Thread(target=webhook_b, daemon=True)
+    t_w = threading.Thread(target=worker, daemon=True)
+
+    t_a.start()
+    t_b.start()
+    t_w.start()
+
+    t_a.join(timeout=5.0)
+    t_b.join(timeout=5.0)
+    t_w.join(timeout=5.0)
+
+    assert not errors, f"thread errors: {errors}"
+    assert len(order) == 2, f"not all threads completed: {order}"
+    assert order[0] == "webhook_b", (
+        f"worker won lock over queued webhook — got order {order} "
+        f"(bug #1017 regression)"
+    )
+    session.stop()
+
+
 def test_hold_reraises_leak_error_and_releases_lock(
     tmp_path: Path, monkeypatch
 ) -> None:
