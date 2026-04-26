@@ -927,7 +927,7 @@ class TestClaudeSessionDrainToBoundary:
         session._selector = MagicMock(return_value=([], [], []))
         # Set cancel immediately — simulates preempt arriving during drain
         session._cancel.set()
-        session._preempt_pending.set()
+        session._preempt_pending = 1
         with patch.object(session, "recover") as mock_recover:
             session._drain_to_boundary(deadline=5.0)
         # _in_turn stays True so send() knows not to write
@@ -1107,14 +1107,14 @@ class TestClaudeSessionWaitForPendingPreempt:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._preempt_pending.set()
+        session._preempt_pending = 1
 
         # Clear the event from another thread after a brief delay.
         def _clearer() -> None:
             import time as _time
 
             _time.sleep(0.02)
-            session._preempt_pending.clear()
+            session._preempt_pending = 0
 
         t = _t.Thread(target=_clearer)
         t.start()
@@ -1124,7 +1124,7 @@ class TestClaudeSessionWaitForPendingPreempt:
     def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._preempt_pending.set()
+        session._preempt_pending = 1
         # Never cleared → waits out the deadline.
         assert session.wait_for_pending_preempt(timeout=0.05) is False
 
@@ -1260,7 +1260,7 @@ class TestClaudeSessionIterEvents:
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
         session._cancel.set()
-        session._preempt_pending.set()
+        session._preempt_pending = 1
         events = list(session.iter_events())
         # Both events were consumed — pipe is clean for the next holder.
         assert len(events) == 2
@@ -1290,10 +1290,10 @@ class TestClaudeSessionIterEvents:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         assert not session._cancel.is_set()
-        assert not session._preempt_pending.is_set()
+        assert not (session._preempt_pending > 0)
         session._fire_worker_cancel()
         assert session._cancel.is_set()
-        assert session._preempt_pending.is_set()
+        assert session._preempt_pending > 0
         session.stop()
 
     def test_recovers_when_cancel_drain_times_out(self, tmp_path: Path) -> None:
@@ -1824,7 +1824,7 @@ class TestClaudeSessionLock:
                         "— expected 1 (hold_for_handler queueing branch must "
                         "signal pending so workers yield, #983)"
                     )
-                    assert session._preempt_pending.is_set(), (
+                    assert session._preempt_pending > 0, (
                         "_preempt_pending should be set after queueing"
                     )
         finally:

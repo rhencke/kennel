@@ -353,6 +353,50 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     assert result == "triage-reply", f"handler prompt got wrong result — got {result!r}"
 
 
+def test_two_queued_handlers_keep_counter_above_zero_after_first_acquires(
+    tmp_path: Path,
+) -> None:
+    """Regression for #1022: when N handlers signal pending and the first
+    acquires the lock + decrements, the counter must still be > 0 (one
+    remaining queued handler), so a worker waiting on `_preempt_pending == 0`
+    keeps yielding to the second.
+
+    The old code used a binary :class:`threading.Event` for
+    ``_preempt_pending``; once one handler acquired and called ``clear()``,
+    the worker saw ``False`` and won the lock over the second queued
+    handler.  Switching to an int counter fixes the race: each signal
+    increments, each handler acquire decrements, worker waits for == 0."""
+    session = _setup_session(tmp_path)
+    try:
+        # Simulate two handlers signalling pending in arrival order.
+        session._signal_pending_preempt()
+        session._signal_pending_preempt()
+        assert session._preempt_pending == 2, "two pending after two signals"
+
+        # Simulate the first handler acquiring + completing its outermost
+        # __enter__ decrement.
+        provider.set_thread_kind("webhook")
+        try:
+            with session:
+                # Inside the hold, the first handler has decremented once;
+                # the second's signal still keeps the counter at 1, so the
+                # worker would still yield (the bug fix).
+                assert session._preempt_pending == 1, (
+                    "second handler's signal must remain — counter > 0 "
+                    "keeps the worker yielding"
+                )
+        finally:
+            provider.set_thread_kind(None)
+
+        # After the first handler exits, counter is still 1 (second handler
+        # hasn't been through its __enter__ yet).
+        assert session._preempt_pending == 1, (
+            "second handler still queued after first's exit"
+        )
+    finally:
+        session.stop()
+
+
 def test_inner_prompt_preserves_queued_webhook_pending_flag(
     tmp_path: Path,
 ) -> None:
@@ -372,12 +416,12 @@ def test_inner_prompt_preserves_queued_webhook_pending_flag(
         with session.hold_for_handler(preempt_worker=False):
             # Simulate webhook B queuing behind this hold_for_handler.
             session._signal_pending_preempt()
-            assert session._preempt_pending.is_set(), "sanity: pending set"
+            assert session._preempt_pending > 0, "sanity: pending set"
             # Inner prompt() — old code cleared _preempt_pending here.
             session.prompt("triage this issue")
             # After returning, pending must still be set so the worker
             # blocks in __enter__'s wait_for and yields to webhook B.
-            assert session._preempt_pending.is_set(), (
+            assert session._preempt_pending > 0, (
                 "_preempt_pending cleared by inner prompt() inside "
                 "hold_for_handler — worker would win lock over queued "
                 "webhook (bug #1017 regression)"
