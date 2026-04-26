@@ -814,11 +814,17 @@ class ClaudeSession(OwnedSession):
                         self._lock.release()
                         continue
             break
-        # We hold the lock now; clear the pending flag (under the cond
-        # mutex so a concurrent webhook setting it sees a coherent state).
-        with self._preempt_cond:
-            self._preempt_pending.clear()
-            self._preempt_cond.notify_all()
+        # We hold the lock now; clear the pending flag — but only on the
+        # outermost acquire for this thread.  A reentrant acquire (e.g.
+        # prompt() called inside hold_for_handler, depth already ≥ 1) must
+        # not stomp on a pending signal that a second webhook set while the
+        # outer hold_for_handler is still running: clearing it here would
+        # let the worker's re-check see False and win the lock over the
+        # queued webhook (#1017).
+        if getattr(self._reentry_tls, "depth", 0) == 0:
+            with self._preempt_cond:
+                self._preempt_pending.clear()
+                self._preempt_cond.notify_all()
         # If the entering thread is the same one that fired the most recent
         # cancel, that signal was meant for the previous holder (who has
         # since released the lock).  Clear it so the firer's own first turn
@@ -1066,8 +1072,10 @@ class ClaudeSession(OwnedSession):
         """
         tid = threading.get_ident()
         t_start = time.monotonic()
+        _entered = False
         try:
             with self:
+                _entered = True
                 log.info(
                     "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
                     tid,
@@ -1091,13 +1099,16 @@ class ClaudeSession(OwnedSession):
                 )
                 return result
         finally:
-            # If an exception blew us out of `with self:` before __enter__
-            # could clear the event, do it here so a stuck event doesn't
-            # trap the worker forever.  Notify under _preempt_cond so any
-            # worker blocked in __enter__'s wait_for is unblocked.
-            with self._preempt_cond:
-                self._preempt_pending.clear()
-                self._preempt_cond.notify_all()
+            # Safety net: if __enter__ raised before it could clear
+            # _preempt_pending, do it here so workers aren't stuck waiting.
+            # Skip on normal return (_entered=True) — __enter__ already
+            # cleared the flag, and re-clearing would stomp on a pending
+            # signal that a later-arriving webhook set while this prompt()
+            # was running inside hold_for_handler (#1017).
+            if not _entered:
+                with self._preempt_cond:
+                    self._preempt_pending.clear()
+                    self._preempt_cond.notify_all()
 
     def switch_model(self, model: ProviderModel | str) -> None:
         """Switch the active model by respawning the claude subprocess
