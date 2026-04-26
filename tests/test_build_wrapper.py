@@ -538,9 +538,10 @@ class TestFidoLauncher:
         assert removed_flag not in script
         assert "supervise_up()" in script
         assert "--rm" in script
-        assert "fido_log=${FIDO_LOG:-$HOME/log/fido.log}" in script
+        assert "fido_log=${FIDO_LOG:-$HOME/log/fido.log}" not in script
         assert "redirect_up_logs()" in script
-        assert 'exec >>"$fido_log" 2>&1' in script
+        assert "systemd-cat --identifier=fido --priority=info" in script
+        assert "exec > >(systemd-cat" in script
         assert "prune_on_restart=${FIDO_PRUNE_ON_RESTART:-1}" in script
         assert "prune_keep_storage=${FIDO_BUILDKIT_KEEP_STORAGE:-24gb}" in script
         assert "prune_restart_buildkit_async()" in script

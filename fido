@@ -8,7 +8,6 @@ rocq_repl_image=${FIDO_ROCQ_REPL_IMAGE:-fido-rocq-repl:local}
 run_image=$image
 container=${FIDO_CONTAINER:-fido}
 secret=${FIDO_SECRET:-$HOME/.fido-secret}
-fido_log=${FIDO_LOG:-$HOME/log/fido.log}
 auto_update=${FIDO_AUTO_UPDATE:-1}
 prune_on_restart=${FIDO_PRUNE_ON_RESTART:-1}
 prune_keep_storage=${FIDO_BUILDKIT_KEEP_STORAGE:-24gb}
@@ -54,10 +53,8 @@ log() {
 }
 
 redirect_up_logs() {
-  mkdir -p "$(dirname "$fido_log")"
-  log INFO "redirecting up output to $fido_log"
-  exec >>"$fido_log" 2>&1
-  log INFO "up log opened"
+  log INFO "redirecting up output to journald (-t fido)"
+  exec > >(systemd-cat --identifier=fido --priority=info) 2>&1
 }
 
 buildx_driver() {
