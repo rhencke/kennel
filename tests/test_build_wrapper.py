@@ -398,7 +398,7 @@ class TestFidoLauncher:
             " (2026-04-24 14:00:00 UTC)" in result.stdout
         )
         assert (
-            "owner/repo: running — claude-code, crashes 2, up 2m, BUSY,"
+            "owner/repo: claude-code, crashes 2, up 2m, BUSY,"
             " last crash: RuntimeError: boom" in result.stdout
         )
         assert "  claude-code: pid 4242 (dropped session 1)" in result.stdout

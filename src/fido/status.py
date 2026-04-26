@@ -1028,7 +1028,7 @@ def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str
 
 
 def _format_repo_header(repo: RepoStatus) -> str:
-    """Top line per repo: ``<name>: <state> — <stats>[ → <claude>]``.
+    """Top line per repo: ``<name>: <stats>``.
 
     Stats list is comma-separated and only shows what matters right now:
     ``crashes N`` (skipped when 0), ``up X`` (worker thread uptime), ``BUSY``
@@ -1036,8 +1036,6 @@ def _format_repo_header(repo: RepoStatus) -> str:
     line when crash_count > 0.  If nobody is currently talking to the agent,
     the generic pid/uptime suffix appears on this line.
     """
-    state_word = "running" if repo.fido_running else "waiting"
-    state_style = GREEN if repo.fido_running else DIM
     stats: list[str] = [_styled_repo_provider(repo)]
     if repo.crash_count > 0:
         stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
@@ -1049,10 +1047,9 @@ def _format_repo_header(repo: RepoStatus) -> str:
         stats.append(color(RED_BOLD, f"last crash: {repo.last_crash_error}"))
 
     name_styled = color(BOLD, f"{repo.name}:")
-    state_styled = color(state_style, state_word)
-    header = f"{name_styled} {state_styled}"
+    header = name_styled
     if stats:
-        header += " — " + ", ".join(stats)
+        header += " " + ", ".join(stats)
     return header
 
 
