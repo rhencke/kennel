@@ -73,7 +73,6 @@ class Pos_Module(Protocol):
 
 
 __Pos_value: Any = __ModuleNamespace()
-__Pos_value.eqb = eqb
 Pos: Pos_Module = cast(Pos_Module, __Pos_value)
 
 

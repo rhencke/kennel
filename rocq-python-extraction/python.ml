@@ -3646,7 +3646,7 @@ let rec module_type_annotation state = function
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
       if is_prop_type typ || is_inline_custom r || is_runtime_marker_ref r ||
-         is_std_collection_term_ref r then []
+         is_std_collection_term_ref r || is_std_primitive_compare_ref r then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
@@ -3654,7 +3654,8 @@ let decl_export_names state = function
            not (is_prop_type typs.(i)) &&
            not (is_runtime_marker_ref rv.(i)) &&
            not (is_inline_custom rv.(i)) &&
-           not (is_std_collection_term_ref rv.(i)))
+           not (is_std_collection_term_ref rv.(i)) &&
+           not (is_std_primitive_compare_ref rv.(i)))
       |> List.map (fun i -> pp_global state Term rv.(i))
   | Dtype (r, _, _) ->
       if is_custom r || is_std_remapped_type_ref r then [] else [pp_global state Type r]
