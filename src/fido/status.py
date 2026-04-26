@@ -148,6 +148,8 @@ class RepoStatus:
     session_owner: str | None = None
     session_alive: bool = False
     session_dropped_count: int = 0
+    session_sent_count: int = 0
+    session_received_count: int = 0
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
     issue_cache: IssueCacheInfo | None = None
@@ -476,6 +478,8 @@ def _fetch_activities(
                 "session_alive": item.get("session_alive", False),
                 "session_pid": item.get("session_pid"),
                 "session_dropped_count": item.get("session_dropped_count", 0),
+                "session_sent_count": item.get("session_sent_count", 0),
+                "session_received_count": item.get("session_received_count", 0),
                 "claude_talker": item.get("claude_talker"),
                 "provider_status": _parse_provider_status(item.get("provider_status")),
                 "rescoping": item.get("rescoping", False),
@@ -629,6 +633,8 @@ def repo_status(
     session_alive: bool = False,
     session_pid: int | None = None,
     session_dropped_count: int = 0,
+    session_sent_count: int = 0,
+    session_received_count: int = 0,
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
@@ -664,6 +670,8 @@ def repo_status(
             session_owner=session_owner,
             session_alive=session_alive,
             session_dropped_count=session_dropped_count,
+            session_sent_count=session_sent_count,
+            session_received_count=session_received_count,
             claude_talker=claude_talker,
             rescoping=rescoping,
             issue_cache=issue_cache,
@@ -720,6 +728,8 @@ def repo_status(
         session_owner=session_owner,
         session_alive=session_alive,
         session_dropped_count=session_dropped_count,
+        session_sent_count=session_sent_count,
+        session_received_count=session_received_count,
         claude_talker=claude_talker,
         rescoping=rescoping,
         issue_cache=issue_cache,
@@ -790,6 +800,12 @@ def collect() -> FidoStatus:
                 session_dropped_count=int(info.get("session_dropped_count", 0))
                 if info
                 else 0,
+                session_sent_count=int(info.get("session_sent_count", 0))
+                if info
+                else 0,
+                session_received_count=int(info.get("session_received_count", 0))
+                if info
+                else 0,
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
@@ -836,6 +852,13 @@ def _format_agent_line(repo: RepoStatus) -> str | None:
     if repo.session_dropped_count > 0:
         noun = "session" if repo.session_dropped_count == 1 else "sessions"
         parts.append(color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
+    if repo.session_sent_count > 0 or repo.session_received_count > 0:
+        parts.append(
+            color(
+                DIM,
+                f"{repo.session_sent_count} sent, {repo.session_received_count} received",
+            )
+        )
 
     pid_str = (
         color(DIM, f"pid {repo.claude_pid}")
@@ -1041,8 +1064,8 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
        name so it works for Claude, Copilot, or any future provider.
     2. ``Issue:  #N — title  (elapsed Xm)``
     3. ``PR:     #N — title``
-    4. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
-    5. Webhook threads (indented ``├─`` / ``└─``), up to
+    4. ``Worker: <state>`` (only when a worker is running; idle / task N/M — title / waiting on …)
+    5. Webhook threads (plain peer siblings), up to
        :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to the agent
        sorts to the top and gets an ANSI background-highlighted label; overflow
        rolled into ``+N more webhook(s)``.
@@ -1076,7 +1099,8 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             pr_line += f" {color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
-    body.append(_format_worker_thread_line(repo))
+    if repo.worker_what is not None:
+        body.append(_format_worker_thread_line(repo))
 
     body.extend(_format_webhook_lines(repo))
 
@@ -1162,18 +1186,17 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     shown = webhooks[:_WEBHOOK_DISPLAY_CAP]
     overflow = len(webhooks) - len(shown)
     lines: list[str] = []
-    for i, w in enumerate(shown):
-        branch = color(DIM, "└─" if overflow == 0 and i == len(shown) - 1 else "├─")
+    for w in shown:
         is_talker = talker_tid is not None and w.thread_id == talker_tid
         wh_label = (
             color(YELLOW_BG, "webhook:") if is_talker else color(BOLD, "webhook:")
         )
         elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
-        line = f"  {branch} {wh_label} {w.description} {elapsed}"
+        line = f"  {wh_label} {w.description} {elapsed}"
         lines.append(line)
     if overflow > 0:
         lines.append(
-            color(DIM, f"  └─ +{overflow} more webhook{'s' if overflow != 1 else ''}")
+            color(DIM, f"  +{overflow} more webhook{'s' if overflow != 1 else ''}")
         )
     return lines
 

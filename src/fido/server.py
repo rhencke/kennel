@@ -1137,6 +1137,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "session_alive": self.registry.get_session_alive(a.repo_name),
                     "session_pid": self.registry.get_session_pid(a.repo_name),
                     "session_dropped_count": dropped_count,
+                    "session_sent_count": int(
+                        self.registry.get_session_sent_count(a.repo_name)
+                    ),
+                    "session_received_count": int(
+                        self.registry.get_session_received_count(a.repo_name)
+                    ),
                     "claude_talker": _serialize_talker(
                         provider.get_talker(a.repo_name)
                     ),

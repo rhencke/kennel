@@ -84,6 +84,26 @@ class SessionBackedAgent:
         dropped = getattr(session, "dropped_session_count")
         return dropped if isinstance(dropped, int) and dropped >= 0 else 0
 
+    @property
+    def session_sent_count(self) -> int:
+        """Cumulative number of messages sent to claude since boot."""
+        with self._session_lock:
+            session = self._session
+        if session is None or not hasattr(session, "sent_count"):
+            return 0
+        count = getattr(session, "sent_count")
+        return count if isinstance(count, int) and count >= 0 else 0
+
+    @property
+    def session_received_count(self) -> int:
+        """Cumulative number of stream-json events received from claude since boot."""
+        with self._session_lock:
+            session = self._session
+        if session is None or not hasattr(session, "received_count"):
+            return 0
+        count = getattr(session, "received_count")
+        return count if isinstance(count, int) and count >= 0 else 0
+
     def ensure_session(
         self,
         model: ProviderModel | None = None,

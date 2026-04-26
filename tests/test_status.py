@@ -595,6 +595,8 @@ class TestFetchActivities:
                     "session_alive": False,
                     "session_pid": None,
                     "session_dropped_count": 0,
+                    "session_sent_count": 0,
+                    "session_received_count": 0,
                     "claude_talker": None,
                     "provider_status": None,
                     "rescoping": False,
@@ -642,6 +644,8 @@ class TestFetchActivities:
                     "session_alive": False,
                     "session_pid": None,
                     "session_dropped_count": 0,
+                    "session_sent_count": 0,
+                    "session_received_count": 0,
                     "claude_talker": None,
                     "provider_status": None,
                     "rescoping": False,
@@ -658,6 +662,8 @@ class TestFetchActivities:
                     "session_alive": False,
                     "session_pid": None,
                     "session_dropped_count": 0,
+                    "session_sent_count": 0,
+                    "session_received_count": 0,
                     "claude_talker": None,
                     "provider_status": None,
                     "rescoping": False,
@@ -1278,6 +1284,8 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             session_dropped_count=0,
+            session_sent_count=0,
+            session_received_count=0,
             claude_talker=None,
             rescoping=False,
             issue_cache=None,
@@ -1321,6 +1329,8 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             session_dropped_count=0,
+            session_sent_count=0,
+            session_received_count=0,
             claude_talker=None,
             rescoping=False,
             issue_cache=None,
@@ -1352,6 +1362,8 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             session_dropped_count=0,
+            session_sent_count=0,
+            session_received_count=0,
             claude_talker=None,
             rescoping=False,
             issue_cache=None,
@@ -1431,6 +1443,8 @@ class TestCollect:
             session_alive=False,
             session_pid=None,
             session_dropped_count=0,
+            session_sent_count=0,
+            session_received_count=0,
             claude_talker=None,
             rescoping=False,
             issue_cache=None,
@@ -1566,6 +1580,33 @@ class TestFormatAgentLine:
         line = _format_agent_line(repo)
         assert line is not None
         assert line.startswith("  ")
+
+    def test_includes_sent_and_received_counts_when_nonzero(self) -> None:
+        repo = self._repo(
+            claude_pid=42, session_sent_count=5, session_received_count=12
+        )
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "5 sent, 12 received" in line
+
+    def test_omits_sent_and_received_counts_when_both_zero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=0)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "sent" not in line
+        assert "received" not in line
+
+    def test_includes_counts_when_only_sent_is_nonzero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=3, session_received_count=0)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "3 sent, 0 received" in line
+
+    def test_includes_counts_when_only_received_is_nonzero(self) -> None:
+        repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=7)
+        line = _format_agent_line(repo)
+        assert line is not None
+        assert "0 sent, 7 received" in line
 
 
 class TestFormatStatus:
@@ -1733,6 +1774,7 @@ class TestFormatStatus:
             task_number=1,
             task_total=1,
             issue_title="Add widget",
+            worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
@@ -1750,6 +1792,7 @@ class TestFormatStatus:
             task_number=3,
             task_total=3,
             provider_status=provider_status,
+            worker_what="waiting",
         )
         status = FidoStatus(
             fido_pid=None,
@@ -1767,6 +1810,7 @@ class TestFormatStatus:
             task_number=2,
             task_total=5,
             rescoping=True,
+            worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
@@ -1779,6 +1823,7 @@ class TestFormatStatus:
             task_number=2,
             task_total=5,
             rescoping=False,
+            worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
@@ -1786,7 +1831,14 @@ class TestFormatStatus:
         assert "task 2/5?" not in output
 
     def test_repo_issue_without_title(self) -> None:
-        repo = self._repo(issue=5, pending=2, completed=0, task_number=1, task_total=2)
+        repo = self._repo(
+            issue=5,
+            pending=2,
+            completed=0,
+            task_number=1,
+            task_total=2,
+            worker_what="working",
+        )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue: #5" in output
@@ -1797,7 +1849,15 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
         assert "Issue: #3" in output
-        # No task → Worker line shows waiting for work
+        # No worker running → Worker line hidden entirely
+        assert "Worker:" not in output
+
+    def test_repo_issue_no_tasks_with_running_worker(self) -> None:
+        repo = self._repo(issue=3, worker_what="waiting for work")
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        output = format_status(status)
+        assert "Issue: #3" in output
+        # Worker is running but has no task → shows waiting for work
         assert "Worker: waiting for work" in output
 
     def test_claude_pid_on_agent_line_when_no_talker(self) -> None:
@@ -1827,6 +1887,7 @@ class TestFormatStatus:
             claude_pid=9999,
             claude_uptime=60,
             session_alive=True,
+            worker_what="working",
             claude_talker=ClaudeTalkerInfo(
                 thread_id=111,
                 kind="worker",
@@ -1979,7 +2040,11 @@ class TestFormatStatus:
 
     def test_current_task_line_without_numbering(self) -> None:
         repo = self._repo(
-            issue=1, current_task="Freeform task", task_number=None, task_total=None
+            issue=1,
+            current_task="Freeform task",
+            task_number=None,
+            task_total=None,
+            worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
@@ -2024,6 +2089,7 @@ class TestFormatStatus:
             current_task="Do thing",
             task_number=1,
             task_total=1,
+            worker_what="working",
             claude_talker=ClaudeTalkerInfo(
                 thread_id=100,
                 kind="worker",
@@ -2043,6 +2109,7 @@ class TestFormatStatus:
             current_task="Do thing",
             task_number=1,
             task_total=1,
+            worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
@@ -2132,9 +2199,11 @@ class TestFormatStatus:
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
-        # First webhook uses ├─ (not last), second uses └─ (last).
-        assert "├─ webhook: triaging comment on PR #9 (12s)" in output
-        assert "└─ webhook: replying to review (3s)" in output
+        # Webhook lines are plain peer siblings without tree characters.
+        assert "webhook: triaging comment on PR #9 (12s)" in output
+        assert "webhook: replying to review (3s)" in output
+        assert "├─" not in output
+        assert "└─" not in output
 
     def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)
@@ -2297,7 +2366,13 @@ class TestFormatStatusColor:
         assert f"{_CODES['red_bold']}last crash: RuntimeError: boom" in output
 
     def test_task_counter_bold(self) -> None:
-        repo = self._repo(issue=1, current_task="Do thing", task_number=2, task_total=5)
+        repo = self._repo(
+            issue=1,
+            current_task="Do thing",
+            task_number=2,
+            task_total=5,
+            worker_what="working",
+        )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
@@ -2308,6 +2383,7 @@ class TestFormatStatusColor:
             issue=1,
             claude_pid=999,
             session_alive=True,
+            worker_what="working",
             claude_talker=ClaudeTalkerInfo(
                 thread_id=1, kind="worker", description="turn", claude_pid=999
             ),
@@ -2319,7 +2395,7 @@ class TestFormatStatusColor:
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
     def test_worker_label_plain_when_not_talker(self) -> None:
-        repo = self._repo(issue=1)
+        repo = self._repo(issue=1, worker_what="waiting")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
@@ -2327,7 +2403,12 @@ class TestFormatStatusColor:
         assert _CODES["green_bg"] not in worker_line
 
     def test_worker_label_green_bg_when_session_owner_is_worker(self) -> None:
-        repo = self._repo(issue=1, session_owner="worker-orly", session_alive=True)
+        repo = self._repo(
+            issue=1,
+            session_owner="worker-orly",
+            session_alive=True,
+            worker_what="working",
+        )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
@@ -2343,6 +2424,7 @@ class TestFormatStatusColor:
             current_task="Do thing",
             task_number=1,
             task_total=3,
+            worker_what="working",
             # No claude_talker, no session_owner — purely between-turn state.
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2359,6 +2441,7 @@ class TestFormatStatusColor:
             current_task=None,
             session_alive=False,
             session_owner=None,
+            worker_what="waiting for work",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
@@ -2471,6 +2554,7 @@ class TestProviderColoredStatus:
                 fido_running=True,
                 issue=7,
                 current_task={"title": "implement foo", "index": 1, "total": 2},
+                worker_what="working",
             )
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
@@ -2486,6 +2570,7 @@ class TestProviderColoredStatus:
                 fido_running=True,
                 issue=7,
                 current_task={"title": "implement foo", "index": 1, "total": 2},
+                worker_what="working",
             )
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
@@ -2502,7 +2587,7 @@ class TestProviderColoredStatus:
 
     def test_inactive_worker_line_keeps_alignment_without_marker(self) -> None:
         with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
-            repo = self._repo(fido_running=True, issue=7)
+            repo = self._repo(fido_running=True, issue=7, worker_what="waiting")
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]

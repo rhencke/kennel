@@ -238,6 +238,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.get_session_sent_count.return_value = 0
+        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
@@ -254,6 +256,8 @@ class TestGetEndpoint:
         assert entry["webhook_activities"] == []
         assert entry["session_owner"] is None
         assert entry["session_dropped_count"] == 0
+        assert entry["session_sent_count"] == 0
+        assert entry["session_received_count"] == 0
 
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -277,11 +281,15 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.get_session_dropped_count.return_value = 3
+        WebhookHandler.registry.get_session_sent_count.return_value = 10
+        WebhookHandler.registry.get_session_received_count.return_value = 8
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data["activities"][0]["session_owner"] == "worker-home"
         assert data["activities"][0]["session_dropped_count"] == 3
+        assert data["activities"][0]["session_sent_count"] == 10
+        assert data["activities"][0]["session_received_count"] == 8
 
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         from datetime import datetime, timezone
@@ -709,6 +717,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.get_session_sent_count.return_value = 0
+        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -789,6 +799,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.get_session_sent_count.return_value = 0
+        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -831,6 +843,8 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.get_session_dropped_count.return_value = 0
+        WebhookHandler.registry.get_session_sent_count.return_value = 0
+        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())

@@ -3224,6 +3224,20 @@ class WorkerThread(threading.Thread):
             provider = self._provider
         return provider.agent.session_dropped_count if provider is not None else 0
 
+    @property
+    def session_sent_count(self) -> int:
+        """Number of messages sent to the current session subprocess since spawn."""
+        with self._provider_lock:
+            provider = self._provider
+        return provider.agent.session_sent_count if provider is not None else 0
+
+    @property
+    def session_received_count(self) -> int:
+        """Number of stream-json events received from the current session subprocess since spawn."""
+        with self._provider_lock:
+            provider = self._provider
+        return provider.agent.session_received_count if provider is not None else 0
+
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()

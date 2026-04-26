@@ -12595,6 +12595,30 @@ class TestWorkerThread:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
         assert wt.session_dropped_count == 4
 
+    def test_session_sent_count_defaults_to_zero(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.session_sent_count == 0
+
+    def test_session_sent_count_delegates_to_provider_agent(
+        self, tmp_path: Path
+    ) -> None:
+        provider = MagicMock()
+        provider.agent.session_sent_count = 42
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        assert wt.session_sent_count == 42
+
+    def test_session_received_count_defaults_to_zero(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.session_received_count == 0
+
+    def test_session_received_count_delegates_to_provider_agent(
+        self, tmp_path: Path
+    ) -> None:
+        provider = MagicMock()
+        provider.agent.session_received_count = 38
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        assert wt.session_received_count == 38
+
     def test_run_halts_on_claude_leak_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

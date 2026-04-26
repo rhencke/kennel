@@ -90,6 +90,8 @@ class TestSessionBackedAgent:
             pid=123,
             session_id="sess-1",
             dropped_session_count=2,
+            sent_count=10,
+            received_count=8,
         )
         session.is_alive.return_value = True
         agent = _FakeAgent(session=session)
@@ -99,6 +101,8 @@ class TestSessionBackedAgent:
         assert agent.session_pid == 123
         assert agent.session_id == "sess-1"
         assert agent.session_dropped_count == 2
+        assert agent.session_sent_count == 10
+        assert agent.session_received_count == 8
         assert agent.detach_session() is session
         assert agent.session is None
 
@@ -109,6 +113,8 @@ class TestSessionBackedAgent:
             _FakeAgent(session=type("S", (), {"session_id": 123})()).session_id is None
         )
         assert _FakeAgent().session_dropped_count == 0
+        assert _FakeAgent().session_sent_count == 0
+        assert _FakeAgent().session_received_count == 0
 
     def test_ensure_session_requires_factory_inputs(self) -> None:
         with pytest.raises(

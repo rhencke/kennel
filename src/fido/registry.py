@@ -349,6 +349,16 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread.session_dropped_count if thread is not None else 0
 
+    def get_session_sent_count(self, repo_name: str) -> int:
+        """Return the number of messages sent to the current session subprocess for *repo_name*."""
+        thread = self._threads.get(repo_name)
+        return thread.session_sent_count if thread is not None else 0
+
+    def get_session_received_count(self, repo_name: str) -> int:
+        """Return the number of events received from the current session subprocess for *repo_name*."""
+        thread = self._threads.get(repo_name)
+        return thread.session_received_count if thread is not None else 0
+
     def set_rescoping(self, repo_name: str, active: bool) -> None:
         """Set the rescoping-active flag for *repo_name*.
 

@@ -772,6 +772,16 @@ class ProviderAgent(Protocol):
         """Return the attached session's dropped-session count, if available."""
         ...
 
+    @property
+    def session_sent_count(self) -> int:
+        """Return the number of messages sent to the current session subprocess since spawn."""
+        ...
+
+    @property
+    def session_received_count(self) -> int:
+        """Return the number of stream-json events received from the current session subprocess since spawn."""
+        ...
+
     voice_model: ProviderModel
     work_model: ProviderModel
     brief_model: ProviderModel
