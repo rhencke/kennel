@@ -28,6 +28,7 @@ Declare ML Module "rocq-runtime.plugins.extraction".
 From Stdlib Require Import
   Lists.List
   Numbers.BinNums
+  PArith.BinPos
   Strings.String.
 
 Open Scope string_scope.
@@ -208,3 +209,62 @@ Definition cmd_delivery_id (cmd : WebhookCommand) : DeliveryId :=
   | CmdIssueAssigned   d _ _       => d
   | CmdReviewSubmitted d _ _ _     => d
   end.
+
+(** * translate
+
+    Total function from [WebhookEvent] to [WebhookCommand].  Every
+    constructor of [WebhookEvent] maps to exactly one constructor of
+    [WebhookCommand]; there is no [None] branch.
+
+    This totality is the Rocq statement of the fail-closed guarantee:
+    a [WebhookEvent] can only be constructed from a recognised
+    (event-type, action) pair, so [translate] never silently drops an
+    event that crossed the JSON boundary.  Unknown shapes are excluded
+    earlier, at the raw-JSON parser (not yet modelled); the absence of a
+    [None] branch here is the formal witness.
+
+    Proof of totality ([translate_total]) lives in Task 4.
+
+    Delivery id threading: [translate] preserves [wev_delivery]
+    unchanged into [cmd_delivery_id (translate ev) = wev_delivery ev].
+    This is the idempotence anchor — a redelivered event with the same
+    [DeliveryId] yields a command with the same [cmd_delivery_id], so
+    the dedup check in [same_delivery] is delivery-stable.  Proof
+    ([translate_preserves_delivery]) lives in Task 4. *)
+Definition translate (ev : WebhookEvent) : WebhookCommand :=
+  match ev with
+
+  | WevReviewComment d pr cid author is_bot =>
+      CmdComment d pr cid author is_bot ReviewLine
+
+  | WevIssueComment d pr cid author is_bot =>
+      CmdComment d pr cid author is_bot TopLevelPR
+
+  | WevCIFailure d name conclusion pr_nums =>
+      CmdCIFailure d name conclusion pr_nums
+
+  | WevPRMerged d pr =>
+      CmdPRMerged d pr
+
+  | WevIssueAssigned d issue assignee =>
+      CmdIssueAssigned d issue assignee
+
+  | WevReviewSubmitted d pr rid author =>
+      CmdReviewSubmitted d pr rid author
+
+  end.
+
+(** * same_delivery
+
+    Idempotence predicate: [same_delivery c1 c2] is [true] when [c1] and
+    [c2] carry the same [DeliveryId].  Two commands with the same delivery
+    id originated from the same physical GitHub webhook delivery (possibly
+    redelivered); a handler that has already acted on one must skip the
+    other.
+
+    Implemented as [Pos.eqb] on [cmd_delivery_id] — decidable, pure, and
+    extractable to Python [==] on integers.  The reflexivity theorem
+    ([same_delivery_refl]) and symmetry theorem ([same_delivery_sym]) live
+    in Task 4. *)
+Definition same_delivery (c1 c2 : WebhookCommand) : bool :=
+  Pos.eqb (cmd_delivery_id c1) (cmd_delivery_id c2).
