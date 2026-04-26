@@ -25,8 +25,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 buildx bake`, loads it as `fido:local`, then runs it with Docker.
 `./fido help` lists the project commands. `./fido up` runs the Fido server,
 then supervises it in the foreground with `docker run --rm`. `./fido up`
-appends supervisor and container stdout/stderr to `~/log/fido.log`; override
-with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
+redirects stdout/stderr to journald (`-t fido`). On update exits from the app, `./fido up` syncs the runner
 clone, rebuilds the image, and starts again. It exits normally on ordinary
 shutdown signals. `./fido down` stops the named container gracefully; `--rm`
 lets Docker remove it after the stop.

@@ -18,7 +18,7 @@ right Docker buildx target, runs the command in the container, and avoids host
 | Command | Purpose |
 |---------|---------|
 | `./fido help` | Print the command list. |
-| `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
+| `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, redirects stdout/stderr to journald (`-t fido`), syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
 | `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
 | `./fido ci` | Build the buildx `ci` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
 | `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. Uses host `python3` only for the stdlib generator, not host `uv`. |
