@@ -521,16 +521,15 @@ class ClaudeSession(OwnedSession):
         # is dirty.  :meth:`send` drains to the boundary before writing new
         # content so every turn starts on a clean slate.
         self._in_turn = False
-        # Counter of handlers that have signalled pending-preempt but not
-        # yet completed their outermost :meth:`__enter__`.  Workers wait
-        # for this to reach zero before acquiring :attr:`_lock`.  Was a
-        # binary :class:`threading.Event` before #1022 — switched to a
-        # counter so a *second* queued handler doesn't get starved when
-        # the first acquires (the Event would clear after one handler
-        # passed through, letting the worker race ahead of the second).
-        # The counter reflects queue length, so workers keep yielding
-        # while ANY handler is queued.
-        self._preempt_pending: int = 0
+        # Set by :meth:`prompt` right after :attr:`_cancel` and before it
+        # blocks on :attr:`_lock`.  Cleared inside :meth:`__enter__` once the
+        # preempter actually acquires the lock.  Workers check this in their
+        # retry loop to yield fairly: without it, a freshly-released worker
+        # thread can re-acquire :attr:`_lock` before the waiting webhook
+        # gets scheduled, and the next :meth:`iter_events` clears
+        # :attr:`_cancel` — starving the preempter for a full worker turn.
+        # See yield-starvation discussion in #499 comments.
+        self._preempt_pending = threading.Event()
         # Condition that serializes the "set pending → check pending → acquire
         # lock" handshake between webhook (priority) and worker (yields)
         # threads at lock-handoff time.  Webhooks set ``_preempt_pending`` and
@@ -570,7 +569,7 @@ class ClaudeSession(OwnedSession):
         so the worker can otherwise race ahead and starve the preempter for
         a full turn.
         """
-        if not self._preempt_pending > 0:
+        if not self._preempt_pending.is_set():
             return False
         # Wait for the preempter's __enter__ to clear the event, meaning they
         # hold the lock now.  If they don't manage within the deadline, bail.
@@ -584,7 +583,7 @@ class ClaudeSession(OwnedSession):
             "session: worker ceding lock to pending preempter (tid=%d)",
             threading.get_ident(),
         )
-        while self._preempt_pending > 0:
+        while self._preempt_pending.is_set():
             if _time.monotonic() >= deadline:
                 log.warning(
                     "session: preempter still pending after %.2fs — worker "
@@ -829,13 +828,13 @@ class ClaudeSession(OwnedSession):
             if is_worker:
                 with self._preempt_cond:
                     self._preempt_cond.wait_for(
-                        lambda: not self._preempt_pending > 0,
+                        lambda: not self._preempt_pending.is_set(),
                         timeout=30.0,
                     )
             self._lock.acquire()
             if is_worker:
                 with self._preempt_cond:
-                    if self._preempt_pending > 0:
+                    if self._preempt_pending.is_set():
                         # A webhook arrived between our wait and acquire —
                         # let it in.  Release and re-wait.
                         self._lock.release()
@@ -848,15 +847,9 @@ class ClaudeSession(OwnedSession):
         # outer hold_for_handler is still running: clearing it here would
         # let the worker's re-check see False and win the lock over the
         # queued webhook (#1017).
-        # Decrement on the outermost handler entry only — workers don't
-        # decrement (they're not queued).  This is the #1022 fix: a
-        # second queued handler (counter still > 0 after the first
-        # decrements) keeps workers yielding, so the second handler
-        # gets the lock next instead of the worker.
-        if getattr(self._reentry_tls, "depth", 0) == 0 and not is_worker:
+        if getattr(self._reentry_tls, "depth", 0) == 0:
             with self._preempt_cond:
-                if self._preempt_pending > 0:
-                    self._preempt_pending -= 1
+                self._preempt_pending.clear()
                 self._preempt_cond.notify_all()
         # If the entering thread is the same one that fired the most recent
         # cancel, that signal was meant for the previous holder (who has
@@ -1030,7 +1023,7 @@ class ClaudeSession(OwnedSession):
         turn).
         """
         with self._preempt_cond:
-            self._preempt_pending += 1
+            self._preempt_pending.set()
             self._preempt_cond.notify_all()
 
     def _send_control_interrupt(self) -> str:
@@ -1133,15 +1126,15 @@ class ClaudeSession(OwnedSession):
                 )
                 return result
         finally:
-            # Safety net: if __enter__ raised before it could decrement
+            # Safety net: if __enter__ raised before it could clear
             # _preempt_pending, do it here so workers aren't stuck waiting.
             # Skip on normal return (_entered=True) — __enter__ already
-            # decremented.  Decrement by 1 (not zero) so concurrent
-            # other-handler signals aren't over-cleared (#1022).
+            # cleared the flag, and re-clearing would stomp on a pending
+            # signal that a later-arriving webhook set while this prompt()
+            # was running inside hold_for_handler (#1017).
             if not _entered:
                 with self._preempt_cond:
-                    if self._preempt_pending > 0:
-                        self._preempt_pending -= 1
+                    self._preempt_pending.clear()
                     self._preempt_cond.notify_all()
 
     def switch_model(self, model: ProviderModel | str) -> None:
@@ -1248,7 +1241,7 @@ class ClaudeSession(OwnedSession):
         # (fix for #786).  Otherwise the signal fired by the preempter is
         # meant for the current holder — clobbering it here lets the turn
         # run to completion before the preempter ever gets the lock.
-        if not self._preempt_pending > 0:
+        if not self._preempt_pending.is_set():
             self._cancel.clear()
         self._last_turn_cancelled = False
         last_activity = time.monotonic()
