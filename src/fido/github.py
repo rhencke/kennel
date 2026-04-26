@@ -305,6 +305,7 @@ class GitHub:
                 "id": c["id"],
                 "author": c.get("user", {}).get("login", ""),
                 "body": c.get("body", ""),
+                "in_reply_to_id": c.get("in_reply_to_id"),
             }
             for c in raw
             if c["id"] == root_id or c.get("in_reply_to_id") == root_id
