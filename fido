@@ -873,7 +873,7 @@ status_fast_path() {
       def repo_header($repo):
         bold("\($repo.repo_name):")
         + " "
-        + (if $repo.fido_running then green("fido running") else dim("fido waiting") end)
+        + (if $repo.fido_running then green("running") else dim("waiting") end)
         + " — "
         + ([provider_status_style($repo.provider_status; ($repo.provider // "unknown")),
             (if ($repo.crash_count // 0) > 0 then red_bold("crashes \($repo.crash_count)") else empty end),
