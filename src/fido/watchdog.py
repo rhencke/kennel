@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fido.config import RepoConfig
 from fido.github import GitHub
 from fido.registry import WorkerRegistry
+from fido.rocq import watchdog_transitions as watchdog_fsm
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,19 @@ class Watchdog:
     the fido lockfile (the old thread may not exit before the new one
     starts, and Python threads can't be cleanly killed), which caused a
     restart loop in the field — so we no longer do it.
+
+    :attr:`_fsm_states` tracks the formal lifecycle state for each repo
+    via the FSM extracted from ``models/watchdog_transitions.v``.  Every
+    state change is asserted against the formal transition table so
+    coordination bugs surface as crashes rather than silent drift.
+    The two invariants this oracle enforces on every tick:
+
+    - **alive_never_forcibly_restarted** — an alive thread never receives
+      ``WatchdogDetectDead``; the dead-detection path only fires when
+      ``is_alive`` returns ``False``.
+    - **dead_always_restarted** — when dead is detected, ``WatchdogDetectDead``
+      from ``Crashed`` always succeeds; a rejected transition would crash
+      the watchdog, surfacing the coordination violation immediately.
     """
 
     def __init__(
@@ -45,16 +59,57 @@ class Watchdog:
     ) -> None:
         self.registry = registry
         self.repos = repos
+        # Per-repo FSM state from watchdog_transitions.v.  Only accessed
+        # from the single watchdog daemon thread, so no lock is needed.
+        self._fsm_states: dict[str, watchdog_fsm.State] = {}
+
+    def _fsm_transition(
+        self, repo_name: str, event: watchdog_fsm.Event
+    ) -> watchdog_fsm.State:
+        """Fire *event* for *repo_name*, raising ``AssertionError`` if rejected.
+
+        Single oracle for every FSM transition in :meth:`run`, so a
+        coordination bug surfaces as a crash rather than silent drift.
+        Initialises the repo's FSM state to ``Running`` on first access.
+        """
+        prev = self._fsm_states.get(repo_name, watchdog_fsm.Running())
+        new_state = watchdog_fsm.transition(prev, event)
+        if new_state is None:
+            raise AssertionError(
+                f"watchdog_transitions FSM: {type(event).__name__} rejected in "
+                f"state {type(prev).__name__} for repo {repo_name!r}"
+            )
+        self._fsm_states[repo_name] = new_state
+        log.debug(
+            "watchdog[%s]: FSM %s →%s via %s",
+            repo_name,
+            type(prev).__name__,
+            type(new_state).__name__,
+            type(event).__name__,
+        )
+        return new_state
 
     def run(self) -> int:
         """Run one watchdog iteration. Returns 0."""
         for repo_name, repo_cfg in self.repos.items():
-            if not self.registry.is_alive(repo_name):
+            if self.registry.is_alive(repo_name):
+                # Thread alive: assert the FSM accepts the alive-observation
+                # event.  This enforces alive_never_forcibly_restarted —
+                # WatchdogDetectDead is only valid from Crashed, never from
+                # Running or Hung.
+                self._fsm_transition(repo_name, watchdog_fsm.WatchdogDetectAlive())
+            else:
                 error = self.registry.get_thread_crash_error(repo_name)
                 if error is not None:
                     self.registry.record_crash(repo_name, error)
                 log.info("thread for %s is not alive — restarting", repo_name)
+                # Running/Hung → Crashed: thread exited unexpectedly.
+                self._fsm_transition(repo_name, watchdog_fsm.WorkerCrash())
+                # Crashed → Restarting: watchdog initiates the restart.
+                self._fsm_transition(repo_name, watchdog_fsm.WatchdogDetectDead())
                 self.registry.start(repo_cfg)
+                # Restarting → Running: new thread started, provider rescued.
+                self._fsm_transition(repo_name, watchdog_fsm.RestartComplete())
         return 0
 
     def start_thread(
