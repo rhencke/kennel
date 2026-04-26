@@ -1064,7 +1064,7 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
        name so it works for Claude, Copilot, or any future provider.
     2. ``Issue:  #N — title  (elapsed Xm)``
     3. ``PR:     #N — title``
-    4. ``Worker: <state>`` (idle / task N/M — title / waiting on …)
+    4. ``Worker: <state>`` (only when a worker is running; idle / task N/M — title / waiting on …)
     5. Webhook threads (plain peer siblings), up to
        :data:`_WEBHOOK_DISPLAY_CAP`; a webhook currently talking to the agent
        sorts to the top and gets an ANSI background-highlighted label; overflow
@@ -1099,7 +1099,8 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
             pr_line += f" {color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
-    body.append(_format_worker_thread_line(repo))
+    if repo.worker_what is not None:
+        body.append(_format_worker_thread_line(repo))
 
     body.extend(_format_webhook_lines(repo))
 
