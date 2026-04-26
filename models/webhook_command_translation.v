@@ -59,7 +59,7 @@ Extract Inductive option => ""
     [positive] for dedup comparisons.  Two arrivals with the same
     [DeliveryId] are the same delivery redelivered — the translate oracle
     and handler must produce identical commands for identical delivery ids.
-    The dedup predicate is formalised in Task 2. *)
+    The dedup predicate is [same_delivery] below. *)
 Definition DeliveryId := positive.
 
 (** * CheckConclusion
@@ -230,14 +230,14 @@ Definition cmd_delivery_id (cmd : WebhookCommand) : DeliveryId :=
     earlier, at the raw-JSON parser (not yet modelled); the absence of a
     [None] branch here is the formal witness.
 
-    Proof of totality ([translate_total]) lives in Task 4.
+    [translate_total] (proved below) states the existence witness.
 
     Delivery id threading: [translate] preserves [wev_delivery]
-    unchanged into [cmd_delivery_id (translate ev) = wev_delivery ev].
+    unchanged into [cmd_delivery_id (translate ev) = wev_delivery_id ev].
     This is the idempotence anchor — a redelivered event with the same
     [DeliveryId] yields a command with the same [cmd_delivery_id], so
-    the dedup check in [same_delivery] is delivery-stable.  Proof
-    ([translate_preserves_delivery]) lives in Task 4. *)
+    the dedup check in [same_delivery] is delivery-stable.  Proved
+    below as [translate_preserves_delivery]. *)
 Definition translate (ev : WebhookEvent) : WebhookCommand :=
   match ev with
 
@@ -270,9 +270,8 @@ Definition translate (ev : WebhookEvent) : WebhookCommand :=
     other.
 
     Implemented as [Pos.eqb] on [cmd_delivery_id] — decidable, pure, and
-    extractable to Python [==] on integers.  The reflexivity theorem
-    ([same_delivery_refl]) and symmetry theorem ([same_delivery_sym]) live
-    in Task 4. *)
+    extractable to Python [==] on integers.  [same_delivery_refl] and
+    [same_delivery_sym] are proved below. *)
 Definition same_delivery (c1 c2 : WebhookCommand) : bool :=
   Pos.eqb (cmd_delivery_id c1) (cmd_delivery_id c2).
 
@@ -294,9 +293,9 @@ Definition same_delivery (c1 c2 : WebhookCommand) : bool :=
     [WebhookCommand] constructor without updating [cmd_to_contender]
     is a compile-time error.
 
-    The key property ([cmd_to_contender_is_handler], proved in Task 4):
-    [∀ cmd, cmd_to_contender cmd = Handler].  This is the formal statement
-    that webhooks never enqueue a [CronSweep] contender. *)
+    [cmd_to_contender_is_handler] (proved below) is the formal statement
+    that webhooks never enqueue a [CronSweep] contender:
+    [∀ cmd, cmd_to_contender cmd = Handler]. *)
 Definition cmd_to_contender (cmd : WebhookCommand) : Contender :=
   match cmd with
   | CmdComment         _ _ _ _ _ _ => Handler
@@ -305,3 +304,77 @@ Definition cmd_to_contender (cmd : WebhookCommand) : Contender :=
   | CmdIssueAssigned   _ _ _       => Handler
   | CmdReviewSubmitted _ _ _ _     => Handler
   end.
+
+(** * wev_delivery_id
+
+    Uniform accessor that extracts the [DeliveryId] from any [WebhookEvent].
+    The symmetric counterpart to [cmd_delivery_id]; used to state
+    [translate_preserves_delivery] without pattern-matching on each
+    constructor individually. *)
+Definition wev_delivery_id (ev : WebhookEvent) : DeliveryId :=
+  match ev with
+  | WevReviewComment   d _ _ _ _ => d
+  | WevIssueComment    d _ _ _ _ => d
+  | WevCIFailure       d _ _ _   => d
+  | WevPRMerged        d _       => d
+  | WevIssueAssigned   d _ _     => d
+  | WevReviewSubmitted d _ _ _   => d
+  end.
+
+(** * Proved invariants
+
+    All lemmas follow by computation ([reflexivity], [destruct] +
+    [reflexivity], or [Pos.eqb] lemmas): the functions reduce on concrete
+    constructor shapes, and Rocq's kernel verifies the equalities by
+    normalisation.
+
+    These names surface in the runtime oracle: when the Python implementation
+    diverges from the Rocq definitions, the crash message includes the theorem
+    name so the engineer knows exactly which invariant was violated. *)
+
+(** [translate_total]: every [WebhookEvent] yields a [WebhookCommand].
+    [translate] is a total function with no [None] branch — the formal
+    witness that all recognised events produce commands and no recognised
+    event is silently dropped. *)
+Lemma translate_total :
+  forall ev : WebhookEvent, exists cmd : WebhookCommand, translate ev = cmd.
+Proof.
+  intro ev; exists (translate ev); reflexivity.
+Qed.
+
+(** [translate_preserves_delivery]: [translate] threads the [DeliveryId]
+    from the event into the command unchanged.  This is the idempotence
+    anchor: a redelivered event (same [wev_delivery_id]) yields a command
+    with the same [cmd_delivery_id], so [same_delivery] is delivery-stable. *)
+Lemma translate_preserves_delivery :
+  forall ev : WebhookEvent,
+    cmd_delivery_id (translate ev) = wev_delivery_id ev.
+Proof.
+  intro ev; destruct ev; reflexivity.
+Qed.
+
+(** [same_delivery_refl]: every command is a duplicate of itself.  A handler
+    that compares its own command against a stored record using [same_delivery]
+    always sees [true]. *)
+Lemma same_delivery_refl :
+  forall cmd : WebhookCommand, same_delivery cmd cmd = true.
+Proof.
+  intro cmd; unfold same_delivery; apply Pos.eqb_refl.
+Qed.
+
+(** [same_delivery_sym]: [same_delivery] is symmetric.  Dedup checks may
+    compare in either order and get the same result. *)
+Lemma same_delivery_sym :
+  forall c1 c2 : WebhookCommand, same_delivery c1 c2 = same_delivery c2 c1.
+Proof.
+  intros c1 c2; unfold same_delivery; apply Pos.eqb_sym.
+Qed.
+
+(** [cmd_to_contender_is_handler]: every webhook command maps to [Handler].
+    The formal statement that webhooks never enqueue a [CronSweep] contender
+    — [CronSweep] is reserved exclusively for the periodic idle-drain sweep. *)
+Lemma cmd_to_contender_is_handler :
+  forall cmd : WebhookCommand, cmd_to_contender cmd = Handler.
+Proof.
+  intro cmd; destruct cmd; reflexivity.
+Qed.
