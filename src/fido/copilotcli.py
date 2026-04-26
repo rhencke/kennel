@@ -13,9 +13,8 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import acp
 from acp.exceptions import RequestError
@@ -913,13 +912,7 @@ class CopilotCLISession(OwnedSession):
         else:
             factory = CopilotACPRuntime if runtime_factory is None else runtime_factory
             self._runtime = factory(work_dir=self._work_dir, repo_name=repo_name)
-        self._lock = threading.RLock()
         self._init_handler_reentry()
-        self._owner_lock = threading.Lock()
-        self._owner: str | None = None
-        self._pending_preempts = 0
-        self._preempt_condition = threading.Condition()
-        self._thread_state = threading.local()
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
@@ -930,15 +923,18 @@ class CopilotCLISession(OwnedSession):
         # When the id is no longer known to Copilot, ensure_session falls
         # back to creating a fresh session automatically.
         self._session_id: str | None = self._runtime.ensure_session(session_id, model)
-        # Kind the current lock holder is registered under in the shared
-        # talker registry (``"worker"`` / ``"webhook"``), or ``None`` when
-        # no one is inside the lock.  Set by :meth:`_register_talker_kind`.
-        self._registered_talker_kind: Literal["worker", "webhook"] | None = None
 
     @property
     def owner(self) -> str | None:
-        with self._owner_lock:
-            return self._owner
+        if self._repo_name is None:
+            return None
+        talker = provider.get_talker(self._repo_name)
+        if talker is None or talker.kind != "worker":
+            return None
+        for t in threading.enumerate():
+            if t.ident == talker.thread_id:
+                return t.name
+        return None
 
     @property
     def pid(self) -> int | None:
@@ -975,14 +971,15 @@ class CopilotCLISession(OwnedSession):
         return self._last_turn_cancelled
 
     def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        deadline = time.monotonic() + timeout
-        with self._preempt_condition:
-            while self._pending_preempts > 0:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._preempt_condition.wait(timeout=remaining)
-        return True
+        """Compatibility stub — the FSM handles priority ordering; always returns False.
+
+        The old :class:`threading.RLock`-based implementation polled
+        ``_preempt_condition`` to let webhook callers win the lock before the
+        worker retried.  The FSM's handler-priority queue makes that polling
+        unnecessary: workers already yield to any queued handler inside
+        :meth:`~provider.OwnedSession._fsm_acquire_worker`.
+        """
+        return False
 
     def prompt(
         self,
@@ -1040,79 +1037,61 @@ class CopilotCLISession(OwnedSession):
             self._runtime.cancel(session_id)
 
     def __enter__(self) -> "CopilotCLISession":
-        if getattr(self._reentry_tls, "depth", 0) > 0:
-            # Reentrant call from within :meth:`hold_for_handler` — RLock
-            # handles the nested acquire; owner and talker state stay owned
-            # by the outermost entry.
-            self._lock.acquire()
+        """Acquire the session lock, serializing prompt calls across threads.
+
+        On the outermost entry (via the :class:`OwnedSession` reentrance
+        counter), delegates to :meth:`_fsm_acquire_worker` or
+        :meth:`_fsm_acquire_handler` based on the calling thread's kind
+        (read from :func:`provider.current_thread_kind`).  Handler acquires
+        queue behind any current holder and are served FIFO; worker acquires
+        yield to any queued handler.
+
+        Registers a :class:`provider.SessionTalker` after acquiring.
+        Nested entries (from :meth:`hold_for_handler`) re-enter the
+        reentrance counter and skip the FSM acquire.
+
+        Raises :class:`provider.SessionLeakError` on the outermost entry if
+        another thread is already registered as the talker for this repo.  The
+        FSM lock is released before raising so the prior holder isn't
+        deadlocked.
+        """
+        depth = getattr(self._reentry_tls, "depth", 0)
+        if depth > 0:
             self._bump_entry_depth()
             return self
-        waited = not self._lock.acquire(blocking=False)
-        if waited:
-            with self._preempt_condition:
-                self._pending_preempts += 1
-            # Preemption (cancelling a running worker turn) is handled
-            # upstream: the HTTP handler fires preempt_worker() synchronously
-            # (#955) and hold_for_handler fires a second preemption before the
-            # lock is acquired (#658).  Nothing to do here except wait.
-            self._lock.acquire()
-        self._thread_state.waited = waited
-        with self._owner_lock:
-            self._owner = threading.current_thread().name
-        self._register_talker_kind()
+        kind = provider.current_thread_kind()
+        if kind == "worker":
+            self._fsm_acquire_worker()
+        else:
+            self._fsm_acquire_handler()
         self._bump_entry_depth()
-        self._oracle_on_acquire(provider.current_thread_kind())
+        if self._repo_name is not None:
+            try:
+                provider.register_talker(
+                    provider.SessionTalker(
+                        repo_name=self._repo_name,
+                        thread_id=threading.get_ident(),
+                        kind=kind,
+                        description="copilot-cli session turn",
+                        claude_pid=0,  # no claude subprocess — ACP runtime
+                        started_at=provider.talker_now(),
+                    )
+                )
+            except provider.SessionLeakError:
+                self._drop_entry_depth()
+                self._fsm_release()
+                raise
         return self
 
-    def _register_talker_kind(self) -> None:
-        """Register this thread with the shared talker registry so other
-        threads can tell, via :func:`provider.get_talker`, whether the current
-        lock holder is a worker or a webhook.  Matches what
-        :meth:`ClaudeSession.__enter__` does for the claude provider.
-
-        Tracked as :attr:`_registered_talker_kind` so :meth:`__exit__` knows
-        whether to unregister.
-        """
-        if self._repo_name is None:
-            self._registered_talker_kind = None
-            return
-        kind = provider.current_thread_kind()
-        try:
-            provider.register_talker(
-                provider.SessionTalker(
-                    repo_name=self._repo_name,
-                    thread_id=threading.get_ident(),
-                    kind=kind,
-                    description="copilot-cli session turn",
-                    claude_pid=0,  # no claude subprocess — ACP runtime
-                    started_at=datetime.now(tz=timezone.utc),
-                )
-            )
-            self._registered_talker_kind = kind
-        except provider.SessionLeakError:
-            self._lock.release()
-            raise
-
     def __exit__(self, *args: object) -> None:
-        if self._drop_entry_depth() > 0:
-            # Inner exit of a :meth:`hold_for_handler` nest — only drop
-            # the reentrant RLock acquire; owner / talker / waited state
-            # stays until the outermost exit.
-            self._lock.release()
-            return
-        if self._repo_name is not None and self._registered_talker_kind is not None:
-            provider.unregister_talker(self._repo_name, threading.get_ident())
-            self._registered_talker_kind = None
-        with self._owner_lock:
-            self._owner = None
-        self._oracle_on_release()
-        self._lock.release()
-        if getattr(self._thread_state, "waited", False):
-            with self._preempt_condition:
-                self._pending_preempts -= 1
-                if self._pending_preempts == 0:
-                    self._preempt_condition.notify_all()
-            self._thread_state.waited = False
+        """Release the session lock.  Unregisters the :class:`provider.SessionTalker`
+        before releasing so no other thread can race in and see a stale talker entry.
+        """
+        depth = self._drop_entry_depth()
+        if depth == 0:
+            if self._repo_name is not None:
+                provider.unregister_talker(self._repo_name, threading.get_ident())
+            self._fsm_release()
 
     def _prompt_locked(
         self,

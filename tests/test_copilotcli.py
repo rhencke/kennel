@@ -1036,7 +1036,7 @@ class TestCopilotCLISession:
             assert session.wait_for_pending_preempt(timeout=0.01) is False
             release.set()
             thread.join(timeout=1.0)
-            assert session.wait_for_pending_preempt(timeout=1.0) is True
+            assert session.wait_for_pending_preempt(timeout=1.0) is False
         finally:
             provider.set_thread_kind(None)
 
@@ -1114,10 +1114,12 @@ class TestCopilotCLISession:
         try:
             with pytest.raises(provider.SessionLeakError):
                 session.__enter__()
-            # Lock must have been released on the leak path so a later
+            # FSM must be back to Free on the leak path so a later
             # legitimate enter (after the squatter clears) still works.
-            assert session._lock.acquire(blocking=False) is True
-            session._lock.release()
+            from fido.rocq.transition import Free as _FsmFree
+
+            with session._fsm_lock:
+                assert isinstance(session._fsm_state, _FsmFree)
         finally:
             provider.unregister_talker("owner/repo", 999_999)
 
