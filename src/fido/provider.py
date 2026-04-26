@@ -617,13 +617,30 @@ class OwnedSession:
         Fires the ``WorkerAcquire`` FSM transition and updates
         :attr:`_fsm_state` atomically under :attr:`_fsm_lock`.
         """
+        tid = threading.get_ident()
         with self._fsm_cond:
+            waited = False
             while True:
                 if isinstance(self._fsm_state, fsm.Free) and not self._handler_queue:
                     new = fsm.transition(self._fsm_state, fsm.WorkerAcquire())
                     assert new is not None  # Free + WorkerAcquire always succeeds
                     self._fsm_state = new  # → OwnedByWorker
+                    log.info(
+                        "fsm[%s]: WorkerAcquire (tid=%d, waited=%s, queue=%d)",
+                        self._repo_name or "?",
+                        tid,
+                        "yes" if waited else "no",
+                        len(self._handler_queue),
+                    )
                     return
+                log.info(
+                    "fsm[%s]: WorkerAcquire blocked — state=%s, queue=%d (tid=%d)",
+                    self._repo_name or "?",
+                    type(self._fsm_state).__name__,
+                    len(self._handler_queue),
+                    tid,
+                )
+                waited = True
                 self._fsm_cond.wait()
 
     def _fsm_acquire_handler(self) -> None:
@@ -639,21 +656,38 @@ class OwnedSession:
         the caller must have already fired :meth:`_fire_worker_cancel` so the
         worker drains its turn and calls :meth:`_fsm_release`.
         """
+        tid = threading.get_ident()
         waiter: threading.Event | None = None
         with self._fsm_cond:
             new = fsm.transition(self._fsm_state, fsm.HandlerAcquire())
             if new is not None:
                 # Free → OwnedByHandler: immediate acquisition.
                 self._fsm_state = new
+                log.info(
+                    "fsm[%s]: HandlerAcquire immediate (tid=%d)",
+                    self._repo_name or "?",
+                    tid,
+                )
                 return
             # Occupied; register in the FIFO handler queue and wait.
             waiter = threading.Event()
             self._handler_queue.append(waiter)
+            log.info(
+                "fsm[%s]: HandlerAcquire queued — state=%s, position=%d (tid=%d)",
+                self._repo_name or "?",
+                type(self._fsm_state).__name__,
+                len(self._handler_queue),
+                tid,
+            )
         # Wait outside the Condition so _fsm_release can acquire _fsm_lock.
         assert waiter is not None
         waiter.wait()
         # _fsm_release set _fsm_state = OwnedByHandler and signalled us.
-        # Nothing more to do here.
+        log.info(
+            "fsm[%s]: HandlerAcquire dequeued (tid=%d)",
+            self._repo_name or "?",
+            tid,
+        )
 
     def _fsm_release(self) -> None:
         """Release the FSM lock.
@@ -675,6 +709,7 @@ class OwnedSession:
         :class:`~fido.rocq.transition.Free` (``release_only_by_owner``
         invariant).
         """
+        tid = threading.get_ident()
         with self._fsm_cond:
             ev = (
                 fsm.WorkerRelease()
@@ -693,10 +728,23 @@ class OwnedSession:
                 waiter = self._handler_queue.pop(0)
                 self._fsm_state = fsm.OwnedByHandler()
                 waiter.set()
+                log.info(
+                    "fsm[%s]: %s → OwnedByHandler (tid=%d, queue=%d remaining)",
+                    self._repo_name or "?",
+                    type(ev).__name__,
+                    tid,
+                    len(self._handler_queue),
+                )
             else:
                 # No handlers waiting; transition to Free and wake workers.
                 self._fsm_state = new_state  # → Free
                 self._fsm_cond.notify_all()
+                log.info(
+                    "fsm[%s]: %s → Free (tid=%d)",
+                    self._repo_name or "?",
+                    type(ev).__name__,
+                    tid,
+                )
 
     def _fire_worker_cancel(self) -> None:
         """Abort the current lock-holder's turn.  Subclasses override

@@ -1,4 +1,5 @@
 import dataclasses
+import faulthandler
 import fcntl
 import hashlib
 import hmac
@@ -1357,6 +1358,14 @@ def run(
 
     _signal(signal.SIGTERM, _shutdown_handler)
     _signal(signal.SIGINT, _shutdown_handler)
+
+    # Diagnostic hook: ``kill -USR1 <fido-pid>`` (or ``docker kill --signal=
+    # SIGUSR1 fido``) dumps every thread's Python stack to stderr — captured
+    # in fido.log via the launcher's redirect.  Lets us see exactly which
+    # line a hung worker thread is parked on without needing pdb attached.
+    # The :class:`faulthandler` module's signal handler is async-signal-safe
+    # and compatible with the free-threaded (3.14t) runtime.
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
 
     repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
     log.info("fido listening on :%d — repos: %s", config.port, repos_str)
