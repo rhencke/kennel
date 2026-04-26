@@ -66,14 +66,21 @@ vice versa).
 **Bugs.** #981 (the canonical instance — worker thread registered with
 kind=webhook, breaks subsequent preempt detection).
 
-**Status.** Hand-fixed. Should be subsumed by `session_lock.v` once kind
-is part of the FSM state. Today the FSM tracks owner *type*; verify the
-invariant is now structurally impossible.
+**Status.** ✓ Audited 2026-04-26 — structurally impossible. Both
+`ClaudeSession.__enter__` and `CopilotCLISession.__enter__` read
+`kind = provider.current_thread_kind()` exactly once, then use that same
+value to (a) choose the FSM acquisition path (`_fsm_acquire_worker` →
+`OwnedByWorker`, else `_fsm_acquire_handler` → `OwnedByHandler`) and
+(b) construct the `SessionTalker(kind=kind, ...)` passed to
+`register_talker`. No separate `_pending_talker_kind` field exists; the
+FSM state and the talker registry kind are always derived from the same
+variable in the same call. The bug #981 class cannot recur.
 
-**Action.** Audit `session_lock.v` to confirm `OwnedByWorker` and
-`OwnedByHandler` are the *only* holder representations (no separate
-`_pending_talker_kind` field surviving alongside). If a separate field
-still exists, fold it in.
+**Residual note.** `preempt_worker()` reads from `get_talker().kind`
+rather than from `_fsm_state` — a minor redundancy (both agree by
+construction), but the FSM state alone could answer "is the holder a
+worker?" via `isinstance(_fsm_state, OwnedByWorker)`. Not a bug; a
+smell to address if the talker registry is ever removed.
 
 ---
 
