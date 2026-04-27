@@ -118,6 +118,7 @@ def _restore_handler_fns():
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
         "fido_started_at": WebhookHandler.fido_started_at,
+        "_restart_fsm_state": WebhookHandler._restart_fsm_state,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).

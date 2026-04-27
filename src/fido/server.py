@@ -43,6 +43,7 @@ from fido.infra import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.rate_limit import RateLimitMonitor
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
+from fido.rocq import self_restart as restart_fsm
 from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
@@ -607,6 +608,38 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
     _fn_kill_active_children = staticmethod(kill_active_children)
+    # Process-level FSM state from self_restart.v.  Tracks the restart episode
+    # in progress so coordination violations surface as immediate crashes.
+    # Initialised to Running() at class definition — the process is always
+    # "running normally" before any restart trigger fires.  Reset to Running()
+    # after an Aborted episode so a subsequent trigger can begin a fresh one.
+    _restart_fsm_state: restart_fsm.State = restart_fsm.Running()
+
+    def _restart_fsm_transition(self, event: restart_fsm.Event) -> restart_fsm.State:
+        """Fire *event* against the process-level self-restart FSM.
+
+        Raises :exc:`AssertionError` if the transition is rejected — a
+        restart-sequence violation crashes loudly rather than silently
+        continuing in an undefined state.
+
+        Uses ``type(self)`` so the class-level state is updated and visible
+        to every subsequent handler instance in the same process.
+        """
+        prev = type(self)._restart_fsm_state
+        new_state = restart_fsm.transition(prev, event)
+        if new_state is None:
+            raise AssertionError(
+                f"self_restart FSM: {type(event).__name__} rejected in "
+                f"state {type(prev).__name__}"
+            )
+        type(self)._restart_fsm_state = new_state
+        log.debug(
+            "self-restart FSM: %s →%s via %s",
+            type(prev).__name__,
+            type(new_state).__name__,
+            type(event).__name__,
+        )
+        return new_state
 
     def do_POST(self) -> None:
         try:
@@ -1017,6 +1050,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self_repo = _get_self_repo(runner_dir, self.infra.proc)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
+        # FSM oracle: Running → Syncing.  This fires before any side effects so
+        # a double-trigger (two webhooks racing) raises AssertionError on the
+        # second call rather than tearing down workers a second time.
+        self._restart_fsm_transition(restart_fsm.TriggerRestart())
         log.info(
             "self-restart: %s on %s — syncing runner clone at %s",
             reason,
@@ -1029,7 +1066,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # left without a worker thread.
         if not _pull_with_backoff(runner_dir, self.infra.proc, self.infra.clock):
             log.error("self-restart: gave up — running old version (%s)", reason)
+            # FSM oracle: Syncing → Aborted.  Validates sync_before_teardown:
+            # the FSM reaches Aborted without passing through StoppingWorkers,
+            # confirming workers were never touched.  Reset to Running() so a
+            # subsequent trigger can begin a fresh episode.
+            self._restart_fsm_transition(restart_fsm.SyncFail())
+            type(self)._restart_fsm_state = restart_fsm.Running()
             return
+        # FSM oracle: Syncing → StoppingWorkers.
+        self._restart_fsm_transition(restart_fsm.SyncOk())
         log.info(
             "self-restart: runner synced — stopping workers and exiting %d (%s)",
             _RESTART_EXIT_CODE,
@@ -1045,7 +1090,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # We've seen this orphan a session that then committed + reset
         # over an in-progress human edit hours after fido was "stopped".
         self.registry.stop_all()
+        # FSM oracle: StoppingWorkers → KillingChildren.  Validates
+        # workers_before_children: all workers stopped before kill fires.
+        self._restart_fsm_transition(restart_fsm.WorkersStopped())
         type(self)._fn_kill_active_children()
+        # FSM oracle: KillingChildren → Exiting.  Validates
+        # exit_requires_full_teardown: process only exits after full teardown.
+        self._restart_fsm_transition(restart_fsm.ChildrenKilled())
         self.infra.os_proc.chdir(runner_dir)
         self.infra.os_proc.exit(_RESTART_EXIT_CODE)
 
