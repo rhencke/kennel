@@ -157,6 +157,12 @@ class ActivityReporter(Protocol):
 
     def status_update(self) -> AbstractContextManager[None]: ...
 
+    def has_untriaged(self, repo_name: str) -> bool: ...
+
+    def wait_for_inbox_drain(
+        self, repo_name: str, timeout: float | None = None
+    ) -> bool: ...
+
 
 class LockHeld(Exception):
     """Raised when the fido lock is already held by another process."""
@@ -2312,6 +2318,24 @@ class Worker:
         self._abort_task.clear()
         tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
 
+    def _yield_for_untriaged(self) -> None:
+        """Yield at a provider-turn boundary if untriaged webhooks are waiting.
+
+        Called at both ``provider_run()`` return sites in :meth:`execute_task`
+        so that fresh comments and CI events always get a handler turn before
+        the next worker turn (#1067).  No-op when the registry is absent
+        (standalone tests) or the inbox is already empty.
+        """
+        if self._registry is None:
+            return
+        if not self._registry.has_untriaged(self._repo_name):
+            return
+        log.info(
+            "inbox non-empty for %s — yielding turn to untriaged handlers",
+            self._repo_name,
+        )
+        self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -2394,6 +2418,10 @@ class Worker:
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
 
+        # Yield before the retry loop so any untriaged webhook handlers get a
+        # turn before we start another provider turn (#1067).
+        self._yield_for_untriaged()
+
         # Resume loop: let the provider agent cook until commits appear
         attempt = 0
         fresh_session_retry_used = False
@@ -2468,6 +2496,10 @@ class Worker:
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
+
+            # Yield at the retry boundary so untriaged handlers get their turn
+            # before we loop back for another provider run (#1067).
+            self._yield_for_untriaged()
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
