@@ -293,6 +293,19 @@ class PromptSession(Protocol):
         or session-state loss."""
         ...
 
+    def switch_tools(self, tools: str | None) -> None:
+        """Restrict or restore available tools for the continued session.
+
+        *tools* is passed as ``--allowedTools`` to the subprocess on respawn
+        while preserving ``--resume`` so conversation context carries across
+        the mode boundary.  ``None`` = no restriction (worker mode); a
+        non-empty string = the triage allowlist (handler mode, typically
+        :data:`~fido.claude.HANDLER_ALLOWED_TOOLS`, enforcing #1042).
+        No-op if unchanged.  Called automatically by
+        :meth:`OwnedSession.hold_for_handler`.
+        """
+        ...
+
     def recover(self) -> None:
         """Reattach or revive the underlying session after an interruption."""
         ...
@@ -575,6 +588,11 @@ class OwnedSession:
     _fsm_cond: threading.Condition
     _fsm_state: fsm.State
     _handler_queue: list[threading.Event]
+    # Allowed-tools value passed to :meth:`switch_tools` on handler entry.
+    # ``None`` means no restriction (default for CopilotCLISession whose
+    # switch_tools is a no-op; ClaudeSession sets this to
+    # :data:`~fido.claude.HANDLER_ALLOWED_TOOLS` in its constructor).
+    _handler_tools: str | None
 
     def _init_handler_reentry(self) -> None:
         """Subclasses call this from their ``__init__`` to set up the
@@ -591,6 +609,9 @@ class OwnedSession:
         # not acquire immediately.  _fsm_release pops from the front and sets
         # the event to hand ownership to the next handler.
         self._handler_queue: list[threading.Event] = []
+        # Tool restriction applied on handler entry via switch_tools().
+        # ClaudeSession overrides to HANDLER_ALLOWED_TOOLS in its constructor.
+        self._handler_tools: str | None = None
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at
@@ -751,6 +772,20 @@ class OwnedSession:
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
 
+    def switch_tools(self, tools: str | None) -> None:
+        """Restrict or restore the subprocess tool allowlist.
+
+        Subclasses that wrap a persistent Claude Code subprocess (e.g.
+        :class:`~fido.claude.ClaudeSession`) override this to respawn with
+        ``--allowedTools <value>`` so handler turns get a triage tool set
+        and worker turns get the full set back.  Subclasses that do not
+        support tool switching (e.g. CopilotCLISession) override with a no-op.
+
+        Called automatically by :meth:`hold_for_handler` on entry
+        (``tools = self._handler_tools``) and on exit (``tools = None``).
+        """
+        raise NotImplementedError  # pragma: no cover — abstract hook
+
     def preempt_worker(self) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
         the session.
@@ -805,6 +840,10 @@ class OwnedSession:
         outcome — preempted vs. queuing — so webhook latency spikes
         are visible in the log without needing to trace ``session.prompt``
         calls (fixes the missing diagnostic from #955).
+
+        Switches the session to triage handler mode (via
+        :meth:`switch_tools` with :attr:`_handler_tools`) on entry, then
+        restores the unrestricted worker tool set on exit (#1042).
         """
         if preempt_worker:
             preempted, current_kind = try_preempt_worker(
@@ -824,7 +863,11 @@ class OwnedSession:
                     self._repo_name,
                 )
         with self:  # type: ignore[attr-defined]
-            yield self
+            self.switch_tools(self._handler_tools)
+            try:
+                yield self
+            finally:
+                self.switch_tools(None)
 
 
 class ProviderAgent(Protocol):

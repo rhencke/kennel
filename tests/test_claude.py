@@ -12,6 +12,7 @@ from fido import provider
 from fido.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
+    HANDLER_ALLOWED_TOOLS,
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
@@ -1669,6 +1670,115 @@ class TestClaudeSessionSwitchModel:
                 session.switch_model("claude-sonnet-4-6")
 
 
+class TestClaudeSessionSwitchTools:
+    """switch_tools respawns the subprocess with ``--allowedTools <value>
+    --resume`` so the continued session can vary its allowed tool set per
+    turn without losing conversation context.  This is the enforcement
+    mechanism for #1042: handler turns use a triage allowlist and worker
+    turns use ``tools=None`` (unrestricted).
+    """
+
+    def test_same_tools_is_noop(self, tmp_path: Path) -> None:
+        """When tools already match, no respawn happens."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)  # default _tools=None
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools(None)
+        mock_respawn.assert_not_called()
+
+    def test_restrict_to_triage_respawns_preserving_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Switching to a triage allowlist updates ``_tools`` and triggers
+        ``_respawn`` with ``clear_session_id=False`` so ``--resume <sid>``
+        keeps conversation context (continued session, not fresh)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools(HANDLER_ALLOWED_TOOLS)
+        assert session._tools == HANDLER_ALLOWED_TOOLS
+        mock_respawn.assert_called_once()
+        kwargs = mock_respawn.call_args.kwargs
+        assert kwargs["clear_session_id"] is False
+
+    def test_restore_unrestricted_tools_respawns_preserving_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Switching from restricted back to None respawns with resume."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._tools = HANDLER_ALLOWED_TOOLS  # pretend handler mode
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools(None)
+        assert session._tools is None
+        mock_respawn.assert_called_once()
+        kwargs = mock_respawn.call_args.kwargs
+        assert kwargs["clear_session_id"] is False
+
+    def test_switch_propagates_respawn_error(self, tmp_path: Path) -> None:
+        """Errors raised by ``_respawn`` (e.g. kill timeout) propagate."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        boom = OSError("kill failed")
+        with patch.object(session, "_respawn", side_effect=boom):
+            with pytest.raises(OSError, match="kill failed"):
+                session.switch_tools(HANDLER_ALLOWED_TOOLS)
+
+
+class TestClaudeSessionSpawnTools:
+    """Verify that ``_spawn`` includes ``--allowedTools`` only when
+    ``_tools`` is set."""
+
+    def test_no_allowed_tools_flag_when_unrestricted(self, tmp_path: Path) -> None:
+        """Default construction (tools=None) must NOT include
+        ``--allowedTools``."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        cmd = fake_popen.call_args.args[0]
+        assert "--allowedTools" not in cmd
+
+    def test_allowed_tools_flag_included_when_restricted(self, tmp_path: Path) -> None:
+        """When a tools allowlist is passed, spawn includes
+        ``--allowedTools <value>``."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file,
+            popen=fake_popen,
+            selector=fake_selector,
+            tools=HANDLER_ALLOWED_TOOLS,
+        )
+        cmd = fake_popen.call_args.args[0]
+        assert "--allowedTools" in cmd
+        assert cmd[cmd.index("--allowedTools") + 1] == HANDLER_ALLOWED_TOOLS
+
+    def test_allowed_tools_flag_appears_before_resume(self, tmp_path: Path) -> None:
+        """``--allowedTools`` is placed before ``--resume`` in the command."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file,
+            popen=fake_popen,
+            selector=fake_selector,
+            tools=HANDLER_ALLOWED_TOOLS,
+            session_id="sess-123",
+        )
+        cmd = fake_popen.call_args.args[0]
+        assert "--allowedTools" in cmd
+        assert "--resume" in cmd
+        assert cmd.index("--allowedTools") < cmd.index("--resume")
+
+
 class TestClaudeSessionConsumeUntilResult:
     def test_returns_result_text(self, tmp_path: Path) -> None:
         import json as _json
@@ -1929,6 +2039,60 @@ class TestClaudeSessionLock:
         finally:
             provider.set_thread_kind(None)
             session.stop()
+
+    def test_hold_for_handler_switches_to_triage_tools_and_restores(
+        self, tmp_path: Path
+    ) -> None:
+        """hold_for_handler calls switch_tools(HANDLER_ALLOWED_TOOLS) on entry
+        and switch_tools(None) on exit so handler turns are automatically
+        restricted to the triage allowlist (#1042)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        calls: list[str | None] = []
+        original_switch = session.switch_tools
+
+        def recording_switch(tools: str | None) -> None:
+            calls.append(tools)
+            original_switch(tools)
+
+        session.switch_tools = recording_switch  # type: ignore[method-assign]
+        provider.set_thread_kind("webhook")
+        try:
+            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
+                with session.hold_for_handler():
+                    pass
+        finally:
+            provider.set_thread_kind(None)
+            session.stop()
+
+        assert len(calls) == 2
+        assert calls[0] == HANDLER_ALLOWED_TOOLS  # restricted on entry
+        assert calls[1] is None  # restored on exit
+
+    def test_hold_for_handler_restores_tools_on_exception(self, tmp_path: Path) -> None:
+        """hold_for_handler restores tools even when the body raises."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        calls: list[str | None] = []
+        original_switch = session.switch_tools
+
+        def recording_switch(tools: str | None) -> None:
+            calls.append(tools)
+            original_switch(tools)
+
+        session.switch_tools = recording_switch  # type: ignore[method-assign]
+        provider.set_thread_kind("webhook")
+        try:
+            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
+                with pytest.raises(RuntimeError, match="boom"):
+                    with session.hold_for_handler():
+                        raise RuntimeError("boom")
+        finally:
+            provider.set_thread_kind(None)
+            session.stop()
+
+        assert calls[0] == HANDLER_ALLOWED_TOOLS
+        assert calls[-1] is None  # always restored
 
     def test_enter_uses_thread_kind_not_shared_attribute(self, tmp_path: Path) -> None:
         """Regression for #981: __enter__ must read the talker kind from

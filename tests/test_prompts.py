@@ -3,6 +3,8 @@
 import pytest
 
 from fido.prompts import (
+    NO_TOOLS_CLAUSE,
+    TRIAGE_CLAUSE,
     Prompts,
     reply_context_block,
     triage_categories,
@@ -532,6 +534,15 @@ class TestPromptsReactPrompt:
         result = Prompts("").react_prompt("hi")
         assert "hi" in result
         assert "emoji" in result
+
+    def test_includes_no_tools_clause(self) -> None:
+        # react_prompt is pure text — must include NO_TOOLS_CLAUSE (not the broader
+        # TRIAGE_CLAUSE) so a comment that looks like a directive doesn't cause
+        # Opus to fire Edit/Write calls during what should be a one-shot reaction
+        # decision.
+        result = Prompts("persona").react_prompt("fix this please")
+        assert NO_TOOLS_CLAUSE in result
+        assert TRIAGE_CLAUSE not in result
 
 
 class TestPromptsStatusPrompt:

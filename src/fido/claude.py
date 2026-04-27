@@ -51,6 +51,24 @@ _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
 
+# Handler tool allowlist for handler turns (#1042).  Handler prompts
+# (triage, reply, status, rescope) must never perform implementation work —
+# they may *inspect* the codebase and perform triage actions (file issues,
+# create tasks) but not edit source files.  Passed as ``--allowedTools`` to
+# the claude subprocess when switching into handler mode.
+# Format: space-separated tool specs per ``claude --help``.
+HANDLER_ALLOWED_TOOLS = (
+    "Read"
+    " Grep"
+    " Glob"
+    " Bash(git log *,git show *,git diff *,git status *,"
+    "git rev-parse *,git describe *,git tag *,git ls-files *,"
+    "git blame *,git shortlog *,git cat-file *,"
+    "git rev-list *,"
+    "gh issue create *,gh issue list *,gh issue view *,"
+    "gh pr view *,gh pr list *)"
+)
+
 
 class _Trunc:
     """Lazy-truncating wrapper for log arguments.
@@ -472,6 +490,7 @@ class ClaudeSession(OwnedSession):
         selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
         repo_name: str | None = None,
         session_id: str | None = None,
+        tools: str | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -483,6 +502,13 @@ class ClaudeSession(OwnedSession):
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
         )
+        # Allowed-tools restriction passed as ``--allowedTools`` to the
+        # subprocess.  ``None`` = no restriction (worker mode, default);
+        # any string = triage allowlist (handler mode, typically
+        # :data:`HANDLER_ALLOWED_TOOLS`).  Changed via :meth:`switch_tools`,
+        # which respawns the subprocess while keeping ``--resume`` so
+        # conversation context survives the mode transition (#1042).
+        self._tools: str | None = tools
         # Latest session_id seen in a stream-json event.  Updated inside
         # :meth:`iter_events` so :meth:`recover`, :meth:`reset`, and
         # :meth:`switch_model` can pass ``--resume <sid>``
@@ -505,6 +531,12 @@ class ClaudeSession(OwnedSession):
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
         self._init_handler_reentry()
+        # Activate the triage allowlist for handler turns: override the
+        # OwnedSession default (None = no restriction) with the Claude Code
+        # handler allowlist so hold_for_handler automatically switches the
+        # subprocess into triage mode on entry and back to full tools on
+        # exit (#1042).
+        self._handler_tools = HANDLER_ALLOWED_TOOLS
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
         # blocking wait in iter_events() so the cancel signal is noticed
         # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
@@ -617,6 +649,8 @@ class ClaudeSession(OwnedSession):
             "--system-prompt-file",
             str(self._system_file),
         ]
+        if self._tools is not None:
+            cmd += ["--allowedTools", self._tools]
         if self._session_id:
             cmd += ["--resume", self._session_id]
         proc = self._popen_fn(
@@ -1087,6 +1121,37 @@ class ClaudeSession(OwnedSession):
             reason=f"switching model to {target_model}",
         )
         log.info("switch_model: now on model=%s", target_model)
+
+    def switch_tools(self, tools: str | None) -> None:
+        """Restrict or restore available tools by respawning with a different
+        ``--allowedTools`` value.
+
+        When *tools* is a non-None string (typically
+        :data:`HANDLER_ALLOWED_TOOLS`), the subprocess is spawned with
+        ``--allowedTools <value>`` so only triage tools are available —
+        this is the handler mode that enforces the invariant from #1042:
+        webhook handlers may inspect the codebase and perform triage actions
+        but must not perform implementation work.  When *tools* is ``None``, the subprocess uses
+        the full tool set (no ``--allowedTools`` flag) — this is the normal
+        worker mode.
+
+        A change triggers a subprocess respawn with ``--resume`` so
+        conversation context is preserved across the mode boundary.  No-op
+        when *tools* already matches the current value.
+        """
+        if tools == self._tools:
+            return
+        log.info(
+            "switch_tools: %r → %r (respawn-with-resume)",
+            self._tools,
+            tools,
+        )
+        self._tools = tools
+        self._respawn(
+            clear_session_id=False,
+            reason=f"switching tools to {tools!r}",
+        )
+        log.info("switch_tools: complete, tools=%r", self._tools)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
         """Emit a human-readable INFO log line for a stream-json *obj*.

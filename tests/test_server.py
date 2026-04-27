@@ -2979,6 +2979,82 @@ class TestProcessAction:
         assert status == 200
         mock_unblock.assert_not_called()
 
+    def test_review_comment_handler_enters_hold_for_handler(
+        self, server: tuple
+    ) -> None:
+        """Regression for #950: review_comment webhook must enter
+        hold_for_handler so the subprocess is restricted to
+        HANDLER_ALLOWED_TOOLS during triage turns.
+
+        Bug #950: the handler used the full tool surface (Edit, Bash, git push)
+        and performed an entire ACT cycle inline instead of queueing a task.
+        hold_for_handler is the enforcement point — it calls switch_tools with
+        the triage-mode allowlist on entry and restores full tools on exit.
+        """
+        url, cfg = server
+        mock_session = MagicMock()
+        WebhookHandler.registry.get_session.return_value = mock_session
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 950,
+                "body": "please refactor this",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "src/foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 10, "title": "My PR", "body": ""},
+        }
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        mock_session.hold_for_handler.assert_called_once_with(preempt_worker=True)
+
+    def test_issue_comment_handler_enters_hold_for_handler(self, server: tuple) -> None:
+        """Regression for #1007: issue_comment webhook on a PR must enter
+        hold_for_handler so the subprocess is restricted to
+        HANDLER_ALLOWED_TOOLS during triage turns.
+
+        Bug #1007: the handler ran read/write/commit/push operations inline
+        after triaging a top-level PR comment, starving the worker for ~5 min.
+        hold_for_handler is the enforcement point — it calls switch_tools with
+        the triage-mode allowlist on entry and restores full tools on exit.
+        """
+        url, cfg = server
+        mock_session = MagicMock()
+        WebhookHandler.registry.get_session.return_value = mock_session
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 1007,
+                "body": "please update the docs",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/90#issuecomment-1007",
+            },
+            "issue": {
+                "number": 90,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/owner/repo/pulls/90"
+                },
+            },
+        }
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        mock_session.hold_for_handler.assert_called_once_with(preempt_worker=True)
+
 
 class TestSynchronousPreemption:
     """Verify that preemption fires on the HTTP handler thread, before the

@@ -996,6 +996,11 @@ class CopilotCLISession(OwnedSession):
         self._session_id = self._runtime.ensure_session(self._session_id, normalized)
         self._model = normalized
 
+    def switch_tools(self, tools: str | None) -> None:
+        """No-op for Copilot CLI — the ACP protocol does not support a
+        per-session tool restriction flag equivalent to ``--tools``."""
+        del tools
+
     def recover(self) -> None:
         self._session_id = self._runtime.recover_session(self._session_id, self._model)
 
