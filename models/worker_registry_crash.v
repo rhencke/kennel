@@ -72,19 +72,7 @@
     not None and not old_thread.is_alive() and not old_thread._stop]
     guard entirely.  The oracle assertions become the control flow. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
-
-(* Prevent sort-polymorphism so nullary-constructor extraction is clean.
-   See the note in [rocq-python-extraction/test/datatypes.v] for context. *)
-Unset Universe Polymorphism.
-
-(* Remap [option] so [Some x] erases to [x] and [None] stays [None].
-   This makes [transition] return the new [State] directly on success
-   and [None] on rejection — a natural Python return type. *)
-Extract Inductive option => ""
-  [ "" "None" ]
-  "(lambda fSome, fNone, x: fNone() if x is None else fSome(x))".
+From FidoModels Require Import preamble.
 
 (** * State
 

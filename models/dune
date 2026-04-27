@@ -4,6 +4,7 @@
  (plugins rocq-python-extraction)
  (theories Stdlib)
  (modules
+  preamble
   seed
   session_lock
   payload_text

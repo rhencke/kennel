@@ -4,8 +4,7 @@
     [string], [ascii], [byte], and primitive byte strings without local
     extraction pragmas. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 From Stdlib Require Import
   Strings.String

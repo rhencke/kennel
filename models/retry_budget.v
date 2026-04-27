@@ -3,8 +3,7 @@
     This model exercises backend-owned Python mappings for [nat], [N], [Z],
     and [Q] without local extraction pragmas. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 From Stdlib Require Import
   Numbers.BinNums

@@ -5,8 +5,7 @@
     scheduler fairness or arbitrary thread interleavings.  This file defines
     the deterministic wrapper boundary that production models can depend on. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 (** [IO] marks Python effect boundaries. *)
 Definition IO (A : Type) : Type := A.
