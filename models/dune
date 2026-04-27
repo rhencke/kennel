@@ -4,6 +4,7 @@
  (plugins rocq-python-extraction)
  (theories Stdlib)
  (modules
+  preamble
   seed
   session_lock
   payload_text
@@ -17,4 +18,5 @@
   webhook_command_translation
   claude_session
   watchdog_transitions
-  worker_registry_crash))
+  worker_registry_crash
+  self_restart))

@@ -6,8 +6,7 @@
     promise may cover many comment ids, and acknowledging that promise
     completes every covered id. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 From Stdlib Require Import
   FSets.FMapPositive

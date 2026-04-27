@@ -27,9 +27,7 @@
     imports [session_ownership_fifo] to access [Contender] for
     [cmd_to_contender]. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
-
+From FidoModels Require Import preamble.
 From FidoModels Require Import session_ownership_fifo.
 
 From Stdlib Require Import
@@ -40,17 +38,6 @@ From Stdlib Require Import
 
 Open Scope string_scope.
 Import ListNotations.
-
-(* Prevent sort-polymorphism so nullary-constructor extraction is clean.
-   See the note in [rocq-python-extraction/test/datatypes.v] for context. *)
-Unset Universe Polymorphism.
-
-(* Remap [option] so [Some x] erases to [x] and [None] stays [None].
-   This makes [translate] return the [WebhookCommand] directly on success
-   and [None] on rejection — a natural Python return type. *)
-Extract Inductive option => ""
-  [ "" "None" ]
-  "(lambda fSome, fNone, x: fNone() if x is None else fSome(x))".
 
 (** * DeliveryId
 

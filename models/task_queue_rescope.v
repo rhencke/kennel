@@ -8,8 +8,7 @@
     intended SQLite-era contract and first serves as an oracle around the
     handwritten path. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 From Stdlib Require Import
   FSets.FMapPositive

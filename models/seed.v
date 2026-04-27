@@ -8,8 +8,7 @@
     This file stays as a smoke-test that the pipeline is wired up before
     larger coordination models are extracted. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 (** Map [bool] to Python [bool] so the output is idiomatic Python. *)
 Extract Inductive bool => "bool" [ "True" "False" ].

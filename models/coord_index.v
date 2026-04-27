@@ -18,8 +18,7 @@
     Neither cluster is proved here; this file provides the extracted primitives
     on which the proving models build. *)
 
-Declare ML Module "rocq-python-extraction".
-Declare ML Module "rocq-runtime.plugins.extraction".
+From FidoModels Require Import preamble.
 
 From Stdlib Require Import
   FSets.FMapPositive
