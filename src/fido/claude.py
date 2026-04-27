@@ -61,13 +61,12 @@ HANDLER_ALLOWED_TOOLS = (
     "Read"
     " Grep"
     " Glob"
-    " Bash(git log *,git show *,git diff *,git status *,git branch *,"
+    " Bash(git log *,git show *,git diff *,git status *,"
     "git rev-parse *,git describe *,git tag *,git ls-files *,"
-    "git blame *,git remote *,git shortlog *,git cat-file *,"
+    "git blame *,git shortlog *,git cat-file *,"
     "git rev-list *,"
     "gh issue create *,gh issue list *,gh issue view *,"
-    "gh pr view *,gh pr list *,"
-    "./fido task *)"
+    "gh pr view *,gh pr list *)"
 )
 
 
