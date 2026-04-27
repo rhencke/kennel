@@ -19,4 +19,5 @@
   claude_session
   watchdog_transitions
   worker_registry_crash
+  webhook_ingress_dedupe
   self_restart))

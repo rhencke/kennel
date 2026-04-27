@@ -21,6 +21,7 @@ from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
 from fido.rocq import webhook_command_translation as wct_oracle
+from fido.rocq import webhook_ingress_dedupe as ingress_fsm
 from fido.state import State
 from fido.store import FidoStore, append_reply_promise_markers
 from fido.tasks import Tasks
@@ -32,6 +33,127 @@ log = logging.getLogger(__name__)
 # Ensures at most one Opus call in-flight + one pending per repo.
 _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
+
+
+class WebhookIngressOracle:
+    """Per-process at-least-once delivery vs exactly-once dispatch oracle.
+
+    Tracks the ingress FSM state for every (repo, delivery_id) pair seen
+    during this process lifetime.  Keyed by repo name → delivery ID string →
+    :class:`~fido.rocq.webhook_ingress_dedupe.State`.
+
+    All mutations are guarded by :attr:`_lock` so concurrent webhook handler
+    threads running in Python 3.14t's free-threaded runtime cannot race on
+    the delivery-ID table.
+
+    The oracle is crash-on-violation: :meth:`_transition` raises
+    :exc:`AssertionError` (with the theorem name) whenever the extracted Rocq
+    FSM rejects a transition.  Callers that receive ``None`` from
+    :meth:`check_dispatch` should suppress the event (already dispatched).
+    """
+
+    def __init__(self) -> None:
+        # repo_name → delivery_id → ingress FSM state
+        self._states: dict[str, dict[str, ingress_fsm.State]] = {}
+        self._lock = threading.Lock()
+
+    def _transition(
+        self,
+        repo_name: str,
+        delivery_id: str,
+        event: ingress_fsm.Event,
+        current: ingress_fsm.State,
+    ) -> ingress_fsm.State:
+        """Fire *event* for *delivery_id*, raising ``AssertionError`` if rejected.
+
+        Single oracle for every FSM transition so a coordination bug surfaces
+        as a crash rather than silent event duplication or suppression.
+        """
+        new_state = ingress_fsm.transition(current, event)
+        if new_state is None:
+            raise AssertionError(
+                f"webhook_ingress_dedupe FSM: {type(event).__name__} rejected in "
+                f"state {type(current).__name__} for repo {repo_name!r} "
+                f"delivery {delivery_id!r}"
+            )
+        log.debug(
+            "ingress[%s][%s]: FSM %s →%s via %s",
+            repo_name,
+            delivery_id,
+            type(current).__name__,
+            type(new_state).__name__,
+            type(event).__name__,
+        )
+        return new_state
+
+    def check_dispatch(
+        self,
+        repo_name: str,
+        delivery_id: str,
+        *,
+        collapse_review: bool = False,
+    ) -> ingress_fsm.State | None:
+        """Record an incoming webhook and return the new FSM state, or None to suppress.
+
+        Parameters
+        ----------
+        repo_name:
+            The ``owner/repo`` string for the repo receiving the webhook.
+        delivery_id:
+            The ``X-GitHub-Delivery`` header value identifying this delivery.
+        collapse_review:
+            When True, fire ``CollapseReview`` instead of ``Arrive``.
+            Used for ``pull_request_review / submitted`` events whose inline
+            comments are handled individually — the review-level event is
+            collapsed rather than dispatched.
+
+        Returns
+        -------
+        ingress_fsm.State
+            The new FSM state after recording the event.
+        None
+            The delivery should be suppressed — it was already dispatched or
+            collapsed in an earlier call.  The caller must return ``None``
+            from ``dispatch()`` without executing any side effects.
+        """
+        with self._lock:
+            repo_states = self._states.setdefault(repo_name, {})
+            current = repo_states.get(delivery_id, ingress_fsm.Fresh())
+            if isinstance(current, ingress_fsm.Fresh):
+                event: ingress_fsm.Event = (
+                    ingress_fsm.CollapseReview()
+                    if collapse_review
+                    else ingress_fsm.Arrive()
+                )
+            elif isinstance(current, ingress_fsm.Dispatched):
+                event = ingress_fsm.Redeliver()
+            else:
+                # Collapsed or any other terminal state — fire Arrive to let
+                # the FSM reject it (returns None → suppress).
+                event = ingress_fsm.Arrive()
+            new_state = self._transition(repo_name, delivery_id, event, current)
+            repo_states[delivery_id] = new_state
+        # Arrive from Fresh → Dispatched: proceed normally.
+        # CollapseReview from Fresh → Collapsed: suppress (collapsed away).
+        # Redeliver from Dispatched → Dispatched: suppress (already handled).
+        # Arrive from Dispatched → None (AssertionError above): never reached.
+        if isinstance(new_state, ingress_fsm.Collapsed):
+            log.info(
+                "ingress[%s][%s]: CollapseReview — suppressing pull_request_review",
+                repo_name,
+                delivery_id,
+            )
+            return None
+        if isinstance(new_state, ingress_fsm.Dispatched) and isinstance(
+            event, ingress_fsm.Redeliver
+        ):
+            log.info(
+                "ingress[%s][%s]: Redeliver — suppressing duplicate delivery",
+                repo_name,
+                delivery_id,
+            )
+            return None
+        return new_state
 
 
 def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
@@ -493,11 +615,35 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
 
 
 def dispatch(
-    event: str, payload: dict[str, Any], config: Config, repo_cfg: RepoConfig
+    event: str,
+    payload: dict[str, Any],
+    config: Config,
+    repo_cfg: RepoConfig,
+    *,
+    delivery_id: str | None = None,
+    oracle: WebhookIngressOracle | None = None,
 ) -> Action | None:
-    """Map a GitHub webhook event to an action. Returns None if ignored."""
+    """Map a GitHub webhook event to an action. Returns None if ignored.
+
+    When *delivery_id* and *oracle* are provided the
+    :class:`WebhookIngressOracle` is consulted before any routing logic runs.
+    Duplicate deliveries (same delivery ID arriving a second time) and
+    collapsed ``pull_request_review / submitted`` events are suppressed by
+    returning ``None`` before any side effects execute.
+    """
     action = payload.get("action", "")
     repo = payload.get("repository", {}).get("full_name", "")
+
+    # Oracle check — deduplicate at the ingress boundary.
+    if delivery_id is not None and oracle is not None:
+        collapse_review = event == "pull_request_review" and action == "submitted"
+        ingress_result = oracle.check_dispatch(
+            repo_cfg.name,
+            delivery_id,
+            collapse_review=collapse_review,
+        )
+        if ingress_result is None:
+            return None
 
     if event == "ping":
         log.info("ping received — hook_id=%s", payload.get("hook_id"))
