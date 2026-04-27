@@ -10,7 +10,7 @@ from typing import Any
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
-from fido.prompts import READ_ONLY_CLAUSE, Prompts
+from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
     ProviderAgent,
     safe_voice_turn,
@@ -1150,7 +1150,7 @@ def needs_more_context(
     if agent is None:
         raise ValueError("needs_more_context requires agent")
     prompt = (
-        f"{READ_ONLY_CLAUSE}\n\n"
+        f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
         f"{comment_body!r}\n\n"
         "Does this comment need context from sibling review threads to be understood "
@@ -1182,7 +1182,7 @@ def _summarize_as_action_item(
     if agent is None:
         raise ValueError("_summarize_as_action_item requires agent")
     prompt = (
-        f"{READ_ONLY_CLAUSE}\n\n"
+        f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
@@ -1206,7 +1206,7 @@ def _summarize_as_action_item(
         )
         shortened = safe_voice_turn(
             agent,
-            f"{READ_ONLY_CLAUSE}\n\n"
+            f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
