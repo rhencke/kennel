@@ -51,10 +51,11 @@ _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
 
-# Read-only tool allowlist for handler turns (#1042).  Handler prompts
+# Handler tool allowlist for handler turns (#1042).  Handler prompts
 # (triage, reply, status, rescope) must never perform implementation work —
-# they may *inspect* the codebase but not modify it.  Passed as
-# ``--allowedTools`` to the claude subprocess when switching into handler mode.
+# they may *inspect* the codebase and perform triage actions (file issues,
+# create tasks) but not edit source files.  Passed as ``--allowedTools`` to
+# the claude subprocess when switching into handler mode.
 # Format: space-separated tool specs per ``claude --help``.
 HANDLER_ALLOWED_TOOLS = (
     "Read"
@@ -63,7 +64,10 @@ HANDLER_ALLOWED_TOOLS = (
     " Bash(git log *,git show *,git diff *,git status *,git branch *,"
     "git rev-parse *,git describe *,git tag *,git ls-files *,"
     "git blame *,git remote *,git shortlog *,git cat-file *,"
-    "git rev-list *)"
+    "git rev-list *,"
+    "gh issue create *,gh issue list *,gh issue view *,"
+    "gh pr view *,gh pr list *,"
+    "./fido task *)"
 )
 
 
