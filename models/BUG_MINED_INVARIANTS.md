@@ -2,7 +2,7 @@
 
 **Source:** 23 closed `Bug:` issues + 8 open ones from
 [FidoCanCode/home](https://github.com/FidoCanCode/home),
-2026-04-08 → 2026-04-26.
+2026-04-08 → 2026-04-27.
 **Filed as:** [#1040](https://github.com/FidoCanCode/home/issues/1040)
 **PR:** [#1043](https://github.com/FidoCanCode/home/pull/1043)
 
@@ -322,6 +322,32 @@ Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
 
 ---
 
+## Q. Handler preemption — untriaged inbox yield
+
+**Invariant.** When the untriaged-webhook inbox for a repo is non-empty,
+the worker must not start a new provider turn for that repo. Formally:
+`untriaged_inbox(r) ≠ ∅ ⟹ next_turn(r) ∈ Handler`. The worker yields
+at every turn boundary when untriaged webhooks are waiting, blocking
+until the inbox drains (or a timeout fires).
+
+**Bugs.** [#1067](https://github.com/FidoCanCode/home/issues/1067)
+(worker grinds through in-progress task without checking for pending
+webhooks — fresh comments and CI events are starved).
+
+**Proposed model.** `handler_preemption.v` — states `{Empty, NonEmpty}`
+× `{Worker, Handler}`; events `WebhookArrives`, `HandlerDone`,
+`WorkerTurnStart`. Theorem: `WorkerTurnStart` is rejected when inbox
+is `NonEmpty`.
+
+**Status.** Runtime implementation live
+([#1070](https://github.com/FidoCanCode/home/pull/1070)): per-repo
+`enter_untriaged` / `exit_untriaged` counter on `WorkerRegistry`,
+turn-boundary yield in `Worker.execute_task`, server-side wiring in
+`_do_post_inner` / `_process_action`. Rocq model and extracted oracle
+pending.
+
+---
+
 ## Summary
 
 | Cluster | Invariant focus | Bugs | Already covered | Action |
@@ -342,6 +368,7 @@ Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
 | N | Single runtime path | 1 | (deploy, not runtime) | mention in D8 (#746) |
 | O | Build cache | 1 | (CI, not coordination) | standard fix |
 | P | Worker registry slot lifecycle + crash recovery | lockfile race, provider orphan | ✓ worker_registry_crash.v live (#1056) | — |
+| Q | Handler preemption — untriaged inbox yield | 1 (#1067) | runtime live (#1070); Rocq pending | model + oracle |
 
 **New issues filed (as of this survey):**
 - [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation) — **closed** ([#1052](https://github.com/FidoCanCode/home/pull/1052))
@@ -350,3 +377,6 @@ Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
 
 **Existing issues to enrich with bug references:**
 D3 (#741), D9 (#747), D10 (#748), D11 (#749), D13 (#751), D16 (#888), D18 (#890).
+
+**Runtime-first (model pending):**
+- [#1067](https://github.com/FidoCanCode/home/issues/1067) — handler preemption / untriaged inbox yield (cluster Q, runtime in [#1070](https://github.com/FidoCanCode/home/pull/1070))
