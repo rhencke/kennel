@@ -19,6 +19,7 @@ from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
+    WebhookIngressOracle,
     recover_reply_promises,
     reply_to_comment,
     reply_to_issue_comment,
@@ -120,6 +121,11 @@ def _restore_handler_fns():
         "fido_started_at": WebhookHandler.fido_started_at,
         "_restart_fsm_state": WebhookHandler._restart_fsm_state,
     }
+    # Reset the ingress oracle so each test starts with a clean delivery-ID
+    # table — tests reuse the same delivery ID ("test") so without a reset,
+    # the second test to run would see the delivery as already dispatched and
+    # suppress it via the Redeliver path.
+    WebhookHandler.ingress_oracle = WebhookIngressOracle()
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
     WebhookHandler._fn_after_do_post = staticmethod(  # type: ignore[assignment]
@@ -2241,6 +2247,9 @@ class TestProcessAction:
         mock_ic.assert_called_once()
 
     def test_review_comments_handled(self, server: tuple) -> None:
+        # pull_request_review / submitted is collapsed by the ingress oracle
+        # (CollapseReview) so reply_to_review is never called — inline comments
+        # are handled individually by pull_request_review_comment events.
         url, cfg = server
         payload = {
             **self._payload(),
@@ -2257,7 +2266,7 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review", payload)
         assert status == 200
-        mock_review.assert_called()
+        mock_review.assert_not_called()
 
     def test_issue_comment_handled(self, server: tuple) -> None:
         url, cfg = server

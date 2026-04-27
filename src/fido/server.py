@@ -23,6 +23,7 @@ from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
     Action,
+    WebhookIngressOracle,
     create_task,
     dispatch,
     launch_worker,
@@ -608,6 +609,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
     _fn_kill_active_children = staticmethod(kill_active_children)
+    # Per-process ingress deduplication oracle (webhook_ingress_dedupe.v).
+    # Shared across all handler instances via the class attribute so every
+    # request on every thread sees the same delivery-ID table.  Created once
+    # at class definition time — no lock needed here because the attribute is
+    # set before any threads start and never replaced.
+    ingress_oracle: WebhookIngressOracle = WebhookIngressOracle()
     # Process-level FSM state from self_restart.v.  Tracks the restart episode
     # in progress so coordination violations surface as immediate crashes.
     # Initialised to Running() at class definition — the process is always
@@ -713,7 +720,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Dispatch BEFORE acknowledging — if dispatch raises, return 500 so
         # GitHub retries instead of treating the event as successfully handled.
         try:
-            action = type(self)._fn_dispatch(event, payload, self.config, repo_cfg)
+            action = type(self)._fn_dispatch(
+                event,
+                payload,
+                self.config,
+                repo_cfg,
+                delivery_id=delivery,
+                oracle=type(self).ingress_oracle,
+            )
         except Exception:
             log.exception("dispatch failed for %s", repo_name)
             self._respond(500, "dispatch error")
