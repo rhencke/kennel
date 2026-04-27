@@ -1674,7 +1674,7 @@ class TestClaudeSessionSwitchTools:
     """switch_tools respawns the subprocess with ``--allowedTools <value>
     --resume`` so the continued session can vary its allowed tool set per
     turn without losing conversation context.  This is the enforcement
-    mechanism for #1042: handler turns use a read-only allowlist and worker
+    mechanism for #1042: handler turns use a triage allowlist and worker
     turns use ``tools=None`` (unrestricted).
     """
 
@@ -1686,10 +1686,10 @@ class TestClaudeSessionSwitchTools:
             session.switch_tools(None)
         mock_respawn.assert_not_called()
 
-    def test_restrict_to_read_only_respawns_preserving_session_id(
+    def test_restrict_to_triage_respawns_preserving_session_id(
         self, tmp_path: Path
     ) -> None:
-        """Switching to a read-only allowlist updates ``_tools`` and triggers
+        """Switching to a triage allowlist updates ``_tools`` and triggers
         ``_respawn`` with ``clear_session_id=False`` so ``--resume <sid>``
         keeps conversation context (continued session, not fresh)."""
         proc = _make_session_proc([])
@@ -2040,12 +2040,12 @@ class TestClaudeSessionLock:
             provider.set_thread_kind(None)
             session.stop()
 
-    def test_hold_for_handler_switches_to_read_only_tools_and_restores(
+    def test_hold_for_handler_switches_to_triage_tools_and_restores(
         self, tmp_path: Path
     ) -> None:
         """hold_for_handler calls switch_tools(HANDLER_ALLOWED_TOOLS) on entry
         and switch_tools(None) on exit so handler turns are automatically
-        restricted to the read-only allowlist (#1042)."""
+        restricted to the triage allowlist (#1042)."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         calls: list[str | None] = []

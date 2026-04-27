@@ -504,7 +504,7 @@ class ClaudeSession(OwnedSession):
         )
         # Allowed-tools restriction passed as ``--allowedTools`` to the
         # subprocess.  ``None`` = no restriction (worker mode, default);
-        # any string = read-only allowlist (handler mode, typically
+        # any string = triage allowlist (handler mode, typically
         # :data:`HANDLER_ALLOWED_TOOLS`).  Changed via :meth:`switch_tools`,
         # which respawns the subprocess while keeping ``--resume`` so
         # conversation context survives the mode transition (#1042).
@@ -531,10 +531,10 @@ class ClaudeSession(OwnedSession):
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
         self._init_handler_reentry()
-        # Activate the read-only allowlist for handler turns: override the
+        # Activate the triage allowlist for handler turns: override the
         # OwnedSession default (None = no restriction) with the Claude Code
         # handler allowlist so hold_for_handler automatically switches the
-        # subprocess into read-only mode on entry and back to full tools on
+        # subprocess into triage mode on entry and back to full tools on
         # exit (#1042).
         self._handler_tools = HANDLER_ALLOWED_TOOLS
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
@@ -1128,10 +1128,10 @@ class ClaudeSession(OwnedSession):
 
         When *tools* is a non-None string (typically
         :data:`HANDLER_ALLOWED_TOOLS`), the subprocess is spawned with
-        ``--allowedTools <value>`` so only read-only tools are available —
+        ``--allowedTools <value>`` so only triage tools are available —
         this is the handler mode that enforces the invariant from #1042:
-        webhook handlers may inspect the codebase but must not perform
-        implementation work.  When *tools* is ``None``, the subprocess uses
+        webhook handlers may inspect the codebase and perform triage actions
+        but must not perform implementation work.  When *tools* is ``None``, the subprocess uses
         the full tool set (no ``--allowedTools`` flag) — this is the normal
         worker mode.
 

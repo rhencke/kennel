@@ -299,7 +299,7 @@ class PromptSession(Protocol):
         *tools* is passed as ``--allowedTools`` to the subprocess on respawn
         while preserving ``--resume`` so conversation context carries across
         the mode boundary.  ``None`` = no restriction (worker mode); a
-        non-empty string = the read-only allowlist (handler mode, typically
+        non-empty string = the triage allowlist (handler mode, typically
         :data:`~fido.claude.HANDLER_ALLOWED_TOOLS`, enforcing #1042).
         No-op if unchanged.  Called automatically by
         :meth:`OwnedSession.hold_for_handler`.
@@ -777,7 +777,7 @@ class OwnedSession:
 
         Subclasses that wrap a persistent Claude Code subprocess (e.g.
         :class:`~fido.claude.ClaudeSession`) override this to respawn with
-        ``--allowedTools <value>`` so handler turns get a read-only tool set
+        ``--allowedTools <value>`` so handler turns get a triage tool set
         and worker turns get the full set back.  Subclasses that do not
         support tool switching (e.g. CopilotCLISession) override with a no-op.
 
@@ -841,7 +841,7 @@ class OwnedSession:
         are visible in the log without needing to trace ``session.prompt``
         calls (fixes the missing diagnostic from #955).
 
-        Switches the session to read-only handler mode (via
+        Switches the session to triage handler mode (via
         :meth:`switch_tools` with :attr:`_handler_tools`) on entry, then
         restores the unrestricted worker tool set on exit (#1042).
         """
