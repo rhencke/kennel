@@ -68,6 +68,9 @@ class _FakeAppServer:
         self.cwd = cwd
         self.pid = 456
         self.requests: list[tuple[str, dict]] = []
+        self.notification_timeouts: list[float] = []
+        self.notification_timeouts_before_match = 0
+        self.on_notification_wait = lambda _timeout: None
         self.notifications: list[dict] = []
         self.responses: dict[str, object | Exception] = {}
         self.stopped = False
@@ -104,7 +107,11 @@ class _FakeAppServer:
         predicate=None,
         timeout: float = 30.0,
     ) -> dict:
-        del timeout
+        self.notification_timeouts.append(timeout)
+        self.on_notification_wait(timeout)
+        if self.notification_timeouts_before_match > 0:
+            self.notification_timeouts_before_match -= 1
+            raise TimeoutError(method)
         for index, notification in enumerate(self.notifications):
             if method != "*" and notification["method"] != method:
                 continue
@@ -560,6 +567,87 @@ class TestCodexSession:
         with pytest.raises(CodexProviderError) as exc_info:
             session.consume_until_result()
         assert exc_info.value.kind == "rate_limit"
+
+    def test_turn_consumption_tolerates_quiet_notification_polls(
+        self, tmp_path: Path
+    ) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        now = 0.0
+
+        def clock() -> float:
+            return now
+
+        def advance(timeout: float) -> None:
+            nonlocal now
+            now += timeout
+
+        fake.notification_timeouts_before_match = 2
+        fake.on_notification_wait = advance
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "reply"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+            turn_idle_timeout=10.0,
+            clock=clock,
+        )
+        session.send("work")
+        assert session.consume_until_result() == "reply"
+        assert fake.notification_timeouts[:3] == [1.0, 1.0, 1.0]
+
+    def test_turn_consumption_times_out_after_idle_budget(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        replacement = _FakeAppServer()
+        clients = [fake, replacement]
+        now = 0.0
+
+        def clock() -> float:
+            return now
+
+        def advance(timeout: float) -> None:
+            nonlocal now
+            now += timeout
+
+        fake.notification_timeouts_before_match = 100
+        fake.on_notification_wait = advance
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: clients.pop(0),
+            turn_idle_timeout=2.5,
+            clock=clock,
+        )
+        session.send("work")
+        with pytest.raises(TimeoutError, match="Codex turn activity"):
+            session.consume_until_result()
+        assert fake.notification_timeouts == [1.0, 1.0, 0.5]
+        assert fake.stopped
+        assert replacement.requests[0][0] == "thread/resume"
+        assert replacement.requests[0][1]["threadId"] == "thread-new"
 
 
 class TestCodexClient:

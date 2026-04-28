@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 import fido.provider as provider
+from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     OwnedSession,
     PromptSession,
@@ -32,6 +33,8 @@ log = logging.getLogger(__name__)
 
 _CODEX_RATE_LIMIT_CACHE_SECONDS = 300.0
 _CODEX_APP_SERVER_TIMEOUT = 30.0
+_CODEX_TURN_IDLE_TIMEOUT = 1800.0
+_CODEX_TURN_POLL_INTERVAL = 1.0
 _CODEX_APP_SERVER_MAX_LINE_BYTES = 8 * 1024 * 1024
 _CODEX_CLIENT_INFO = {
     "name": "fido",
@@ -642,6 +645,8 @@ class CodexSession(OwnedSession):
         repo_name: str | None = None,
         client_factory: Callable[..., CodexAppServer] = CodexAppServerClient,
         session_id: str | None = None,
+        turn_idle_timeout: float = _CODEX_TURN_IDLE_TIMEOUT,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._work_dir = Path(work_dir).resolve()
         self._repo_name = repo_name
@@ -651,6 +656,8 @@ class CodexSession(OwnedSession):
         self._client_factory = client_factory
         self._client = self._client_factory(cwd=self._work_dir)
         self._model = coerce_provider_model(model)
+        self._turn_idle_timeout = turn_idle_timeout
+        self._clock = clock
         self._state_lock = threading.Lock()
         self._session_id: str | None = None
         self._turn_lock = threading.Lock()
@@ -750,14 +757,25 @@ class CodexSession(OwnedSession):
             return ""
         final_text = ""
         thread_id = self._require_thread_id()
+        idle_deadline = IdleDeadline(
+            self._turn_idle_timeout,
+            clock=self._clock,
+        )
         while True:
-            notification = self._client.wait_notification(
-                "*",
-                predicate=lambda params: _notification_matches(
-                    params, thread_id=thread_id, turn_id=active_turn_id
-                ),
-                timeout=_CODEX_APP_SERVER_TIMEOUT,
-            )
+            timeout = min(idle_deadline.remaining(), _CODEX_TURN_POLL_INTERVAL)
+            if timeout <= 0:
+                self._recover_after_turn_idle_timeout(active_turn_id)
+            try:
+                notification = self._client.wait_notification(
+                    "*",
+                    predicate=lambda params: _notification_matches(
+                        params, thread_id=thread_id, turn_id=active_turn_id
+                    ),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                continue
+            idle_deadline.reset()
             method = notification.get("method")
             params = notification["params"]
             if method == "error":
@@ -785,6 +803,18 @@ class CodexSession(OwnedSession):
                 completed = self._poll_completed_turn(thread_id, active_turn_id)
             if completed is not None:
                 return self._finish_turn(completed, final_text)
+
+    def _recover_after_turn_idle_timeout(self, turn_id: str) -> None:
+        log.warning(
+            "CodexSession: turn %s idle for %.0fs — restarting app-server",
+            turn_id,
+            self._turn_idle_timeout,
+        )
+        with self._turn_lock:
+            if self._active_turn_id == turn_id:
+                self._active_turn_id = None
+        self.recover()
+        raise TimeoutError(f"Timed out waiting for Codex turn activity: {turn_id}")
 
     def switch_model(self, model: ProviderModel | str) -> None:
         self._model = coerce_provider_model(model)
