@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from fido.codex import (
+    Codex,
     CodexAPI,
     CodexAppServerClient,
+    CodexClient,
     CodexCLIError,
     CodexProtocolError,
     CodexProviderError,
@@ -17,6 +19,7 @@ from fido.codex import (
     extract_session_id,
     raise_for_provider_error_output,
     run_codex_exec,
+    run_codex_exec_resume,
 )
 from fido.provider import ProviderID, ProviderModel
 
@@ -250,6 +253,41 @@ class TestRunCodexExec:
         with pytest.raises(CodexProviderError) as exc_info:
             run_codex_exec("hello", model="gpt-5.5", runner=mock_run)
         assert exc_info.value.kind == "rate_limit"
+
+    def test_resume_builds_stable_json_exec_resume_command(
+        self, tmp_path: Path
+    ) -> None:
+        prompt_file = tmp_path / "prompt.md"
+        prompt_file.write_text("continue")
+        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        output = run_codex_exec_resume(
+            "sess-1",
+            prompt_file.read_text(),
+            model=ProviderModel("gpt-5.5", "medium"),
+            timeout=19,
+            cwd=tmp_path,
+            runner=mock_run,
+        )
+        assert extract_result_text(output) == "final reply"
+        cmd = mock_run.call_args.args[0]
+        assert cmd == [
+            "codex",
+            "exec",
+            "--json",
+            "--model",
+            "gpt-5.5",
+            "--sandbox",
+            "danger-full-access",
+            "--ask-for-approval",
+            "never",
+            "--skip-git-repo-check",
+            "resume",
+            "sess-1",
+            "-",
+        ]
+        assert mock_run.call_args.kwargs["input"] == "continue"
+        assert mock_run.call_args.kwargs["timeout"] == 19
+        assert mock_run.call_args.kwargs["cwd"] == tmp_path.resolve()
 
 
 class TestCodexAppServerClient:
@@ -522,3 +560,122 @@ class TestCodexSession:
         with pytest.raises(CodexProviderError) as exc_info:
             session.consume_until_result()
         assert exc_info.value.kind == "rate_limit"
+
+
+class TestCodexClient:
+    def test_model_slots_and_provider_id(self) -> None:
+        client = CodexClient(session=MagicMock())
+        assert client.provider_id == ProviderID.CODEX
+        assert client.voice_model == ProviderModel("gpt-5.5", "xhigh")
+        assert client.work_model == ProviderModel("gpt-5.5", "medium")
+        assert client.brief_model == ProviderModel("gpt-5.5", "low")
+
+    def test_spawns_owned_session_with_resume_id(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        session = MagicMock()
+        factory = MagicMock(return_value=session)
+        client = CodexClient(
+            session_system_file=system_file,
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+            session_factory=factory,
+        )
+        client.ensure_session(client.voice_model, session_id="thread-1")
+        factory.assert_called_once_with(
+            system_file,
+            work_dir=tmp_path,
+            model=client.voice_model,
+            repo_name="owner/repo",
+            session_id="thread-1",
+        )
+        assert client.session is session
+
+    def test_run_turn_through_fake_codex_session(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "reply"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        client = CodexClient(
+            session_system_file=system_file,
+            work_dir=tmp_path,
+            session_factory=lambda *args, **kwargs: CodexSession(
+                *args,
+                **kwargs,
+                client_factory=lambda **_: fake,
+            ),
+        )
+        assert client.run_turn("hello", model=client.work_model) == "reply"
+        assert [method for method, _ in fake.requests] == ["thread/start", "turn/start"]
+        assert fake.requests[1][1]["effort"] == "medium"
+
+    def test_provider_errors_pass_through(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = CodexProviderError(message="rate limit")
+        client = CodexClient(session=session)
+        with pytest.raises(CodexProviderError, match="rate limit"):
+            client.run_turn("hello", model=client.work_model)
+
+    def test_file_helpers_use_exec_paths(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        prompt_file = tmp_path / "prompt.md"
+        system_file.write_text("system")
+        prompt_file.write_text("prompt")
+        runner = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        client = CodexClient(runner=runner)
+
+        assert client.print_prompt_from_file(
+            system_file, prompt_file, client.work_model, cwd=tmp_path
+        )
+        assert runner.call_args.kwargs["input"] == "system\n\nprompt"
+
+        client.resume_session("sess-1", prompt_file, client.brief_model, cwd=tmp_path)
+        assert runner.call_args.args[0][-3:] == ["resume", "sess-1", "-"]
+
+    def test_extract_session_id(self) -> None:
+        client = CodexClient(session=MagicMock())
+        assert (
+            client.extract_session_id(
+                '{"type":"thread.started","thread_id":"codex-sess"}'
+            )
+            == "codex-sess"
+        )
+
+
+class TestCodex:
+    def test_default_provider_id_and_injected_components(self) -> None:
+        api = MagicMock()
+        agent = MagicMock()
+        provider = Codex(api=api, agent=agent)
+        assert provider.provider_id == ProviderID.CODEX
+        assert provider.api is api
+        assert provider.agent is agent
+
+    def test_default_agent_receives_session(self) -> None:
+        session = MagicMock()
+        provider = Codex(session=session)
+        assert provider.agent.session is session
+
+    def test_injected_agent_receives_session(self) -> None:
+        agent = MagicMock()
+        session = MagicMock()
+        Codex(agent=agent, session=session)
+        agent.attach_session.assert_called_once_with(session)

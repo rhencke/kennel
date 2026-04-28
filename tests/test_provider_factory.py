@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from fido.config import RepoConfig
 from fido.provider import ProviderID
 from fido.provider_factory import DefaultProviderFactory
@@ -98,22 +96,22 @@ class TestDefaultProviderFactory:
         )
         assert agent.provider_id == ProviderID.COPILOT_CLI
 
-    def test_create_provider_rejects_codex_until_wired(self, tmp_path: Path) -> None:
+    def test_create_provider_builds_codex(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         factory = DefaultProviderFactory(session_system_file=system_file)
-        repo_cfg = RepoConfig(
-            name="owner/repo",
-            work_dir=tmp_path,
-            provider=ProviderID.CODEX,
-        )
-        with pytest.raises(NotImplementedError, match="codex provider not yet wired"):
-            factory.create_provider(
-                repo_cfg,
+        provider = factory.create_provider(
+            RepoConfig(
+                name="owner/repo",
                 work_dir=tmp_path,
-                repo_name="owner/repo",
-                session=None,
-            )
+                provider=ProviderID.CODEX,
+            ),
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+            session=None,
+        )
+        assert provider.provider_id == ProviderID.CODEX
+        assert provider.agent.provider_id == ProviderID.CODEX
 
 
 class TestProviderSessionIdExtraction:
@@ -151,4 +149,24 @@ class TestProviderSessionIdExtraction:
         assert (
             agent.extract_session_id('{"type":"result","sessionId":"copilot-sess"}')
             == "copilot-sess"
+        )
+
+    def test_codex_agent_extracts_session_id(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        agent = factory.create_agent(
+            RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.CODEX,
+            ),
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+        )
+        assert (
+            agent.extract_session_id(
+                '{"type":"thread.started","thread_id":"codex-sess"}'
+            )
+            == "codex-sess"
         )

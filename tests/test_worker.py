@@ -438,6 +438,21 @@ class TestWorker:
         )
         assert worker._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
 
+    def test_repo_cfg_provider_selects_codex_provider(self, tmp_path: Path) -> None:
+        from fido.config import RepoConfig
+
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.CODEX,
+            ),
+            issue_cache=MagicMock(),
+        )
+        assert worker._provider.provider_id == ProviderID.CODEX  # pyright: ignore[reportPrivateUsage]
+
     def test_config_defaults_to_none(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
         assert worker._config is None
@@ -12943,6 +12958,23 @@ class TestWorkerThread:
         )
         assert wt._provider is not None  # pyright: ignore[reportPrivateUsage]
         assert wt._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
+
+    def test_repo_cfg_provider_selects_codex_provider(self, tmp_path: Path) -> None:
+        from fido.config import RepoConfig
+
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.CODEX,
+            ),
+            issue_cache=MagicMock(),
+        )
+        assert wt._provider is not None  # pyright: ignore[reportPrivateUsage]
+        assert wt._provider.provider_id == ProviderID.CODEX  # pyright: ignore[reportPrivateUsage]
 
     def test_config_defaults_to_none(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)

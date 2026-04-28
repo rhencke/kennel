@@ -15,6 +15,9 @@ from typing import IO, Any, Protocol
 import fido.provider as provider
 from fido.provider import (
     OwnedSession,
+    PromptSession,
+    Provider,
+    ProviderAgent,
     ProviderAPI,
     ProviderID,
     ProviderLimitSnapshot,
@@ -23,6 +26,7 @@ from fido.provider import (
     coerce_provider_model,
     model_name,
 )
+from fido.session_agent import SessionBackedAgent
 
 log = logging.getLogger(__name__)
 
@@ -647,6 +651,7 @@ class CodexSession(OwnedSession):
         self._client_factory = client_factory
         self._client = self._client_factory(cwd=self._work_dir)
         self._model = coerce_provider_model(model)
+        self._state_lock = threading.Lock()
         self._session_id: str | None = None
         self._turn_lock = threading.Lock()
         self._active_turn_id: str | None = None
@@ -671,27 +676,33 @@ class CodexSession(OwnedSession):
 
     @property
     def pid(self) -> int | None:
-        return self._client.pid
+        with self._state_lock:
+            return self._client.pid
 
     @property
     def session_id(self) -> str | None:
-        return self._session_id
+        with self._state_lock:
+            return self._session_id
 
     @property
     def dropped_session_count(self) -> int:
-        return self._dropped_session_count
+        with self._state_lock:
+            return self._dropped_session_count
 
     @property
     def sent_count(self) -> int:
-        return self._sent_count
+        with self._state_lock:
+            return self._sent_count
 
     @property
     def received_count(self) -> int:
-        return self._received_count
+        with self._state_lock:
+            return self._received_count
 
     @property
     def last_turn_cancelled(self) -> bool:
-        return self._last_turn_cancelled
+        with self._state_lock:
+            return self._last_turn_cancelled
 
     def prompt(
         self,
@@ -707,7 +718,8 @@ class CodexSession(OwnedSession):
 
     def send(self, content: str) -> None:
         thread_id = self._require_thread_id()
-        self._last_turn_cancelled = False
+        with self._state_lock:
+            self._last_turn_cancelled = False
         result = self._client.request(
             "turn/start",
             {
@@ -728,7 +740,8 @@ class CodexSession(OwnedSession):
             raise CodexProtocolError("Codex turn/start response missing turn.id")
         with self._turn_lock:
             self._active_turn_id = turn_id
-        self._sent_count += 1
+        with self._state_lock:
+            self._sent_count += 1
 
     def consume_until_result(self) -> str:
         with self._turn_lock:
@@ -763,7 +776,8 @@ class CodexSession(OwnedSession):
                 text = item.get("text")
                 if isinstance(text, str):
                     final_text = text
-                    self._received_count += 1
+                    with self._state_lock:
+                        self._received_count += 1
             completed = (
                 _extract_completed_turn(params) if method == "turn/completed" else None
             )
@@ -779,24 +793,33 @@ class CodexSession(OwnedSession):
         del tools
 
     def recover(self) -> None:
-        old_session_id = self._session_id
-        self._client.stop()
-        self._client = self._client_factory(cwd=self._work_dir)
+        with self._state_lock:
+            old_session_id = self._session_id
+            old_client = self._client
+        old_client.stop()
+        new_client = self._client_factory(cwd=self._work_dir)
+        with self._state_lock:
+            self._client = new_client
         self._ensure_thread(session_id=old_session_id)
 
     def reset(self, model: ProviderModel | None = None) -> None:
         if model is not None:
             self._model = coerce_provider_model(model)
-        self._session_id = None
-        self._active_turn_id = None
-        self._last_turn_cancelled = False
+        with self._state_lock:
+            self._session_id = None
+            self._last_turn_cancelled = False
+        with self._turn_lock:
+            self._active_turn_id = None
         self._ensure_thread(session_id=None)
 
     def is_alive(self) -> bool:
-        return self._client.is_alive()
+        with self._state_lock:
+            return self._client.is_alive()
 
     def stop(self) -> None:
-        self._client.stop()
+        with self._state_lock:
+            client = self._client
+        client.stop()
 
     def interrupt_active_turn(self) -> None:
         """Interrupt the currently active turn, if one is in flight."""
@@ -805,10 +828,12 @@ class CodexSession(OwnedSession):
     def _fire_worker_cancel(self) -> None:
         with self._turn_lock:
             turn_id = self._active_turn_id
-        thread_id = self._session_id
-        if thread_id is None or turn_id is None or not self._client.is_alive():
+        with self._state_lock:
+            thread_id = self._session_id
+            client = self._client
+        if thread_id is None or turn_id is None or not client.is_alive():
             return
-        self._client.request(
+        client.request(
             "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=5
         )
 
@@ -854,13 +879,16 @@ class CodexSession(OwnedSession):
                 result = self._client.request(
                     "thread/resume", self._thread_params(session_id)
                 )
-                self._session_id = _thread_id_from_result(result)
+                with self._state_lock:
+                    self._session_id = _thread_id_from_result(result)
                 return
             except CodexProviderError:
                 log.exception("CodexSession: failed to resume session %s", session_id)
-                self._dropped_session_count += 1
+                with self._state_lock:
+                    self._dropped_session_count += 1
         result = self._client.request("thread/start", self._thread_params(None))
-        self._session_id = _thread_id_from_result(result)
+        with self._state_lock:
+            self._session_id = _thread_id_from_result(result)
 
     def _thread_params(self, session_id: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -876,9 +904,11 @@ class CodexSession(OwnedSession):
         return params
 
     def _require_thread_id(self) -> str:
-        if self._session_id is None:
+        with self._state_lock:
+            session_id = self._session_id
+        if session_id is None:
             raise CodexProtocolError("Codex session has no thread id")
-        return self._session_id
+        return session_id
 
     def _poll_completed_turn(
         self, thread_id: str, turn_id: str
@@ -901,7 +931,8 @@ class CodexSession(OwnedSession):
         turn = params.get("turn")
         status = turn.get("status") if isinstance(turn, dict) else params.get("status")
         if isinstance(status, str) and status.lower() in {"interrupted", "cancelled"}:
-            self._last_turn_cancelled = True
+            with self._state_lock:
+                self._last_turn_cancelled = True
             return ""
         if isinstance(status, str) and status.lower() in {"failed", "error"}:
             error = params.get("error")
@@ -911,7 +942,8 @@ class CodexSession(OwnedSession):
                 kind=_classify_provider_error(str(message)),
                 payload=params,
             )
-        self._last_turn_cancelled = False
+        with self._state_lock:
+            self._last_turn_cancelled = False
         return final_text
 
 
@@ -986,3 +1018,164 @@ def run_codex_exec(
         raise CodexCLIError(completed.returncode, completed.stderr)
     raise_for_provider_error_output(completed.stdout)
     return completed.stdout
+
+
+def run_codex_exec_resume(
+    session_id: str,
+    prompt: str,
+    *,
+    model: ProviderModel | str,
+    timeout: int = 300,
+    cwd: Path | str = ".",
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """Run one non-persistent Codex exec resume turn and return raw JSONL output."""
+    work_dir = Path(cwd).resolve()
+    completed = _codex(
+        "exec",
+        "--json",
+        "--model",
+        model_name(model),
+        "--sandbox",
+        "danger-full-access",
+        "--ask-for-approval",
+        "never",
+        "--skip-git-repo-check",
+        "resume",
+        session_id,
+        "-",
+        prompt=prompt,
+        timeout=timeout,
+        cwd=work_dir,
+        runner=runner,
+    )
+    if completed.returncode != 0:
+        raise CodexCLIError(completed.returncode, completed.stderr)
+    raise_for_provider_error_output(completed.stdout)
+    return completed.stdout
+
+
+class CodexClient(SessionBackedAgent, ProviderAgent):
+    """Injectable collaborator for Codex CLI and app-server interactions."""
+
+    voice_model = ProviderModel("gpt-5.5", "xhigh")
+    work_model = ProviderModel("gpt-5.5", "medium")
+    brief_model = ProviderModel("gpt-5.5", "low")
+
+    def __init__(
+        self,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        session_fn: Callable[[], PromptSession] = provider.current_repo_session,
+        session_factory: Callable[..., PromptSession] | None = None,
+        session_system_file: Path | None = None,
+        work_dir: Path | str | None = None,
+        repo_name: str | None = None,
+        session: PromptSession | None = None,
+    ) -> None:
+        self._runner = runner
+        self._session_factory = (
+            CodexSession if session_factory is None else session_factory
+        )
+        super().__init__(
+            session_fn=session_fn,
+            session_system_file=session_system_file,
+            work_dir=work_dir,
+            repo_name=repo_name,
+            session=session,
+        )
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CODEX
+
+    def _spawn_owned_session(
+        self, model: ProviderModel, *, session_id: str | None = None
+    ) -> PromptSession:
+        system_file = self._session_system_file
+        work_dir = self._work_dir
+        assert system_file is not None
+        assert work_dir is not None
+        return self._session_factory(
+            system_file,
+            work_dir=work_dir,
+            model=model,
+            repo_name=self._repo_name,
+            session_id=session_id,
+        )
+
+    def _prompt_failure_is_passthrough(self, exc: Exception) -> bool:
+        return isinstance(exc, CodexProviderError)
+
+    def _dead_prompt_error_message(self) -> str:
+        return "Codex session died during prompt"
+
+    def print_prompt_from_file(
+        self,
+        system_file: Path,
+        prompt_file: Path,
+        model: ProviderModel,
+        timeout: int = 30,
+        idle_timeout: float = 1800.0,
+        cwd: Path | str = ".",
+    ) -> str:
+        del idle_timeout
+        prompt = _combine_prompt(prompt_file.read_text(), system_file.read_text(), None)
+        return run_codex_exec(
+            prompt,
+            model=model,
+            timeout=timeout,
+            cwd=cwd,
+            runner=self._runner,
+        )
+
+    def resume_session(
+        self,
+        session_id: str,
+        prompt_file: Path,
+        model: ProviderModel,
+        timeout: int = 300,
+        idle_timeout: float = 1800.0,
+        cwd: Path | str = ".",
+    ) -> str:
+        del idle_timeout
+        return run_codex_exec_resume(
+            session_id,
+            prompt_file.read_text(),
+            model=model,
+            timeout=timeout,
+            cwd=cwd,
+            runner=self._runner,
+        )
+
+    def extract_session_id(self, output: str) -> str:
+        return extract_session_id(output)
+
+
+class Codex(Provider):
+    """Composite Codex provider with separate account API and runtime agent."""
+
+    def __init__(
+        self,
+        *,
+        api: ProviderAPI | None = None,
+        agent: ProviderAgent | None = None,
+        session: PromptSession | None = None,
+    ) -> None:
+        if agent is None:
+            agent = CodexClient(session=session)
+        elif session is not None:
+            agent.attach_session(session)
+        self._api = CodexAPI() if api is None else api
+        self._agent = agent
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CODEX
+
+    @property
+    def api(self) -> ProviderAPI:
+        return self._api
+
+    @property
+    def agent(self) -> ProviderAgent:
+        return self._agent

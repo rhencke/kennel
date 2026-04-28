@@ -15,6 +15,7 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
+    ProviderLimitWindow,
     ProviderPressureStatus,
 )
 from fido.status import (
@@ -202,6 +203,24 @@ class TestProviderStatusesForRepoConfigs:
         with patch("fido.status.DefaultProviderFactory", return_value=factory):
             statuses = provider_statuses_for_repo_configs([repo])
         assert list(statuses) == [ProviderID.CLAUDE_CODE]
+
+    def test_collects_codex_provider_status(self, tmp_path: Path) -> None:
+        repo = RepoConfig(
+            name="owner/repo", work_dir=tmp_path, provider=ProviderID.CODEX
+        )
+        factory = MagicMock()
+        api = MagicMock()
+        api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CODEX,
+            windows=(ProviderLimitWindow(name="codex_primary", used=25, limit=100),),
+        )
+        factory.create_api.return_value = api
+
+        statuses = provider_statuses_for_repo_configs([repo], _provider_factory=factory)
+
+        assert statuses[ProviderID.CODEX].provider == ProviderID.CODEX
+        assert statuses[ProviderID.CODEX].percent_used == 25
+        factory.create_api.assert_called_once_with(repo)
 
 
 class TestProcessUptimeSeconds:
