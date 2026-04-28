@@ -7,6 +7,9 @@ This document catalogues every node in Rocq's MiniML intermediate representation
 and specifies the target Python construct for each.  It is the design contract for
 Phase 1 (the `python.ml` extraction plugin) and gates all later phases.
 
+See `DEDUPLICATION.md` for the current audit of extractor abstractions that
+should be consolidated as the generated-code corpus grows.
+
 Sources read:
 
 - `plugins/extraction/miniml.mli` — IR type definitions
