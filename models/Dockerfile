@@ -91,6 +91,7 @@ RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
     && mkdir -p "$FIDO_HOME/.config" "$FIDO_HOME/.cache" "$FIDO_HOME/workspace" /tmp/uv-cache \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/copilot /usr/local/bin/copilot \
+    && ln -sf /opt/fido-node-tools/node_modules/.bin/codex /usr/local/bin/codex \
     && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /tmp/uv-cache
 
 ENV HOME=$FIDO_HOME

@@ -54,8 +54,8 @@ Supported dev-tool commands, `./fido ruff ...`, `./fido pyright ...`, and
 tool binaries under the ephemeral `./pyproject` wrapper; do not use host `uv`
 for normal project checks. The production runtime image installs only production Python
 dependencies, plus pinned Node CLI tools from
-`package-lock.json` (`claude` and
-`copilot`) and the GitHub CLI. Node dependencies are built in their own Docker
+`package-lock.json` (`claude`, `copilot`, and
+`codex`) and the GitHub CLI. Node dependencies are built in their own Docker
 stage with an npm cache mount, so changing application code does not rerun
 `npm ci`.
 

@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"cancel-thread"}
+{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"turn cancelled by user interrupt"}}

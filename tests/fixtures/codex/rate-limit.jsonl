@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"rate-limit-thread"}
+{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"rate_limit_exceeded: rate limit reached for codex"}}
