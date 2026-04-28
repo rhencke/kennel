@@ -15,10 +15,6 @@ from typing import (
 
 
 # bool: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
 # list: remapped to Python primitive
 # positive: remapped to Python primitive
 # ascii: remapped to Python primitive

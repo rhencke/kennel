@@ -57,3 +57,10 @@ def test_bool_eq_lowers_to_native_equality(build_default) -> None:
 
     assert "def eqb(" not in source
     assert "return b1 == b2" in source
+
+
+def test_remapped_primitives_do_not_emit_unused_typevars(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert '_A = TypeVar("_A")' not in source
+    assert '_B = TypeVar("_B")' not in source

@@ -16,15 +16,7 @@ from typing import (
 
 # unit: remapped to Python primitive
 # nat: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
 # option: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
 # list: remapped to Python primitive
 
 

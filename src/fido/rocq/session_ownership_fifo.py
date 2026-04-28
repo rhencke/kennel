@@ -15,15 +15,7 @@ from typing import (
 
 
 # bool: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
 # option: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
 # list: remapped to Python primitive
 
 

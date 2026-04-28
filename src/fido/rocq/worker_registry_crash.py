@@ -13,8 +13,6 @@ from typing import (
     cast,
 )
 
-_A = TypeVar("_A")
-
 
 # option: remapped to Python primitive
 

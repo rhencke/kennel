@@ -3470,10 +3470,20 @@ let pp_ind_decl state (ind : ml_ind) =
         pp_one_cons state ~typevar_shift:2 p (Some fields) base_opt 0
   | Standard ->
       let tvars = List.init ind.ind_nparams typevar_name in
+      let packet_needs_typevars p =
+        not p.ip_logical &&
+        not (is_custom p.ip_typename_ref) &&
+        not (is_std_remapped_type_ref p.ip_typename_ref)
+      in
       (* TypeVar declarations are emitted once, before all packets, because
          mutual inductives share the same type parameters.  For example,
          [tree A] and [forest A] in a mutual definition both use [_A]. *)
-      let pp_typevars = pp_typevar_decls (List.init ind.ind_nparams Fun.id) in
+      let pp_typevars =
+        if Array.exists packet_needs_typevars ind.ind_packets then
+          pp_typevar_decls (List.init ind.ind_nparams Fun.id)
+        else
+          mt ()
+      in
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()

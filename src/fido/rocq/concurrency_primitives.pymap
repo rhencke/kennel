@@ -11,4 +11,4 @@ open,1,0,1,0,concurrency_primitives.v,56,10,56,22,extraction,channel_send,Channe
 open,1,0,1,0,concurrency_primitives.v,59,10,59,25,extraction,channel_receive,Channel.receive
 open,1,0,1,0,concurrency_primitives.v,62,10,62,20,extraction,future_set,Future.set_result
 open,1,0,1,0,concurrency_primitives.v,65,10,65,23,extraction,future_result,Future.result
-open,62,0,63,53,concurrency_primitives.v,73,11,73,28,extraction,roundtrip_message,roundtrip_message
+open,54,0,55,53,concurrency_primitives.v,73,11,73,28,extraction,roundtrip_message,roundtrip_message
