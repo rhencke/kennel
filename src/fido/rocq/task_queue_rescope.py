@@ -32,21 +32,6 @@ _A = TypeVar("_A")
 
 
 # list: remapped to Python primitive
-
-
-def eqb(
-    b1: bool,
-    b2: bool,
-) -> bool:
-    if b1:
-        if b2:
-            return True
-        return False
-    if b2:
-        return False
-    return True
-
-
 # positive: remapped to Python primitive
 
 

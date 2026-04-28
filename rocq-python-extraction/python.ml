@@ -1193,7 +1193,7 @@ let rec pp_expr state env expr =
         | _ -> None
       in
       let pp_std_bool_app r =
-        let pp_not_operand operand =
+        let pp_atomic_or_parenthesized_operand operand =
           match operand with
           | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _ ->
               pp_expr state env operand
@@ -1202,9 +1202,12 @@ let rec pp_expr state env expr =
         in
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
-            Some (str "not " ++ pp_not_operand value)
+            Some (str "not " ++ pp_atomic_or_parenthesized_operand value)
         | [left; right] when is_std_bool_ref r "andb" ->
             Some (pp_expr state env left ++ str " and " ++ pp_expr state env right)
+        | [left; right] when is_std_bool_ref r "eqb" ->
+            Some (pp_atomic_or_parenthesized_operand left ++ str " == " ++
+                  pp_atomic_or_parenthesized_operand right)
         | _ ->
             None
       in
@@ -1227,7 +1230,8 @@ let rec pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
-        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ->
+        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
+                        is_std_bool_ref r "eqb" ->
             pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
@@ -3612,7 +3616,8 @@ let pp_decl state = function
       if is_prop_type typ then mt ()
       else if is_runtime_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
-      else if is_std_bool_ref r "andb" || is_std_bool_ref r "negb" then mt ()
+      else if is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
+              is_std_bool_ref r "eqb" then mt ()
       else if is_std_primitive_compare_ref r then mt ()
       else if is_std_collection_term_ref r then mt ()
       else if is_custom r then
@@ -3630,7 +3635,8 @@ let pp_decl state = function
         if is_prop_type typs.(i) then mt ()
         else if is_runtime_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
-        else if is_std_bool_ref rv.(i) "andb" || is_std_bool_ref rv.(i) "negb" then mt ()
+        else if is_std_bool_ref rv.(i) "andb" || is_std_bool_ref rv.(i) "negb" ||
+                is_std_bool_ref rv.(i) "eqb" then mt ()
         else if is_std_primitive_compare_ref rv.(i) then mt ()
         else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then

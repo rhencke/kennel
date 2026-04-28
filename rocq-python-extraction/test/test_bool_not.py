@@ -1,4 +1,4 @@
-from primitives import bool_and, bool_neg, bool_neg_and, bool_not
+from primitives import bool_and, bool_eq, bool_neg, bool_neg_and, bool_not
 
 
 def test_bool_not_round_trip() -> None:
@@ -25,6 +25,13 @@ def test_bool_neg_and_round_trip() -> None:
     assert bool_neg_and(False, False) is True
 
 
+def test_bool_eq_round_trip() -> None:
+    assert bool_eq(True, True) is True
+    assert bool_eq(True, False) is False
+    assert bool_eq(False, True) is False
+    assert bool_eq(False, False) is True
+
+
 def test_bool_and_lowers_to_native_and(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -43,3 +50,10 @@ def test_bool_neg_and_preserves_precedence(build_default) -> None:
 
     assert "return not (b1 and b2)" in source
     assert "return not b1 and b2" not in source
+
+
+def test_bool_eq_lowers_to_native_equality(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "def eqb(" not in source
+    assert "return b1 == b2" in source
