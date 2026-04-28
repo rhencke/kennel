@@ -3161,6 +3161,173 @@ class TestSynchronousPreemption:
         assert status == 200
 
 
+class TestUntriagedInboxWiring:
+    """Verify that _do_post_inner / _process_action correctly enter/exit the
+    per-repo untriaged inbox for model-needing webhook actions (#1067)."""
+
+    def _payload(self, repo_owner: str = "owner") -> dict:
+        return {
+            "repository": {
+                "full_name": f"{repo_owner}/repo",
+                "owner": {"login": repo_owner},
+            },
+        }
+
+    def _issue_comment_payload(self, comment_id: int = 950) -> dict:
+        """An issue_comment on a PR — ``_action_uses_model`` returns True."""
+        return {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": comment_id,
+                "body": "please fix this",
+                "user": {"login": "owner"},
+                "html_url": f"https://github.com/owner/repo/pull/80#issuecomment-{comment_id}",
+            },
+            "issue": {
+                "number": 80,
+                "title": "my pr",
+                "body": "",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/owner/repo/pulls/80"
+                },
+            },
+        }
+
+    def _check_run_failure_payload(self) -> dict:
+        return {
+            **self._payload(),
+            "action": "completed",
+            "check_run": {
+                "name": "ci",
+                "conclusion": "failure",
+                "pull_requests": [{"number": 80}],
+            },
+        }
+
+    def test_enter_untriaged_called_for_model_action(self, server: tuple) -> None:
+        """enter_untriaged must be called synchronously for a model-needing action."""
+        url, cfg = server
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
+        assert status == 200
+        WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
+
+    def test_enter_untriaged_called_for_ci_failure(self, server: tuple) -> None:
+        """CI failures do not use the model, but they still preempt workers."""
+        url, cfg = server
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(url, cfg, "check_run", self._check_run_failure_payload())
+
+        assert status == 200
+        WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
+        WebhookHandler.registry.exit_untriaged.assert_called_with("owner/repo")
+
+    def test_enter_untriaged_not_called_for_non_model_action(
+        self, server: tuple
+    ) -> None:
+        """A PR-merge webhook does not use the model — enter_untriaged must NOT
+        be called."""
+        url, cfg = server
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 81, "merged": True},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.enter_untriaged.assert_not_called()
+
+    def test_exit_untriaged_called_on_handler_success(self, server: tuple) -> None:
+        """exit_untriaged must be called in the _process_action finally block
+        when the handler completes successfully."""
+        url, cfg = server
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(
+            url, cfg, "issue_comment", self._issue_comment_payload(951)
+        )
+        assert status == 200
+        WebhookHandler.registry.exit_untriaged.assert_called_with("owner/repo")
+
+    def test_exit_untriaged_called_on_handler_exception(self, server: tuple) -> None:
+        """exit_untriaged must still be called even when _process_action_inner
+        raises — the finally block must fire on all non-os._exit paths."""
+        url, cfg = server
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(
+            url, cfg, "issue_comment", self._issue_comment_payload(952)
+        )
+        assert status == 200
+        WebhookHandler.registry.exit_untriaged.assert_called_with("owner/repo")
+
+    def test_exit_untriaged_not_called_for_non_model_action(
+        self, server: tuple
+    ) -> None:
+        """exit_untriaged must NOT be called when the action does not use the
+        model — there was no matching enter."""
+        url, cfg = server
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 82, "merged": True},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.exit_untriaged.assert_not_called()
+
+    def test_enter_fires_before_background_spawn(self, server: tuple) -> None:
+        """enter_untriaged must be called before _fn_spawn_bg so the inbox is
+        non-empty before the background thread runs."""
+        url, cfg = server
+
+        call_order: list[str] = []
+
+        mock_session = MagicMock()
+        WebhookHandler.registry.get_session.return_value = mock_session
+        WebhookHandler.registry.enter_untriaged.side_effect = lambda _: (
+            call_order.append("enter")
+        )
+
+        original_spawn = _capturing_spawn_bg
+
+        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+            call_order.append("spawn")
+            original_spawn(fn, args)
+
+        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(
+            url, cfg, "issue_comment", self._issue_comment_payload(953)
+        )
+        assert status == 200
+        assert call_order == ["enter", "spawn"]
+
+
 class TestPopulateMemberships:
     def test_populates_from_get_collaborators(self, tmp_path: Path) -> None:
         from fido.config import RepoMembership

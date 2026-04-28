@@ -172,6 +172,7 @@ class Action:
     reply_to: dict[str, Any] | None = None  # {repo, pr, comment_id}
     review_comments: dict[str, Any] | None = None  # {repo, pr, review_id}
     comment_body: str | None = None
+    preempts_worker: bool = False
     is_bot: bool = False
     context: dict[str, Any] | None = None  # {pr_title, file, diff_hunk, line, pr_body}
     thread: dict[str, Any] | None = (
@@ -794,7 +795,10 @@ def dispatch(
         cmd = wct_oracle.translate(wev)
         assert isinstance(cmd, wct_oracle.CmdCIFailure), "translate_total"
         pr_str = ", ".join(f"#{n}" for n in pr_nums) if pr_nums else "unknown PR"
-        return Action(prompt=f"CI failure on {pr_str}: {name} ({conclusion})")
+        return Action(
+            prompt=f"CI failure on {pr_str}: {name} ({conclusion})",
+            preempts_worker=True,
+        )
 
     if event == "pull_request" and action == "closed":
         pr = payload.get("pull_request", {})
@@ -1734,6 +1738,7 @@ def _reorder_tasks_background(
     _reorder_fn: Callable[..., None] | None = None,
     _sync_fn: Callable[[Path, Any], None] | None = None,
     _coalesce_state: dict[str, Any] | None = None,
+    _release_untriaged_on_finish: bool = False,
 ) -> None:
     """Run :func:`~fido.tasks.reorder_tasks` in a daemon background thread.
 
@@ -1776,7 +1781,11 @@ def _reorder_tasks_background(
     )
 
     with _reorder_coalesce_lock:
-        entry = state.setdefault(key, {"running": False, "pending": None})
+        entry = state.setdefault(
+            key, {"running": False, "pending": None, "untriaged_holds": 0}
+        )
+        if _release_untriaged_on_finish:
+            entry["untriaged_holds"] = int(entry.get("untriaged_holds", 0)) + 1
         if entry["running"]:
             # Coalesce: latest call wins; the running thread will do one more pass.
             entry["pending"] = (commit_summary, kwargs)
@@ -1787,6 +1796,7 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
+        release_untriaged = 0
         # Register as "webhook" so the session talker reflects the true nature of
         # this thread: it is triggered by webhooks and should not be treated as the
         # worker for preemption purposes.  Without this, current_thread_kind()
@@ -1803,13 +1813,20 @@ def _reorder_tasks_background(
                 with _reorder_coalesce_lock:
                     pending = state[key].get("pending")
                     if pending is None:
-                        state[key]["running"] = False
-                        return
+                        break
                     state[key]["pending"] = None
                     cs, kw = pending
         finally:
+            with _reorder_coalesce_lock:
+                entry = state.get(key)
+                if entry is not None:
+                    release_untriaged += int(entry.get("untriaged_holds", 0))
+                    entry["untriaged_holds"] = 0
+                    entry["running"] = False
             if registry is not None and repo_cfg is not None:
                 registry.set_rescoping(repo_cfg.name, False)
+                for _ in range(release_untriaged):
+                    registry.exit_untriaged(repo_cfg.name)
             if repo_cfg is not None:
                 set_thread_repo(None)
             set_thread_kind(None)
@@ -1819,7 +1836,22 @@ def _reorder_tasks_background(
         name=f"reorder-{work_dir.name}",
         daemon=True,
     )
-    _start(t)
+    try:
+        _start(t)
+    except Exception:
+        release_untriaged = 0
+        with _reorder_coalesce_lock:
+            entry = state.get(key)
+            if entry is not None:
+                release_untriaged = int(entry.get("untriaged_holds", 0))
+                entry["untriaged_holds"] = 0
+                entry["running"] = False
+                entry["pending"] = None
+        if registry is not None and repo_cfg is not None:
+            registry.set_rescoping(repo_cfg.name, False)
+            for _ in range(release_untriaged):
+                registry.exit_untriaged(repo_cfg.name)
+        raise
 
 
 def create_task(
@@ -1894,9 +1926,25 @@ def create_task(
     launch_sync(config, repo_cfg, gh)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
-        _reorder_background_fn(
-            repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry
-        )
+        if registry is not None and _reorder_background_fn is _reorder_tasks_background:
+            registry.enter_untriaged(repo_cfg.name)
+            try:
+                _reorder_background_fn(
+                    repo_cfg.work_dir,
+                    commit_summary,
+                    config,
+                    gh,
+                    repo_cfg,
+                    registry,
+                    _release_untriaged_on_finish=True,
+                )
+            except Exception:
+                registry.exit_untriaged(repo_cfg.name)
+                raise
+        else:
+            _reorder_background_fn(
+                repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry
+            )
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task

@@ -832,6 +832,327 @@ class TestRescoping:
         assert not errors
 
 
+class TestUntriagedInbox:
+    """Tests for the per-repo untriaged-webhook inbox (fix #1067)."""
+
+    def _reg(self) -> WorkerRegistry:
+        return WorkerRegistry(MagicMock())
+
+    # ── has_untriaged ─────────────────────────────────────────────────────
+
+    def test_has_untriaged_false_for_unknown_repo(self) -> None:
+        reg = self._reg()
+        assert reg.has_untriaged("unknown/repo") is False
+
+    def test_has_untriaged_false_before_any_enter(self) -> None:
+        reg = self._reg()
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_has_untriaged_true_after_enter(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+
+    def test_has_untriaged_false_after_enter_then_exit(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_has_untriaged_true_while_multiple_pending(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+
+    def test_has_untriaged_false_after_all_exits(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_inbox_is_per_repo(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+        assert reg.has_untriaged("foo/baz") is False
+
+    # ── exit_untriaged underflow ──────────────────────────────────────────
+
+    def test_exit_untriaged_when_count_zero_does_not_raise(self) -> None:
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")  # must not raise
+
+    def test_exit_untriaged_underflow_leaves_count_zero(self) -> None:
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    # ── wait_for_inbox_drain ──────────────────────────────────────────────
+
+    def test_wait_returns_true_when_empty(self) -> None:
+        reg = self._reg()
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.1)
+        assert result is True
+
+    def test_wait_returns_true_after_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.1)
+        assert result is True
+
+    def test_wait_blocks_until_exit(self) -> None:
+        """wait_for_inbox_drain blocks while the inbox is non-empty, then unblocks."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        drained = threading.Event()
+
+        def drainer() -> None:
+            result = reg.wait_for_inbox_drain("foo/bar", timeout=2.0)
+            if result:
+                drained.set()
+
+        t = threading.Thread(target=drainer)
+        t.start()
+        # Give the waiter a moment to start blocking
+        time.sleep(0.01)
+        assert not drained.is_set(), "should still be waiting"
+        reg.exit_untriaged("foo/bar")
+        t.join(timeout=2.0)
+        assert drained.is_set(), "should have been unblocked by exit"
+
+    def test_wait_returns_false_on_timeout(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.02)
+        assert result is False
+        # Clean up so the event doesn't linger
+        reg.exit_untriaged("foo/bar")
+
+    def test_wait_for_unknown_repo_returns_true_immediately(self) -> None:
+        reg = self._reg()
+        result = reg.wait_for_inbox_drain("ghost/repo", timeout=0.1)
+        assert result is True
+
+    def test_wait_unblocks_when_last_of_multiple_exits(self) -> None:
+        """Drain fires only when the last of several enters is exited."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        drained = threading.Event()
+
+        def waiter() -> None:
+            if reg.wait_for_inbox_drain("foo/bar", timeout=2.0):
+                drained.set()
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.01)
+        reg.exit_untriaged("foo/bar")
+        time.sleep(0.01)
+        assert not drained.is_set(), "one exit should not drain"
+        reg.exit_untriaged("foo/bar")
+        t.join(timeout=2.0)
+        assert drained.is_set(), "second exit should drain"
+
+    # ── thread-safety ─────────────────────────────────────────────────────
+
+    def test_concurrent_enter_exit_is_threadsafe(self) -> None:
+        """Concurrent enter_untriaged and exit_untriaged calls must not corrupt state."""
+        reg = self._reg()
+        errors: list[Exception] = []
+        n = 200
+
+        def worker_enter() -> None:
+            try:
+                for _ in range(n):
+                    reg.enter_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        def worker_exit() -> None:
+            try:
+                for _ in range(n):
+                    reg.exit_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        # Pre-fill to avoid underflow warnings in the test
+        for _ in range(n * 2):
+            reg.enter_untriaged("foo/bar")
+
+        threads = [
+            threading.Thread(target=worker_enter),
+            threading.Thread(target=worker_enter),
+            threading.Thread(target=worker_exit),
+            threading.Thread(target=worker_exit),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+        # After equal enters and exits, count returns to the pre-filled value
+        assert reg.has_untriaged("foo/bar") is True
+
+
+class TestPreemptionFsmOracle:
+    """Tests for the handler_preemption FSM oracle wired into WorkerRegistry.
+
+    Each test maps to a proved invariant from ``models/handler_preemption.v``.
+    The FSM oracle validates that WorkerTurnStart is rejected when the inbox
+    is non-empty — the core preemption guarantee from #1067.
+    """
+
+    def _reg(self) -> WorkerRegistry:
+        return WorkerRegistry(MagicMock())
+
+    # ── worker_blocked_when_nonempty ─────────────────────────────────────
+
+    def test_assert_worker_turn_ok_raises_when_inbox_nonempty(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    def test_assert_worker_turn_ok_raises_with_multiple_pending(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    # ── worker_turn_proceeds_when_empty ──────────────────────────────────
+
+    def test_assert_worker_turn_ok_succeeds_when_empty(self) -> None:
+        reg = self._reg()
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_assert_worker_turn_ok_succeeds_after_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_assert_worker_turn_ok_succeeds_after_full_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    # ── per-repo isolation ───────────────────────────────────────────────
+
+    def test_assert_worker_turn_ok_is_per_repo(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        # Different repo is still empty — worker turn should be accepted
+        reg.assert_worker_turn_ok("foo/baz")  # must not raise
+        # But the repo with a pending webhook should reject
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    # ── handler_done_rejected_from_empty (underflow) ─────────────────────
+
+    def test_exit_untriaged_underflow_does_not_corrupt_fsm(self) -> None:
+        """An underflow exit_untriaged logs a warning but doesn't crash the FSM.
+
+        After the underflow, the FSM should still be in Empty so
+        assert_worker_turn_ok works.
+        """
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")  # underflow — logs warning, no FSM change
+        reg.assert_worker_turn_ok("foo/bar")  # still Empty — should work
+
+    # ── full lifecycle ───────────────────────────────────────────────────
+
+    def test_full_enter_assert_fails_drain_assert_succeeds(self) -> None:
+        """enter → assert (fails) → exit → assert (succeeds)."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_repeated_worker_turns_while_empty(self) -> None:
+        """Multiple WorkerTurnStart calls are fine when inbox stays empty."""
+        reg = self._reg()
+        reg.assert_worker_turn_ok("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # all should succeed
+
+    def test_interleaved_enter_exit_with_worker_turns(self) -> None:
+        """Full interleaved lifecycle: enters, exits, worker turns."""
+        reg = self._reg()
+        # Worker turn ok while empty
+        reg.assert_worker_turn_ok("foo/bar")
+        # Two webhooks arrive
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        # Worker blocked
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        # First handler finishes — still blocked
+        reg.exit_untriaged("foo/bar")
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        # Second handler finishes — now clear
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_concurrent_enter_exit_with_oracle(self) -> None:
+        """Concurrent enter/exit preserves FSM consistency.
+
+        After equal enters and exits, the FSM must be back in Empty
+        so assert_worker_turn_ok succeeds.
+        """
+        reg = self._reg()
+        n = 50
+        errors: list[Exception] = []
+
+        def enter_batch() -> None:
+            try:
+                for _ in range(n):
+                    reg.enter_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        def exit_batch() -> None:
+            try:
+                for _ in range(n):
+                    reg.exit_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        # Pre-fill so exits don't underflow
+        for _ in range(n):
+            reg.enter_untriaged("foo/bar")
+
+        threads = [
+            threading.Thread(target=enter_batch),
+            threading.Thread(target=exit_batch),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+        # Drain the remaining enters
+        remaining = reg._untriaged.get("foo/bar", 0)  # pyright: ignore[reportPrivateUsage]
+        for _ in range(remaining):
+            reg.exit_untriaged("foo/bar")
+        # After full drain, worker turn should be ok
+        reg.assert_worker_turn_ok("foo/bar")
+
+
 class TestRegistryFsmOracle:
     """Tests for the worker_registry_crash FSM oracle wired into WorkerRegistry.
 

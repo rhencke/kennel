@@ -761,10 +761,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # still fires a second preempt in case the worker starts a new turn in
         # the window between this cancel and the background thread acquiring
         # the session lock.
-        if action and self._action_uses_model(action):
+        #
+        # Also enter the untriaged inbox (#1067) synchronously here — before
+        # the background thread spawns — so the worker sees a non-empty inbox
+        # at its next turn boundary and yields rather than starting another
+        # provider turn.  exit_untriaged is called in _process_action's finally
+        # block when the handler finishes.
+        if action and self._action_preempts_worker(action):
             session = self.registry.get_session(repo_cfg.name)
             if session is not None:
                 session.preempt_worker()
+            self.registry.enter_untriaged(repo_cfg.name)
 
         # Process in background thread so we don't block the server.
         if action:
@@ -818,6 +825,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         provider.set_thread_kind("webhook")
         session = self.registry.get_session(repo_cfg.name)
         needs_model = self._action_uses_model(action)
+        preempts_worker = self._action_preempts_worker(action)
         try:
             with self.registry.webhook_activity(repo_cfg.name, description) as activity:
                 if session is not None and needs_model:
@@ -845,6 +853,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_cfg.name,
                 tid,
             )
+            if preempts_worker:
+                # Mirror the enter_untriaged called synchronously in
+                # _do_post_inner — decrement now that this handler action is
+                # done so the worker can resume its next turn (#1067).  Model
+                # actions hold the provider session; non-model interrupt
+                # actions such as CI failures still block worker admission
+                # until the webhook action has launched/woken the worker.
+                self.registry.exit_untriaged(repo_cfg.name)
             provider.set_thread_kind(None)
             provider.set_thread_repo(None)
 
@@ -858,6 +874,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
         don't touch the model — no point blocking the worker for those.
         """
         return bool(action.reply_to or action.review_comments or action.comment_body)
+
+    def _action_preempts_worker(self, action: Action) -> bool:
+        """True when the action must run before the next worker provider turn."""
+        return self._action_uses_model(action) or action.preempts_worker
 
     def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""

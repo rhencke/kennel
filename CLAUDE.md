@@ -324,6 +324,27 @@ durable store handles *across runs*. Don't conflate them.
 **Reviewer signal:** if an action is taken before the corresponding record is
 written to `tasks.json` (or another durable store), the order is wrong.
 
+### Rocq-modeled coordination boundary
+
+Long-term coordination work under #710 must make the scheduler/reducer
+boundary authoritative. Webhooks, CLI commands, provider callbacks, CI updates,
+and rescope results should translate into typed commands or intents; one
+Rocq-modeled scheduler/reducer transition decides the durable state mutation;
+only after that commit may Python run outbox effects such as replies,
+reactions, wakeups, preempt signals, pushes, or task execution.
+
+Rocq does not help if Python keeps side-channel coordination state outside the
+modeled transition. Avoid ad hoc counters, background flags, worker-local
+snapshots, or direct lock choreography as sources of truth. If a mutation can
+change worker admission, command ordering, task status, provider-session
+ownership, CI failure state, rescope outcome, dedupe, or outbox visibility, it
+belongs behind the modeled transition boundary with a runtime oracle or
+extracted reducer enforcing it.
+
+**Reviewer signal:** if coordination code mutates authoritative state without
+calling the scheduler/reducer transition, the proof is only covering the
+clean model while races remain in the glue.
+
 ### Patterns to reject in review
 
 | Pattern | Why it's wrong |

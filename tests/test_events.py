@@ -1307,6 +1307,7 @@ class TestDispatchCheckRun:
         result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "CI failure" in result.prompt
+        assert result.preempts_worker is True
 
     def test_success_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -3648,6 +3649,56 @@ class TestReorderTasksBackground:
         on_inprogress_affected = calls[0][2]["_on_inprogress_affected"]
         on_inprogress_affected()
         registry.abort_task.assert_called_once_with("owner/repo")
+
+    def test_releases_untriaged_hold_after_reorder_finishes(
+        self, tmp_path: Path
+    ) -> None:
+        started: list = []
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _, mock_reorder = self._capture_reorder_calls()
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+            _release_untriaged_on_finish=True,
+        )
+
+        self._run_thread(started)
+
+        registry.exit_untriaged.assert_called_once_with("owner/repo")
+
+    def test_releases_untriaged_hold_when_thread_start_fails(
+        self, tmp_path: Path
+    ) -> None:
+        registry = MagicMock()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+        def fail_start(_thread):
+            raise RuntimeError("cannot start")
+
+        with pytest.raises(RuntimeError, match="cannot start"):
+            _reorder_tasks_background(
+                tmp_path,
+                "commits",
+                self._cfg(tmp_path),
+                MagicMock(),
+                repo_cfg=repo_cfg,
+                registry=registry,
+                _start=fail_start,
+                _reorder_fn=MagicMock(),
+                _coalesce_state={},
+                _release_untriaged_on_finish=True,
+            )
+
+        registry.set_rescoping.assert_called_once_with("owner/repo", False)
+        registry.exit_untriaged.assert_called_once_with("owner/repo")
 
     def test_on_inprogress_affected_not_in_kwargs_when_no_registry(
         self, tmp_path: Path

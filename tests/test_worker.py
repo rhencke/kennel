@@ -9298,6 +9298,235 @@ class TestExecuteTask:
         gh.resolve_thread.assert_called_once_with("thread-node-xyz")
 
 
+class TestYieldForUntriaged:
+    """Tests for Worker._yield_for_untriaged and its two call sites in
+    execute_task (#1067)."""
+
+    def _make_worker_with_registry(
+        self, tmp_path: Path
+    ) -> tuple[Worker, MagicMock, MagicMock]:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        worker = Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/repo",
+            registry=registry,
+        )
+        return worker, gh, registry
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    def _pending_task(self, title: str = "Do work") -> dict:
+        return {"id": "t1", "title": title, "status": "pending", "type": "spec"}
+
+    @staticmethod
+    def _git_with_new_commits():
+        shas = iter(["aaa", "bbb"])
+
+        def side_effect(args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        m = MagicMock()
+        m.side_effect = side_effect
+        return m
+
+    # ── _yield_for_untriaged unit tests ───────────────────────────────────
+
+    def test_no_op_when_registry_is_none(self, tmp_path: Path) -> None:
+        """_yield_for_untriaged must not crash when _registry is None."""
+        gh = MagicMock()
+        worker = Worker(tmp_path, gh, repo_name="owner/repo")
+        worker._yield_for_untriaged()  # pyright: ignore[reportPrivateUsage]
+
+    def test_no_op_when_inbox_empty(self, tmp_path: Path) -> None:
+        worker, _, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = False
+        worker._yield_for_untriaged()  # pyright: ignore[reportPrivateUsage]
+        registry.wait_for_inbox_drain.assert_not_called()
+
+    def test_drains_when_inbox_non_empty(self, tmp_path: Path) -> None:
+        worker, _, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = True
+        worker._yield_for_untriaged()  # pyright: ignore[reportPrivateUsage]
+        registry.wait_for_inbox_drain.assert_called_once_with(
+            "owner/repo", timeout=30.0
+        )
+
+    def test_passes_repo_name_to_has_untriaged(self, tmp_path: Path) -> None:
+        worker, _, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = False
+        worker._yield_for_untriaged()  # pyright: ignore[reportPrivateUsage]
+        registry.has_untriaged.assert_called_once_with("owner/repo")
+
+    # ── execute_task integration: initial provider_run site ───────────────
+
+    def test_yields_after_initial_provider_run_when_inbox_non_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """wait_for_inbox_drain must be called after the initial provider_run
+        when untriaged webhooks are waiting."""
+        worker, gh, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = True
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task()
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        registry.wait_for_inbox_drain.assert_called_with("owner/repo", timeout=30.0)
+        registry.assert_worker_turn_ok.assert_called_with("owner/repo")
+
+    def test_no_yield_after_initial_provider_run_when_inbox_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """wait_for_inbox_drain must NOT be called when the inbox is empty."""
+        worker, gh, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = False
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task()
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        registry.wait_for_inbox_drain.assert_not_called()
+
+    # ── execute_task integration: retry loop site ─────────────────────────
+
+    def test_yields_inside_retry_loop_when_inbox_non_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """wait_for_inbox_drain must be called inside the retry loop (after the
+        second provider_run) when untriaged webhooks are waiting."""
+        worker, gh, registry = self._make_worker_with_registry(tmp_path)
+        registry.has_untriaged.return_value = True
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task()
+
+        # HEAD stays the same after the first run (enters retry loop),
+        # then changes after the retry (loop exits).
+        shas = iter(["aaa", "aaa", "bbb"])
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout=next(shas, "bbb") if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                side_effect=[("sess-1", ""), ("sess-1", "")],
+            ),
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # Called at least twice: once after initial run, once in retry loop
+        assert registry.wait_for_inbox_drain.call_count >= 2
+
+
+class TestAssertWorkerTurnOk:
+    """Tests for Worker._assert_worker_turn_ok — the handler-preemption
+    oracle call before each provider_run (#1067)."""
+
+    def test_no_op_when_registry_is_none(self, tmp_path: Path) -> None:
+        """_assert_worker_turn_ok must not crash when _registry is None."""
+        gh = MagicMock()
+        worker = Worker(tmp_path, gh, repo_name="owner/repo")
+        worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+
+    def test_delegates_to_registry(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+    def test_propagates_assertion_error(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.assert_worker_turn_ok.side_effect = AssertionError("boom")
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        with pytest.raises(AssertionError, match="boom"):
+            worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+
+
+class TestAdmitWorkerTurn:
+    """Tests for Worker._admit_worker_turn — the pre-provider gate."""
+
+    def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = True
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+
+        registry.wait_for_inbox_drain.assert_called_once_with(
+            "owner/repo", timeout=None
+        )
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+    def test_does_not_wait_when_inbox_empty(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+
+        registry.wait_for_inbox_drain.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+
 class TestRunExecuteTaskIntegration:
     """Tests that Worker.run() calls execute_task after handle_threads."""
 
