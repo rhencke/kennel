@@ -6,7 +6,15 @@
     keep/rewrite/complete decisions to a previously snapped queue.  Today's
     Python still stores this through JSON plus state sidecars; the model is the
     intended SQLite-era contract and first serves as an oracle around the
-    handwritten path. *)
+    handwritten path.
+
+    E1 flip point: while D11 is in oracle mode, Python translates the current
+    omission-based Opus output into [RescopeRelease] rows, calls
+    [apply_batched_rescope], and fails closed if the handwritten reorder result
+    diverges.  When the E-band scheduler/reducer boundary becomes authoritative,
+    the extracted transition becomes the durable rescope implementation itself:
+    Python should only translate inbound ACT/DO releases into the modeled input,
+    commit the returned order/rows, then run outbox effects after that commit. *)
 
 From FidoModels Require Import preamble.
 
