@@ -571,6 +571,86 @@ let needs_numeric_constructor_parens = function
   | _ ->
       false
 
+type py_associativity =
+  | PyAssocLeft
+  | PyAssocRight
+  | PyAssocNone
+
+type py_child_side =
+  | PyLeftChild
+  | PyRightChild
+  | PyOperandChild
+
+type py_rendered_expr = {
+  py_expr_pp : Pp.t;
+  py_precedence : int;
+}
+
+let py_prec_lambda = 10
+let py_prec_conditional = 20
+let py_prec_or = 30
+let py_prec_and = 40
+let py_prec_not = 50
+let py_prec_compare = 60
+let py_prec_bit_or = 70
+let py_prec_bit_and = 80
+let py_prec_add = 100
+let py_prec_mul = 110
+let py_prec_unary = 120
+let py_prec_call = 140
+let py_prec_atom = 150
+
+let py_rendered ?(precedence=py_prec_atom) py_expr_pp = {
+  py_expr_pp;
+  py_precedence = precedence;
+}
+
+let pp_py_rendered expr = expr.py_expr_pp
+
+let py_same_precedence_needs_parens associativity side =
+  match associativity, side with
+  | PyAssocLeft, PyLeftChild -> false
+  | PyAssocRight, PyRightChild -> false
+  | PyAssocLeft, PyRightChild -> false
+  | PyAssocRight, PyLeftChild -> false
+  | PyAssocNone, _ -> true
+  | _, PyOperandChild -> true
+
+let pp_py_child parent_precedence associativity side child =
+  if child.py_precedence < parent_precedence ||
+     (child.py_precedence = parent_precedence &&
+      py_same_precedence_needs_parens associativity side)
+  then str "(" ++ child.py_expr_pp ++ str ")"
+  else child.py_expr_pp
+
+let py_prefix ?(wrap_operand=false) prefix precedence operand =
+  let pp_operand =
+    if wrap_operand then str "(" ++ operand.py_expr_pp ++ str ")"
+    else pp_py_child precedence PyAssocNone PyOperandChild operand
+  in
+  py_rendered ~precedence (str prefix ++ pp_operand)
+
+let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
+    operator precedence left right =
+  let pp_left =
+    pp_py_child precedence associativity PyLeftChild left
+  in
+  let pp_right =
+    pp_py_child precedence associativity PyRightChild right
+  in
+  let pp =
+    pp_left ++ str (" " ^ operator ^ " ") ++ pp_right
+  in
+  let pp = if wrap then str "(" ++ pp ++ str ")" else pp in
+  py_rendered ~precedence pp
+
+let py_call head args =
+  let pp_head =
+    pp_py_child py_prec_call PyAssocLeft PyLeftChild head
+  in
+  py_rendered ~precedence:py_prec_call
+    (pp_head ++ str "(" ++ args ++ str ")")
+
 type diagnostic = {
   code : string;
   title : string;
@@ -1142,14 +1222,86 @@ let rec pp_expr state env expr =
       in
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      let rec rendered_expr expr =
+        py_rendered ~precedence:(expr_precedence expr) (pp_expr state env expr)
+      and expr_precedence expr =
+        match std_string_expr_value expr with
+        | Some _ -> py_prec_atom
+        | None ->
+        match expr with
+        | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
+        | MLcons (_, _, []) ->
+            py_prec_atom
+        | MLlam _ ->
+            py_prec_lambda
+        | MLletin _ ->
+            py_prec_call
+        | MLtuple _ ->
+            py_prec_atom
+        | MLcons (_, r, [_]) when is_std_option_some_ref r ->
+            py_prec_atom
+        | MLcons (_, r, [_]) when is_std_list_cons_ref r ->
+            py_prec_add
+        | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
+            py_prec_add
+        | MLcons (_, r, [_])
+          when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
+            py_prec_add
+        | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
+            py_prec_unary
+        | MLcons (_, r, [_]) when is_std_N_pos_ref r || is_std_Z_pos_ref r ->
+            py_prec_atom
+        | MLcons (_, r, [_; _])
+          when is_std_prod_pair_ref r || is_std_Q_make_ref r ->
+            py_prec_atom
+        | MLcons (_, r, [_; _]) when is_std_string_cons_ref r ->
+            py_prec_add
+        | MLcons _ ->
+            py_prec_call
+        | MLapp (app_head, app_args) ->
+            let (app_head, app_args) = collect app_args app_head in
+            let app_args =
+              List.filter (fun a -> not (is_erased_arg a)) app_args
+            in
+            (match app_head, app_args with
+             | MLglob r, [_] when is_std_bool_ref r "negb" ->
+                 py_prec_not
+             | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
+                 py_prec_and
+             | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
+                 py_prec_compare
+             | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
+                 py_prec_compare
+             | MLglob r, [_; _] when is_std_list_app_ref r ->
+                 py_prec_add
+             | MLglob r, [_; _]
+               when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
+                 py_prec_bit_or
+             | MLglob r, [_; _]
+               when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
+                 py_prec_bit_and
+             | MLglob r, [_; _]
+               when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
+                 py_prec_add
+             | _ ->
+                 py_prec_call)
+        | MLcase _ ->
+            py_prec_conditional
+        | MLfix _ ->
+            py_prec_call
+        | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
+            py_prec_atom
+      in
       let pp_method_call_expr =
         match head, all_args with
         | MLglob r, self_arg :: method_args -> (
             match lookup_active_method_target (pp_global state Term r) with
             | Some (_class_name, method_name) ->
                 Some
-                  (pp_expr state env self_arg ++ str "." ++ str method_name ++ str "(" ++
-                   prlist_with_sep (fun () -> str ", ") (pp_expr state env) method_args ++
+                  (pp_py_rendered (rendered_expr self_arg) ++
+                   str "." ++ str method_name ++ str "(" ++
+                   prlist_with_sep (fun () -> str ", ")
+                     (fun arg -> pp_py_rendered (rendered_expr arg)) method_args ++
                    str ")")
             | None -> None)
         | _ -> None
@@ -1164,12 +1316,13 @@ let rec pp_expr state env expr =
             in
             match lookup_active_record_field_target head_name with
             | Some field_name ->
-                Some (pp_expr state env self_arg ++ str "." ++ str field_name)
+                Some (pp_py_rendered (rendered_expr self_arg) ++
+                      str "." ++ str field_name)
             | None -> None)
         | _ -> None
       in
       let collection_key kind key =
-        pp_collection_key kind (pp_expr state env key)
+        pp_collection_key kind (pp_py_rendered (rendered_expr key))
       in
       let pp_map_app kind r =
         match all_args with
@@ -1207,11 +1360,26 @@ let rec pp_expr state env expr =
         | [key; values] when is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
             Some (collection_key kind key ++ str " in " ++ pp_expr state env values)
         | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
-            Some (str "(" ++ pp_expr state env left ++ str " | " ++ pp_expr state env right ++ str ")")
+            Some
+              (pp_py_rendered
+                 (py_infix ~wrap:true "|"
+                    py_prec_bit_or
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
-            Some (str "(" ++ pp_expr state env left ++ str " & " ++ pp_expr state env right ++ str ")")
+            Some
+              (pp_py_rendered
+                 (py_infix ~wrap:true "&"
+                    py_prec_bit_and
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
-            Some (str "(" ++ pp_expr state env left ++ str " - " ++ pp_expr state env right ++ str ")")
+            Some
+              (pp_py_rendered
+                 (py_infix ~associativity:PyAssocNone ~wrap:true "-"
+                    py_prec_add
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [values] when is_positive_set_ref r "cardinal" || is_string_set_ref r "cardinal" ->
             Some (str "len(" ++ pp_expr state env values ++ str ")")
         | [values] when is_positive_set_ref r "elements" || is_string_set_ref r "elements" ->
@@ -1224,25 +1392,35 @@ let rec pp_expr state env expr =
       let pp_list_app r =
         match all_args with
         | [left; right] when is_std_list_app_ref r ->
-            Some (pp_expr state env left ++ str " + " ++ pp_expr state env right)
+            Some
+              (pp_py_rendered
+                 (py_infix "+"
+                    py_prec_add
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | _ -> None
       in
       let pp_std_bool_app r =
-        let pp_atomic_or_parenthesized_operand operand =
-          match operand with
-          | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _ ->
-              pp_expr state env operand
-          | _ ->
-              str "(" ++ pp_expr state env operand ++ str ")"
-        in
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
-            Some (str "not " ++ pp_atomic_or_parenthesized_operand value)
+            Some
+              (pp_py_rendered
+                 (py_prefix ~wrap_operand:true "not " py_prec_not
+                    (rendered_expr value)))
         | [left; right] when is_std_bool_ref r "andb" ->
-            Some (pp_expr state env left ++ str " and " ++ pp_expr state env right)
+            Some
+              (pp_py_rendered
+                 (py_infix "and"
+                    py_prec_and
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [left; right] when is_std_bool_ref r "eqb" ->
-            Some (pp_atomic_or_parenthesized_operand left ++ str " == " ++
-                  pp_atomic_or_parenthesized_operand right)
+            Some
+              (pp_py_rendered
+                 (py_infix ~associativity:PyAssocNone "=="
+                    py_prec_compare
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | _ ->
             None
       in
@@ -1251,15 +1429,30 @@ let rec pp_expr state env expr =
         | [left; right]
           when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
                is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
-            Some (pp_expr state env left ++ str " == " ++ pp_expr state env right)
+            Some
+              (pp_py_rendered
+                 (py_infix ~associativity:PyAssocNone "=="
+                    py_prec_compare
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [left; right]
           when is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
                is_std_ascii_ref r "leb" || is_std_string_ref r "leb" ->
-            Some (pp_expr state env left ++ str " <= " ++ pp_expr state env right)
+            Some
+              (pp_py_rendered
+                 (py_infix ~associativity:PyAssocNone "<="
+                    py_prec_compare
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | [left; right]
           when is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
                is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb" ->
-            Some (pp_expr state env left ++ str " < " ++ pp_expr state env right)
+            Some
+              (pp_py_rendered
+                 (py_infix ~associativity:PyAssocNone "<"
+                    py_prec_compare
+                    (rendered_expr left)
+                    (rendered_expr right)))
         | _ ->
             None
       in
@@ -1377,18 +1570,15 @@ let rec pp_expr state env expr =
             None
       in
       let pp_default_app =
-        (* Parenthesise the function if it is itself a lambda expression,
-           since [lambda x: e] has very low precedence in Python. *)
-        let pp_head =
-          match head with
-          | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-          | _ -> pp_expr state env head
-        in
-        if List.is_empty all_args then pp_head
+        let rendered_head = rendered_expr head in
+        if List.is_empty all_args then pp_py_rendered rendered_head
         else
-          pp_head ++ str "(" ++
-          prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-          str ")"
+          pp_py_rendered
+            (py_call rendered_head
+               (prlist_with_sep
+                  (fun () -> str ", ")
+                  (fun arg -> pp_py_rendered (rendered_expr arg))
+                  all_args))
       in
       let pp_special =
         match pp_record_field_expr with
