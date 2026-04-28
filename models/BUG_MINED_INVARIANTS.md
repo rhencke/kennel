@@ -236,6 +236,14 @@ unrelated tasks).
 **Status.** Already filed as **D11 (#749) — model rescope confluence**.
 This bug is the empirical anchor.
 
+**E1 flip point.** D11 currently runs as a runtime oracle around
+`reorder_tasks`: Python translates Opus's omission-based result into explicit
+ACT/DO rescope releases, compares the handwritten output with
+`apply_batched_rescope`, and fails closed on divergence. At E1, that extracted
+transition stops being a checker and becomes the durable rescope reducer: the
+Python path should commit the modeled order/rows first, then run notifications,
+wakeups, and PR-body sync as outbox effects after the commit.
+
 ---
 
 ## K. PR transition gate (draft→ready, request_review, merge)

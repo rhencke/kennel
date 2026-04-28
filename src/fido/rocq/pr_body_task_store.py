@@ -355,7 +355,7 @@ def apply_rescope_ops(
             match row.task_status:
                 case StatusPending():
                     row_ = TaskRow(
-                        task_title=title,
+                        task_title=row.task_title,
                         task_description=description,
                         task_kind=row.task_kind,
                         task_status=row.task_status,
@@ -380,7 +380,7 @@ def apply_rescope_ops(
                     )
                 case StatusBlocked():
                     row_ = TaskRow(
-                        task_title=title,
+                        task_title=row.task_title,
                         task_description=description,
                         task_kind=row.task_kind,
                         task_status=row.task_status,

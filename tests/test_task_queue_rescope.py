@@ -205,8 +205,11 @@ def test_model_rescope_and_abort_helpers() -> None:
 
     order, updated_rows = oracle.apply_rescope(snapshot_order, current_order, rows, ops)
     assert order == [2, 3, 1, 4, 5]
-    assert updated_rows[2].task_title == "thread two rewritten"
+    assert updated_rows[2].task_title == "thread two"
     assert type(updated_rows[1].task_status).__name__ == "StatusCompleted"
+    assert updated_rows[2].task_description == "new"
+    assert updated_rows[2].task_source_comment == 42
+    assert oracle.rescope_preserves_task_identity(snapshot_order, rows, updated_rows)
 
     lease = 2
     assert oracle.rescope_affects_active_task(lease, rows, updated_rows)
@@ -284,7 +287,7 @@ def test_apply_reorder_matches_oracle() -> None:
         },
     ]
     ordered_items = [
-        {"id": "t2", "title": "Comment follow-up rewritten", "description": "new"},
+        {"id": "t2", "title": "Comment follow-up", "description": "new"},
         {"id": "t5", "title": "Fix CI", "description": ""},
     ]
 
@@ -302,6 +305,128 @@ def test_apply_reorder_matches_oracle() -> None:
     assert [(task["id"], task["title"], task["status"]) for task in runtime] == [
         (task["id"], task["title"], task["status"]) for task in materialized
     ]
+
+
+def test_rescope_identity_rejects_title_and_comment_drift() -> None:
+    before = oracle.TaskRow(
+        task_title="Thread follow-up",
+        task_description="old",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=55,
+    )
+    rows_before = {1: before}
+
+    _order, rows_after = oracle.apply_rescope(
+        [1],
+        [1],
+        rows_before,
+        [oracle.RewriteTask(1, "Different title", "new")],
+    )
+    assert rows_after[1].task_title == "Thread follow-up"
+    assert rows_after[1].task_source_comment == 55
+    assert rows_after[1].task_description == "new"
+    assert not before.identity_changed(rows_after[1])
+    assert oracle.rescope_preserves_task_identity([1], rows_before, rows_after)
+
+    changed_title = oracle.TaskRow(
+        task_title="Different title",
+        task_description="new",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=55,
+    )
+    changed_comment = oracle.TaskRow(
+        task_title="Thread follow-up",
+        task_description="new",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=77,
+    )
+    assert before.identity_changed(changed_title)
+    assert before.identity_changed(changed_comment)
+    assert not oracle.rescope_preserves_task_identity(
+        [1], rows_before, {1: changed_title}
+    )
+    assert not oracle.rescope_preserves_task_identity(
+        [1], rows_before, {1: changed_comment}
+    )
+
+
+def test_batched_rescope_converges_for_permuted_releases() -> None:
+    rows = {
+        1: oracle.TaskRow(
+            "Thread follow-up",
+            "old",
+            oracle.TaskThread(),
+            oracle.StatusPending(),
+            55,
+        ),
+        2: oracle.TaskRow(
+            "Spec task",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusPending(),
+            None,
+        ),
+        3: oracle.TaskRow(
+            "Fix CI",
+            "",
+            oracle.TaskCI(),
+            oracle.StatusPending(),
+            None,
+        ),
+        4: oracle.TaskRow(
+            "Already done",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusCompleted(),
+            None,
+        ),
+        5: oracle.TaskRow(
+            "Late arrival",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusPending(),
+            None,
+        ),
+    }
+    snapshot_order = [1, 2, 3]
+    current_order = [1, 2, 3, 4, 5]
+    act_rewrite = oracle.RescopeRelease(
+        oracle.ReleaseACT(),
+        oracle.RewriteTask(1, "Title drift ignored", "new detail"),
+    )
+    do_complete = oracle.RescopeRelease(oracle.ReleaseDO(), oracle.CompleteTask(2))
+    act_keep = oracle.RescopeRelease(oracle.ReleaseACT(), oracle.KeepTask(3))
+
+    left_releases = [act_rewrite, do_complete, act_keep]
+    right_releases = [act_keep, act_rewrite, do_complete]
+
+    assert oracle.normalize_rescope_batch(snapshot_order, left_releases) == (
+        oracle.normalize_rescope_batch(snapshot_order, right_releases)
+    )
+
+    left_order, left_rows = oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, left_releases
+    )
+    right_order, right_rows = oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, right_releases
+    )
+
+    assert left_order == [3, 1, 4, 2, 5]
+    assert left_order == right_order
+    assert left_rows == right_rows
+    assert left_rows[1].task_title == "Thread follow-up"
+    assert left_rows[1].task_description == "new detail"
+    assert type(left_rows[2].task_status).__name__ == "StatusCompleted"
+    assert oracle.rescope_preserves_task_identity(snapshot_order, rows, left_rows)
+    assert oracle.batched_rescope_materially_significant(
+        snapshot_order, current_order, rows, left_releases
+    )
+    assert oracle.batched_rescope_materially_significant(
+        snapshot_order, current_order, rows, right_releases
+    )
 
 
 def test_abort_decision_matches_oracle(tmp_path: Path) -> None:

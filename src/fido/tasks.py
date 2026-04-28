@@ -18,6 +18,7 @@ from fido.github import GitHub
 from fido.prompts import Prompts
 from fido.provider import ProviderAgent
 from fido.rocq import pr_body_task_store as task_store_oracle
+from fido.rocq import task_queue_rescope as rescope_oracle
 from fido.state import (
     JsonFileStore,
     State,
@@ -78,6 +79,158 @@ def _task_store_for_oracle(
             task_source_comment=_task_source_comment_for_oracle(task),
         )
     return task_store_oracle.TaskStore(order, rows), tasks_by_oracle_id
+
+
+def _rescope_task_kind_for_oracle(task: dict[str, Any]) -> rescope_oracle.TaskKind:
+    title_upper = task.get("title", "").upper()
+    if title_upper.startswith("ASK:"):
+        return rescope_oracle.TaskAsk()
+    if title_upper.startswith("DEFER:"):
+        return rescope_oracle.TaskDefer()
+    if title_upper.startswith("CI FAILURE:") or task.get("type") == TaskType.CI:
+        return rescope_oracle.TaskCI()
+    if task.get("type") == TaskType.THREAD:
+        return rescope_oracle.TaskThread()
+    return rescope_oracle.TaskSpec()
+
+
+def _rescope_task_status_for_oracle(
+    task: dict[str, Any],
+) -> rescope_oracle.TaskStatus:
+    match task.get("status", TaskStatus.PENDING):
+        case TaskStatus.COMPLETED | "completed":
+            return rescope_oracle.StatusCompleted()
+        case TaskStatus.BLOCKED | "blocked":
+            return rescope_oracle.StatusBlocked()
+        case _:
+            return rescope_oracle.StatusPending()
+
+
+def _rescope_task_source_comment_for_oracle(task: dict[str, Any]) -> int | None:
+    comment_id = (task.get("thread") or {}).get("comment_id")
+    if comment_id is None:
+        return None
+    return int(comment_id)
+
+
+def _rescope_state_for_oracle(
+    task_list: list[dict[str, Any]],
+) -> tuple[
+    dict[str, int],
+    dict[int, dict[str, Any]],
+    list[int],
+    dict[int, rescope_oracle.TaskRow],
+]:
+    ids_by_task_id: dict[str, int] = {}
+    tasks_by_oracle_id: dict[int, dict[str, Any]] = {}
+    order: list[int] = []
+    rows: dict[int, rescope_oracle.TaskRow] = {}
+    for oracle_id, task in enumerate(task_list, 1):
+        task_id = task["id"]
+        ids_by_task_id[task_id] = oracle_id
+        tasks_by_oracle_id[oracle_id] = task
+        order.append(oracle_id)
+        rows[oracle_id] = rescope_oracle.TaskRow(
+            task_title=task.get("title", ""),
+            task_description=task.get("description", ""),
+            task_kind=_rescope_task_kind_for_oracle(task),
+            task_status=_rescope_task_status_for_oracle(task),
+            task_source_comment=_rescope_task_source_comment_for_oracle(task),
+        )
+    return ids_by_task_id, tasks_by_oracle_id, order, rows
+
+
+def _rescope_snapshot_order_for_oracle(
+    current: list[dict[str, Any]],
+    original_ids: frozenset[str],
+    seen_ids: set[str],
+    ids_by_task_id: dict[str, int],
+) -> list[int]:
+    snapshot_ids = original_ids | seen_ids
+    return [
+        ids_by_task_id[task["id"]]
+        for task in current
+        if task["id"] in snapshot_ids and task.get("status") != TaskStatus.COMPLETED
+    ]
+
+
+def _rescope_releases_for_oracle(
+    current: list[dict[str, Any]],
+    ordered_items: list[dict[str, Any]],
+    original_ids: frozenset[str],
+    seen_ids: set[str],
+    ids_by_task_id: dict[str, int],
+) -> list[rescope_oracle.RescopeRelease]:
+    ordered_by_id: dict[str, dict[str, Any]] = {}
+    for item in ordered_items:
+        if item.get("id") and item["id"] not in ordered_by_id:
+            ordered_by_id[item["id"]] = item
+    snapshot_ids = original_ids | seen_ids
+    releases: list[rescope_oracle.RescopeRelease] = []
+    for task in current:
+        task_id = task["id"]
+        if task_id not in snapshot_ids or task.get("status") == TaskStatus.COMPLETED:
+            continue
+        oracle_id = ids_by_task_id[task_id]
+        item = ordered_by_id.get(task_id)
+        if item is None:
+            decision: rescope_oracle.RescopeOp = rescope_oracle.CompleteTask(oracle_id)
+        elif "description" in item and item["description"] != task.get(
+            "description", ""
+        ):
+            decision = rescope_oracle.RewriteTask(
+                oracle_id,
+                task.get("title", ""),
+                item["description"],
+            )
+        else:
+            decision = rescope_oracle.KeepTask(oracle_id)
+        releases.append(
+            rescope_oracle.RescopeRelease(rescope_oracle.ReleaseACT(), decision)
+        )
+    return releases
+
+
+def _materialize_rescope_oracle_result(
+    oracle_order: list[int],
+    oracle_rows: dict[int, rescope_oracle.TaskRow],
+    tasks_by_oracle_id: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    materialized: list[dict[str, Any]] = []
+    for oracle_id in oracle_order:
+        task = dict(tasks_by_oracle_id[oracle_id])
+        row = oracle_rows[oracle_id]
+        task["title"] = row.task_title
+        task["description"] = row.task_description
+        task["status"] = type(row.task_status).__name__.removeprefix("Status").lower()
+        materialized.append(task)
+    return materialized
+
+
+def _assert_rescope_matches_oracle(
+    current: list[dict[str, Any]],
+    ordered_items: list[dict[str, Any]],
+    original_ids: frozenset[str],
+    seen_ids: set[str],
+    result: list[dict[str, Any]],
+) -> None:
+    ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
+        current
+    )
+    snapshot_order = _rescope_snapshot_order_for_oracle(
+        current, original_ids, seen_ids, ids_by_task_id
+    )
+    releases = _rescope_releases_for_oracle(
+        current, ordered_items, original_ids, seen_ids, ids_by_task_id
+    )
+    oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, releases
+    )
+    expected = _materialize_rescope_oracle_result(
+        oracle_order, oracle_rows, tasks_by_oracle_id
+    )
+    if result != expected:
+        raise AssertionError("rescope result diverged from Rocq oracle")
 
 
 def _task_file(work_dir: Path) -> Path:
@@ -450,16 +603,13 @@ def _apply_reorder(
     - Tasks added after the original snapshot (IDs not in *original_ids*) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
-    - Title/description are updated from Opus's output; all other fields kept.
-    - If Opus proposes a title already used by an earlier task in the output,
-      the duplicate rewrite is rejected and the original title is kept (first
-      occurrence wins).  A warning is logged.
+    - Description is updated from Opus's output; title and thread anchor are
+      immutable task identity and are preserved.
     - Opus-returned IDs absent from *current* or duplicated are ignored.
     """
     by_id = {t["id"]: t for t in current}
     merged: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    seen_titles: set[str] = set()
 
     for item in ordered_items:
         tid = item.get("id", "")
@@ -469,20 +619,8 @@ def _apply_reorder(
             continue
         seen_ids.add(tid)
         orig = dict(by_id[tid])
-        proposed_title = item.get("title") or ""
-        if proposed_title:
-            if proposed_title in seen_titles:
-                log.warning(
-                    "_apply_reorder: rejecting rewrite — title %r would duplicate "
-                    "another task; preserving original title for %s",
-                    proposed_title,
-                    tid,
-                )
-            else:
-                orig["title"] = proposed_title
         if "description" in item:
             orig["description"] = item["description"]
-        seen_titles.add(orig["title"])
         merged.append(orig)
 
     ci = [t for t in merged if t.get("type") == TaskType.CI]
@@ -509,7 +647,11 @@ def _apply_reorder(
         and t.get("status") != TaskStatus.COMPLETED
     ]
 
-    return ci + non_ci + completed + newly_completed + newly_added
+    result = ci + non_ci + completed + newly_completed + newly_added
+    _assert_rescope_matches_oracle(
+        current, ordered_items, original_ids, seen_ids, result
+    )
+    return result
 
 
 def _compute_thread_changes(
@@ -591,7 +733,7 @@ def reorder_tasks(
     is marked completed or modified by Opus, it is called with no arguments so
     the caller can abort the running worker and restart on the new next task.
     When the in-progress task is modified its status is reset to ``pending`` so
-    the worker loop picks it up again with the updated title/description.
+    the worker loop picks it up again with the updated description.
 
     If *_on_done* is provided, it is called after a successful reorder write so
     callers can trigger follow-up work (e.g. rewriting the PR description).
@@ -621,8 +763,8 @@ def reorder_tasks(
     # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
     # titles.  Each turn runs in the same conversation so the model sees its
     # prior responses and the remaining-attempt count in each nudge.
-    # If duplicates remain after all nudges, _apply_reorder's silent fallback
-    # handles them as a last resort.
+    # If duplicates remain after all nudges, _apply_reorder still preserves
+    # immutable task titles while applying any description/order changes.
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
         duplicates = _find_duplicate_titles(ordered_items)
         if not duplicates:
