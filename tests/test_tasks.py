@@ -10,10 +10,17 @@ from fido.rocq import pr_body_task_store as oracle
 from fido.tasks import (
     Tasks,
     _apply_reorder,
+    _assert_rescope_matches_oracle,
     _compute_thread_changes,
     _find_duplicate_titles,
     _format_work_queue,
     _parse_reorder_response,
+    _rescope_releases_for_oracle,
+    _rescope_snapshot_order_for_oracle,
+    _rescope_state_for_oracle,
+    _rescope_task_kind_for_oracle,
+    _rescope_task_source_comment_for_oracle,
+    _rescope_task_status_for_oracle,
     _task_kind_for_oracle,
     _task_source_comment_for_oracle,
     _task_status_for_oracle,
@@ -128,6 +135,123 @@ class TestTaskStoreOracleAdapter:
         assert lines[1] == "- [ ] Spec <!-- type:spec -->"
         assert "Blocked" not in queue
         assert "- [x] Done <!-- type:thread -->" in queue
+
+
+class TestRescopeOracleAdapter:
+    def test_task_kind_maps_all_runtime_kinds(self) -> None:
+        assert (
+            type(
+                _rescope_task_kind_for_oracle({"title": "ASK: clarify", "type": "spec"})
+            ).__name__
+            == "TaskAsk"
+        )
+        assert (
+            type(
+                _rescope_task_kind_for_oracle({"title": "DEFER: later", "type": "spec"})
+            ).__name__
+            == "TaskDefer"
+        )
+        assert (
+            type(
+                _rescope_task_kind_for_oracle(
+                    {"title": "CI failure: lint", "type": "spec"}
+                )
+            ).__name__
+            == "TaskCI"
+        )
+        assert (
+            type(
+                _rescope_task_kind_for_oracle({"title": "Review", "type": "thread"})
+            ).__name__
+            == "TaskThread"
+        )
+        assert (
+            type(
+                _rescope_task_kind_for_oracle({"title": "Build it", "type": "spec"})
+            ).__name__
+            == "TaskSpec"
+        )
+
+    def test_task_status_and_source_comment_map_runtime_values(self) -> None:
+        assert (
+            type(
+                _rescope_task_status_for_oracle({"status": TaskStatus.COMPLETED})
+            ).__name__
+            == "StatusCompleted"
+        )
+        assert (
+            type(
+                _rescope_task_status_for_oracle({"status": TaskStatus.BLOCKED})
+            ).__name__
+            == "StatusBlocked"
+        )
+        assert type(_rescope_task_status_for_oracle({})).__name__ == "StatusPending"
+        assert (
+            _rescope_task_source_comment_for_oracle({"thread": {"comment_id": "42"}})
+            == 42
+        )
+        assert _rescope_task_source_comment_for_oracle({}) is None
+
+    def test_snapshot_order_includes_seen_and_original_non_completed_tasks(
+        self,
+    ) -> None:
+        current = [
+            {"id": "a", "title": "A", "status": "pending", "type": "spec"},
+            {"id": "b", "title": "B", "status": "completed", "type": "spec"},
+            {"id": "c", "title": "C", "status": "pending", "type": "spec"},
+        ]
+        ids_by_task_id, _tasks_by_oracle_id, _order, _rows = _rescope_state_for_oracle(
+            current
+        )
+
+        assert _rescope_snapshot_order_for_oracle(
+            current, frozenset({"a", "b"}), {"c"}, ids_by_task_id
+        ) == [1, 3]
+
+    def test_releases_encode_completion_description_updates_and_keeps(self) -> None:
+        current = [
+            {
+                "id": "a",
+                "title": "A",
+                "description": "old",
+                "status": "pending",
+                "type": "thread",
+                "thread": {"comment_id": "1"},
+            },
+            {
+                "id": "b",
+                "title": "B",
+                "description": "",
+                "status": "pending",
+                "type": "spec",
+            },
+            {
+                "id": "c",
+                "title": "C",
+                "description": "",
+                "status": "pending",
+                "type": "ci",
+            },
+        ]
+        ids_by_task_id, _tasks_by_oracle_id, _order, _rows = _rescope_state_for_oracle(
+            current
+        )
+        releases = _rescope_releases_for_oracle(
+            current,
+            [
+                {"id": "a", "title": "Ignored title", "description": "new"},
+                {"id": "c", "title": "C"},
+            ],
+            frozenset({"a", "b", "c"}),
+            {"a", "c"},
+            ids_by_task_id,
+        )
+
+        assert [type(release.release_decision).__name__ for release in releases] == [
+            "RewriteTask",
+            "CompleteTask",
+            "KeepTask",
+        ]
 
 
 class TestAddTask:
@@ -510,11 +634,11 @@ class TestApplyReorder:
         result = _apply_reorder(current, items)
         assert [t["id"] for t in result] == ["2", "1"]
 
-    def test_updates_title_from_opus(self) -> None:
+    def test_preserves_title_from_opus(self) -> None:
         current = [self._t("1", "Old title")]
         items = [self._item("1", "New title")]
         result = _apply_reorder(current, items)
-        assert result[0]["title"] == "New title"
+        assert result[0]["title"] == "Old title"
 
     def test_preserves_title_when_opus_returns_empty(self) -> None:
         current = [self._t("1", "Original title")]
@@ -552,7 +676,7 @@ class TestApplyReorder:
         items = [self._item("1", "Task v1"), self._item("1", "Task v2")]
         result = _apply_reorder(current, items)
         assert len([t for t in result if t["id"] == "1"]) == 1
-        assert result[0]["title"] == "Task v1"
+        assert result[0]["title"] == "Task"
 
     def test_ci_tasks_always_first(self) -> None:
         current = [
@@ -622,16 +746,14 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
-    def test_rejects_duplicate_title_preserves_original_when_different(self) -> None:
-        # Opus renames both tasks to the same new name; second keeps its own original
+    def test_preserves_titles_when_opus_proposes_duplicates(self) -> None:
         current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
         items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
         result = _apply_reorder(current, items)
-        assert next(t for t in result if t["id"] == "1")["title"] == "Shared name"
+        assert next(t for t in result if t["id"] == "1")["title"] == "Alpha task"
         assert next(t for t in result if t["id"] == "2")["title"] == "Beta task"
 
-    def test_unique_titles_all_applied(self) -> None:
-        # No duplicates → all Opus-proposed titles go through unchanged
+    def test_unique_title_rewrites_are_ignored(self) -> None:
         current = [self._t("1", "Old A"), self._t("2", "Old B"), self._t("3", "Old C")]
         items = [
             self._item("1", "New A"),
@@ -640,17 +762,26 @@ class TestApplyReorder:
         ]
         result = _apply_reorder(current, items)
         titles = {t["id"]: t["title"] for t in result}
-        assert titles == {"1": "New A", "2": "New B", "3": "New C"}
+        assert titles == {"1": "Old A", "2": "Old B", "3": "Old C"}
 
-    def test_duplicate_title_logs_warning(self, caplog) -> None:
-        import logging
-
+    def test_duplicate_title_rewrites_do_not_log_warning(self, caplog) -> None:
         current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
         items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
-        with caplog.at_level(logging.WARNING, logger="fido.tasks"):
-            _apply_reorder(current, items)
-        assert "rejecting rewrite" in caplog.text
-        assert "Shared name" in caplog.text
+        _apply_reorder(current, items)
+        assert "rejecting rewrite" not in caplog.text
+
+    def test_fails_closed_when_runtime_result_diverges_from_oracle(self) -> None:
+        current = [self._t("1", "Original")]
+        bad_result = [self._t("1", "Changed")]
+
+        with pytest.raises(AssertionError, match="diverged"):
+            _assert_rescope_matches_oracle(
+                current,
+                [self._item("1", "Changed")],
+                frozenset(),
+                {"1"},
+                bad_result,
+            )
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────
@@ -746,13 +877,13 @@ class TestReorderTasks:
         assert result[0]["id"] == t2["id"]
         assert result[1]["id"] == t1["id"]
 
-    def test_updates_title_from_opus(self, tmp_path: Path) -> None:
+    def test_preserves_title_from_opus(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Old title")
         raw = self._response(
             [{"id": t1["id"], "title": "New title", "description": ""}]
         )
         reorder_tasks(tmp_path, "", agent=_client(raw))
-        assert list_tasks(tmp_path)[0]["title"] == "New title"
+        assert list_tasks(tmp_path)[0]["title"] == "Old title"
 
     def test_marks_completed_task_opus_excludes(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Keep")
@@ -850,11 +981,14 @@ class TestReorderTasks:
             "url": "https://example.com",
         }
         t1 = add_task(
-            tmp_path, title="Old title", task_type=TaskType.THREAD, thread=thread
+            tmp_path,
+            title="Stable title",
+            task_type=TaskType.THREAD,
+            thread=thread,
         )
         received: list = []
         raw = self._response(
-            [{"id": t1["id"], "title": "New title", "description": ""}]
+            [{"id": t1["id"], "title": "Changed title", "description": "new"}]
         )
         reorder_tasks(
             tmp_path,
@@ -864,7 +998,8 @@ class TestReorderTasks:
         )
         assert len(received) == 1
         assert received[0]["kind"] == "modified"
-        assert received[0]["new_title"] == "New title"
+        assert received[0]["new_title"] == "Stable title"
+        assert received[0]["new_description"] == "new"
 
     def test_on_changes_not_called_when_no_thread_tasks_changed(
         self, tmp_path: Path
@@ -919,10 +1054,10 @@ class TestReorderTasks:
     def test_on_inprogress_affected_called_when_inprogress_task_modified(
         self, tmp_path: Path
     ) -> None:
-        t1 = self._add(tmp_path, "Old title")
+        t1 = self._add(tmp_path, "Stable title")
         update_task(tmp_path, t1["id"], TaskStatus.IN_PROGRESS)
         raw = self._response(
-            [{"id": t1["id"], "title": "New title", "description": ""}]
+            [{"id": t1["id"], "title": "Changed title", "description": "new"}]
         )
         affected: list[int] = []
         reorder_tasks(
@@ -932,9 +1067,10 @@ class TestReorderTasks:
             _on_inprogress_affected=lambda: affected.append(1),
         )
         assert affected == [1]
-        # task reset to pending with new title
+        # task reset to pending with preserved title and updated description
         result = list_tasks(tmp_path)
-        assert result[0]["title"] == "New title"
+        assert result[0]["title"] == "Stable title"
+        assert result[0]["description"] == "new"
         assert result[0]["status"] == str(TaskStatus.PENDING)
 
     def test_on_inprogress_affected_not_called_when_inprogress_task_unchanged(
@@ -1063,8 +1199,8 @@ class TestReorderTasks:
         )
         assert client.run_turn.call_count == 2
         tasks = list_tasks(tmp_path)
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Fixed Alpha"
-        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Fixed Beta"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
 
     def test_falls_back_silently_when_nudge_still_has_duplicates(
         self, tmp_path: Path
@@ -1086,9 +1222,8 @@ class TestReorderTasks:
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
         # All 3 nudges fired (1 initial + 3 nudge calls = 4 total)
         assert client.run_turn.call_count == 4
-        # _apply_reorder's silent fallback: first occurrence wins, second keeps original
         tasks = list_tasks(tmp_path)
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
 
     def test_attempts_remaining_decrements_across_nudges(self, tmp_path: Path) -> None:
@@ -1132,9 +1267,8 @@ class TestReorderTasks:
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
-        # Falls back to original dup_response with silent correction
         tasks = list_tasks(tmp_path)
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
 
     def test_proceeds_with_original_when_nudge_response_unparseable(
@@ -1154,9 +1288,8 @@ class TestReorderTasks:
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
-        # Falls back to original dup_response with silent correction
         tasks = list_tasks(tmp_path)
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
 
     def test_no_nudge_when_titles_all_unique(self, tmp_path: Path) -> None:
