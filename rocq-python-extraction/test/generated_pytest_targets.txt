@@ -22,6 +22,10 @@ nat_pred_or_zero.py
 nat_roundtrip.py
 positive_five.py
 positive_case.py
+nat_compare_and.py
+nat_compare_or.py
+nat_compare_neg.py
+nat_compare_bool_eq.py
 n_seven.py
 n_case.py
 z_neg_three.py

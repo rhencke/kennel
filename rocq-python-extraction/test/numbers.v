@@ -8,6 +8,7 @@ Declare ML Module "rocq-python-extraction".
 Declare ML Module "rocq-runtime.plugins.extraction".
 
 From Stdlib Require Import
+  Bool.Bool
   Numbers.BinNums
   NArith.BinNat
   ZArith.BinInt
@@ -47,6 +48,26 @@ Definition positive_case (p : positive) : nat :=
     a generated [Pos] protocol module. *)
 Definition positive_eq (left right : positive) : bool :=
   Pos.eqb left right.
+
+(** [nat_compare_and] keeps primitive comparisons as high-precedence children
+    of a lowered boolean conjunction. *)
+Definition nat_compare_and (left middle right : nat) : bool :=
+  andb (Nat.ltb left middle) (Nat.leb middle right).
+
+(** [nat_compare_or] keeps primitive comparisons as high-precedence children
+    of a lowered boolean disjunction. *)
+Definition nat_compare_or (left middle right : nat) : bool :=
+  orb (Nat.eqb left middle) (Nat.ltb middle right).
+
+(** [nat_compare_neg] parenthesizes a primitive comparison under lowered
+    boolean negation. *)
+Definition nat_compare_neg (left right : nat) : bool :=
+  negb (Nat.leb left right).
+
+(** [nat_compare_bool_eq] parenthesizes a primitive comparison when it becomes
+    the left operand of another lowered equality expression. *)
+Definition nat_compare_bool_eq (left right : nat) (expected : bool) : bool :=
+  Bool.eqb (Nat.ltb left right) expected.
 
 (** [n_seven] checks [N] literals become Python non-negative ints. *)
 Definition n_seven : N := Npos (xI (xI xH)).
@@ -90,6 +111,10 @@ Python Extraction nat_roundtrip.
 Python Extraction positive_five.
 Python Extraction positive_case.
 Python Extraction positive_eq.
+Python Extraction nat_compare_and.
+Python Extraction nat_compare_or.
+Python Extraction nat_compare_neg.
+Python Extraction nat_compare_bool_eq.
 Python Extraction n_seven.
 Python Extraction n_case.
 Python Extraction z_neg_three.
