@@ -53,6 +53,14 @@ Definition bool_neg_and (b1 b2 : bool) : bool := negb (andb b1 b2).
     of retaining the Rocq helper call. *)
 Definition bool_eq (b1 b2 : bool) : bool := Bool.eqb b1 b2.
 
+(** [bool_eq_and]: equality has higher precedence than conjunction, so the
+    lowered equality operand must not be wrapped just to feed [and]. *)
+Definition bool_eq_and (b1 b2 b3 : bool) : bool := andb (Bool.eqb b1 b2) b3.
+
+(** [bool_and_eq]: a lowered conjunction used as an equality operand must stay
+    parenthesized so Python does not parse the result as [b1 and (b2 == b3)]. *)
+Definition bool_and_eq (b1 b2 b3 : bool) : bool := Bool.eqb (andb b1 b2) b3.
+
 (* ------------------------------------------------------------------ *)
 (*  nat → Python int                                                   *)
 (*                                                                     *)
@@ -155,4 +163,16 @@ Fixpoint list_add_one (l : list nat) : list nat :=
   | h :: t => (S h) :: list_add_one t
   end.
 
-Python File Extraction primitives "bool_not bool_and bool_neg bool_neg_and bool_eq nat_double option_inc pair_swap list_add_one".
+(** [list_cons_append]: list cons and list append both lower to Python [+].
+    The generated expression must preserve the left-associative grouping of
+    prepending one element before appending the rest. *)
+Definition list_cons_append (h : nat) (left right : list nat) : list nat :=
+  h :: (left ++ right).
+
+(** [lambda_call_head]: application of an inline lambda must parenthesize the
+    call head because Python lambda has lower precedence than calls. *)
+Definition lambda_call_head (n : nat) : nat :=
+  (fun f => f n) (fun x => S x).
+
+Python File Extraction primitives
+  "bool_not bool_and bool_neg bool_neg_and bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append lambda_call_head".
