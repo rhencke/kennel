@@ -80,6 +80,27 @@ Definition positive_claim_inter : PositiveSet.t :=
 Definition positive_claim_diff : PositiveSet.t :=
   PositiveSet.add p7 PositiveSet.empty.
 
+(** [positive_claim_union_expr] directly covers native set union lowering. *)
+Definition positive_claim_union_expr : PositiveSet.t :=
+  PositiveSet.union positive_claim_set positive_claim_diff.
+
+(** [positive_claim_inter_expr] directly covers native set intersection
+    lowering. *)
+Definition positive_claim_inter_expr : PositiveSet.t :=
+  PositiveSet.inter positive_claim_set positive_claim_union.
+
+(** [positive_claim_diff_expr] directly covers native set difference lowering. *)
+Definition positive_claim_diff_expr : PositiveSet.t :=
+  PositiveSet.diff positive_claim_union positive_claim_set.
+
+(** [positive_claim_nested_expr] keeps nested lowered set operations under
+    source assertion coverage so later precedence-aware printing can preserve
+    the intended grouping. *)
+Definition positive_claim_nested_expr : PositiveSet.t :=
+  PositiveSet.inter
+    (PositiveSet.union positive_claim_set positive_claim_diff)
+    positive_claim_union.
+
 (** [positive_claim_removed] removes [p2] from the base set, directly
     covering [PositiveSet.remove]. *)
 Definition positive_claim_removed : PositiveSet.t :=

@@ -1,4 +1,14 @@
-from primitives import bool_and, bool_eq, bool_neg, bool_neg_and, bool_not
+from primitives import (
+    bool_and,
+    bool_and_eq,
+    bool_eq,
+    bool_eq_and,
+    bool_neg,
+    bool_neg_and,
+    bool_not,
+    lambda_call_head,
+    list_cons_append,
+)
 
 
 def test_bool_not_round_trip() -> None:
@@ -32,6 +42,26 @@ def test_bool_eq_round_trip() -> None:
     assert bool_eq(False, False) is True
 
 
+def test_bool_eq_and_round_trip() -> None:
+    assert bool_eq_and(True, True, True) is True
+    assert bool_eq_and(True, True, False) is False
+    assert bool_eq_and(True, False, True) is False
+
+
+def test_bool_and_eq_round_trip() -> None:
+    assert bool_and_eq(True, True, True) is True
+    assert bool_and_eq(True, False, False) is True
+    assert bool_and_eq(False, True, True) is False
+
+
+def test_list_cons_append_round_trip() -> None:
+    assert list_cons_append(1, [2], [3, 4]) == [1, 2, 3, 4]
+
+
+def test_lambda_call_head_round_trip() -> None:
+    assert lambda_call_head(4) == 5
+
+
 def test_bool_and_lowers_to_native_and(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -57,6 +87,31 @@ def test_bool_eq_lowers_to_native_equality(build_default) -> None:
 
     assert "def eqb(" not in source
     assert "return b1 == b2" in source
+
+
+def test_bool_equality_operand_keeps_and_precedence(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return b1 == b2 and b3" in source
+
+
+def test_bool_and_operand_is_parenthesized_for_equality(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return (b1 and b2) == b3" in source
+    assert "return b1 and b2 == b3" not in source
+
+
+def test_list_append_preserves_left_associative_grouping(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return [h] + left + right" in source
+
+
+def test_lambda_call_head_is_parenthesized(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return (lambda f: f(n))(lambda x: x + 1)" in source
 
 
 def test_remapped_primitives_do_not_emit_unused_typevars(build_default) -> None:
