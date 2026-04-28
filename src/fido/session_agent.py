@@ -186,8 +186,29 @@ class SessionBackedAgent:
         retry_on_preempt: bool = False,
         session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
-        del content, model, system_prompt, retry_on_preempt, session_mode
-        raise NotImplementedError
+        session = self._resolve_turn_session(
+            model=model,
+            session_mode=session_mode,
+        )
+        attempt = 0
+        while True:
+            result = self._prompt_with_recovery(
+                session,
+                content,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            if (
+                not retry_on_preempt
+                or getattr(session, "last_turn_cancelled", False) is not True
+            ):
+                return result
+            attempt += 1
+            log.info(
+                "%s.run_turn: preempted mid-flight — retry %d",
+                type(self).__name__,
+                attempt,
+            )
 
     def _spawn_owned_session(
         self, model: ProviderModel, *, session_id: str | None = None

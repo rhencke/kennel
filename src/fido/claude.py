@@ -28,7 +28,6 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
-    TurnSessionMode,
     model_name,
 )
 from fido.rocq import claude_session as stream_fsm
@@ -1688,35 +1687,6 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
 
     def _json_parse_candidates(self, raw: str) -> tuple[str, ...]:
         return (raw, *(m.group() for m in re.finditer(r"\{.*?\}", raw, re.DOTALL)))
-
-    def run_turn(
-        self,
-        content: str,
-        *,
-        model: ProviderModel | None = None,
-        system_prompt: str | None = None,
-        retry_on_preempt: bool = False,
-        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
-    ) -> str:
-        session = self._resolve_turn_session(
-            model=model,
-            session_mode=session_mode,
-        )
-        attempt = 0
-        while True:
-            result = self._prompt_with_recovery(
-                session,
-                content,
-                model=model,
-                system_prompt=system_prompt,
-            )
-            if (
-                not retry_on_preempt
-                or getattr(session, "last_turn_cancelled", False) is not True
-            ):
-                return result
-            attempt += 1
-            log.info("ClaudeClient.run_turn: preempted mid-flight — retry %d", attempt)
 
     def generate_status(
         self,

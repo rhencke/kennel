@@ -41,7 +41,6 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderModel,
     ReasoningEffort,
-    TurnSessionMode,
     coerce_provider_model,
 )
 from fido.session_agent import SessionBackedAgent
@@ -1216,37 +1215,6 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
 
     def _dead_prompt_error_message(self) -> str:
         return "Copilot CLI session died during prompt"
-
-    def run_turn(
-        self,
-        content: str,
-        *,
-        model: ProviderModel | None = None,
-        system_prompt: str | None = None,
-        retry_on_preempt: bool = False,
-        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
-    ) -> str:
-        session = self._resolve_turn_session(
-            model=model,
-            session_mode=session_mode,
-        )
-        attempt = 0
-        while True:
-            result = self._prompt_with_recovery(
-                session,
-                content,
-                model=model,
-                system_prompt=system_prompt,
-            )
-            if (
-                not retry_on_preempt
-                or getattr(session, "last_turn_cancelled", False) is not True
-            ):
-                return result
-            attempt += 1
-            log.info(
-                "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt
-            )
 
     def print_prompt_from_file(
         self,
