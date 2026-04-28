@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"auth-thread"}
+{"type":"error","message":"authentication failed: please login to Codex"}

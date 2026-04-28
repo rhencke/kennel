@@ -3,6 +3,7 @@
   "description": "Pinned runtime CLI tools for the Fido container image.",
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.114",
-    "@github/copilot": "1.0.32"
+    "@github/copilot": "1.0.32",
+    "@openai/codex": "0.125.0"
   }
 }

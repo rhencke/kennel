@@ -754,6 +754,7 @@ class TestModelDockerfile:
         assert "gh_${GH_VERSION}_linux_amd64.deb" in dockerfile
         assert "ln -sf /opt/fido-node-tools/node_modules/.bin/claude" in dockerfile
         assert "ln -sf /opt/fido-node-tools/node_modules/.bin/copilot" in dockerfile
+        assert "ln -sf /opt/fido-node-tools/node_modules/.bin/codex" in dockerfile
         assert (
             "./pyproject uv sync --frozen --no-dev --no-install-project" in dockerfile
         )
