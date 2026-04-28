@@ -48,14 +48,22 @@ Codex epic issue wires Codex into `CodexClient`/provider selection.
 For bootstrap validation against the local Codex install, run:
 
 ```bash
-PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py --turn
 PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py \
-  --interrupt --prompt 'Run `sleep 20` in the shell, then reply done.'
+  --turn --resume --interrupt --preempt \
+  --prompt 'Run `sleep 20` in the shell, then reply done.'
+docker run --rm --interactive --user "$(id -u):$(id -g)" \
+  --env "HOME=$HOME" --env "PYTHONPATH=/workspace/src" --network host \
+  --volume "$PWD:/workspace" --volume "$HOME/workspace:$HOME/workspace" \
+  --volume "$HOME/.codex:$HOME/.codex" --workdir /workspace \
+  --entrypoint /opt/fido-venv/bin/python3 fido-test:local \
+  tools/codex_appserver_smoke.py --turn --resume --interrupt --preempt \
+  --prompt 'Run `sleep 20` in the shell, then reply done.'
 ```
 
 The smoke driver is intentionally outside CI. It is for reconciling Fido's
 fixtures with live app-server behavior before codifying that behavior in unit
-tests.
+tests. The Docker form validates the same image, Codex binary, and `~/.codex`
+mount shape Fido uses at runtime.
 
 Pinned app-server schemas:
 
