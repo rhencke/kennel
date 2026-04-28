@@ -212,6 +212,24 @@ let active_method_targets : (string * (string * string)) list ref = ref []
 let lookup_active_method_target source_name =
   List.assoc_opt source_name !active_method_targets
 
+let active_record_field_targets : (string * string) list ref = ref []
+
+let source_name_tail source_name =
+  match String.rindex_opt source_name '.' with
+  | Some index ->
+      String.sub source_name (index + 1) (String.length source_name - index - 1)
+  | None -> source_name
+
+let lookup_active_record_field_target source_name =
+  match List.assoc_opt source_name !active_record_field_targets with
+  | Some _ as result -> result
+  | None -> List.assoc_opt (source_name_tail source_name) !active_record_field_targets
+
+let is_active_record_field_target source_name =
+  match lookup_active_record_field_target source_name with
+  | Some _ -> true
+  | None -> false
+
 let pp_collection_key kind pp_key =
   match kind with
   | `Positive -> str "_rocq_positive_key(" ++ pp_key ++ str ")"
@@ -1136,6 +1154,20 @@ let rec pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
+      let pp_record_field_expr =
+        match List.rev all_args with
+        | self_arg :: _ -> (
+            let head_name =
+              match head with
+              | MLglob r -> pp_global state Term r
+              | _ -> Pp.string_of_ppcmds (pp_expr state env head)
+            in
+            match lookup_active_record_field_target head_name with
+            | Some field_name ->
+                Some (pp_expr state env self_arg ++ str "." ++ str field_name)
+            | None -> None)
+        | _ -> None
+      in
       let collection_key kind key =
         pp_collection_key kind (pp_expr state env key)
       in
@@ -1359,15 +1391,18 @@ let rec pp_expr state env expr =
           str ")"
       in
       let pp_special =
-        match pp_method_call_expr with
+        match pp_record_field_expr with
         | Some _ as pp -> pp
         | None ->
-            (match pp_collection_expr with
+            (match pp_method_call_expr with
              | Some _ as pp -> pp
              | None ->
-                 (match pp_concurrency_expr with
+                 (match pp_collection_expr with
                   | Some _ as pp -> pp
-                  | None -> pp_monad_expr))
+                  | None ->
+                      (match pp_concurrency_expr with
+                       | Some _ as pp -> pp
+                       | None -> pp_monad_expr)))
       in
       (match pp_special with
        | Some pp -> pp
@@ -3327,6 +3362,29 @@ let record_field_names_of_decl state = function
       | _ -> None)
   | _ -> None
 
+let record_field_targets_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record fields when Array.length ind.ind_packets > 0 ->
+          let packet = ind.ind_packets.(0) in
+          let ind_kn = kn_of_ind packet.ip_typename_ref in
+          Some
+            (List.filter_map
+               (function
+                 | Some r' ->
+                     let source_name = pp_global state Term r' in
+                     let field_name = pp_global_with_key state Term ind_kn r' in
+                     Some
+                       (if String.equal source_name field_name then
+                          [(source_name, field_name)]
+                        else
+                          [(source_name, field_name); (field_name, field_name)])
+                 | None -> None)
+               fields
+            |> List.concat)
+      | _ -> None)
+  | _ -> None
+
 let record_class_prefix_of_decl state decl =
   match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
   | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
@@ -3633,6 +3691,7 @@ let pp_decl state = function
               is_std_bool_ref r "eqb" then mt ()
       else if is_std_primitive_compare_ref r then mt ()
       else if is_std_collection_term_ref r then mt ()
+      else if is_active_record_field_target (pp_global state Term r) then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
         str (find_custom r) ++ fnl ()
@@ -3689,7 +3748,8 @@ let rec module_type_annotation state = function
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
       if is_prop_type typ || is_inline_custom r || is_runtime_marker_ref r ||
-         is_std_collection_term_ref r || is_std_primitive_compare_ref r then []
+         is_std_collection_term_ref r || is_std_primitive_compare_ref r ||
+         is_active_record_field_target (pp_global state Term r) then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
@@ -3921,6 +3981,14 @@ let pp_structure_sel state sel =
            | (_, SEmodule _) | (_, SEmodtype _) -> None)
          sel)
   in
+  let record_field_targets =
+    List.concat
+      (List.filter_map
+         (function
+           | (_, SEdecl d) -> record_field_targets_of_decl state d
+           | (_, SEmodule _) | (_, SEmodtype _) -> None)
+         sel)
+  in
   List.iter
       (function
       | (_, SEdecl (Dterm (r, _a, _typ) as d)) -> (
@@ -3951,6 +4019,7 @@ let pp_structure_sel state sel =
   in
   let prior_method_targets = !active_method_targets in
   active_method_targets := method_targets;
+  active_record_field_targets := record_field_targets @ !active_record_field_targets;
   let rendered =
   let pp_record_methods class_name =
     match Hashtbl.find_opt methods_by_class class_name with

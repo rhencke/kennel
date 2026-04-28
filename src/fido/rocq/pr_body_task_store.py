@@ -87,26 +87,6 @@ class TaskRow:
     task_source_comment: int | None
 
 
-def task_title(t0: TaskRow) -> str:
-    return t0.task_title
-
-
-def task_description(t0: TaskRow) -> str:
-    return t0.task_description
-
-
-def task_kind(t0: TaskRow) -> TaskKind:
-    return t0.task_kind
-
-
-def task_status(t0: TaskRow) -> TaskStatus:
-    return t0.task_status
-
-
-def task_source_comment(t0: TaskRow) -> int | None:
-    return t0.task_source_comment
-
-
 class RescopeOp:
     pass
 
@@ -190,7 +170,7 @@ def find_comment_duplicate(
             rows,
         )
     row = __option
-    __option = task_source_comment(row)
+    __option = row.task_source_comment
     if __option is None:
         return find_comment_duplicate(
             comment,
@@ -225,9 +205,9 @@ def find_pending_title_duplicate(
             rows,
         )
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
-            if task_title(row) == title:
+            if row.task_title == title:
                 return task
             return find_pending_title_duplicate(
                 title,
@@ -256,9 +236,9 @@ def enqueue_task(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> tuple[tuple[list[int], dict[int, TaskRow]], int]:
-    __option = task_source_comment(row)
+    __option = row.task_source_comment
     if __option is None:
-        __option = find_pending_title_duplicate(task_title(row), order, rows)
+        __option = find_pending_title_duplicate(row.task_title, order, rows)
         if __option is None:
             return (
                 (
@@ -308,11 +288,11 @@ def row_with_status(
     status: TaskStatus,
 ) -> TaskRow:
     return TaskRow(
-        task_title=task_title(row),
-        task_description=task_description(row),
-        task_kind=task_kind(row),
+        task_title=row.task_title,
+        task_description=row.task_description,
+        task_kind=row.task_kind,
         task_status=status,
-        task_source_comment=task_source_comment(row),
+        task_source_comment=row.task_source_comment,
     )
 
 
@@ -357,7 +337,7 @@ def apply_rescope_ops(
     row = __option
     match op:
         case KeepTask(task0):
-            match task_status(row):
+            match row.task_status:
                 case StatusPending():
                     return apply_rescope_ops(
                         rest,
@@ -382,14 +362,14 @@ def apply_rescope_ops(
                 case __impossible:
                     assert_never(__impossible)
         case RewriteTask(task0, title, description):
-            match task_status(row):
+            match row.task_status:
                 case StatusPending():
                     row_ = TaskRow(
                         task_title=title,
                         task_description=description,
-                        task_kind=task_kind(row),
-                        task_status=task_status(row),
-                        task_source_comment=task_source_comment(row),
+                        task_kind=row.task_kind,
+                        task_status=row.task_status,
+                        task_source_comment=row.task_source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -412,9 +392,9 @@ def apply_rescope_ops(
                     row_ = TaskRow(
                         task_title=title,
                         task_description=description,
-                        task_kind=task_kind(row),
-                        task_status=task_status(row),
-                        task_source_comment=task_source_comment(row),
+                        task_kind=row.task_kind,
+                        task_status=row.task_status,
+                        task_source_comment=row.task_source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -429,14 +409,14 @@ def apply_rescope_ops(
                 case __impossible:
                     assert_never(__impossible)
         case CompleteTask(task0):
-            match task_status(row):
+            match row.task_status:
                 case StatusPending():
                     row_ = TaskRow(
-                        task_title=task_title(row),
-                        task_description=task_description(row),
-                        task_kind=task_kind(row),
+                        task_title=row.task_title,
+                        task_description=row.task_description,
+                        task_kind=row.task_kind,
                         task_status=StatusCompleted(),
-                        task_source_comment=task_source_comment(row),
+                        task_source_comment=row.task_source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -457,11 +437,11 @@ def apply_rescope_ops(
                     )
                 case StatusBlocked():
                     row_ = TaskRow(
-                        task_title=task_title(row),
-                        task_description=task_description(row),
-                        task_kind=task_kind(row),
+                        task_title=row.task_title,
+                        task_description=row.task_description,
+                        task_kind=row.task_kind,
                         task_status=StatusCompleted(),
-                        task_source_comment=task_source_comment(row),
+                        task_source_comment=row.task_source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -492,7 +472,7 @@ def completed_tasks_in_order(
     if __option is None:
         return completed_tasks_in_order(rest, rows)
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
             return completed_tasks_in_order(rest, rows)
         case StatusCompleted():
@@ -524,7 +504,7 @@ def preserve_newly_added(
     if __option is None:
         return rest_
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
             return [task] + rest_
         case StatusCompleted():
@@ -543,7 +523,7 @@ def task_is_ci(
     if __option is None:
         return False
     row = __option
-    return task_kind_is_ci(task_kind(row))
+    return task_kind_is_ci(row.task_kind)
 
 
 def task_is_non_ci(
@@ -554,7 +534,7 @@ def task_is_non_ci(
     if __option is None:
         return False
     row = __option
-    return task_kind_is_non_ci(task_kind(row))
+    return task_kind_is_non_ci(row.task_kind)
 
 
 def collect_ci_tasks(
@@ -632,7 +612,7 @@ def complete_task_visible(
             None,
         )
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
             row_ = row_with_status(row, StatusCompleted())
             return (
@@ -641,7 +621,7 @@ def complete_task_visible(
                     row_,
                     rows,
                 ),
-                task_source_comment(row),
+                row.task_source_comment,
             )
         case StatusCompleted():
             return (
@@ -656,7 +636,7 @@ def complete_task_visible(
                     row_,
                     rows,
                 ),
-                task_source_comment(row),
+                row.task_source_comment,
             )
         case __impossible:
             assert_never(__impossible)
@@ -669,14 +649,6 @@ model_version: int = 0
 class TaskStore:
     task_store_order: list[int]
     task_store_rows: dict[int, TaskRow]
-
-
-def task_store_order(t0: TaskStore) -> list[int]:
-    return t0.task_store_order
-
-
-def task_store_rows(t0: TaskStore) -> dict[int, TaskRow]:
-    return t0.task_store_rows
 
 
 class PRBodyStatus:
@@ -709,34 +681,14 @@ class PRBodyRow:
         right: PRBodyRow,
     ) -> bool:
         left = self
-        same_task = positive_eqb(pr_body_task(left), pr_body_task(right))
-        same_title = pr_body_title(left) == pr_body_title(right)
-        same_description = pr_body_description(left) == pr_body_description(right)
-        same_kind = task_kind_eqb(pr_body_kind(left), pr_body_kind(right))
-        same_status = pr_body_status_eqb(pr_body_status(left), pr_body_status(right))
+        same_task = positive_eqb(left.pr_body_task, right.pr_body_task)
+        same_title = left.pr_body_title == right.pr_body_title
+        same_description = left.pr_body_description == right.pr_body_description
+        same_kind = task_kind_eqb(left.pr_body_kind, right.pr_body_kind)
+        same_status = pr_body_status_eqb(left.pr_body_status, right.pr_body_status)
         same_text = same_title and same_description
         same_metadata = same_kind and same_status
         return same_task and same_text and same_metadata
-
-
-def pr_body_task(p: PRBodyRow) -> int:
-    return p.pr_body_task
-
-
-def pr_body_title(p: PRBodyRow) -> str:
-    return p.pr_body_title
-
-
-def pr_body_description(p: PRBodyRow) -> str:
-    return p.pr_body_description
-
-
-def pr_body_kind(p: PRBodyRow) -> TaskKind:
-    return p.pr_body_kind
-
-
-def pr_body_status(p: PRBodyRow) -> PRBodyStatus:
-    return p.pr_body_status
 
 
 def projected_row(
@@ -746,9 +698,9 @@ def projected_row(
 ) -> PRBodyRow:
     return PRBodyRow(
         pr_body_task=task,
-        pr_body_title=task_title(row),
-        pr_body_description=task_description(row),
-        pr_body_kind=task_kind(row),
+        pr_body_title=row.task_title,
+        pr_body_description=row.task_description,
+        pr_body_kind=row.task_kind,
         pr_body_status=status,
     )
 
@@ -761,9 +713,9 @@ def pending_ci_projection(
     if __option is None:
         return []
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
-            if task_kind_is_ci(task_kind(row)):
+            if task_kind_is_ci(row.task_kind):
                 return [projected_row(task, row, PRPending())] + []
             return []
         case StatusCompleted():
@@ -782,9 +734,9 @@ def pending_non_ci_projection(
     if __option is None:
         return []
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
-            if task_kind_is_non_ci(task_kind(row)):
+            if task_kind_is_non_ci(row.task_kind):
                 return [projected_row(task, row, PRPending())] + []
             return []
         case StatusCompleted():
@@ -803,7 +755,7 @@ def completed_projection(
     if __option is None:
         return []
     row = __option
-    match task_status(row):
+    match row.task_status:
         case StatusPending():
             return []
         case StatusCompleted():
@@ -851,8 +803,8 @@ def project_completed(
 
 
 def project_task_store(store: TaskStore) -> list[PRBodyRow]:
-    order = task_store_order(store)
-    rows = task_store_rows(store)
+    order = store.task_store_order
+    rows = store.task_store_rows
     pending_ci = project_pending_ci(order, rows)
     pending_non_ci = project_pending_non_ci(order, rows)
     completed = project_completed(order, rows)
@@ -991,17 +943,9 @@ class SystemState:
     visible_pr_body: list[PRBodyRow]
 
 
-def durable_task_store(s: SystemState) -> TaskStore:
-    return s.durable_task_store
-
-
-def visible_pr_body(s: SystemState) -> list[PRBodyRow]:
-    return s.visible_pr_body
-
-
 def pr_body_matches_store_bool(state: SystemState) -> bool:
-    visible = visible_pr_body(state)
-    projected = project_task_store(durable_task_store(state))
+    visible = state.visible_pr_body
+    projected = project_task_store(state.durable_task_store)
     return pr_body_eqb(visible, projected)
 
 
@@ -1042,8 +986,8 @@ def apply_task_write(
 ) -> TaskStore:
     match write:
         case WriteTaskAdd(task, row):
-            order = task_store_order(store)
-            rows = task_store_rows(store)
+            order = store.task_store_order
+            rows = store.task_store_rows
             __pair = enqueue_task(task, row, order, rows)
             p = __pair[0]
             p0 = __pair[1]
@@ -1055,16 +999,16 @@ def apply_task_write(
                 task_store_rows=rows_,
             )
         case WriteTaskComplete(task):
-            __pair = complete_task_visible(task, task_store_rows(store))
+            __pair = complete_task_visible(task, store.task_store_rows)
             rows_ = __pair[0]
             o = __pair[1]
             return TaskStore(
-                task_store_order=task_store_order(store),
+                task_store_order=store.task_store_order,
                 task_store_rows=rows_,
             )
         case WriteTaskRescope(snapshot_order, ops):
-            order = task_store_order(store)
-            rows = task_store_rows(store)
+            order = store.task_store_order
+            rows = store.task_store_rows
             __pair = apply_rescope(snapshot_order, order, rows, ops)
             order_ = __pair[0]
             rows_ = __pair[1]
@@ -1081,5 +1025,5 @@ def transition(
     write: TaskWrite,
 ) -> SystemState | None:
     if pr_body_matches_store_bool(state):
-        return synced_state(apply_task_write(write, durable_task_store(state)))
+        return synced_state(apply_task_write(write, state.durable_task_store))
     return None

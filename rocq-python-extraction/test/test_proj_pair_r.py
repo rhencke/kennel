@@ -28,3 +28,12 @@ def test_proj_pair_r_round_trip() -> None:
 
     assert isinstance(p1, Pair_r), "p1 must be Pair_r"
     assert isinstance(swapped, Pair_r), "swapped must be Pair_r"
+
+
+def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
+    source = (build_default / "records.py").read_text()
+
+    assert "def pfst_r(" not in source
+    assert "def psnd_r(" not in source
+    assert "return p.pfst_r" in source
+    assert "return p.psnd_r" in source

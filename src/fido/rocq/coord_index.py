@@ -132,9 +132,9 @@ class CoordIndex:
     ) -> CoordIndex:
         index = self
         return CoordIndex(
-            coord_claims=add_claim(thread, coord_claims(index)),
-            coord_issue_owners=coord_issue_owners(index),
-            coord_repos=coord_repos(index),
+            coord_claims=add_claim(thread, index.coord_claims),
+            coord_issue_owners=index.coord_issue_owners,
+            coord_repos=index.coord_repos,
         )
 
     def remove_claim(
@@ -143,9 +143,9 @@ class CoordIndex:
     ) -> CoordIndex:
         index = self
         return CoordIndex(
-            coord_claims=remove_claim(thread, coord_claims(index)),
-            coord_issue_owners=coord_issue_owners(index),
-            coord_repos=coord_repos(index),
+            coord_claims=remove_claim(thread, index.coord_claims),
+            coord_issue_owners=index.coord_issue_owners,
+            coord_repos=index.coord_repos,
         )
 
     def has_claim(
@@ -153,7 +153,7 @@ class CoordIndex:
         thread: int,
     ) -> bool:
         index = self
-        return has_claim(coord_claims(index), thread)
+        return has_claim(index.coord_claims, thread)
 
     def assign_issue(
         self,
@@ -162,13 +162,13 @@ class CoordIndex:
     ) -> CoordIndex:
         index = self
         return CoordIndex(
-            coord_claims=coord_claims(index),
+            coord_claims=index.coord_claims,
             coord_issue_owners=assign_issue(
                 issue,
                 owner,
-                coord_issue_owners(index),
+                index.coord_issue_owners,
             ),
-            coord_repos=coord_repos(index),
+            coord_repos=index.coord_repos,
         )
 
     def unassign_issue(
@@ -177,9 +177,9 @@ class CoordIndex:
     ) -> CoordIndex:
         index = self
         return CoordIndex(
-            coord_claims=coord_claims(index),
-            coord_issue_owners=unassign_issue(issue, coord_issue_owners(index)),
-            coord_repos=coord_repos(index),
+            coord_claims=index.coord_claims,
+            coord_issue_owners=unassign_issue(issue, index.coord_issue_owners),
+            coord_repos=index.coord_repos,
         )
 
     def issue_owner(
@@ -187,27 +187,15 @@ class CoordIndex:
         issue: int,
     ) -> str | None:
         index = self
-        return issue_owner(coord_issue_owners(index), issue)
+        return issue_owner(index.coord_issue_owners, issue)
 
     def repo_providers(self) -> list[str]:
         index = self
-        return repo_providers(coord_repos(index))
+        return repo_providers(index.coord_repos)
 
     def repo_count(self) -> int:
         index = self
-        return repo_count(coord_repos(index))
-
-
-def coord_claims(c: CoordIndex) -> frozenset[int]:
-    return c.coord_claims
-
-
-def coord_issue_owners(c: CoordIndex) -> dict[int, str]:
-    return c.coord_issue_owners
-
-
-def coord_repos(c: CoordIndex) -> list[repo_entry]:
-    return c.coord_repos
+        return repo_count(index.coord_repos)
 
 
 empty_coord_index: CoordIndex = CoordIndex(

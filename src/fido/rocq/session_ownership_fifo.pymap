@@ -10,10 +10,10 @@ open,101,0,104,30,session_ownership_fifo.v,64,7,64,16,extraction,FifoState,FifoS
 open,102,4,102,31,session_ownership_fifo.v,65,2,65,12,extraction,fifo_queue,fifo_queue
 open,103,4,103,32,session_ownership_fifo.v,66,2,66,18,extraction,fifo_active_slot,fifo_active_slot
 open,104,4,104,30,session_ownership_fifo.v,67,2,67,22,extraction,fifo_worker_deferred,fifo_worker_deferred
-open,119,0,120,8,session_ownership_fifo.v,88,10,88,15,extraction,Event,Event
-open,124,0,125,16,session_ownership_fifo.v,89,2,89,9,extraction,Enqueue,Enqueue
-open,129,0,130,8,session_ownership_fifo.v,90,2,90,9,extraction,Dequeue,Dequeue
-open,134,0,135,8,session_ownership_fifo.v,91,2,91,13,extraction,WorkerDefer,WorkerDefer
-open,139,0,140,8,session_ownership_fifo.v,92,2,92,14,extraction,WorkerResume,WorkerResume
-open,144,0,145,31,session_ownership_fifo.v,93,2,93,9,extraction,Release,Release
-open,151,0,153,18,session_ownership_fifo.v,103,11,103,21,extraction,transition,transition
+open,107,0,108,8,session_ownership_fifo.v,88,10,88,15,extraction,Event,Event
+open,112,0,113,16,session_ownership_fifo.v,89,2,89,9,extraction,Enqueue,Enqueue
+open,117,0,118,8,session_ownership_fifo.v,90,2,90,9,extraction,Dequeue,Dequeue
+open,122,0,123,8,session_ownership_fifo.v,91,2,91,13,extraction,WorkerDefer,WorkerDefer
+open,127,0,128,8,session_ownership_fifo.v,92,2,92,14,extraction,WorkerResume,WorkerResume
+open,132,0,133,31,session_ownership_fifo.v,93,2,93,9,extraction,Release,Release
+open,139,0,141,18,session_ownership_fifo.v,103,11,103,21,extraction,transition,transition
