@@ -1278,6 +1278,8 @@ let rec pp_expr state env expr =
                  py_prec_not
              | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
                  py_prec_and
+             | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
+                 py_prec_or
              | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
                  py_prec_compare
              | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
@@ -1451,6 +1453,12 @@ let rec pp_expr state env expr =
                  py_prec_and
                  (rendered_expr left)
                  (rendered_expr right))
+        | [left; right] when is_std_bool_ref r "orb" ->
+            Some
+              (py_infix "or"
+                 py_prec_or
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right] when is_std_bool_ref r "eqb" ->
             Some
               (py_infix ~associativity:PyAssocNone "=="
@@ -1491,8 +1499,8 @@ let rec pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
-        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
-                        is_std_bool_ref r "eqb" ->
+        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
+                        is_std_bool_ref r "negb" || is_std_bool_ref r "eqb" ->
             pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
@@ -3922,8 +3930,8 @@ type type_decl_action =
   | TypeDeclUnsupported
 
 let is_std_bool_term_ref r =
-  is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
-  is_std_bool_ref r "eqb"
+  is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
+  is_std_bool_ref r "negb" || is_std_bool_ref r "eqb"
 
 let classify_term_decl state r typ =
   if is_prop_type typ then TermDeclSuppress

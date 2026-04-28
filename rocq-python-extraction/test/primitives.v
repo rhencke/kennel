@@ -41,6 +41,10 @@ Definition bool_not (b : bool) : bool := if b then false else true.
     expression instead of retaining the Rocq helper call. *)
 Definition bool_and (b1 b2 : bool) : bool := andb b1 b2.
 
+(** [bool_or]: standard bool disjunction lowers to a native Python [or]
+    expression instead of retaining the Rocq helper call. *)
+Definition bool_or (b1 b2 : bool) : bool := orb b1 b2.
+
 (** [bool_neg]: standard bool negation lowers to a native Python [not]
     expression instead of retaining the Rocq helper call. *)
 Definition bool_neg (b : bool) : bool := negb b.
@@ -48,6 +52,18 @@ Definition bool_neg (b : bool) : bool := negb b.
 (** [bool_neg_and]: nested lowered bool operations must preserve Python
     precedence with parentheses around the lowered [and] expression. *)
 Definition bool_neg_and (b1 b2 : bool) : bool := negb (andb b1 b2).
+
+(** [bool_neg_or]: nested lowered bool operations must preserve Python
+    precedence with parentheses around the lowered [or] expression. *)
+Definition bool_neg_or (b1 b2 : bool) : bool := negb (orb b1 b2).
+
+(** [bool_or_and]: conjunction binds more tightly than disjunction, so a
+    lowered [and] expression can feed [or] without extra parentheses. *)
+Definition bool_or_and (b1 b2 b3 : bool) : bool := orb b1 (andb b2 b3).
+
+(** [bool_and_or]: a lowered disjunction used as a conjunction operand must
+    stay parenthesized so Python does not parse the result as [(b1 and b2) or b3]. *)
+Definition bool_and_or (b1 b2 b3 : bool) : bool := andb b1 (orb b2 b3).
 
 (** [bool_eq]: standard bool equality lowers to native Python equality instead
     of retaining the Rocq helper call. *)
@@ -175,4 +191,4 @@ Definition lambda_call_head (n : nat) : nat :=
   (fun f => f n) (fun x => S x).
 
 Python File Extraction primitives
-  "bool_not bool_and bool_neg bool_neg_and bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append lambda_call_head".
+  "bool_not bool_and bool_or bool_neg bool_neg_and bool_neg_or bool_or_and bool_and_or bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append lambda_call_head".

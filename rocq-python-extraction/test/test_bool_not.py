@@ -1,11 +1,15 @@
 from primitives import (
     bool_and,
     bool_and_eq,
+    bool_and_or,
     bool_eq,
     bool_eq_and,
     bool_neg,
     bool_neg_and,
+    bool_neg_or,
     bool_not,
+    bool_or,
+    bool_or_and,
     lambda_call_head,
     list_cons_append,
 )
@@ -23,6 +27,13 @@ def test_bool_and_round_trip() -> None:
     assert bool_and(False, False) is False
 
 
+def test_bool_or_round_trip() -> None:
+    assert bool_or(True, True) is True
+    assert bool_or(True, False) is True
+    assert bool_or(False, True) is True
+    assert bool_or(False, False) is False
+
+
 def test_bool_neg_round_trip() -> None:
     assert bool_neg(True) is False
     assert bool_neg(False) is True
@@ -33,6 +44,25 @@ def test_bool_neg_and_round_trip() -> None:
     assert bool_neg_and(True, False) is True
     assert bool_neg_and(False, True) is True
     assert bool_neg_and(False, False) is True
+
+
+def test_bool_neg_or_round_trip() -> None:
+    assert bool_neg_or(True, True) is False
+    assert bool_neg_or(True, False) is False
+    assert bool_neg_or(False, True) is False
+    assert bool_neg_or(False, False) is True
+
+
+def test_bool_or_and_round_trip() -> None:
+    assert bool_or_and(False, True, True) is True
+    assert bool_or_and(False, True, False) is False
+    assert bool_or_and(True, False, False) is True
+
+
+def test_bool_and_or_round_trip() -> None:
+    assert bool_and_or(True, False, True) is True
+    assert bool_and_or(True, False, False) is False
+    assert bool_and_or(False, True, True) is False
 
 
 def test_bool_eq_round_trip() -> None:
@@ -68,6 +98,13 @@ def test_bool_and_lowers_to_native_and(build_default) -> None:
     assert "return b1 and b2" in source
 
 
+def test_bool_or_lowers_to_native_or(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "def orb(" not in source
+    assert "return b1 or b2" in source
+
+
 def test_bool_neg_lowers_to_native_not(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -80,6 +117,27 @@ def test_bool_neg_and_preserves_precedence(build_default) -> None:
 
     assert "return not (b1 and b2)" in source
     assert "return not b1 and b2" not in source
+
+
+def test_bool_neg_or_preserves_precedence(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return not (b1 or b2)" in source
+    assert "return not b1 or b2" not in source
+
+
+def test_bool_or_and_keeps_python_precedence(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return b1 or b2 and b3" in source
+    assert "return b1 or (b2 and b3)" not in source
+
+
+def test_bool_and_or_parenthesizes_or_operand(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return b1 and (b2 or b3)" in source
+    assert "return b1 and b2 or b3" not in source
 
 
 def test_bool_eq_lowers_to_native_equality(build_default) -> None:
