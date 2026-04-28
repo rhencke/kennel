@@ -66,6 +66,20 @@ Inductive RescopeOp : Type :=
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
 | CompleteTask (task : positive) : RescopeOp.
 
+(** [RescopeReleaseKind] distinguishes the accumulated worker releases that
+    enter D11's batched rescope input.  Both ACT and DO releases are normalized
+    into the same explicit [RescopeOp] algebra before the durable transition
+    runs; their kind remains part of the input shape so the oracle can model
+    the exact worker boundary. *)
+Inductive RescopeReleaseKind : Type :=
+| ReleaseACT
+| ReleaseDO.
+
+Record RescopeRelease : Type := {
+  release_kind : RescopeReleaseKind;
+  release_decision : RescopeOp
+}.
+
 (** [task_executable] says whether a task kind may be selected for execution. *)
 Definition task_executable (kind : TaskKind) : bool :=
   match kind with
@@ -319,6 +333,9 @@ Definition rescope_task_id (op : RescopeOp) : positive :=
   | CompleteTask task => task
   end.
 
+Definition release_task_id (release : RescopeRelease) : positive :=
+  rescope_task_id (release_decision release).
+
 Fixpoint op_covers_task (task : positive) (ops : list RescopeOp) : bool :=
   match ops with
   | [] => false
@@ -335,6 +352,35 @@ Fixpoint rescope_ops_cover_snapshot
   | [] => true
   | task :: rest =>
       if op_covers_task task ops then rescope_ops_cover_snapshot rest ops else false
+  end.
+
+Fixpoint release_for_task
+    (task : positive)
+    (releases : list RescopeRelease) : option RescopeOp :=
+  match releases with
+  | [] => None
+  | release :: rest =>
+      if positive_eqb (release_task_id release) task then
+        Some (release_decision release)
+      else
+        release_for_task task rest
+  end.
+
+(** [normalize_rescope_batch] is the D11 confluence boundary.  The worker may
+    accumulate ACT/DO releases in any FIFO interleaving, but the durable
+    transition consumes them in snapshot order.  Equivalent batches whose
+    per-task releases agree therefore feed [apply_rescope] the same op list. *)
+Fixpoint normalize_rescope_batch
+    (snapshot_order : list positive)
+    (releases : list RescopeRelease) : list RescopeOp :=
+  match snapshot_order with
+  | [] => []
+  | task :: rest =>
+      let rest' := normalize_rescope_batch rest releases in
+      match release_for_task task releases with
+      | Some op => op :: rest'
+      | None => rest'
+      end
   end.
 
 Fixpoint apply_rescope_ops
@@ -540,6 +586,15 @@ Definition apply_rescope
   (List.app pending_order
       (List.app completed_existing (List.app newly_completed newly_added)), rows').
 
+Definition apply_batched_rescope
+    (snapshot_order : list positive)
+    (current_order : list positive)
+    (rows : PositiveMap.t TaskRow)
+    (releases : list RescopeRelease)
+    : list positive * PositiveMap.t TaskRow :=
+  let ops := normalize_rescope_batch snapshot_order releases in
+  apply_rescope snapshot_order current_order rows ops.
+
 (** [rescope_affects_active_task] says whether the active lease must abort after
     rescope because its task was completed or rewritten. *)
 Definition rescope_affects_active_task
@@ -675,6 +730,23 @@ Fixpoint compute_task_changes
       end
   end.
 
+Definition task_changes_materially_significant
+    (changes : list TaskChange) : bool :=
+  match changes with
+  | [] => false
+  | _ => true
+  end.
+
+Definition batched_rescope_materially_significant
+    (snapshot_order : list positive)
+    (current_order : list positive)
+    (rows : PositiveMap.t TaskRow)
+    (releases : list RescopeRelease) : bool :=
+  let '(_, rows_after) :=
+    apply_batched_rescope snapshot_order current_order rows releases in
+  let changes := compute_task_changes snapshot_order rows rows_after in
+  task_changes_materially_significant changes.
+
 (** [remove_from_order] removes all occurrences of [task] from [order].
 
     At most one occurrence normally exists; the function is total on any list
@@ -727,4 +799,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot task_identity_changed rescope_preserves_task_identity apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes remove_from_order cleanup_aborted_task task_still_pending".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch task_identity_changed rescope_preserves_task_identity apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending".

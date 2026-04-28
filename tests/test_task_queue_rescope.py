@@ -353,6 +353,82 @@ def test_rescope_identity_rejects_title_and_comment_drift() -> None:
     )
 
 
+def test_batched_rescope_converges_for_permuted_releases() -> None:
+    rows = {
+        1: oracle.TaskRow(
+            "Thread follow-up",
+            "old",
+            oracle.TaskThread(),
+            oracle.StatusPending(),
+            55,
+        ),
+        2: oracle.TaskRow(
+            "Spec task",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusPending(),
+            None,
+        ),
+        3: oracle.TaskRow(
+            "Fix CI",
+            "",
+            oracle.TaskCI(),
+            oracle.StatusPending(),
+            None,
+        ),
+        4: oracle.TaskRow(
+            "Already done",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusCompleted(),
+            None,
+        ),
+        5: oracle.TaskRow(
+            "Late arrival",
+            "",
+            oracle.TaskSpec(),
+            oracle.StatusPending(),
+            None,
+        ),
+    }
+    snapshot_order = [1, 2, 3]
+    current_order = [1, 2, 3, 4, 5]
+    act_rewrite = oracle.RescopeRelease(
+        oracle.ReleaseACT(),
+        oracle.RewriteTask(1, "Title drift ignored", "new detail"),
+    )
+    do_complete = oracle.RescopeRelease(oracle.ReleaseDO(), oracle.CompleteTask(2))
+    act_keep = oracle.RescopeRelease(oracle.ReleaseACT(), oracle.KeepTask(3))
+
+    left_releases = [act_rewrite, do_complete, act_keep]
+    right_releases = [act_keep, act_rewrite, do_complete]
+
+    assert oracle.normalize_rescope_batch(snapshot_order, left_releases) == (
+        oracle.normalize_rescope_batch(snapshot_order, right_releases)
+    )
+
+    left_order, left_rows = oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, left_releases
+    )
+    right_order, right_rows = oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, right_releases
+    )
+
+    assert left_order == [3, 1, 4, 2, 5]
+    assert left_order == right_order
+    assert left_rows == right_rows
+    assert left_rows[1].task_title == "Thread follow-up"
+    assert left_rows[1].task_description == "new detail"
+    assert type(left_rows[2].task_status).__name__ == "StatusCompleted"
+    assert oracle.rescope_preserves_task_identity(snapshot_order, rows, left_rows)
+    assert oracle.batched_rescope_materially_significant(
+        snapshot_order, current_order, rows, left_releases
+    )
+    assert oracle.batched_rescope_materially_significant(
+        snapshot_order, current_order, rows, right_releases
+    )
+
+
 def test_abort_decision_matches_oracle(tmp_path: Path) -> None:
     repo_cfg = MagicMock()
     repo_cfg.work_dir = tmp_path

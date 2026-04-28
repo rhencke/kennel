@@ -170,6 +170,33 @@ class CompleteTask(RescopeOp):
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
 
 
+class RescopeReleaseKind:
+    pass
+
+
+@dataclass(frozen=True)
+class ReleaseACT(RescopeReleaseKind):
+    pass
+
+
+@dataclass(frozen=True)
+class ReleaseDO(RescopeReleaseKind):
+    pass
+
+
+RescopeReleaseKindT = ReleaseACT | ReleaseDO
+
+
+@dataclass(frozen=True)
+class RescopeRelease:
+    release_kind: RescopeReleaseKind
+    release_decision: RescopeOp
+
+    def task_id(self) -> int:
+        release = self
+        return rescope_task_id(release.release_decision)
+
+
 def task_executable(kind: TaskKind) -> bool:
     match kind:
         case TaskCI():
@@ -602,6 +629,37 @@ def rescope_ops_cover_snapshot(
     return False
 
 
+def release_for_task(
+    task: int,
+    releases: list[RescopeRelease],
+) -> RescopeOp | None:
+    __list = releases
+    if __list == []:
+        return None
+    release = __list[0]
+    rest = __list[1:]
+    if positive_eqb(release.task_id(), task):
+        return release.release_decision
+    return release_for_task(task, rest)
+
+
+def normalize_rescope_batch(
+    snapshot_order: list[int],
+    releases: list[RescopeRelease],
+) -> list[RescopeOp]:
+    __list = snapshot_order
+    if __list == []:
+        return []
+    task = __list[0]
+    rest = __list[1:]
+    rest_ = normalize_rescope_batch(rest, releases)
+    __option = release_for_task(task, releases)
+    if __option is None:
+        return rest_
+    op = __option
+    return [op] + rest_
+
+
 def apply_rescope_ops(
     ops: list[RescopeOp],
     rows: dict[int, TaskRow],
@@ -952,6 +1010,21 @@ def apply_rescope(
     )
 
 
+def apply_batched_rescope(
+    snapshot_order: list[int],
+    current_order: list[int],
+    rows: dict[int, TaskRow],
+    releases: list[RescopeRelease],
+) -> tuple[list[int], dict[int, TaskRow]]:
+    ops = normalize_rescope_batch(snapshot_order, releases)
+    return apply_rescope(
+        snapshot_order,
+        current_order,
+        rows,
+        ops,
+    )
+
+
 def rescope_affects_active_task(
     lease: ExecutionLease | None,
     rows_before: dict[int, TaskRow],
@@ -1159,6 +1232,32 @@ def compute_task_changes(
         return rest_
     change = __option
     return [change] + rest_
+
+
+def task_changes_materially_significant(changes: list[TaskChange]) -> bool:
+    __list = changes
+    if __list == []:
+        return False
+    t0 = __list[0]
+    l = __list[1:]
+    return True
+
+
+def batched_rescope_materially_significant(
+    snapshot_order: list[int],
+    current_order: list[int],
+    rows: dict[int, TaskRow],
+    releases: list[RescopeRelease],
+) -> bool:
+    __pair = apply_batched_rescope(snapshot_order, current_order, rows, releases)
+    l = __pair[0]
+    rows_after = __pair[1]
+    changes = compute_task_changes(
+        snapshot_order,
+        rows,
+        rows_after,
+    )
+    return task_changes_materially_significant(changes)
 
 
 def remove_from_order(
