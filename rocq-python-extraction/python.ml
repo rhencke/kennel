@@ -3911,50 +3911,66 @@ let pp_ind_decl state (ind : ml_ind) =
 
 (*s Declaration printer. *)
 
+type term_decl_action =
+  | TermDeclSuppress
+  | TermDeclCustomAlias of string
+  | TermDeclEmit
+
+type type_decl_action =
+  | TypeDeclError of string
+  | TypeDeclSuppress
+  | TypeDeclUnsupported
+
+let is_std_bool_term_ref r =
+  is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
+  is_std_bool_ref r "eqb"
+
+let classify_term_decl state r typ =
+  if is_prop_type typ then TermDeclSuppress
+  else if is_runtime_marker_ref r then TermDeclSuppress
+  else if is_inline_custom r then TermDeclSuppress
+  else if is_std_bool_term_ref r then TermDeclSuppress
+  else if is_std_primitive_compare_ref r then TermDeclSuppress
+  else if is_std_collection_term_ref r then TermDeclSuppress
+  else if is_active_record_field_target (pp_global state Term r) then
+    TermDeclSuppress
+  else if is_custom r then TermDeclCustomAlias (find_custom r)
+  else TermDeclEmit
+
+let classify_type_decl r =
+  if is_std_real_type_ref r then TypeDeclError "PYEX041"
+  else if is_custom r || is_std_remapped_type_ref r then TypeDeclSuppress
+  else TypeDeclUnsupported
+
+let pp_classified_term_decl state env r a typ =
+  match classify_term_decl state r typ with
+  | TermDeclSuppress -> mt ()
+  | TermDeclCustomAlias alias ->
+      str (pp_global state Term r) ++ str " = " ++ str alias ++ fnl ()
+  | TermDeclEmit ->
+      let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
+      fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
+
+let term_decl_export_names state r typ =
+  match classify_term_decl state r typ with
+  | TermDeclSuppress -> []
+  | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
+
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind
-  | Dtype (r, _, _) when is_std_real_type_ref r ->
-      extraction_diagnostic_error "PYEX041"
-  | Dtype (r, _, _) when is_custom r || is_std_remapped_type_ref r -> mt ()
-  | Dtype _     -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003"
+  | Dtype (r, _, _) -> (
+      match classify_type_decl r with
+      | TypeDeclError code -> extraction_diagnostic_error code
+      | TypeDeclSuppress -> mt ()
+      | TypeDeclUnsupported -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003")
   | Dterm (r, a, typ) ->
-      if is_prop_type typ then mt ()
-      else if is_runtime_marker_ref r then mt ()
-      else if is_inline_custom r then mt ()
-      else if is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
-              is_std_bool_ref r "eqb" then mt ()
-      else if is_std_primitive_compare_ref r then mt ()
-      else if is_std_collection_term_ref r then mt ()
-      else if is_active_record_field_target (pp_global state Term r) then mt ()
-      else if is_custom r then
-        str (pp_global state Term r) ++ str " = " ++
-        str (find_custom r) ++ fnl ()
-      else
-        let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
-        let env = empty_env state () in
-        fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
+      pp_classified_term_decl state (empty_env state ()) r a typ
   | Dfix (rv, defs, typs) ->
       (* Each function in the fix block is named globally; the bodies use
          [MLglob] references for mutual recursion, so [empty_env] suffices. *)
       let env = empty_env state () in
       let pp_one i =
-        if is_prop_type typs.(i) then mt ()
-        else if is_runtime_marker_ref rv.(i) then mt ()
-        else if is_inline_custom rv.(i) then mt ()
-        else if is_std_bool_ref rv.(i) "andb" || is_std_bool_ref rv.(i) "negb" ||
-                is_std_bool_ref rv.(i) "eqb" then mt ()
-        else if is_std_primitive_compare_ref rv.(i) then mt ()
-        else if is_std_collection_term_ref rv.(i) then mt ()
-        else if is_custom rv.(i) then
-          str (pp_global state Term rv.(i)) ++ str " = " ++
-          str (find_custom rv.(i)) ++ fnl ()
-        else
-          let () =
-            validate_prop_discipline_decl
-              (Dterm (rv.(i), defs.(i), typs.(i)))
-          in
-          fnl () ++ fnl () ++
-          pp_term_decl state env (pp_global state Term rv.(i)) defs.(i) typs.(i)
+        pp_classified_term_decl state env rv.(i) defs.(i) typs.(i)
       in
       prlist_with_sep mt pp_one (List.init (Array.length rv) (fun i -> i))
 
@@ -3981,21 +3997,14 @@ let rec module_type_annotation state = function
 
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
-      if is_prop_type typ || is_inline_custom r || is_runtime_marker_ref r ||
-         is_std_collection_term_ref r || is_std_primitive_compare_ref r ||
-         is_active_record_field_target (pp_global state Term r) then []
-      else [pp_global state Term r]
+      term_decl_export_names state r typ
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
-      |> List.filter (fun i ->
-           not (is_prop_type typs.(i)) &&
-           not (is_runtime_marker_ref rv.(i)) &&
-           not (is_inline_custom rv.(i)) &&
-           not (is_std_collection_term_ref rv.(i)) &&
-           not (is_std_primitive_compare_ref rv.(i)))
-      |> List.map (fun i -> pp_global state Term rv.(i))
+      |> List.concat_map (fun i -> term_decl_export_names state rv.(i) typs.(i))
   | Dtype (r, _, _) ->
-      if is_custom r || is_std_remapped_type_ref r then [] else [pp_global state Type r]
+      (match classify_type_decl r with
+       | TypeDeclError _ | TypeDeclSuppress -> []
+       | TypeDeclUnsupported -> [pp_global state Type r])
   | Dind ind ->
       let packet_names packet =
         if is_std_remapped_type_ref packet.ip_typename_ref then []
