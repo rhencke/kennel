@@ -126,6 +126,17 @@ class TaskRow:
             return True
         return before_row.description_changed(after_row)
 
+    def identity_changed(
+        self,
+        after_row: TaskRow,
+    ) -> bool:
+        before_row = self
+        if before_row.title_changed(after_row):
+            return True
+        before_source = before_row.task_source_comment
+        after_source = after_row.task_source_comment
+        return task_source_comment_changed(before_source, after_source)
+
 
 # ExecutionLease: singleton inductive, constructor was Build_ExecutionLease
 
@@ -648,7 +659,7 @@ def apply_rescope_ops(
             match row.task_status:
                 case StatusPending():
                     row_ = TaskRow(
-                        task_title=title,
+                        task_title=row.task_title,
                         task_description=description,
                         task_kind=row.task_kind,
                         task_status=row.task_status,
@@ -673,7 +684,7 @@ def apply_rescope_ops(
                     )
                 case StatusBlocked():
                     row_ = TaskRow(
-                        task_title=title,
+                        task_title=row.task_title,
                         task_description=description,
                         task_kind=row.task_kind,
                         task_status=row.task_status,
@@ -857,6 +868,63 @@ def stable_ci_first(
     ci = collect_ci_tasks(order, rows)
     non_ci = collect_non_ci_tasks(order, rows)
     return ci + non_ci
+
+
+def option_positive_eqb(
+    left: int | None,
+    right: int | None,
+) -> bool:
+    __option = left
+    if __option is None:
+        __option = right
+        if __option is None:
+            return True
+        p = __option
+        return False
+    l = __option
+    __option = right
+    if __option is None:
+        return False
+    r = __option
+    return positive_eqb(l, r)
+
+
+def task_source_comment_changed(
+    before_source: int | None,
+    after_source: int | None,
+) -> bool:
+    return not (option_positive_eqb(before_source, after_source))
+
+
+def rescope_preserves_task_identity(
+    snapshot_order: list[int],
+    rows_before: dict[int, TaskRow],
+    rows_after: dict[int, TaskRow],
+) -> bool:
+    __list = snapshot_order
+    if __list == []:
+        return True
+    task = __list[0]
+    rest = __list[1:]
+    __option = rows_before.get(_rocq_positive_key(task))
+    if __option is None:
+        return rescope_preserves_task_identity(
+            rest,
+            rows_before,
+            rows_after,
+        )
+    before_row = __option
+    __option = rows_after.get(_rocq_positive_key(task))
+    if __option is None:
+        return False
+    after_row = __option
+    if before_row.identity_changed(after_row):
+        return False
+    return rescope_preserves_task_identity(
+        rest,
+        rows_before,
+        rows_after,
+    )
 
 
 def apply_rescope(

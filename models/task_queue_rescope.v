@@ -55,7 +55,12 @@ Record ExecutionLease : Type := {
 
 (** [RescopeOp] is the explicit normalized rescope decision for one snapped
     task.  The handwritten adapter can derive these from today's omission-based
-    provider output before comparing against the model. *)
+    provider output before comparing against the model.
+
+    D11 treats [task_title] and [task_source_comment] as immutable task
+    identity.  [RewriteTask] still carries a title because today's Python
+    proposal shape includes one, but the modeled transition must ignore that
+    field and may only revise mutable task text. *)
 Inductive RescopeOp : Type :=
 | KeepTask (task : positive) : RescopeOp
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
@@ -356,7 +361,7 @@ Fixpoint apply_rescope_ops
               | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
               | _ =>
                   let row' := {|
-                    task_title := title;
+                    task_title := task_title row;
                     task_description := description;
                     task_kind := task_kind row;
                     task_status := task_status row;
@@ -477,6 +482,48 @@ Definition task_metadata_changed (before_row after_row : TaskRow) : bool :=
     true
   else
     task_description_changed before_row after_row.
+
+Definition option_positive_eqb
+    (left right : option positive) : bool :=
+  match left, right with
+  | Some l, Some r => positive_eqb l r
+  | None, None => true
+  | _, _ => false
+  end.
+
+Definition task_source_comment_changed
+    (before_source after_source : option positive) : bool :=
+  negb (option_positive_eqb before_source after_source).
+
+(** [task_identity_changed] captures the D11 invariant boundary: rescope may
+    reorder tasks, complete tasks, or revise mutable task text, but it may not
+    rewrite the existing task title or source-comment anchor. *)
+Definition task_identity_changed
+    (before_row after_row : TaskRow) : bool :=
+  if task_title_changed before_row after_row then
+    true
+  else
+    let before_source := task_source_comment before_row in
+    let after_source := task_source_comment after_row in
+    task_source_comment_changed before_source after_source.
+
+Fixpoint rescope_preserves_task_identity
+    (snapshot_order : list positive)
+    (rows_before rows_after : PositiveMap.t TaskRow) : bool :=
+  match snapshot_order with
+  | [] => true
+  | task :: rest =>
+      match PositiveMap.find task rows_before,
+            PositiveMap.find task rows_after with
+      | Some before_row, Some after_row =>
+          if task_identity_changed before_row after_row then
+            false
+          else
+            rescope_preserves_task_identity rest rows_before rows_after
+      | Some _, None => false
+      | _, _ => rescope_preserves_task_identity rest rows_before rows_after
+      end
+  end.
 
 (** [apply_rescope] applies explicit keep/rewrite/complete decisions to a
     snapped queue while preserving post-snapshot additions and completed rows. *)
@@ -680,4 +727,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes remove_from_order cleanup_aborted_task task_still_pending".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot task_identity_changed rescope_preserves_task_identity apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes remove_from_order cleanup_aborted_task task_still_pending".
