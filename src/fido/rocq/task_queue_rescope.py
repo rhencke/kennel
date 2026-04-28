@@ -17,15 +17,6 @@ from typing import (
 # bool: remapped to Python primitive
 
 
-def andb(
-    b1: bool,
-    b2: bool,
-) -> bool:
-    if b1:
-        return b2
-    return False
-
-
 def negb(b: bool) -> bool:
     if b:
         return False
@@ -462,7 +453,7 @@ def pick_first_ci(
     if __option is None:
         return pick_first_ci(rest, rows)
     row = __option
-    if andb(row.row_executable(), task_kind_is_ci(task_kind(row))):
+    if row.row_executable() and task_kind_is_ci(task_kind(row)):
         return task
     return pick_first_ci(rest, rows)
 
@@ -480,7 +471,7 @@ def pick_first_non_ci(
     if __option is None:
         return pick_first_non_ci(rest, rows)
     row = __option
-    if andb(row.row_executable(), task_kind_is_non_ci(task_kind(row))):
+    if row.row_executable() and task_kind_is_non_ci(task_kind(row)):
         return task
     return pick_first_non_ci(rest, rows)
 

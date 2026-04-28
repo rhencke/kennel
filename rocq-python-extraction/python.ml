@@ -368,6 +368,10 @@ let is_std_prod_pair_ref r =
 let is_std_bool_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.bool"
 
+let is_std_bool_ref r name =
+  global_path_has_suffix r (".Init.Datatypes." ^ name) ||
+  global_path_has_suffix r (".Bool.Bool." ^ name)
+
 let is_std_nat_ref r name =
   global_path_has_suffix r (".Init.Nat." ^ name)
 
@@ -1188,6 +1192,13 @@ let rec pp_expr state env expr =
             Some (pp_expr state env left ++ str " + " ++ pp_expr state env right)
         | _ -> None
       in
+      let pp_std_bool_app r =
+        match all_args with
+        | [left; right] when is_std_bool_ref r "andb" ->
+            Some (pp_expr state env left ++ str " and " ++ pp_expr state env right)
+        | _ ->
+            None
+      in
       let pp_std_primitive_compare r =
         match all_args with
         | [left; right]
@@ -1207,6 +1218,8 @@ let rec pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
+        | MLglob r when is_std_bool_ref r "andb" ->
+            pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
         | MLglob r when is_std_list_app_ref r ->
@@ -3590,6 +3603,7 @@ let pp_decl state = function
       if is_prop_type typ then mt ()
       else if is_runtime_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
+      else if is_std_bool_ref r "andb" then mt ()
       else if is_std_primitive_compare_ref r then mt ()
       else if is_std_collection_term_ref r then mt ()
       else if is_custom r then
@@ -3607,6 +3621,7 @@ let pp_decl state = function
         if is_prop_type typs.(i) then mt ()
         else if is_runtime_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
+        else if is_std_bool_ref rv.(i) "andb" then mt ()
         else if is_std_primitive_compare_ref rv.(i) then mt ()
         else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then

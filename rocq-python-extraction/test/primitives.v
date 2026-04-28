@@ -36,6 +36,10 @@ Extract Inductive bool => "bool" [ "True" "False" ].
     Extracted form: [False if b else True]. *)
 Definition bool_not (b : bool) : bool := if b then false else true.
 
+(** [bool_and]: standard bool conjunction lowers to a native Python [and]
+    expression instead of retaining the Rocq helper call. *)
+Definition bool_and (b1 b2 : bool) : bool := andb b1 b2.
+
 (* ------------------------------------------------------------------ *)
 (*  nat → Python int                                                   *)
 (*                                                                     *)
@@ -138,4 +142,4 @@ Fixpoint list_add_one (l : list nat) : list nat :=
   | h :: t => (S h) :: list_add_one t
   end.
 
-Python File Extraction primitives "bool_not nat_double option_inc pair_swap list_add_one".
+Python File Extraction primitives "bool_not bool_and nat_double option_inc pair_swap list_add_one".

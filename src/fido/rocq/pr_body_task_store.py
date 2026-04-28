@@ -17,15 +17,6 @@ from typing import (
 # bool: remapped to Python primitive
 
 
-def andb(
-    b1: bool,
-    b2: bool,
-) -> bool:
-    if b1:
-        return b2
-    return False
-
-
 def negb(b: bool) -> bool:
     if b:
         return False
@@ -770,9 +761,9 @@ class PRBodyRow:
         same_description = pr_body_description(left) == pr_body_description(right)
         same_kind = task_kind_eqb(pr_body_kind(left), pr_body_kind(right))
         same_status = pr_body_status_eqb(pr_body_status(left), pr_body_status(right))
-        same_text = andb(same_title, same_description)
-        same_metadata = andb(same_kind, same_status)
-        return andb(same_task, andb(same_text, same_metadata))
+        same_text = same_title and same_description
+        same_metadata = same_kind and same_status
+        return same_task and same_text and same_metadata
 
 
 def pr_body_task(p: PRBodyRow) -> int:
@@ -1038,7 +1029,7 @@ def pr_body_eqb(
         return False
     right_row = __list[0]
     right_rest = __list[1:]
-    return andb(left_row.body_row_eqb(right_row), pr_body_eqb(left_rest, right_rest))
+    return left_row.body_row_eqb(right_row) and pr_body_eqb(left_rest, right_rest)
 
 
 @dataclass(frozen=True)
