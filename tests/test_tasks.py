@@ -6,12 +6,18 @@ import pytest
 
 from fido.claude import ClaudeClient
 from fido.prompts import Prompts
+from fido.rocq import pr_body_task_store as oracle
 from fido.tasks import (
     Tasks,
     _apply_reorder,
     _compute_thread_changes,
     _find_duplicate_titles,
+    _format_work_queue,
     _parse_reorder_response,
+    _task_kind_for_oracle,
+    _task_source_comment_for_oracle,
+    _task_status_for_oracle,
+    _task_store_for_oracle,
     add_task,
     complete_by_id,
     has_pending_tasks_for_comment,
@@ -38,6 +44,90 @@ def _task_file(tmp_path: Path) -> Path:
     git_dir = tmp_path / ".git" / "fido"
     git_dir.mkdir(parents=True)
     return git_dir / "tasks.json"
+
+
+class TestTaskStoreOracleAdapter:
+    def test_task_kind_maps_ci_title_before_type(self) -> None:
+        task = {"title": "CI failure: lint", "type": "spec"}
+
+        assert isinstance(_task_kind_for_oracle(task), oracle.TaskCI)
+
+    def test_task_kind_maps_thread_ask_defer_and_spec(self) -> None:
+        assert isinstance(
+            _task_kind_for_oracle({"title": "Review", "type": "thread"}),
+            oracle.TaskThread,
+        )
+        assert isinstance(
+            _task_kind_for_oracle({"title": "ASK: clarify", "type": "spec"}),
+            oracle.TaskAsk,
+        )
+        assert isinstance(
+            _task_kind_for_oracle({"title": "DEFER: later", "type": "spec"}),
+            oracle.TaskDefer,
+        )
+        assert isinstance(
+            _task_kind_for_oracle({"title": "Build it", "type": "spec"}),
+            oracle.TaskSpec,
+        )
+
+    def test_task_status_maps_visible_states(self) -> None:
+        assert isinstance(
+            _task_status_for_oracle({"status": TaskStatus.COMPLETED}),
+            oracle.StatusCompleted,
+        )
+        assert isinstance(
+            _task_status_for_oracle({"status": TaskStatus.BLOCKED}),
+            oracle.StatusBlocked,
+        )
+        assert isinstance(
+            _task_status_for_oracle({"status": TaskStatus.IN_PROGRESS}),
+            oracle.StatusPending,
+        )
+        assert isinstance(_task_status_for_oracle({}), oracle.StatusPending)
+
+    def test_task_source_comment_maps_thread_metadata(self) -> None:
+        assert _task_source_comment_for_oracle({"thread": {"comment_id": "42"}}) == 42
+        assert _task_source_comment_for_oracle({"thread": {}}) is None
+
+    def test_task_store_preserves_order_and_rows(self) -> None:
+        task_list = [
+            {
+                "title": "First",
+                "description": "one",
+                "type": "spec",
+                "status": "pending",
+            },
+            {
+                "title": "Second",
+                "description": "two",
+                "type": "thread",
+                "status": "completed",
+                "thread": {"comment_id": 9},
+            },
+        ]
+
+        store, by_oracle_id = _task_store_for_oracle(task_list)
+
+        assert store.task_store_order == [1, 2]
+        assert by_oracle_id == {1: task_list[0], 2: task_list[1]}
+        assert store.task_store_rows[1].task_description == "one"
+        assert store.task_store_rows[2].task_source_comment == 9
+
+    def test_format_work_queue_uses_oracle_projection(self) -> None:
+        task_list = [
+            {"title": "Spec", "status": "pending", "type": "spec"},
+            {"title": "CI failure: lint", "status": "pending", "type": "spec"},
+            {"title": "Blocked", "status": "blocked", "type": "spec"},
+            {"title": "Done", "status": "completed", "type": "thread"},
+        ]
+
+        queue = _format_work_queue(task_list)
+        lines = queue.splitlines()
+
+        assert lines[0] == "- [ ] CI failure: lint **→ next** <!-- type:spec -->"
+        assert lines[1] == "- [ ] Spec <!-- type:spec -->"
+        assert "Blocked" not in queue
+        assert "- [x] Done <!-- type:thread -->" in queue
 
 
 class TestAddTask:

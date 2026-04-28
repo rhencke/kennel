@@ -17,6 +17,7 @@ from fido.claude import ClaudeClient
 from fido.github import GitHub
 from fido.prompts import Prompts
 from fido.provider import ProviderAgent
+from fido.rocq import pr_body_task_store as task_store_oracle
 from fido.state import (
     JsonFileStore,
     State,
@@ -28,6 +29,55 @@ log = logging.getLogger(__name__)
 
 # Maximum number of nudge retries when Opus proposes duplicate task titles.
 _RESCOPE_MAX_NUDGES = 3
+
+
+def _task_kind_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskKind:
+    title_upper = task.get("title", "").upper()
+    if title_upper.startswith("ASK:"):
+        return task_store_oracle.TaskAsk()
+    if title_upper.startswith("DEFER:"):
+        return task_store_oracle.TaskDefer()
+    if title_upper.startswith("CI FAILURE:") or task.get("type") == TaskType.CI:
+        return task_store_oracle.TaskCI()
+    if task.get("type") == TaskType.THREAD:
+        return task_store_oracle.TaskThread()
+    return task_store_oracle.TaskSpec()
+
+
+def _task_status_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskStatus:
+    match task.get("status", TaskStatus.PENDING):
+        case TaskStatus.COMPLETED | "completed":
+            return task_store_oracle.StatusCompleted()
+        case TaskStatus.BLOCKED | "blocked":
+            return task_store_oracle.StatusBlocked()
+        case _:
+            return task_store_oracle.StatusPending()
+
+
+def _task_source_comment_for_oracle(task: dict[str, Any]) -> int | None:
+    comment_id = (task.get("thread") or {}).get("comment_id")
+    if comment_id is None:
+        return None
+    return int(comment_id)
+
+
+def _task_store_for_oracle(
+    task_list: list[dict[str, Any]],
+) -> tuple[task_store_oracle.TaskStore, dict[int, dict[str, Any]]]:
+    tasks_by_oracle_id: dict[int, dict[str, Any]] = {}
+    rows: dict[int, task_store_oracle.TaskRow] = {}
+    order: list[int] = []
+    for oracle_id, task in enumerate(task_list, 1):
+        order.append(oracle_id)
+        tasks_by_oracle_id[oracle_id] = task
+        rows[oracle_id] = task_store_oracle.TaskRow(
+            task_title=task.get("title", ""),
+            task_description=task.get("description", ""),
+            task_kind=_task_kind_for_oracle(task),
+            task_status=_task_status_for_oracle(task),
+            task_source_comment=_task_source_comment_for_oracle(task),
+        )
+    return task_store_oracle.TaskStore(order, rows), tasks_by_oracle_id
 
 
 def _task_file(work_dir: Path) -> Path:
@@ -138,29 +188,26 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     Completed tasks appear in a collapsible ``<details>`` section.
     Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
     """
-    ci_pending: list[tuple[str, str]] = []
-    other_pending: list[tuple[str, str]] = []
+    store, tasks_by_oracle_id = _task_store_for_oracle(task_list)
+    projected_rows = task_store_oracle.project_task_store(store)
+    pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
 
-    def _fmt(t: dict[str, Any]) -> str:
-        title = t.get("title", "")
-        url = (t.get("thread") or {}).get("url", "")
-        return f"[{title}]({url})" if url else title
+    def _fmt(row: task_store_oracle.PRBodyRow) -> tuple[str, str]:
+        task = tasks_by_oracle_id[row.pr_body_task]
+        title = row.pr_body_title
+        url = (task.get("thread") or {}).get("url", "")
+        task_type = task.get("type", TaskType.SPEC)
+        display = f"[{title}]({url})" if url else title
+        return display, task_type
 
-    for t in task_list:
-        status = t.get("status", TaskStatus.PENDING)
-        task_type = t.get("type", TaskType.SPEC)
-        display = _fmt(t)
-        if status == TaskStatus.COMPLETED:
-            completed.append((display, task_type))
-        elif status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
-            title = t.get("title", "")
-            if title.startswith("CI failure:"):
-                ci_pending.append((display, task_type))
-            else:
-                other_pending.append((display, task_type))
+    for row in projected_rows:
+        display = _fmt(row)
+        if isinstance(row.pr_body_status, task_store_oracle.PRCompleted):
+            completed.append(display)
+        else:
+            pending.append(display)
 
-    pending = ci_pending + other_pending
     lines: list[str] = []
     for i, (display, task_type) in enumerate(pending):
         suffix = " **→ next**" if i == 0 else ""
