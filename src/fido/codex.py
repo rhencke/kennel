@@ -183,7 +183,11 @@ class CodexAppServerClient:
         )
         self._reader.start()
         self._stderr_reader.start()
-        self._initialize()
+        try:
+            self._initialize()
+        except Exception:
+            self.stop()
+            raise
 
     @property
     def pid(self) -> int | None:
@@ -587,8 +591,9 @@ class CodexAPI(ProviderAPI):
                 < _CODEX_RATE_LIMIT_CACHE_SECONDS
             ):
                 return self._limit_snapshot_cache
-            client = self._client_factory()
+            client: CodexAppServer | None = None
             try:
+                client = self._client_factory()
                 payload = client.request(
                     "account/rateLimits/read", timeout=_CODEX_APP_SERVER_TIMEOUT
                 )
@@ -610,7 +615,8 @@ class CodexAPI(ProviderAPI):
                     unavailable_reason=f"Codex usage unavailable: {exc}",
                 )
             finally:
-                client.stop()
+                if client is not None:
+                    client.stop()
             self._limit_snapshot_cache = snapshot
             self._limit_snapshot_cached_at = self._monotonic()
             return snapshot
@@ -850,7 +856,7 @@ class CodexSession(OwnedSession):
                 )
                 self._session_id = _thread_id_from_result(result)
                 return
-            except Exception:
+            except CodexProviderError:
                 log.exception("CodexSession: failed to resume session %s", session_id)
                 self._dropped_session_count += 1
         result = self._client.request("thread/start", self._thread_params(None))

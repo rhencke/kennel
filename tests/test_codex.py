@@ -270,6 +270,7 @@ class TestCodexAppServerClient:
         process = _FakeProcess("not-json\n")
         with pytest.raises(CodexProtocolError, match="invalid JSON"):
             CodexAppServerClient(process_factory=lambda **_: process)
+        assert process.terminated
 
     def test_oversized_line_fails_loudly(self) -> None:
         process = _FakeProcess('{"id":1,"result":{}}\n')
@@ -278,6 +279,7 @@ class TestCodexAppServerClient:
                 process_factory=lambda **_: process,
                 max_line_bytes=1,
             )
+        assert process.terminated
 
 
 class TestCodexAPI:
@@ -344,6 +346,15 @@ class TestCodexAPI:
         snapshot = CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
         assert snapshot.provider == ProviderID.CODEX
         assert snapshot.unavailable_reason is not None
+
+    def test_client_factory_failure_is_unavailable_snapshot(self) -> None:
+        def fail() -> _FakeAppServer:
+            raise RuntimeError("codex unavailable")
+
+        snapshot = CodexAPI(client_factory=fail).get_limit_snapshot()
+        assert snapshot.provider == ProviderID.CODEX
+        assert snapshot.unavailable_reason is not None
+        assert "codex unavailable" in snapshot.unavailable_reason
 
     def test_caches_snapshot(self) -> None:
         fake = _FakeAppServer()
