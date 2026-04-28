@@ -135,8 +135,11 @@ that projection. When the scheduler/reducer boundary becomes authoritative,
 `task_complete` should stay an explicit reducer transition, while new reviewer
 input should arrive as a `change_request(request : str)` command whose rescope
 step lets the LLM rewrite the PR description and remaining tasks to fit the
-new ask. That rescope transition must preserve enough comment provenance to
-notify authors when their task is materially changed or deleted; grouping a
+new ask. A rescoped task may carry zero to many origin comments because later,
+broader asks can absorb earlier ones. The rescope transition must preserve
+that provenance so same-author absorbed asks can receive one final reply
+instead of repeated pings, while tasks absorbed from other authors still get an
+outbox notification that their task was folded into a larger one. Grouping a
 task with another one should not count as a material deletion. The reducer
 commits the durable task store first, then runs the PR-body update and any
 notifications as outbox effects, making the handwritten sync choreography in
