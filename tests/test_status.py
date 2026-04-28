@@ -2678,20 +2678,27 @@ class TestProviderColoredStatus:
         for line in repo_lines:
             assert expected_bg in line, f"bg missing from: {line!r}"
 
-    def test_repo_section_bg_omitted_for_provider_without_palette(self) -> None:
-        # CODEX has no registered palette — section renders without
-        # provider-bg wrap.  This test also guards against crashes when
-        # palette_for returns None.
+    def test_repo_section_lines_get_codex_provider_bg_when_color_enabled(self) -> None:
+        from fido.color import rgb_bg
+        from fido.provider import PROVIDER_PALETTES
+
         with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
             repo = self._repo(provider=ProviderID.CODEX, fido_running=True, issue=7)
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
-        # No truecolor bg escape (\033[48;2;...m) should appear anywhere.
-        assert "\033[48;2;" not in output
+        palette = PROVIDER_PALETTES[ProviderID.CODEX]
+        expected_bg = rgb_bg(*palette.dim_bg)
+        repo_lines = [
+            ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
+        ]
+        assert repo_lines, f"no repo/issue lines:\n{output}"
+        for line in repo_lines:
+            assert expected_bg in line, f"bg missing from: {line!r}"
 
-    def test_limits_line_falls_back_when_provider_has_no_palette(self) -> None:
-        # CODEX has no palette registered; the limits line still renders,
-        # without a truecolor fg prefix for the provider token.
+    def test_limits_line_highlights_codex_token(self) -> None:
+        from fido.color import rgb_fg
+        from fido.provider import PROVIDER_PALETTES
+
         with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
             provider_status = ProviderPressureStatus(
                 provider=ProviderID.CODEX,
@@ -2709,9 +2716,10 @@ class TestProviderColoredStatus:
                 provider_statuses=[provider_status],
             )
             output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CODEX]
+        expected_prefix = rgb_fg(*palette.bright_fg) + "codex"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
-        assert "codex 50%" in limits_line
-        assert "\033[38;2;" not in limits_line
+        assert expected_prefix in limits_line
 
     def test_repo_header_colors_provider_name_with_bright_fg(self) -> None:
         # The provider token in the repo header stats line gets the provider's
@@ -2750,16 +2758,18 @@ class TestProviderColoredStatus:
         # DARK_GRAY code (\033[90m) must be present on the header for the paused state.
         assert "\033[90m" in header_line
 
-    def test_repo_header_provider_name_no_color_when_no_palette(self) -> None:
-        # Providers with no palette render the provider name as plain text.
+    def test_repo_header_codex_provider_name_colored(self) -> None:
+        from fido.color import rgb_fg
+        from fido.provider import PROVIDER_PALETTES
+
         with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
             repo = self._repo(provider=ProviderID.CODEX)
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CODEX]
+        expected = rgb_fg(*palette.bright_fg) + "codex"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
-        assert "codex" in header_line
-        # No truecolor fg escape for the provider token.
-        assert "\033[38;2;" not in header_line
+        assert expected in header_line
 
     def test_repo_header_provider_name_colored_when_no_provider_status(self) -> None:
         # Even without a provider_status, the provider name gets bright_fg color

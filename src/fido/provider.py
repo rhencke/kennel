@@ -68,15 +68,18 @@ PROVIDER_PALETTES: dict[ProviderID, ProviderPalette] = {
         dim_bg=(40, 20, 60),  # obvious plum tint, still dark
         bright_fg=(180, 130, 255),  # Copilot-purple, legible on dark terminals
     ),
+    ProviderID.CODEX: ProviderPalette(
+        dim_bg=(8, 54, 43),  # dark teal-green tint, still readable under white
+        bright_fg=(72, 220, 160),  # Codex-green, legible on dark terminals
+    ),
 }
 
 
 def palette_for(provider: ProviderID) -> ProviderPalette | None:
     """Return the :class:`ProviderPalette` for *provider*, or ``None``.
 
-    Returns ``None`` for providers without a registered palette (e.g.
-    ``CODEX`` today).  Callers treat ``None`` as "render without
-    provider-specific color", not as an error.
+    Callers treat ``None`` as "render without provider-specific color", not
+    as an error, so new providers can be wired before their visual identity.
     """
     return PROVIDER_PALETTES.get(provider)
 
@@ -88,7 +91,7 @@ class TurnSessionMode(StrEnum):
     FRESH = "fresh"
 
 
-ReasoningEffort: TypeAlias = Literal["low", "medium", "high"]
+ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh"]
 ReasoningEffortSpec: TypeAlias = ReasoningEffort | tuple[ReasoningEffort, ...] | None
 
 

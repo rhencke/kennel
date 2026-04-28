@@ -37,11 +37,11 @@ class TestDefaultProviderFactory:
         )
         assert api.provider_id == ProviderID.COPILOT_CLI
 
-    def test_create_api_rejects_unknown_provider(self, tmp_path: Path) -> None:
+    def test_create_api_rejects_codex_until_wired(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         factory = DefaultProviderFactory(session_system_file=system_file)
-        with pytest.raises(ValueError, match="unsupported provider"):
+        with pytest.raises(NotImplementedError, match="codex provider not yet wired"):
             factory.create_api(
                 RepoConfig(
                     name="owner/repo",
@@ -98,7 +98,7 @@ class TestDefaultProviderFactory:
         )
         assert agent.provider_id == ProviderID.COPILOT_CLI
 
-    def test_create_provider_rejects_unknown_provider(self, tmp_path: Path) -> None:
+    def test_create_provider_rejects_codex_until_wired(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         factory = DefaultProviderFactory(session_system_file=system_file)
@@ -107,7 +107,7 @@ class TestDefaultProviderFactory:
             work_dir=tmp_path,
             provider=ProviderID.CODEX,
         )
-        with pytest.raises(ValueError, match="unsupported provider"):
+        with pytest.raises(NotImplementedError, match="codex provider not yet wired"):
             factory.create_provider(
                 repo_cfg,
                 work_dir=tmp_path,

@@ -33,6 +33,8 @@ class DefaultProviderFactory:
                     api = ClaudeAPI()
                 case ProviderID.COPILOT_CLI:
                     api = CopilotCLIAPI()
+                case ProviderID.CODEX:
+                    raise NotImplementedError("codex provider not yet wired")
                 case _:
                     raise ValueError(f"unsupported provider: {repo_cfg.provider}")
             self._apis[repo_cfg.provider] = api
@@ -65,6 +67,8 @@ class DefaultProviderFactory:
                         session=session,
                     )
                 )
+            case ProviderID.CODEX:
+                raise NotImplementedError("codex provider not yet wired")
             case _:
                 raise ValueError(f"unsupported provider: {repo_cfg.provider}")
 

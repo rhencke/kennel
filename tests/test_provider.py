@@ -133,6 +133,10 @@ class TestProviderModel:
         assert hash(model) == hash(same)
         assert model != different
 
+    def test_xhigh_effort_supported_for_codex(self) -> None:
+        model = ProviderModel("gpt-5.5", "xhigh")
+        assert model.efforts == ("xhigh",)
+
     def test_comparison_to_unrelated_type_is_false(self) -> None:
         assert ProviderModel("gpt-5.4") != object()
 
@@ -156,12 +160,13 @@ class TestProviderPalette:
         assert palette.dim_bg == (40, 20, 60)
         assert palette.bright_fg == (180, 130, 255)
 
-    def test_palette_for_codex_returns_none(self) -> None:
-        # CODEX has no palette registered today — callers must
-        # handle None as "render without provider color", not as an error.
+    def test_palette_for_codex(self) -> None:
         from fido.provider import ProviderID, palette_for
 
-        assert palette_for(ProviderID.CODEX) is None
+        palette = palette_for(ProviderID.CODEX)
+        assert palette is not None
+        assert palette.dim_bg == (8, 54, 43)
+        assert palette.bright_fg == (72, 220, 160)
 
     @staticmethod
     def _relative_luminance(rgb: tuple[int, int, int]) -> float:
