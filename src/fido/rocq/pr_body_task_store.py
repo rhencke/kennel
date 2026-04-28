@@ -15,14 +15,6 @@ from typing import (
 
 
 # bool: remapped to Python primitive
-
-
-def negb(b: bool) -> bool:
-    if b:
-        return False
-    return True
-
-
 # nat: remapped to Python primitive
 
 _A = TypeVar("_A")
@@ -195,7 +187,7 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
 
 
 def task_kind_is_non_ci(kind: TaskKind) -> bool:
-    return negb(task_kind_is_ci(kind))
+    return not (task_kind_is_ci(kind))
 
 
 def positive_eqb(

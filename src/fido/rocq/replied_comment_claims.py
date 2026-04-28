@@ -15,14 +15,6 @@ from typing import (
 
 
 # bool: remapped to Python primitive
-
-
-def negb(b: bool) -> bool:
-    if b:
-        return False
-    return True
-
-
 # nat: remapped to Python primitive
 
 _A = TypeVar("_A")
@@ -313,7 +305,7 @@ def comment_claimable(
     if __option is None:
         return True
     row = __option
-    return negb(row.is_blocking())
+    return not (row.is_blocking())
 
 
 def all_claimable(

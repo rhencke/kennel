@@ -15,14 +15,6 @@ from typing import (
 
 
 # bool: remapped to Python primitive
-
-
-def negb(b: bool) -> bool:
-    if b:
-        return False
-    return True
-
-
 # nat: remapped to Python primitive
 
 _A = TypeVar("_A")
@@ -165,14 +157,14 @@ class TaskRow:
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return negb(task_title(before_row) == task_title(after_row))
+        return not (task_title(before_row) == task_title(after_row))
 
     def description_changed(
         self,
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return negb(task_description(before_row) == task_description(after_row))
+        return not (task_description(before_row) == task_description(after_row))
 
     def metadata_changed(
         self,
@@ -269,7 +261,7 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
 
 
 def task_kind_is_non_ci(kind: TaskKind) -> bool:
-    return negb(task_kind_is_ci(kind))
+    return not (task_kind_is_ci(kind))
 
 
 def task_preempt_rank(kind: TaskKind) -> int | None:

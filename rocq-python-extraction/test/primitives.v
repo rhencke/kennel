@@ -40,6 +40,10 @@ Definition bool_not (b : bool) : bool := if b then false else true.
     expression instead of retaining the Rocq helper call. *)
 Definition bool_and (b1 b2 : bool) : bool := andb b1 b2.
 
+(** [bool_neg]: standard bool negation lowers to a native Python [not]
+    expression instead of retaining the Rocq helper call. *)
+Definition bool_neg (b : bool) : bool := negb b.
+
 (* ------------------------------------------------------------------ *)
 (*  nat → Python int                                                   *)
 (*                                                                     *)
@@ -142,4 +146,4 @@ Fixpoint list_add_one (l : list nat) : list nat :=
   | h :: t => (S h) :: list_add_one t
   end.
 
-Python File Extraction primitives "bool_not bool_and nat_double option_inc pair_swap list_add_one".
+Python File Extraction primitives "bool_not bool_and bool_neg nat_double option_inc pair_swap list_add_one".
