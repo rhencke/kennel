@@ -960,6 +960,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             handled = False
             category: str | None = None
             titles: list[str] = []
+            queued_tasks = 0
 
             if action.reply_to:
                 promise = self._prepare_reply(repo_cfg, action)
@@ -987,7 +988,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             if len(titles or []) != 1
                             else "queuing review comment task"
                         )
-                    queue_reply_tasks(
+                    queued_tasks += queue_reply_tasks(
                         category,
                         titles or [],
                         self.config,
@@ -1026,7 +1027,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         if len(titles) != 1
                         else "queuing PR comment task"
                     )
-                queue_reply_tasks(
+                queued_tasks += queue_reply_tasks(
                     category or "",
                     titles,
                     self.config,
@@ -1041,7 +1042,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "action outcome: handled=%s category=%s tasks=%d",
                 handled,
                 category,
-                len(titles),
+                queued_tasks,
             )
             # When a human comments on a PR, transition any BLOCKED tasks back
             # to PENDING so the worker can re-evaluate and resume.

@@ -29,6 +29,8 @@ from fido.types import TaskType
 
 log = logging.getLogger(__name__)
 
+_FIDO_LOGINS = {"fidocancode", "fido-can-code"}
+
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
 _reorder_coalesce: dict[str, dict[str, Any]] = {}
@@ -375,8 +377,9 @@ def queue_reply_tasks(
     if not reply_outcome_creates_tasks(category, thread=thread):
         return 0
     task_fn = create_task if create_task_fn is None else create_task_fn
+    created = 0
     for title in titles:
-        task_fn(
+        task = task_fn(
             title,
             config,
             repo_cfg,
@@ -384,7 +387,9 @@ def queue_reply_tasks(
             thread=thread,
             registry=registry,
         )
-    return len(titles)
+        if not (isinstance(task, dict) and task.get("status") == "skipped_resolved"):
+            created += 1
+    return created
 
 
 def _apply_reply_result(
@@ -929,14 +934,11 @@ def reply_to_comment(
                 "fetched %d comment(s) in thread for context", len(thread_comments)
             )
 
-    # Fido login set — used for initial snapshot and post-re-fetch comparison.
-    _fido_logins = {"fidocancode", "fido-can-code"}
-
     # Capture Fido reply IDs from the initial snapshot so we can detect new
     # replies posted by concurrent handlers during the triage + generation
     # window (compared against the re-fetched thread below).
     initial_fido_ids: set[int] = {
-        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+        c["id"] for c in thread_comments if c.get("author", "").lower() in _FIDO_LOGINS
     }
 
     # Root comment body — used for task title generation.
@@ -1031,7 +1033,7 @@ def reply_to_comment(
     current_fido_target_ids: set[int] = {
         c["id"]
         for c in thread_comments
-        if c.get("author", "").lower() in _fido_logins
+        if c.get("author", "").lower() in _FIDO_LOGINS
         and c.get("in_reply_to_id") == target_id
     }
     if current_fido_target_ids - initial_fido_ids:
@@ -1854,6 +1856,29 @@ def _reorder_tasks_background(
         raise
 
 
+def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
+    """Return whether a resolved-thread task request is stale duplicate work.
+
+    Resolved-thread suppression exists for late handlers racing with Fido's
+    auto-resolve path. A new human reply on that same resolved thread is not
+    stale: it is fresh input that should queue work without requiring the human
+    to manually unresolve the GitHub thread.
+    """
+    comment_id = thread.get("comment_id")
+    if comment_id is None:
+        return True
+    comments = gh.fetch_comment_thread(thread["repo"], thread["pr"], int(comment_id))
+    if not comments:
+        return True
+    latest_human_id: int | None = None
+    for comment in comments:
+        author = str(comment.get("author", "")).lower()
+        if author in _FIDO_LOGINS:
+            continue
+        latest_human_id = int(comment["id"])
+    return latest_human_id != int(comment_id)
+
+
 def create_task(
     prompt: str,
     config: Config,
@@ -1906,7 +1931,7 @@ def create_task(
         # return another MagicMock — truthy by default) don't cause this
         # guard to swallow every test-level task creation.  Real GitHub
         # always returns a real bool from ``is_thread_resolved_for_comment``.
-        if already is True:
+        if already is True and _thread_task_is_stale_resolved(gh, thread):
             log.info(
                 "create_task: thread for comment %s already resolved on GitHub — "
                 "skipping queue (closes #520)",
@@ -1920,6 +1945,12 @@ def create_task(
                 "status": "skipped_resolved",
                 "thread": thread,
             }
+        if already is True:
+            log.info(
+                "create_task: thread for comment %s is resolved, but comment is "
+                "fresh human input — queueing task",
+                thread["comment_id"],
+            )
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
