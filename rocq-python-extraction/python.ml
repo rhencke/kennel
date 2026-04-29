@@ -39,7 +39,7 @@ let file_naming state mp =
 (*s Preamble emitted at the top of every extracted .py file. *)
 
 let runtime_prelude = {|from fido.rocq_runtime import *
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import (
     Any,
@@ -1343,6 +1343,56 @@ let primitive_equality_expr_parts expr =
   | Some _ | None ->
       None
 
+let rec unwrap_magic = function
+  | MLmagic a -> unwrap_magic a
+  | expr -> expr
+
+let record_projection_parts state expr =
+  match unwrap_magic expr with
+  | MLapp (f, args) -> (
+      let head, all_args = collect_app f args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      match head, List.rev all_args with
+      | MLglob r, base :: _ -> (
+          match lookup_active_record_field_target (pp_global state Term r) with
+          | Some field_name -> Some (field_name, base)
+          | None -> None)
+      | _ -> None)
+  | _ -> None
+
+let record_replace_expr_parts state r args =
+  let fields = get_record_fields (State.get_table state) r in
+  let field_name i = Pp.string_of_ppcmds (pp_field_name state r fields i) in
+  let same_base expected actual =
+    match expected with
+    | None -> Some actual
+    | Some base when base = actual -> Some base
+    | Some _ -> None
+  in
+  let rec loop base_opt unchanged_count changes i = function
+    | [] ->
+        (match base_opt with
+         | Some base when unchanged_count > 0 -> Some (base, List.rev changes)
+         | Some _ | None -> None)
+    | arg :: rest ->
+        let expected_field = field_name i in
+        match record_projection_parts state arg with
+        | Some (actual_field, base)
+          when String.equal actual_field expected_field -> (
+            match same_base base_opt base with
+            | Some base_opt ->
+                loop (Some base_opt) (unchanged_count + 1) changes (i + 1) rest
+            | None ->
+                None)
+        | Some _ | None ->
+            loop base_opt unchanged_count ((expected_field, arg) :: changes)
+              (i + 1) rest
+  in
+  if List.is_empty fields || not (Int.equal (List.length fields) (List.length args)) then
+    None
+  else
+    loop None 0 [] 0 args
+
 let rec py_expr_precedence expr =
   match std_string_expr_value expr with
   | Some _ -> py_prec_atom
@@ -1438,6 +1488,20 @@ and rendered_args state env args =
     (fun () -> str ", ")
     (fun arg -> pp_py_rendered (pp_rendered_expr state env arg))
     args
+
+and pp_record_replace_expr state env base changes =
+  match changes with
+  | [] ->
+      pp_expr state env base
+  | _ ->
+      str "replace(" ++ pp_py_rendered (pp_rendered_expr state env base) ++
+      str ", " ++
+      prlist_with_sep
+        (fun () -> str ", ")
+        (fun (field_name, value) ->
+           str field_name ++ str "=" ++ pp_expr state env value)
+        changes ++
+      str ")"
 
 and rendered_primitive_comparison state env operator left right =
   py_infix ~associativity:PyAssocNone operator
@@ -2063,13 +2127,17 @@ and pp_expr state env expr =
       else
         let fds = get_record_fields (State.get_table state) r in
         if not (List.is_empty fds) then
-          (* Record type: keyword arguments [T(field=a, field2=b)] *)
-          str cons_name ++ str "(" ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun (i, a) ->
-               pp_field_name state r fds i ++ str "=" ++ pp_expr state env a)
-            (List.mapi (fun i a -> (i, a)) args) ++
-          str ")"
+          (match record_replace_expr_parts state r args with
+           | Some (base, changes) ->
+               pp_record_replace_expr state env base changes
+           | None ->
+               (* Record type: keyword arguments [T(field=a, field2=b)] *)
+               str cons_name ++ str "(" ++
+               prlist_with_sep (fun () -> str ", ")
+                 (fun (i, a) ->
+                    pp_field_name state r fds i ++ str "=" ++ pp_expr state env a)
+                 (List.mapi (fun i a -> (i, a)) args) ++
+               str ")")
         else if List.is_empty args then
           (* Zero-argument constructor.  Inline-custom constructors are plain
              literals (["True"], ["None"], ["0"], etc.) that are emitted
@@ -2672,13 +2740,6 @@ let rec unwrap_fix = function
   | MLmagic a            -> unwrap_fix a
   | _                    -> None
 
-let collect_app f args =
-  let rec collect acc = function
-    | MLapp (g, more) -> collect (more @ acc) g
-    | head            -> (head, acc)
-  in
-  collect args f
-
 let pp_multiline_enclosed indent open_pp close_pp items =
   let arg_pfx = indent_string (indent + 4) in
   let close_pfx = indent_string indent in
@@ -2720,14 +2781,24 @@ let rec pp_statement_expr state env indent = function
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
          not (List.is_empty (get_record_fields (State.get_table state) r)) ->
-      let cons_name = str_cons state r in
-      let fds = get_record_fields (State.get_table state) r in
-      pp_multiline_items indent (str cons_name)
-        (List.mapi
-           (fun i a ->
-              pp_field_name state r fds i ++ str "=" ++
-              pp_statement_expr state env (indent + 4) a)
-           args)
+      (match record_replace_expr_parts state r args with
+       | Some (base, changes) ->
+           pp_multiline_items indent (str "replace")
+             (pp_statement_expr state env (indent + 4) base ::
+              List.map
+                (fun (field_name, value) ->
+                   str field_name ++ str "=" ++
+                   pp_statement_expr state env (indent + 4) value)
+                changes)
+       | None ->
+           let cons_name = str_cons state r in
+           let fds = get_record_fields (State.get_table state) r in
+           pp_multiline_items indent (str cons_name)
+             (List.mapi
+                (fun i a ->
+                   pp_field_name state r fds i ++ str "=" ++
+                   pp_statement_expr state env (indent + 4) a)
+                args))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&

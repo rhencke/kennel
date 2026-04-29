@@ -298,26 +298,6 @@ Definition abort_task
   | None => None
   end.
 
-Definition row_with_status (row : TaskRow) (new_status : TaskStatus) : TaskRow :=
-  {|
-    title := title row;
-    description := description row;
-    kind := kind row;
-    status := new_status;
-    source_comment := source_comment row
-  |}.
-
-Definition row_with_description
-    (row : TaskRow)
-    (new_description : string) : TaskRow :=
-  {|
-    title := title row;
-    description := new_description;
-    kind := kind row;
-    status := status row;
-    source_comment := source_comment row
-  |}.
-
 Definition task_visible_after_rescope (row : TaskRow) : bool :=
   match status row with
   | StatusCompleted => false
@@ -329,7 +309,15 @@ Definition unblock_task_row
     (row : TaskRow)
     (rows : PositiveMap.t TaskRow) : PositiveMap.t TaskRow :=
   match status row with
-  | StatusBlocked => PositiveMap.add task (row_with_status row StatusPending) rows
+  | StatusBlocked =>
+      let row' := {|
+        title := title row;
+        description := description row;
+        kind := kind row;
+        status := StatusPending;
+        source_comment := source_comment row
+      |} in
+      PositiveMap.add task row' rows
   | _ => rows
   end.
 
@@ -424,12 +412,24 @@ Definition apply_rescope_op
     | KeepTask _ =>
         (rows, List.app pending_ids [task], completed_ids)
     | RewriteTask _ _ new_description =>
-        let row' := row_with_description row new_description in
+        let row' := {|
+          title := title row;
+          description := new_description;
+          kind := kind row;
+          status := status row;
+          source_comment := source_comment row
+        |} in
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
           completed_ids)
     | CompleteTask _ =>
-        let row' := row_with_status row StatusCompleted in
+        let row' := {|
+          title := title row;
+          description := description row;
+          kind := kind row;
+          status := StatusCompleted;
+          source_comment := source_comment row
+        |} in
         (PositiveMap.add task row' rows,
           pending_ids,
           List.app completed_ids [task])
@@ -653,7 +653,13 @@ Definition complete_task_visible
       match status row with
       | StatusCompleted => (rows, None)
       | _ =>
-          let row' := row_with_status row StatusCompleted in
+          let row' := {|
+            title := title row;
+            description := description row;
+            kind := kind row;
+            status := StatusCompleted;
+            source_comment := source_comment row
+          |} in
           (PositiveMap.add task row' rows, source_comment row)
       end
   end.

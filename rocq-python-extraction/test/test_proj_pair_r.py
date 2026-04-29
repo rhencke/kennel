@@ -1,4 +1,11 @@
-from records import Pair_r, pair_r_same, proj_first, proj_second, swap_pair_r
+from records import (
+    Pair_r,
+    pair_r_same,
+    proj_first,
+    proj_second,
+    set_second_direct,
+    swap_pair_r,
+)
 
 
 def test_proj_pair_r_round_trip() -> None:
@@ -31,6 +38,19 @@ def test_proj_pair_r_round_trip() -> None:
 
     assert pair_r_same(p1, Pair_r(pfst_r=3, psnd_r=7)) is True
     assert pair_r_same(p1, Pair_r(pfst_r=7, psnd_r=3)) is False
+
+
+def test_record_update_uses_dataclasses_replace(build_default) -> None:
+    p = Pair_r(pfst_r=3, psnd_r=7)
+    updated = set_second_direct(p, 11)
+
+    assert updated == Pair_r(pfst_r=3, psnd_r=11)
+    assert p == Pair_r(pfst_r=3, psnd_r=7)
+
+    source = (build_default / "records.py").read_text()
+    assert "from dataclasses import dataclass, replace" in source
+    assert "return replace(p, psnd_r=n)" in source
+    assert "Pair_r(pfst_r=p.pfst_r, psnd_r=n)" not in source
 
 
 def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
