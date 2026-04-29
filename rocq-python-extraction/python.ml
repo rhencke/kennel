@@ -3242,57 +3242,89 @@ and arg_var_name env = function
   | MLrel n -> Some (get_db_name n env)
   | _ -> None
 
-and is_list_scan_tail_continue state env head args =
+and list_scan_tail_updates state env head args =
   match !active_tail_context, !active_list_scan_context with
   | Some context, Some scan_context
     when is_active_tail_call state env head &&
          Int.equal (List.length context.tail_params) (List.length args) ->
-      List.for_all2
-        (fun param arg ->
+      let rec collect params args acc =
+        match params, args with
+        | [], [] -> Some (List.rev acc)
+        | param :: params, arg :: args -> (
            match arg_var_name env arg with
-           | None -> false
-           | Some arg_name ->
-               if Id.equal param scan_context.list_scan_list_param then
-                 Id.equal arg_name scan_context.list_scan_rest_param
+           | Some arg_name
+             when Id.equal param scan_context.list_scan_list_param ->
+               if Id.equal arg_name scan_context.list_scan_rest_param then
+                 collect params args acc
                else
-                 Id.equal arg_name param)
-        context.tail_params
-        args
+                 None
+           | Some arg_name when Id.equal arg_name param ->
+               collect params args acc
+           | _ ->
+               collect params args ((param, arg) :: acc))
+        | _, _ -> None
+      in
+      collect context.tail_params args []
   | _, _ ->
-      false
+      None
+
+and is_list_scan_tail_continue state env head args =
+  match list_scan_tail_updates state env head args with
+  | Some _ -> true
+  | None -> false
+
+and pp_rebind_assignment state env indent updates =
+  let pp_continue = str "continue" in
+  let pfx = String.make indent ' ' in
+  let continuation_pfx = fnl () ++ str pfx in
+  match updates with
+  | [] ->
+      pp_continue
+  | [(param, arg)] ->
+      pp_pyid param ++ str " = " ++
+      pp_statement_expr state env indent arg ++
+      continuation_pfx ++ pp_continue
+  | _ ->
+      let lhs =
+        prlist_with_sep (fun () -> str ", ") pp_pyid
+          (List.map fst updates)
+      in
+      let rhs =
+        prlist_with_sep (fun () -> str ", ")
+          (fun (_param, arg) -> pp_expr state env arg)
+          updates
+      in
+      let assignment = lhs ++ str " = " ++ rhs in
+      if String.length (pfx ^ Pp.string_of_ppcmds assignment) <= 88 then
+        assignment ++ continuation_pfx ++ pp_continue
+      else
+        lhs ++ str " = (" ++ fnl () ++
+        prlist_with_sep
+          (fun () -> str "," ++ fnl ())
+          (fun (_param, arg) ->
+             str (pfx ^ "    ") ++
+             pp_statement_expr state env (indent + 4) arg)
+          updates ++
+        str "," ++ fnl () ++ str pfx ++ str ")" ++
+        continuation_pfx ++ pp_continue
+
+and pp_list_scan_tail_rebind state env indent head args =
+  match list_scan_tail_updates state env head args with
+  | None -> None
+  | Some updates ->
+      Some (pp_rebind_assignment state env indent updates)
 
 and pp_tail_self_rebind state env indent head args =
   match !active_tail_context with
   | Some context
     when is_active_tail_call state env head &&
          Int.equal (List.length context.tail_params) (List.length args) ->
-      let pp_continue = str "continue" in
-      if is_list_scan_tail_continue state env head args ||
-         List.is_empty context.tail_params then
-        Some pp_continue
-      else
-        let pfx = String.make indent ' ' in
-        let continuation_pfx = fnl () ++ str pfx in
-        let lhs =
-          prlist_with_sep (fun () -> str ", ") pp_pyid context.tail_params
-        in
-        let rhs =
-          prlist_with_sep (fun () -> str ", ") (pp_expr state env) args
-        in
-        let assignment = lhs ++ str " = " ++ rhs in
-        if String.length (pfx ^ Pp.string_of_ppcmds assignment) <= 88 then
-          Some (assignment ++ continuation_pfx ++ pp_continue)
-        else
-          Some
-            (lhs ++ str " = (" ++ fnl () ++
-             prlist_with_sep
-               (fun () -> str "," ++ fnl ())
-               (fun arg ->
-                  str (pfx ^ "    ") ++
-                  pp_statement_expr state env (indent + 4) arg)
-               args ++
-             str "," ++ fnl () ++ str pfx ++ str ")" ++
-             continuation_pfx ++ pp_continue)
+      (match pp_list_scan_tail_rebind state env indent head args with
+       | Some pp -> Some pp
+       | None ->
+           Some
+             (pp_rebind_assignment state env indent
+                (List.combine context.tail_params args)))
   | _ -> None
 
 and expr_has_active_tail_call state env expr =

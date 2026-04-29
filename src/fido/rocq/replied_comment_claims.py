@@ -298,23 +298,14 @@ def claim_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    while True:
-        __list = comments
-        if __list == []:
-            return claims
-        comment = __list[0]
-        rest = __list[1:]
-        owner, promise, comments, claims = (
-            owner,
-            promise,
-            rest,
-            _rocq_map_add(
-                _rocq_positive_key(comment),
-                in_progress_row(owner, promise),
-                claims,
-            ),
+    for comment in comments:
+        claims = _rocq_map_add(
+            _rocq_positive_key(comment),
+            in_progress_row(owner, promise),
+            claims,
         )
         continue
+    return claims
 
 
 def prepare_claims(
@@ -397,22 +388,14 @@ def complete_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    while True:
-        __list = comments
-        if __list == []:
-            return claims
-        comment = __list[0]
-        rest = __list[1:]
-        promise, comments, claims = (
+    for comment in comments:
+        claims = complete_comment(
             promise,
-            rest,
-            complete_comment(
-                promise,
-                comment,
-                claims,
-            ),
+            comment,
+            claims,
         )
         continue
+    return claims
 
 
 def ack_promise(
@@ -474,14 +457,10 @@ def fail_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    while True:
-        __list = comments
-        if __list == []:
-            return claims
-        comment = __list[0]
-        rest = __list[1:]
-        comments, claims = rest, fail_comment(comment, claims)
+    for comment in comments:
+        claims = fail_comment(comment, claims)
         continue
+    return claims
 
 
 def fail_promise(

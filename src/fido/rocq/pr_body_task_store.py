@@ -309,27 +309,10 @@ def apply_rescope_ops(
     pending_ids: list[int],
     completed_ids: list[int],
 ) -> tuple[tuple[dict[int, TaskRow], list[int]], list[int]]:
-    while True:
-        __list = ops
-        if __list == []:
-            return (
-                (
-                    rows,
-                    pending_ids,
-                ),
-                completed_ids,
-            )
-        op = __list[0]
-        rest = __list[1:]
+    for op in ops:
         task = rescope_task_id(op)
         __option = rows.get(_rocq_positive_key(task))
         if __option is None:
-            ops, rows, pending_ids, completed_ids = (
-                rest,
-                rows,
-                pending_ids,
-                completed_ids,
-            )
             continue
         row = __option
         __pair = apply_rescope_op(op, task, row, rows, pending_ids, completed_ids)
@@ -338,13 +321,15 @@ def apply_rescope_ops(
         __pair = p
         rows_ = __pair[0]
         pending_ids_ = __pair[1]
-        ops, rows, pending_ids, completed_ids = (
-            rest,
-            rows_,
-            pending_ids_,
-            completed_ids_,
-        )
+        rows, pending_ids, completed_ids = rows_, pending_ids_, completed_ids_
         continue
+    return (
+        (
+            rows,
+            pending_ids,
+        ),
+        completed_ids,
+    )
 
 
 def completed_tasks_in_order(
