@@ -1142,7 +1142,96 @@ let record_proj_info state branches =
 (*s Core expression printer.
     [env] carries de Bruijn binder names (innermost first). *)
 
-let rec pp_expr state env expr =
+let rec collect_app_args acc = function
+  | MLapp (head, args) -> collect_app_args (args @ acc) head
+  | head               -> (head, acc)
+
+let collect_app head args =
+  collect_app_args args head
+
+let rec py_expr_precedence expr =
+  match std_string_expr_value expr with
+  | Some _ -> py_prec_atom
+  | None ->
+  match expr with
+  | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
+  | MLcons (_, _, []) ->
+      py_prec_atom
+  | MLlam _ ->
+      py_prec_lambda
+  | MLletin _ ->
+      py_prec_call
+  | MLtuple _ ->
+      py_prec_atom
+  | MLcons (_, r, [_]) when is_std_option_some_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_]) when is_std_list_cons_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_])
+    when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
+      py_prec_unary
+  | MLcons (_, r, [_]) when is_std_N_pos_ref r || is_std_Z_pos_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_; _])
+    when is_std_prod_pair_ref r || is_std_Q_make_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_; _]) when is_std_string_cons_ref r ->
+      py_prec_add
+  | MLcons _ ->
+      py_prec_call
+  | MLapp (app_head, app_args) ->
+      let app_head, app_args = collect_app app_head app_args in
+      let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
+      (match app_head, app_args with
+       | MLglob r, [_] when is_std_bool_ref r "negb" ->
+           py_prec_not
+       | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
+           py_prec_and
+       | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
+           py_prec_or
+       | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
+           py_prec_compare
+       | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
+           py_prec_compare
+       | MLglob r, [_; _] when is_std_list_app_ref r ->
+           py_prec_add
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
+           py_prec_bit_or
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
+           py_prec_bit_and
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
+           py_prec_add
+       | MLglob r, [_; _]
+         when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
+              is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
+           py_prec_compare
+       | _, _ ->
+           (match marker_of_ast app_head with
+            | Some marker
+              when String.equal marker marker_reader_pure ||
+                   String.equal marker marker_reader_bind ||
+                   String.equal marker marker_reader_ask ->
+                py_prec_lambda
+            | _ ->
+                py_prec_call))
+  | MLcase _ ->
+      py_prec_conditional
+  | MLfix _ ->
+      py_prec_call
+  | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
+      py_prec_atom
+
+let rec pp_rendered_expr state env expr =
+  py_rendered ~precedence:(py_expr_precedence expr) (pp_expr state env expr)
+
+and pp_expr state env expr =
   match std_string_expr_value expr with
   | Some value ->
       str "\"" ++ str (py_escape_str value) ++ str "\""
@@ -1226,95 +1315,10 @@ let rec pp_expr state env expr =
   | MLapp (f, args) ->
       (* Flatten left-associative curried application:
          MLapp(MLapp(f,[a]),[b]) → f(a, b) *)
-      let rec collect acc = function
-        | MLapp (g, more) -> collect (more @ acc) g
-        | head            -> (head, acc)
-      in
-      let (head, all_args) = collect args f in
+      let (head, all_args) = collect_app f args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
-      let rec rendered_expr expr =
-        py_rendered ~precedence:(expr_precedence expr) (pp_expr state env expr)
-      and expr_precedence expr =
-        match std_string_expr_value expr with
-        | Some _ -> py_prec_atom
-        | None ->
-        match expr with
-        | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
-        | MLcons (_, _, []) ->
-            py_prec_atom
-        | MLlam _ ->
-            py_prec_lambda
-        | MLletin _ ->
-            py_prec_call
-        | MLtuple _ ->
-            py_prec_atom
-        | MLcons (_, r, [_]) when is_std_option_some_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_]) when is_std_list_cons_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_])
-          when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
-            py_prec_unary
-        | MLcons (_, r, [_]) when is_std_N_pos_ref r || is_std_Z_pos_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_; _])
-          when is_std_prod_pair_ref r || is_std_Q_make_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_; _]) when is_std_string_cons_ref r ->
-            py_prec_add
-        | MLcons _ ->
-            py_prec_call
-        | MLapp (app_head, app_args) ->
-            let (app_head, app_args) = collect app_args app_head in
-            let app_args =
-              List.filter (fun a -> not (is_erased_arg a)) app_args
-            in
-            (match app_head, app_args with
-             | MLglob r, [_] when is_std_bool_ref r "negb" ->
-                 py_prec_not
-             | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
-                 py_prec_and
-             | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
-                 py_prec_or
-             | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
-                 py_prec_compare
-             | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
-                 py_prec_compare
-             | MLglob r, [_; _] when is_std_list_app_ref r ->
-                 py_prec_add
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
-                 py_prec_bit_or
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
-                 py_prec_bit_and
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
-                 py_prec_add
-             | MLglob r, [_; _]
-               when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
-                    is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
-                 py_prec_compare
-             | _, _ ->
-                 (match marker_of_ast app_head with
-                  | Some marker
-                    when String.equal marker marker_reader_pure ||
-                         String.equal marker marker_reader_bind ||
-                         String.equal marker marker_reader_ask ->
-                      py_prec_lambda
-                  | _ ->
-                      py_prec_call)
-            )
-        | MLcase _ ->
-            py_prec_conditional
-        | MLfix _ ->
-            py_prec_call
-        | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
-            py_prec_atom
+      let rendered_expr =
+        pp_rendered_expr state env
       in
       let rendered_args args =
         prlist_with_sep
