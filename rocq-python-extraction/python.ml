@@ -559,24 +559,6 @@ let stdlib_set_operation_names =
     "fold";
   ]
 
-let primitive_comparison_operators r =
-  if is_std_bool_ref r "eqb" || is_std_nat_ref r "eqb" ||
-     is_std_positive_ref r "eqb" || is_std_ascii_ref r "eqb" ||
-     is_std_string_ref r "eqb"
-  then Some ("==", "!=")
-  else if is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
-          is_std_ascii_ref r "leb" || is_std_string_ref r "leb"
-  then Some ("<=", ">")
-  else if is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
-          is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb"
-  then Some ("<", ">=")
-  else None
-
-let is_std_primitive_compare_ref r =
-  match primitive_comparison_operators r with
-  | Some _ -> true
-  | None -> false
-
 let is_positive_map_type_ref r =
   global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
 
@@ -673,34 +655,48 @@ let classify_stdlib_term_ref r =
   let classify_operation ref_match make operations =
     Option.map make (classify_named_stdlib_operation ref_match operations)
   in
-  match classify_stdlib_primitive_comparison_ref r with
-  | Some comparison -> Some (StdlibPrimitiveComparison comparison)
-  | None ->
-      if is_std_bool_ref r "negb" then Some (StdlibBoolOperation "negb")
-      else if is_std_bool_ref r "andb" then Some (StdlibBoolOperation "andb")
-      else if is_std_bool_ref r "orb" then Some (StdlibBoolOperation "orb")
-      else if is_std_list_app_ref r then Some StdlibListApp
-      else if is_std_prod_fst_ref r then Some StdlibProdFst
-      else if is_std_prod_snd_ref r then Some StdlibProdSnd
-      else
-        (match classify_operation (is_positive_map_ref r)
-                 (fun name -> StdlibPositiveMapOperation name)
-                 stdlib_map_operation_names with
-         | Some _ as operation -> operation
-         | None ->
-             (match classify_operation (is_string_map_ref r)
-                      (fun name -> StdlibStringMapOperation name)
-                      stdlib_map_operation_names with
-              | Some _ as operation -> operation
-              | None ->
-                  (match classify_operation (is_positive_set_ref r)
-                           (fun name -> StdlibPositiveSetOperation name)
-                           stdlib_set_operation_names with
-                   | Some _ as operation -> operation
-                   | None ->
-                       classify_operation (is_string_set_ref r)
-                         (fun name -> StdlibStringSetOperation name)
-                         stdlib_set_operation_names)))
+  if is_std_bool_ref r "negb" then Some (StdlibBoolOperation "negb")
+  else if is_std_bool_ref r "andb" then Some (StdlibBoolOperation "andb")
+  else if is_std_bool_ref r "orb" then Some (StdlibBoolOperation "orb")
+  else if is_std_bool_ref r "eqb" then Some (StdlibBoolOperation "eqb")
+  else
+    match classify_stdlib_primitive_comparison_ref r with
+    | Some comparison -> Some (StdlibPrimitiveComparison comparison)
+    | None ->
+        if is_std_list_app_ref r then Some StdlibListApp
+        else if is_std_prod_fst_ref r then Some StdlibProdFst
+        else if is_std_prod_snd_ref r then Some StdlibProdSnd
+        else
+          (match classify_operation (is_positive_map_ref r)
+                   (fun name -> StdlibPositiveMapOperation name)
+                   stdlib_map_operation_names with
+           | Some _ as operation -> operation
+           | None ->
+               (match classify_operation (is_string_map_ref r)
+                        (fun name -> StdlibStringMapOperation name)
+                        stdlib_map_operation_names with
+                | Some _ as operation -> operation
+                | None ->
+                    (match classify_operation (is_positive_set_ref r)
+                             (fun name -> StdlibPositiveSetOperation name)
+                             stdlib_set_operation_names with
+                     | Some _ as operation -> operation
+                     | None ->
+                         classify_operation (is_string_set_ref r)
+                           (fun name -> StdlibStringSetOperation name)
+                           stdlib_set_operation_names)))
+
+let primitive_comparison_operators_of_ref = function
+  | StdlibCompareEq -> ("==", "!=")
+  | StdlibCompareLe -> ("<=", ">")
+  | StdlibCompareLt -> ("<", ">=")
+
+let primitive_comparison_operators r =
+  match classify_stdlib_term_ref r with
+  | Some (StdlibBoolOperation "eqb") -> Some ("==", "!=")
+  | Some (StdlibPrimitiveComparison comparison) ->
+      Some (primitive_comparison_operators_of_ref comparison)
+  | Some _ | None -> None
 
 let classify_stdlib_ref r =
   match classify_stdlib_type_ref r with
@@ -726,6 +722,7 @@ type lowering_family =
   | LoweringBool
   | LoweringPrimitiveComparison
   | LoweringList
+  | LoweringProduct
   | LoweringPositiveMap
   | LoweringStringMap
   | LoweringPositiveSet
@@ -737,6 +734,7 @@ type lowering_ref_match =
   | LoweringBoolRef of string
   | LoweringPrimitiveCompareRef
   | LoweringListAppRef
+  | LoweringProdRef of string
   | LoweringPositiveMapRef of string
   | LoweringStringMapRef of string
   | LoweringPositiveSetRef of string
@@ -819,6 +817,10 @@ let primitive_collection_lowering_rules =
       "primitive comparison" [2] (LoweringEmitInfix "<compare>");
     lowering_rule LoweringListAppRef LoweringList "List.app" [2]
       (LoweringEmitInfix "+");
+    lowering_rule (LoweringProdRef "fst") LoweringProduct "prod.fst" [1]
+      (LoweringEmitIndex 0);
+    lowering_rule (LoweringProdRef "snd") LoweringProduct "prod.snd" [1]
+      (LoweringEmitIndex 1);
   ] @
   lowering_rules_for_operations
     (fun name -> LoweringPositiveMapRef name)
@@ -833,20 +835,42 @@ let primitive_collection_lowering_rules =
     (fun name -> LoweringStringSetRef name)
     LoweringStringSet "StringSet" set_lowering_specs
 
-let lowering_rule_matches r rule =
-  match rule.lowering_match with
-  | LoweringBoolRef name -> is_std_bool_ref r name
-  | LoweringPrimitiveCompareRef -> is_std_primitive_compare_ref r
-  | LoweringListAppRef -> is_std_list_app_ref r
-  | LoweringPositiveMapRef name -> is_positive_map_ref r name
-  | LoweringStringMapRef name -> is_string_map_ref r name
-  | LoweringPositiveSetRef name -> is_positive_set_ref r name
-  | LoweringStringSetRef name -> is_string_set_ref r name
-  | LoweringMarkerRef marker -> is_custom r && String.equal (find_custom r) marker
-  | LoweringRecordFieldRef _ -> false
+let lowering_match_matches_stdlib_term lowering_match term_ref =
+  match lowering_match, term_ref with
+  | LoweringBoolRef expected, StdlibBoolOperation actual ->
+      String.equal expected actual
+  | LoweringPrimitiveCompareRef, StdlibPrimitiveComparison _ ->
+      true
+  | LoweringListAppRef, StdlibListApp ->
+      true
+  | LoweringProdRef "fst", StdlibProdFst ->
+      true
+  | LoweringProdRef "snd", StdlibProdSnd ->
+      true
+  | LoweringPositiveMapRef expected, StdlibPositiveMapOperation actual ->
+      String.equal expected actual
+  | LoweringStringMapRef expected, StdlibStringMapOperation actual ->
+      String.equal expected actual
+  | LoweringPositiveSetRef expected, StdlibPositiveSetOperation actual ->
+      String.equal expected actual
+  | LoweringStringSetRef expected, StdlibStringSetOperation actual ->
+      String.equal expected actual
+  | (LoweringBoolRef _ | LoweringPrimitiveCompareRef | LoweringListAppRef
+    | LoweringProdRef _ | LoweringPositiveMapRef _ | LoweringStringMapRef _
+    | LoweringPositiveSetRef _ | LoweringStringSetRef _
+    | LoweringMarkerRef _ | LoweringRecordFieldRef _), _ ->
+      false
+
+let stdlib_lowering_rule_of_ref r =
+  match classify_stdlib_term_ref r with
+  | Some term_ref ->
+      List.find_opt
+        (fun rule -> lowering_match_matches_stdlib_term rule.lowering_match term_ref)
+        primitive_collection_lowering_rules
+  | None -> None
 
 let lowering_rule_of_ref r =
-  List.find_opt (lowering_rule_matches r) primitive_collection_lowering_rules
+  stdlib_lowering_rule_of_ref r
 
 let lowering_rule_has_family family rule =
   rule.lowering_family = family
@@ -862,17 +886,21 @@ let lowering_rule_is_collection rule =
   lowering_rule_has_family LoweringPositiveSet rule ||
   lowering_rule_has_family LoweringStringSet rule
 
+let lowering_rule_is_product rule =
+  lowering_rule_has_family LoweringProduct rule
+
 let lowering_collection_key_kind = function
   | LoweringPositiveMap | LoweringPositiveSet -> Some `Positive
   | LoweringStringMap | LoweringStringSet -> Some `String
   | _ -> None
 
-let lowering_rule_is_primitive_or_collection rule =
-  lowering_rule_is_bool_or_primitive rule || lowering_rule_is_collection rule
+let lowering_rule_is_expression_lowering rule =
+  lowering_rule_is_bool_or_primitive rule || lowering_rule_is_product rule ||
+  lowering_rule_is_collection rule
 
-let primitive_or_collection_lowering_rule_of_ref r =
+let expression_lowering_rule_of_ref r =
   match lowering_rule_of_ref r with
-  | Some rule when lowering_rule_is_primitive_or_collection rule -> Some rule
+  | Some rule when lowering_rule_is_expression_lowering rule -> Some rule
   | Some _ | None -> None
 
 let is_std_remapped_type_ref r =
@@ -1921,7 +1949,7 @@ let rec py_expr_precedence expr =
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
        | MLglob r, _ -> (
-           match primitive_or_collection_lowering_rule_of_ref r with
+           match expression_lowering_rule_of_ref r with
            | Some rule -> lowering_rule_app_precedence rule app_args
            | None when List.length app_args = 2 && is_native_equality_marker_ref r ->
                py_prec_compare
@@ -2018,6 +2046,8 @@ and rendered_lowering_rule_app state env r rule args =
            (lowering_infix_precedence operator)
            (rendered_expr left)
            (rendered_expr right))
+  | LoweringProduct, LoweringEmitIndex index, [pair] ->
+      Some (py_index (rendered_expr pair) (string_of_int index))
   | (LoweringPositiveMap | LoweringStringMap), LoweringEmitLiteral literal, [] ->
       Some (py_rendered (str literal))
   | (LoweringPositiveSet | LoweringStringSet), LoweringEmitLiteral literal, [] ->
@@ -2177,14 +2207,6 @@ and pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
-      let pp_prod_projection r =
-        match all_args with
-        | [pair] when is_std_prod_fst_ref r ->
-            Some (py_index (rendered_expr pair) "0")
-        | [pair] when is_std_prod_snd_ref r ->
-            Some (py_index (rendered_expr pair) "1")
-        | _ -> None
-      in
       let pp_primitive_or_collection_lowering_app r rule =
         rendered_lowering_rule_app state env r rule all_args
       in
@@ -2222,7 +2244,7 @@ and pp_expr state env expr =
       let pp_collection_expr =
         match head with
         | MLglob r -> (
-            match primitive_or_collection_lowering_rule_of_ref r with
+            match expression_lowering_rule_of_ref r with
             | Some rule -> pp_primitive_or_collection_lowering_app r rule
             | None when is_native_equality_marker_ref r ->
                 pp_native_equality_app r
@@ -2230,8 +2252,6 @@ and pp_expr state env expr =
                 pp_constructor_tag_predicate_app r
             | None when is_active_list_membership_predicate (pp_global state Term r) ->
                 pp_list_membership_predicate_app r
-            | None when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
-                pp_prod_projection r
             | None -> None)
         | _ -> None
       in
@@ -3246,7 +3266,7 @@ let rec pp_statement_expr state env indent = function
                    (pp_rendered_expr state env target)
                    (pp_rendered_expr state env items))
           | MLglob r, _ -> (
-              match primitive_or_collection_lowering_rule_of_ref r with
+              match expression_lowering_rule_of_ref r with
               | Some rule -> (
                   match pp_statement_lowering_rule_app r rule with
                   | Some pp -> pp
