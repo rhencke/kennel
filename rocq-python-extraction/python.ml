@@ -553,6 +553,26 @@ let std_bool_expr = function
   | MLcons (_, r, []) when is_std_bool_false_ref r -> Some false
   | _ -> None
 
+let nullary_constructor_pattern = function
+  | Pusual r | Pcons (r, []) -> Some r
+  | _ -> None
+
+let constructor_tag_bool_test_target branches =
+  let rec collect idx true_refs false_refs =
+    if idx = Array.length branches then
+      match true_refs, false_refs with
+      | [r], _ :: _ -> Some (r, true)
+      | _ :: _, [r] -> Some (r, false)
+      | _ -> None
+    else
+      let (ids, pat, body) = branches.(idx) in
+      match ids, nullary_constructor_pattern pat, std_bool_expr body with
+      | [], Some r, Some true -> collect (idx + 1) (r :: true_refs) false_refs
+      | [], Some r, Some false -> collect (idx + 1) true_refs (r :: false_refs)
+      | _ -> None
+  in
+  collect 0 [] []
+
 let std_ascii_expr_value = function
   | MLcons (_, r, args) when is_std_ascii_cons_ref r && List.length args = 8 ->
       let bits = List.map std_bool_expr args in
@@ -2012,19 +2032,26 @@ and pp_expr state env expr =
         pp_std_prod_match_expr state env scrutinee branches
       else if is_std_bool_type ty then
         pp_std_bool_match_expr state env scrutinee branches
-      else if is_bool then
-        let (_, _, body_true)  = branches.(0) in
-        let (_, _, body_false) = branches.(1) in
-        pp_ternary_operand_expr state env body_true  ++ str " if " ++
-        pp_ternary_operand_expr state env scrutinee  ++ str " else " ++
-        pp_ternary_operand_expr state env body_false
-      else if is_custom_match branches then
-        (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
-           Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
-           each branch becomes a Python lambda.  This handles types like
-           [nat → int] whose constructors do not exist as Python patterns. *)
-        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
+        (match constructor_tag_bool_test_target branches with
+        | Some (r, expected) ->
+            str (if expected then "isinstance(" else "not isinstance(") ++
+            pp_expr state env scrutinee ++ str ", " ++ str (str_cons state r) ++
+            str ")"
+        | None ->
+            if is_bool then
+              let (_, _, body_true)  = branches.(0) in
+              let (_, _, body_false) = branches.(1) in
+              pp_ternary_operand_expr state env body_true  ++ str " if " ++
+              pp_ternary_operand_expr state env scrutinee  ++ str " else " ++
+              pp_ternary_operand_expr state env body_false
+            else if is_custom_match branches then
+              (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
+                 Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
+                 each branch becomes a Python lambda.  This handles types like
+                 [nat → int] whose constructors do not exist as Python patterns. *)
+              pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
+            else
         (* Record projection: single-branch match over a record inductive.
            Instead of [match scrutinee: case Ctor(f0,f1): body], emit the
            lambda-lifted attribute form:
@@ -2115,7 +2142,7 @@ and pp_expr state env expr =
         in
         str "match " ++ pp_scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-        catch_all)
+        catch_all))
   | MLfix (i, ids, defs) ->
       (* Mutual fixpoint: push all n names into the env (reversed, per the
          extraction convention so [ids.(0)] becomes the outermost binder),
@@ -2822,14 +2849,21 @@ let rec pp_return_body state env indent = function
         str "return " ++ pp_expr state env expr
       else if is_std_bool_type ty then
         pp_std_bool_return_body state env indent scrutinee branches
-      else if is_bool then
-        (* Ternary — valid expression; a single [return] suffices. *)
-        str "return " ++ pp_expr state env expr
-      else if is_custom_match branches then
-        (* Custom-match — also a pure expression. *)
-        str "return " ++
-        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
+        (match constructor_tag_bool_test_target branches with
+        | Some (r, expected) ->
+            str "return " ++ str (if expected then "isinstance(" else "not isinstance(") ++
+            pp_expr state env scrutinee ++ str ", " ++ str (str_cons state r) ++
+            str ")"
+        | None ->
+            if is_bool then
+              (* Ternary — valid expression; a single [return] suffices. *)
+              str "return " ++ pp_expr state env expr
+            else if is_custom_match branches then
+              (* Custom-match — also a pure expression. *)
+              str "return " ++
+              pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
+            else
         (* Record projection — [record_proj_info] detects the single-branch
            record match; [pp_expr] emits the lambda-lift form, which is a
            valid expression so a single [return] suffices. *)
@@ -2888,7 +2922,7 @@ let rec pp_return_body state env indent = function
               in
               str "match " ++ pp_scrutinee ++ str ":" ++ fnl () ++
               prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-              catch_all )
+              catch_all ))
   | MLaxiom _ | MLexn _ | MLparray _ as expr ->
       (* These emit [raise …], which is a valid Python statement but NOT a
          valid expression.  Emit bare — no [return] prefix. *)

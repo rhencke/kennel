@@ -102,19 +102,7 @@ RescopeOpT = KeepTask | RewriteTask | CompleteTask
 
 
 def task_kind_is_ci(kind0: TaskKind) -> bool:
-    match kind0:
-        case TaskCI():
-            return True
-        case TaskThread():
-            return False
-        case TaskSpec():
-            return False
-        case TaskAsk():
-            return False
-        case TaskDefer():
-            return False
-        case __impossible:
-            assert_never(__impossible)
+    return isinstance(kind0, TaskCI)
 
 
 def positive_mem(
@@ -292,15 +280,7 @@ def row_with_description(
 
 
 def task_visible_after_rescope(row: TaskRow) -> bool:
-    match row.status:
-        case StatusPending():
-            return True
-        case StatusCompleted():
-            return False
-        case StatusBlocked():
-            return True
-        case __impossible:
-            assert_never(__impossible)
+    return not isinstance(row.status, StatusCompleted)
 
 
 def rescope_task_id(op: RescopeOp) -> int:
@@ -743,75 +723,15 @@ def task_kind_eqb(
 ) -> bool:
     match left:
         case TaskCI():
-            match right:
-                case TaskCI():
-                    return True
-                case TaskThread():
-                    return False
-                case TaskSpec():
-                    return False
-                case TaskAsk():
-                    return False
-                case TaskDefer():
-                    return False
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, TaskCI)
         case TaskThread():
-            match right:
-                case TaskCI():
-                    return False
-                case TaskThread():
-                    return True
-                case TaskSpec():
-                    return False
-                case TaskAsk():
-                    return False
-                case TaskDefer():
-                    return False
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, TaskThread)
         case TaskSpec():
-            match right:
-                case TaskCI():
-                    return False
-                case TaskThread():
-                    return False
-                case TaskSpec():
-                    return True
-                case TaskAsk():
-                    return False
-                case TaskDefer():
-                    return False
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, TaskSpec)
         case TaskAsk():
-            match right:
-                case TaskCI():
-                    return False
-                case TaskThread():
-                    return False
-                case TaskSpec():
-                    return False
-                case TaskAsk():
-                    return True
-                case TaskDefer():
-                    return False
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, TaskAsk)
         case TaskDefer():
-            match right:
-                case TaskCI():
-                    return False
-                case TaskThread():
-                    return False
-                case TaskSpec():
-                    return False
-                case TaskAsk():
-                    return False
-                case TaskDefer():
-                    return True
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, TaskDefer)
         case __impossible:
             assert_never(__impossible)
 
@@ -822,21 +742,9 @@ def pr_body_status_eqb(
 ) -> bool:
     match left:
         case PRPending():
-            match right:
-                case PRPending():
-                    return True
-                case PRCompleted():
-                    return False
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, PRPending)
         case PRCompleted():
-            match right:
-                case PRPending():
-                    return False
-                case PRCompleted():
-                    return True
-                case __impossible:
-                    assert_never(__impossible)
+            return isinstance(right, PRCompleted)
         case __impossible:
             assert_never(__impossible)
 

@@ -134,15 +134,7 @@ class ClaimRow:
 
     def is_blocking(self) -> bool:
         row = self
-        match row.claim_state:
-            case ClaimInProgress():
-                return True
-            case ClaimCompleted():
-                return True
-            case ClaimRetryableFailed():
-                return False
-            case __impossible:
-                assert_never(__impossible)
+        return not isinstance(row.claim_state, ClaimRetryableFailed)
 
 
 @dataclass(frozen=True)
@@ -353,17 +345,7 @@ def mark_promise_posted(
 
 
 def promise_recoverable(state: PromiseState) -> bool:
-    match state:
-        case PromisePrepared():
-            return True
-        case PromisePosted():
-            return True
-        case PromiseAcked():
-            return False
-        case PromiseFailed():
-            return True
-        case __impossible:
-            assert_never(__impossible)
+    return not isinstance(state, PromiseAcked)
 
 
 def complete_comment(
@@ -601,15 +583,7 @@ def review_outcome_resolves_thread(outcome: ReviewReplyOutcome) -> bool:
 
 
 def claim_state_completed(state: ClaimState) -> bool:
-    match state:
-        case ClaimInProgress():
-            return False
-        case ClaimCompleted():
-            return True
-        case ClaimRetryableFailed():
-            return False
-        case __impossible:
-            assert_never(__impossible)
+    return isinstance(state, ClaimCompleted)
 
 
 def claim_completed(

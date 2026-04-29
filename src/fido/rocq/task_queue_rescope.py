@@ -165,19 +165,7 @@ def task_row_executable(row: TaskRow) -> bool:
 
 
 def task_kind_is_ci(kind0: TaskKind) -> bool:
-    match kind0:
-        case TaskCI():
-            return True
-        case TaskThread():
-            return False
-        case TaskSpec():
-            return False
-        case TaskAsk():
-            return False
-        case TaskDefer():
-            return False
-        case __impossible:
-            assert_never(__impossible)
+    return isinstance(kind0, TaskCI)
 
 
 def task_preempt_rank(kind0: TaskKind) -> int | None:
@@ -507,15 +495,7 @@ def row_with_description(
 
 
 def task_visible_after_rescope(row: TaskRow) -> bool:
-    match row.status:
-        case StatusPending():
-            return True
-        case StatusCompleted():
-            return False
-        case StatusBlocked():
-            return True
-        case __impossible:
-            assert_never(__impossible)
+    return not isinstance(row.status, StatusCompleted)
 
 
 def unblock_task_row(
@@ -1237,12 +1217,4 @@ def task_still_pending(
     if __option is None:
         return False
     row = __option
-    match row.status:
-        case StatusPending():
-            return True
-        case StatusCompleted():
-            return False
-        case StatusBlocked():
-            return False
-        case __impossible:
-            assert_never(__impossible)
+    return isinstance(row.status, StatusPending)
