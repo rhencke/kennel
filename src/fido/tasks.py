@@ -142,11 +142,9 @@ def _rescope_state_for_oracle(
 
 def _rescope_snapshot_order_for_oracle(
     current: list[dict[str, Any]],
-    original_ids: frozenset[str],
-    seen_ids: set[str],
+    snapshot_ids: frozenset[str],
     ids_by_task_id: dict[str, int],
 ) -> list[int]:
-    snapshot_ids = original_ids | seen_ids
     return [
         ids_by_task_id[task["id"]]
         for task in current
@@ -157,15 +155,13 @@ def _rescope_snapshot_order_for_oracle(
 def _rescope_releases_for_oracle(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
-    original_ids: frozenset[str],
-    seen_ids: set[str],
+    snapshot_ids: frozenset[str],
     ids_by_task_id: dict[str, int],
 ) -> list[rescope_oracle.RescopeRelease]:
     ordered_by_id: dict[str, dict[str, Any]] = {}
     for item in ordered_items:
         if item.get("id") and item["id"] not in ordered_by_id:
             ordered_by_id[item["id"]] = item
-    snapshot_ids = original_ids | seen_ids
     releases: list[rescope_oracle.RescopeRelease] = []
     for task in current:
         task_id = task["id"]
@@ -202,7 +198,12 @@ def _materialize_rescope_oracle_result(
         row = oracle_rows[oracle_id]
         task["title"] = row.title
         task["description"] = row.description
-        task["status"] = type(row.status).__name__.removeprefix("Status").lower()
+        if isinstance(row.status, rescope_oracle.StatusCompleted):
+            task["status"] = str(TaskStatus.COMPLETED)
+        elif isinstance(row.status, rescope_oracle.StatusBlocked):
+            task["status"] = str(TaskStatus.BLOCKED)
+        else:
+            task["status"] = task.get("status", str(TaskStatus.PENDING))
         materialized.append(task)
     return materialized
 
@@ -210,18 +211,17 @@ def _materialize_rescope_oracle_result(
 def _assert_rescope_matches_oracle(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
-    original_ids: frozenset[str],
-    seen_ids: set[str],
+    snapshot_ids: frozenset[str],
     result: list[dict[str, Any]],
 ) -> None:
     ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
         current
     )
     snapshot_order = _rescope_snapshot_order_for_oracle(
-        current, original_ids, seen_ids, ids_by_task_id
+        current, snapshot_ids, ids_by_task_id
     )
     releases = _rescope_releases_for_oracle(
-        current, ordered_items, original_ids, seen_ids, ids_by_task_id
+        current, ordered_items, snapshot_ids, ids_by_task_id
     )
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
         snapshot_order, current_order, rows, releases
@@ -231,6 +231,28 @@ def _assert_rescope_matches_oracle(
     )
     if result != expected:
         raise AssertionError("rescope result diverged from Rocq oracle")
+
+
+def _apply_reorder_with_oracle(
+    current: list[dict[str, Any]],
+    ordered_items: list[dict[str, Any]],
+    snapshot_ids: frozenset[str],
+) -> list[dict[str, Any]]:
+    ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
+        current
+    )
+    snapshot_order = _rescope_snapshot_order_for_oracle(
+        current, snapshot_ids, ids_by_task_id
+    )
+    releases = _rescope_releases_for_oracle(
+        current, ordered_items, snapshot_ids, ids_by_task_id
+    )
+    oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
+        snapshot_order, current_order, rows, releases
+    )
+    return _materialize_rescope_oracle_result(
+        oracle_order, oracle_rows, tasks_by_oracle_id
+    )
 
 
 def _task_file(work_dir: Path) -> Path:
@@ -596,61 +618,26 @@ def _apply_reorder(
 
     Rules (in priority order):
     - CI tasks always come first.
-    - Non-CI pending tasks follow in Opus dependency order.
+    - Non-CI pending tasks follow the snapped queue order.
     - Pending/in_progress tasks that Opus omits are marked completed; the caller
       detects affected in-progress tasks and signals an abort so the worker picks
       the new next task.
-    - Tasks added after the original snapshot (IDs not in *original_ids*) are
+    - Tasks added after the original snapshot (IDs not in the snapshot) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
     - Description is updated from Opus's output; title and thread anchor are
       immutable task identity and are preserved.
-    - Opus-returned IDs absent from *current* or duplicated are ignored.
+    - Opus-returned IDs outside the snapshot or duplicated are ignored.
     """
-    by_id = {t["id"]: t for t in current}
-    merged: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    for item in ordered_items:
-        tid = item.get("id", "")
-        if not tid or tid not in by_id:
-            continue
-        if tid in seen_ids:
-            continue
-        seen_ids.add(tid)
-        orig = dict(by_id[tid])
-        if "description" in item:
-            orig["description"] = item["description"]
-        merged.append(orig)
-
-    ci = [t for t in merged if t.get("type") == TaskType.CI]
-    non_ci = [t for t in merged if t.get("type") != TaskType.CI]
-    completed = [t for t in current if t.get("status") == TaskStatus.COMPLETED]
-
-    # Tasks Opus omitted that were pending/in_progress — mark them completed
-    # rather than silently removing them.  The caller detects in-progress ones
-    # and triggers a worker abort so the next task is picked up cleanly.
-    newly_completed = [
-        {**t, "status": str(TaskStatus.COMPLETED)}
-        for t in current
-        if t["id"] in original_ids
-        and t["id"] not in seen_ids
-        and t.get("status") != TaskStatus.COMPLETED
-    ]
-
-    # Tasks added while Opus was thinking — preserve them rather than drop.
-    newly_added = [
-        t
-        for t in current
-        if t["id"] not in original_ids
-        and t["id"] not in seen_ids
-        and t.get("status") != TaskStatus.COMPLETED
-    ]
-
-    result = ci + non_ci + completed + newly_completed + newly_added
-    _assert_rescope_matches_oracle(
-        current, ordered_items, original_ids, seen_ids, result
+    snapshot_ids = (
+        original_ids
+        if original_ids
+        else frozenset(
+            t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
+        )
     )
+    result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
+    _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, result)
     return result
 
 

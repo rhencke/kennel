@@ -192,7 +192,7 @@ class TestRescopeOracleAdapter:
         )
         assert _rescope_task_source_comment_for_oracle({}) is None
 
-    def test_snapshot_order_includes_seen_and_original_non_completed_tasks(
+    def test_snapshot_order_includes_snapshot_non_completed_tasks(
         self,
     ) -> None:
         current = [
@@ -205,8 +205,8 @@ class TestRescopeOracleAdapter:
         )
 
         assert _rescope_snapshot_order_for_oracle(
-            current, frozenset({"a", "b"}), {"c"}, ids_by_task_id
-        ) == [1, 3]
+            current, frozenset({"a", "b"}), ids_by_task_id
+        ) == [1]
 
     def test_releases_encode_completion_description_updates_and_keeps(self) -> None:
         current = [
@@ -243,7 +243,6 @@ class TestRescopeOracleAdapter:
                 {"id": "c", "title": "C"},
             ],
             frozenset({"a", "b", "c"}),
-            {"a", "c"},
             ids_by_task_id,
         )
 
@@ -632,7 +631,7 @@ class TestApplyReorder:
         current = [self._t("1", "First"), self._t("2", "Second")]
         items = [self._item("2", "Second"), self._item("1", "First")]
         result = _apply_reorder(current, items)
-        assert [t["id"] for t in result] == ["2", "1"]
+        assert [t["id"] for t in result] == ["1", "2"]
 
     def test_preserves_title_from_opus(self) -> None:
         current = [self._t("1", "Old title")]
@@ -719,6 +718,20 @@ class TestApplyReorder:
         assert "1" in ids
         assert "2" in ids
 
+    def test_ignores_opus_returned_id_added_after_snapshot(self) -> None:
+        current = [self._t("1", "Original"), self._t("2", "New arrival")]
+        original_ids = frozenset({"1"})
+        items = [
+            self._item("2", "Reordered new arrival", description="changed"),
+            self._item("1", "Original"),
+        ]
+
+        result = _apply_reorder(current, items, original_ids)
+
+        assert [t["id"] for t in result] == ["1", "2"]
+        assert result[1]["title"] == "New arrival"
+        assert result[1]["description"] == ""
+
     def test_marks_pending_task_completed_when_opus_excludes_it(self) -> None:
         current = [self._t("1", "Keep"), self._t("2", "No longer needed")]
         original_ids = frozenset({"1", "2"})
@@ -778,7 +791,6 @@ class TestApplyReorder:
             _assert_rescope_matches_oracle(
                 current,
                 [self._item("1", "Changed")],
-                frozenset(),
                 {"1"},
                 bad_result,
             )
@@ -862,7 +874,7 @@ class TestReorderTasks:
         reorder_tasks(tmp_path, "", agent=_client("not json"))
         assert list_tasks(tmp_path) == result_before
 
-    def test_reorders_tasks(self, tmp_path: Path) -> None:
+    def test_preserves_snapshot_order_for_non_ci_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "First")
         t2 = self._add(tmp_path, "Second")
         # Opus returns them reversed
@@ -874,8 +886,8 @@ class TestReorderTasks:
         )
         reorder_tasks(tmp_path, "", agent=_client(raw))
         result = list_tasks(tmp_path)
-        assert result[0]["id"] == t2["id"]
-        assert result[1]["id"] == t1["id"]
+        assert result[0]["id"] == t1["id"]
+        assert result[1]["id"] == t2["id"]
 
     def test_preserves_title_from_opus(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Old title")
@@ -934,7 +946,12 @@ class TestReorderTasks:
             return json.dumps(
                 {
                     "tasks": [
-                        {"id": t1["id"], "title": "Original task", "description": ""}
+                        {
+                            "id": t2["id"],
+                            "title": "Reordered mid-reorder task",
+                            "description": "should be ignored",
+                        },
+                        {"id": t1["id"], "title": "Original task", "description": ""},
                     ]
                 }
             )
@@ -945,6 +962,10 @@ class TestReorderTasks:
         result = list_tasks(tmp_path)
         ids = [t["id"] for t in result]
         assert new_task_id[0] in ids  # not silently dropped
+        assert ids == [t1["id"], new_task_id[0]]
+        new_task = next(t for t in result if t["id"] == new_task_id[0])
+        assert new_task["title"] == "Arrived mid-reorder"
+        assert new_task["description"] == ""
 
     def test_on_changes_called_when_thread_task_completed_by_reorder(
         self, tmp_path: Path
