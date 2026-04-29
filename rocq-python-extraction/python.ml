@@ -587,104 +587,128 @@ let is_string_set_ref r name =
   let p = global_path r in
   has_suffix p ("." ^ name) && string_contains p ".StringSet."
 
+let rec classify_first_matching_stdlib_ref r = function
+  | [] -> None
+  | (matches, classified_ref) :: rest ->
+      (match matches r with
+       | true -> Some classified_ref
+       | false -> classify_first_matching_stdlib_ref r rest)
+
+let stdlib_ref_matches_any r predicates =
+  List.exists (fun predicate -> predicate r) predicates
+
 let classify_named_stdlib_operation ref_match operations =
   List.find_opt ref_match operations
 
 let classify_stdlib_type_ref r =
-  if is_std_string_type_ref r then Some StdlibStringType
-  else if is_std_ascii_type_ref r then Some StdlibAsciiType
-  else if is_std_byte_type_ref r then Some StdlibByteType
-  else if is_prim_string_type_ref r then Some StdlibPrimStringType
-  else if is_std_nat_type_ref r then Some StdlibNatType
-  else if is_std_positive_type_ref r then Some StdlibPositiveType
-  else if is_std_N_type_ref r then Some StdlibNType
-  else if is_std_Z_type_ref r then Some StdlibZType
-  else if is_std_Q_type_ref r then Some StdlibQType
-  else if is_std_real_type_ref r then Some StdlibRealType
-  else if is_std_option_type_ref r then Some StdlibOptionType
-  else if is_std_list_type_ref r then Some StdlibListType
-  else if is_std_prod_type_ref r then Some StdlibProdType
-  else if is_positive_map_type_ref r then Some StdlibPositiveMapType
-  else if is_positive_set_type_ref r then Some StdlibPositiveSetType
-  else if is_string_map_type_ref r then Some StdlibStringMapType
-  else if is_string_set_type_ref r then Some StdlibStringSetType
-  else if is_std_bool_type_ref r then Some StdlibBoolType
-  else None
+  classify_first_matching_stdlib_ref r [
+    (is_std_string_type_ref, StdlibStringType);
+    (is_std_ascii_type_ref, StdlibAsciiType);
+    (is_std_byte_type_ref, StdlibByteType);
+    (is_prim_string_type_ref, StdlibPrimStringType);
+    (is_std_nat_type_ref, StdlibNatType);
+    (is_std_positive_type_ref, StdlibPositiveType);
+    (is_std_N_type_ref, StdlibNType);
+    (is_std_Z_type_ref, StdlibZType);
+    (is_std_Q_type_ref, StdlibQType);
+    (is_std_real_type_ref, StdlibRealType);
+    (is_std_option_type_ref, StdlibOptionType);
+    (is_std_list_type_ref, StdlibListType);
+    (is_std_prod_type_ref, StdlibProdType);
+    (is_positive_map_type_ref, StdlibPositiveMapType);
+    (is_positive_set_type_ref, StdlibPositiveSetType);
+    (is_string_map_type_ref, StdlibStringMapType);
+    (is_string_set_type_ref, StdlibStringSetType);
+    (is_std_bool_type_ref, StdlibBoolType);
+  ]
 
 let classify_stdlib_constructor_ref r =
   match std_byte_constructor_value r with
   | Some n when n >= 0 && n <= 255 -> Some (StdlibByteCons n)
   | Some _ | None ->
-      if is_std_string_empty_ref r then Some StdlibStringEmpty
-      else if is_std_string_cons_ref r then Some StdlibStringCons
-      else if is_std_ascii_cons_ref r then Some StdlibAsciiCons
-      else if is_std_nat_zero_ref r then Some StdlibNatZero
-      else if is_std_nat_succ_ref r then Some StdlibNatSucc
-      else if is_std_positive_xh_ref r then Some StdlibPositiveXH
-      else if is_std_positive_xo_ref r then Some StdlibPositiveXO
-      else if is_std_positive_xi_ref r then Some StdlibPositiveXI
-      else if is_std_N_zero_ref r then Some StdlibNZero
-      else if is_std_N_pos_ref r then Some StdlibNPos
-      else if is_std_Z_zero_ref r then Some StdlibZZero
-      else if is_std_Z_pos_ref r then Some StdlibZPos
-      else if is_std_Z_neg_ref r then Some StdlibZNeg
-      else if is_std_Q_make_ref r then Some StdlibQMake
-      else if is_std_option_none_ref r then Some StdlibOptionNone
-      else if is_std_option_some_ref r then Some StdlibOptionSome
-      else if is_std_list_nil_ref r then Some StdlibListNil
-      else if is_std_list_cons_ref r then Some StdlibListCons
-      else if is_std_prod_pair_ref r then Some StdlibProdPair
-      else if is_std_bool_true_ref r then Some StdlibBoolTrue
-      else if is_std_bool_false_ref r then Some StdlibBoolFalse
-      else None
+      classify_first_matching_stdlib_ref r [
+        (is_std_string_empty_ref, StdlibStringEmpty);
+        (is_std_string_cons_ref, StdlibStringCons);
+        (is_std_ascii_cons_ref, StdlibAsciiCons);
+        (is_std_nat_zero_ref, StdlibNatZero);
+        (is_std_nat_succ_ref, StdlibNatSucc);
+        (is_std_positive_xh_ref, StdlibPositiveXH);
+        (is_std_positive_xo_ref, StdlibPositiveXO);
+        (is_std_positive_xi_ref, StdlibPositiveXI);
+        (is_std_N_zero_ref, StdlibNZero);
+        (is_std_N_pos_ref, StdlibNPos);
+        (is_std_Z_zero_ref, StdlibZZero);
+        (is_std_Z_pos_ref, StdlibZPos);
+        (is_std_Z_neg_ref, StdlibZNeg);
+        (is_std_Q_make_ref, StdlibQMake);
+        (is_std_option_none_ref, StdlibOptionNone);
+        (is_std_option_some_ref, StdlibOptionSome);
+        (is_std_list_nil_ref, StdlibListNil);
+        (is_std_list_cons_ref, StdlibListCons);
+        (is_std_prod_pair_ref, StdlibProdPair);
+        (is_std_bool_true_ref, StdlibBoolTrue);
+        (is_std_bool_false_ref, StdlibBoolFalse);
+      ]
 
 let classify_stdlib_primitive_comparison_ref r =
-  if is_std_bool_ref r "eqb" || is_std_nat_ref r "eqb" ||
-     is_std_positive_ref r "eqb" || is_std_ascii_ref r "eqb" ||
-     is_std_string_ref r "eqb"
-  then Some StdlibCompareEq
-  else if is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
-          is_std_ascii_ref r "leb" || is_std_string_ref r "leb"
-  then Some StdlibCompareLe
-  else if is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
-          is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb"
-  then Some StdlibCompareLt
-  else None
+  let matches_name name predicates =
+    fun r ->
+      stdlib_ref_matches_any r
+        (List.map (fun predicate -> fun r -> predicate r name) predicates)
+  in
+  classify_first_matching_stdlib_ref r [
+    (matches_name "eqb"
+       [is_std_bool_ref; is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref;
+        is_std_string_ref],
+     StdlibCompareEq);
+    (matches_name "leb"
+       [is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref; is_std_string_ref],
+     StdlibCompareLe);
+    (matches_name "ltb"
+       [is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref; is_std_string_ref],
+     StdlibCompareLt);
+  ]
 
 let classify_stdlib_term_ref r =
   let classify_operation ref_match make operations =
     Option.map make (classify_named_stdlib_operation ref_match operations)
   in
-  if is_std_bool_ref r "negb" then Some (StdlibBoolOperation "negb")
-  else if is_std_bool_ref r "andb" then Some (StdlibBoolOperation "andb")
-  else if is_std_bool_ref r "orb" then Some (StdlibBoolOperation "orb")
-  else if is_std_bool_ref r "eqb" then Some (StdlibBoolOperation "eqb")
-  else
+  match classify_first_matching_stdlib_ref r [
+    ((fun r -> is_std_bool_ref r "negb"), StdlibBoolOperation "negb");
+    ((fun r -> is_std_bool_ref r "andb"), StdlibBoolOperation "andb");
+    ((fun r -> is_std_bool_ref r "orb"), StdlibBoolOperation "orb");
+    ((fun r -> is_std_bool_ref r "eqb"), StdlibBoolOperation "eqb");
+  ] with
+  | Some _ as term_ref -> term_ref
+  | None ->
     match classify_stdlib_primitive_comparison_ref r with
     | Some comparison -> Some (StdlibPrimitiveComparison comparison)
     | None ->
-        if is_std_list_app_ref r then Some StdlibListApp
-        else if is_std_prod_fst_ref r then Some StdlibProdFst
-        else if is_std_prod_snd_ref r then Some StdlibProdSnd
-        else
-          (match classify_operation (is_positive_map_ref r)
-                   (fun name -> StdlibPositiveMapOperation name)
-                   stdlib_map_operation_names with
-           | Some _ as operation -> operation
-           | None ->
-               (match classify_operation (is_string_map_ref r)
-                        (fun name -> StdlibStringMapOperation name)
-                        stdlib_map_operation_names with
-                | Some _ as operation -> operation
-                | None ->
-                    (match classify_operation (is_positive_set_ref r)
-                             (fun name -> StdlibPositiveSetOperation name)
-                             stdlib_set_operation_names with
-                     | Some _ as operation -> operation
-                     | None ->
-                         classify_operation (is_string_set_ref r)
-                           (fun name -> StdlibStringSetOperation name)
-                           stdlib_set_operation_names)))
+        match classify_first_matching_stdlib_ref r [
+          (is_std_list_app_ref, StdlibListApp);
+          (is_std_prod_fst_ref, StdlibProdFst);
+          (is_std_prod_snd_ref, StdlibProdSnd);
+        ] with
+        | Some _ as term_ref -> term_ref
+        | None ->
+            (match classify_operation (is_positive_map_ref r)
+                     (fun name -> StdlibPositiveMapOperation name)
+                     stdlib_map_operation_names with
+             | Some _ as operation -> operation
+             | None ->
+                 (match classify_operation (is_string_map_ref r)
+                          (fun name -> StdlibStringMapOperation name)
+                          stdlib_map_operation_names with
+                  | Some _ as operation -> operation
+                  | None ->
+                      (match classify_operation (is_positive_set_ref r)
+                               (fun name -> StdlibPositiveSetOperation name)
+                               stdlib_set_operation_names with
+                       | Some _ as operation -> operation
+                       | None ->
+                           classify_operation (is_string_set_ref r)
+                             (fun name -> StdlibStringSetOperation name)
+                             stdlib_set_operation_names)))
 
 let primitive_comparison_operators_of_ref = function
   | StdlibCompareEq -> ("==", "!=")
