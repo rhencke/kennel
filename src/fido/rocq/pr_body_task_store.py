@@ -655,20 +655,6 @@ class PRBodyRow:
     pr_body_kind: TaskKind
     pr_body_status: PRBodyStatus
 
-    def body_row_eqb(
-        self,
-        right: PRBodyRow,
-    ) -> bool:
-        left = self
-        same_task = left.pr_body_task == right.pr_body_task
-        same_title = left.pr_body_title == right.pr_body_title
-        same_description = left.pr_body_description == right.pr_body_description
-        same_kind = task_kind_eqb(left.pr_body_kind, right.pr_body_kind)
-        same_status = pr_body_status_eqb(left.pr_body_status, right.pr_body_status)
-        same_text = same_title and same_description
-        same_metadata = same_kind and same_status
-        return same_task and same_text and same_metadata
-
 
 def projected_row(
     task: int,
@@ -894,6 +880,9 @@ def pr_body_status_eqb(
             assert_never(__impossible)
 
 
+pr_body_row_eqb = __import__("operator").eq
+
+
 def pr_body_eqb(
     left: list[PRBodyRow],
     right: list[PRBodyRow],
@@ -913,7 +902,7 @@ def pr_body_eqb(
         return False
     right_row = __list[0]
     right_rest = __list[1:]
-    return left_row.body_row_eqb(right_row) and pr_body_eqb(left_rest, right_rest)
+    return pr_body_row_eqb(left_row, right_row) and pr_body_eqb(left_rest, right_rest)
 
 
 @dataclass(frozen=True)

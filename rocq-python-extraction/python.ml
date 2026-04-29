@@ -4151,6 +4151,7 @@ let pp_classified_term_decl state env r a typ =
   match classify_term_decl state r typ with
   | TermDeclSuppress -> mt ()
   | TermDeclCustomAlias alias ->
+      fnl () ++ fnl () ++
       str (pp_global state Term r) ++ str " = " ++ str alias ++ fnl ()
   | TermDeclEmit ->
       let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
