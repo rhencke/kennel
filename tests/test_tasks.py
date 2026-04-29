@@ -117,8 +117,8 @@ class TestTaskStoreOracleAdapter:
 
         assert store.task_store_order == [1, 2]
         assert by_oracle_id == {1: task_list[0], 2: task_list[1]}
-        assert store.task_store_rows[1].task_description == "one"
-        assert store.task_store_rows[2].task_source_comment == 9
+        assert store.task_store_rows[1].description == "one"
+        assert store.task_store_rows[2].source_comment == 9
 
     def test_format_work_queue_uses_oracle_projection(self) -> None:
         task_list = [

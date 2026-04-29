@@ -68,9 +68,9 @@ Definition projected_row
     (row : TaskRow)
     (status : PRBodyStatus) : PRBodyRow := {|
   pr_body_task := task;
-  pr_body_title := task_title row;
-  pr_body_description := task_description row;
-  pr_body_kind := task_kind row;
+  pr_body_title := title row;
+  pr_body_description := description row;
+  pr_body_kind := kind row;
   pr_body_status := status
 |}.
 
@@ -79,9 +79,9 @@ Definition pending_ci_projection
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusPending =>
-          if task_kind_is_ci (task_kind row)
+          if task_kind_is_ci (kind row)
           then [projected_row task row PRPending]
           else []
       | _ => []
@@ -94,9 +94,9 @@ Definition pending_non_ci_projection
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusPending =>
-          if negb (task_kind_is_ci (task_kind row))
+          if negb (task_kind_is_ci (kind row))
           then [projected_row task row PRPending]
           else []
       | _ => []
@@ -109,7 +109,7 @@ Definition completed_projection
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusCompleted => [projected_row task row PRCompleted]
       | _ => []
       end

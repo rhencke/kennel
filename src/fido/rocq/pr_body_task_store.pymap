@@ -12,7 +12,7 @@ open,646,4,646,22,pr_body_task_store.v,60,2,60,15,extraction,pr_body_title,pr_bo
 open,647,4,647,28,pr_body_task_store.v,61,2,61,21,extraction,pr_body_description,pr_body_description
 open,648,4,648,26,pr_body_task_store.v,62,2,62,14,extraction,pr_body_kind,pr_body_kind
 open,649,4,649,32,pr_body_task_store.v,63,2,63,16,extraction,pr_body_status,pr_body_status
-open,652,0,655,25,pr_body_task_store.v,66,11,66,24,extraction,projected_row,projected_row
+open,652,0,655,26,pr_body_task_store.v,66,11,66,24,extraction,projected_row,projected_row
 open,666,0,668,29,pr_body_task_store.v,77,11,77,32,extraction,pending_ci_projection,pending_ci_projection
 open,687,0,689,29,pr_body_task_store.v,92,11,92,36,extraction,pending_non_ci_projection,pending_non_ci_projection
 open,708,0,710,29,pr_body_task_store.v,107,11,107,31,extraction,completed_projection,completed_projection

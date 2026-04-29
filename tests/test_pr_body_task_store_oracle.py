@@ -10,11 +10,11 @@ def _row(
     description: str = "",
 ) -> Any:
     return oracle.TaskRow(
-        task_title=title,
-        task_description=description,
-        task_kind=kind,
-        task_status=status,
-        task_source_comment=None,
+        title=title,
+        description=description,
+        kind=kind,
+        status=status,
+        source_comment=None,
     )
 
 

@@ -70,72 +70,11 @@ TaskStatusT = StatusPending | StatusCompleted | StatusBlocked
 
 @dataclass(frozen=True)
 class TaskRow:
-    task_title: str
-    task_description: str
-    task_kind: TaskKind
-    task_status: TaskStatus
-    task_source_comment: int | None
-
-    def row_executable(self) -> bool:
-        row = self
-        match row.task_status:
-            case StatusPending():
-                return task_executable(row.task_kind)
-            case StatusCompleted():
-                return False
-            case StatusBlocked():
-                return False
-            case __impossible:
-                assert_never(__impossible)
-
-    def requires_abort(
-        self,
-        current_row: TaskRow,
-    ) -> bool:
-        new_row = self
-        __option = task_preempt_rank(new_row.task_kind)
-        if __option is None:
-            return False
-        new_rank = __option
-        __option = task_preempt_rank(current_row.task_kind)
-        if __option is None:
-            return False
-        current_rank = __option
-        return new_rank < current_rank
-
-    def title_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        return before_row.task_title != after_row.task_title
-
-    def description_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        return before_row.task_description != after_row.task_description
-
-    def metadata_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        if before_row.title_changed(after_row):
-            return True
-        return before_row.description_changed(after_row)
-
-    def identity_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        if before_row.title_changed(after_row):
-            return True
-        before_source = before_row.task_source_comment
-        after_source = after_row.task_source_comment
-        return task_source_comment_changed(before_source, after_source)
+    title: str
+    description: str
+    kind: TaskKind
+    status: TaskStatus
+    source_comment: int | None
 
 
 # ExecutionLease: singleton inductive, constructor was Build_ExecutionLease
@@ -197,8 +136,8 @@ class RescopeRelease:
         return rescope_task_id(release.release_decision)
 
 
-def task_executable(kind: TaskKind) -> bool:
-    match kind:
+def task_executable(kind0: TaskKind) -> bool:
+    match kind0:
         case TaskCI():
             return True
         case TaskThread():
@@ -213,8 +152,20 @@ def task_executable(kind: TaskKind) -> bool:
             assert_never(__impossible)
 
 
-def task_kind_is_ci(kind: TaskKind) -> bool:
-    match kind:
+def task_row_executable(row: TaskRow) -> bool:
+    match row.status:
+        case StatusPending():
+            return task_executable(row.kind)
+        case StatusCompleted():
+            return False
+        case StatusBlocked():
+            return False
+        case __impossible:
+            assert_never(__impossible)
+
+
+def task_kind_is_ci(kind0: TaskKind) -> bool:
+    match kind0:
         case TaskCI():
             return True
         case TaskThread():
@@ -229,8 +180,8 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
             assert_never(__impossible)
 
 
-def task_preempt_rank(kind: TaskKind) -> int | None:
-    match kind:
+def task_preempt_rank(kind0: TaskKind) -> int | None:
+    match kind0:
         case TaskCI():
             return 0
         case TaskThread():
@@ -243,6 +194,21 @@ def task_preempt_rank(kind: TaskKind) -> int | None:
             return None
         case __impossible:
             assert_never(__impossible)
+
+
+def task_requires_abort(
+    new_row: TaskRow,
+    current_row: TaskRow,
+) -> bool:
+    __option = task_preempt_rank(new_row.kind)
+    if __option is None:
+        return False
+    new_rank = __option
+    __option = task_preempt_rank(current_row.kind)
+    if __option is None:
+        return False
+    current_rank = __option
+    return new_rank < current_rank
 
 
 def positive_mem(
@@ -277,7 +243,7 @@ def find_comment_duplicate(
             rows,
         )
     row = __option
-    __option = row.task_source_comment
+    __option = row.source_comment
     if __option is None:
         return find_comment_duplicate(
             comment,
@@ -295,7 +261,7 @@ def find_comment_duplicate(
 
 
 def find_pending_title_duplicate(
-    title: str,
+    candidate_title: str,
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
@@ -307,29 +273,29 @@ def find_pending_title_duplicate(
     __option = rows.get(_rocq_positive_key(task))
     if __option is None:
         return find_pending_title_duplicate(
-            title,
+            candidate_title,
             rest,
             rows,
         )
     row = __option
-    match row.task_status:
+    match row.status:
         case StatusPending():
-            if row.task_title == title:
+            if row.title == candidate_title:
                 return task
             return find_pending_title_duplicate(
-                title,
+                candidate_title,
                 rest,
                 rows,
             )
         case StatusCompleted():
             return find_pending_title_duplicate(
-                title,
+                candidate_title,
                 rest,
                 rows,
             )
         case StatusBlocked():
             return find_pending_title_duplicate(
-                title,
+                candidate_title,
                 rest,
                 rows,
             )
@@ -343,9 +309,9 @@ def enqueue_task(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> tuple[tuple[list[int], dict[int, TaskRow]], int]:
-    __option = row.task_source_comment
+    __option = row.source_comment
     if __option is None:
-        __option = find_pending_title_duplicate(row.task_title, order, rows)
+        __option = find_pending_title_duplicate(row.title, order, rows)
         if __option is None:
             return (
                 (
@@ -403,7 +369,7 @@ def pick_first_ci(
     if __option is None:
         return pick_first_ci(rest, rows)
     row = __option
-    if row.row_executable() and task_kind_is_ci(row.task_kind):
+    if task_row_executable(row) and task_kind_is_ci(row.kind):
         return task
     return pick_first_ci(rest, rows)
 
@@ -421,7 +387,7 @@ def pick_first_non_ci(
     if __option is None:
         return pick_first_non_ci(rest, rows)
     row = __option
-    if row.row_executable() and not task_kind_is_ci(row.task_kind):
+    if task_row_executable(row) and not task_kind_is_ci(row.kind):
         return task
     return pick_first_non_ci(rest, rows)
 
@@ -448,7 +414,7 @@ def begin_task(
         if __option is None:
             return None
         row = __option
-        if row.row_executable():
+        if task_row_executable(row):
             return task
         return None
     e = __option
@@ -482,11 +448,11 @@ def complete_task(
         )
     row = __option
     row_ = TaskRow(
-        task_title=row.task_title,
-        task_description=row.task_description,
-        task_kind=row.task_kind,
-        task_status=StatusCompleted(),
-        task_source_comment=row.task_source_comment,
+        title=row.title,
+        description=row.description,
+        kind=row.kind,
+        status=StatusCompleted(),
+        source_comment=row.source_comment,
     )
     return (
         lease_,
@@ -513,14 +479,14 @@ def abort_task(
 
 def row_with_status(
     row: TaskRow,
-    status: TaskStatus,
+    new_status: TaskStatus,
 ) -> TaskRow:
     return TaskRow(
-        task_title=row.task_title,
-        task_description=row.task_description,
-        task_kind=row.task_kind,
-        task_status=status,
-        task_source_comment=row.task_source_comment,
+        title=row.title,
+        description=row.description,
+        kind=row.kind,
+        status=new_status,
+        source_comment=row.source_comment,
     )
 
 
@@ -529,7 +495,7 @@ def unblock_task_row(
     row: TaskRow,
     rows: dict[int, TaskRow],
 ) -> dict[int, TaskRow]:
-    match row.task_status:
+    match row.status:
         case StatusPending():
             return rows
         case StatusCompleted():
@@ -678,7 +644,7 @@ def apply_rescope_ops(
     row = __option
     match op:
         case KeepTask(task0):
-            match row.task_status:
+            match row.status:
                 case StatusPending():
                     return apply_rescope_ops(
                         rest,
@@ -702,15 +668,15 @@ def apply_rescope_ops(
                     )
                 case __impossible:
                     assert_never(__impossible)
-        case RewriteTask(task0, title, description):
-            match row.task_status:
+        case RewriteTask(task0, new_title, new_description):
+            match row.status:
                 case StatusPending():
                     row_ = TaskRow(
-                        task_title=row.task_title,
-                        task_description=description,
-                        task_kind=row.task_kind,
-                        task_status=row.task_status,
-                        task_source_comment=row.task_source_comment,
+                        title=row.title,
+                        description=new_description,
+                        kind=row.kind,
+                        status=row.status,
+                        source_comment=row.source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -731,11 +697,11 @@ def apply_rescope_ops(
                     )
                 case StatusBlocked():
                     row_ = TaskRow(
-                        task_title=row.task_title,
-                        task_description=description,
-                        task_kind=row.task_kind,
-                        task_status=row.task_status,
-                        task_source_comment=row.task_source_comment,
+                        title=row.title,
+                        description=new_description,
+                        kind=row.kind,
+                        status=row.status,
+                        source_comment=row.source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -750,14 +716,14 @@ def apply_rescope_ops(
                 case __impossible:
                     assert_never(__impossible)
         case CompleteTask(task0):
-            match row.task_status:
+            match row.status:
                 case StatusPending():
                     row_ = TaskRow(
-                        task_title=row.task_title,
-                        task_description=row.task_description,
-                        task_kind=row.task_kind,
-                        task_status=StatusCompleted(),
-                        task_source_comment=row.task_source_comment,
+                        title=row.title,
+                        description=row.description,
+                        kind=row.kind,
+                        status=StatusCompleted(),
+                        source_comment=row.source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -778,11 +744,11 @@ def apply_rescope_ops(
                     )
                 case StatusBlocked():
                     row_ = TaskRow(
-                        task_title=row.task_title,
-                        task_description=row.task_description,
-                        task_kind=row.task_kind,
-                        task_status=StatusCompleted(),
-                        task_source_comment=row.task_source_comment,
+                        title=row.title,
+                        description=row.description,
+                        kind=row.kind,
+                        status=StatusCompleted(),
+                        source_comment=row.source_comment,
                     )
                     return apply_rescope_ops(
                         rest,
@@ -813,7 +779,7 @@ def completed_tasks_in_order(
     if __option is None:
         return completed_tasks_in_order(rest, rows)
     row = __option
-    match row.task_status:
+    match row.status:
         case StatusPending():
             return completed_tasks_in_order(rest, rows)
         case StatusCompleted():
@@ -845,7 +811,7 @@ def preserve_newly_added(
     if __option is None:
         return rest_
     row = __option
-    match row.task_status:
+    match row.status:
         case StatusPending():
             return [task] + rest_
         case StatusCompleted():
@@ -864,7 +830,7 @@ def task_is_ci(
     if __option is None:
         return False
     row = __option
-    return task_kind_is_ci(row.task_kind)
+    return task_kind_is_ci(row.kind)
 
 
 def collect_ci_tasks(
@@ -896,7 +862,7 @@ def collect_non_ci_tasks(
     if __option is None:
         return rest_
     row = __option
-    if not task_kind_is_ci(row.task_kind):
+    if not task_kind_is_ci(row.kind):
         return [task] + rest_
     return rest_
 
@@ -910,11 +876,45 @@ def stable_ci_first(
     return ci + non_ci
 
 
+def task_title_changed(
+    before_row: TaskRow,
+    after_row: TaskRow,
+) -> bool:
+    return before_row.title != after_row.title
+
+
+def task_description_changed(
+    before_row: TaskRow,
+    after_row: TaskRow,
+) -> bool:
+    return before_row.description != after_row.description
+
+
+def task_metadata_changed(
+    before_row: TaskRow,
+    after_row: TaskRow,
+) -> bool:
+    if task_title_changed(before_row, after_row):
+        return True
+    return task_description_changed(before_row, after_row)
+
+
 def task_source_comment_changed(
     before_source: int | None,
     after_source: int | None,
 ) -> bool:
     return before_source != after_source
+
+
+def task_identity_changed(
+    before_row: TaskRow,
+    after_row: TaskRow,
+) -> bool:
+    if task_title_changed(before_row, after_row):
+        return True
+    before_source = before_row.source_comment
+    after_source = after_row.source_comment
+    return task_source_comment_changed(before_source, after_source)
 
 
 def rescope_preserves_task_identity(
@@ -939,7 +939,7 @@ def rescope_preserves_task_identity(
     if __option is None:
         return False
     after_row = __option
-    if before_row.identity_changed(after_row):
+    if task_identity_changed(before_row, after_row):
         return False
     return rescope_preserves_task_identity(
         rest,
@@ -1005,13 +1005,13 @@ def rescope_affects_active_task(
     if __option is None:
         return True
     after_row = __option
-    match after_row.task_status:
+    match after_row.status:
         case StatusPending():
-            return before_row.metadata_changed(after_row)
+            return task_metadata_changed(before_row, after_row)
         case StatusCompleted():
             return True
         case StatusBlocked():
-            return before_row.metadata_changed(after_row)
+            return task_metadata_changed(before_row, after_row)
         case __impossible:
             assert_never(__impossible)
 
@@ -1035,7 +1035,7 @@ def should_abort_for_new_task(
     if __option is None:
         return False
     current_row = __option
-    return new_row.requires_abort(current_row)
+    return task_requires_abort(new_row, current_row)
 
 
 def complete_task_visible(
@@ -1049,7 +1049,7 @@ def complete_task_visible(
             None,
         )
     row = __option
-    match row.task_status:
+    match row.status:
         case StatusPending():
             row_ = row_with_status(row, StatusCompleted())
             return (
@@ -1058,7 +1058,7 @@ def complete_task_visible(
                     row_,
                     rows,
                 ),
-                row.task_source_comment,
+                row.source_comment,
             )
         case StatusCompleted():
             return (
@@ -1073,7 +1073,7 @@ def complete_task_visible(
                     row_,
                     rows,
                 ),
-                row.task_source_comment,
+                row.source_comment,
             )
         case __impossible:
             assert_never(__impossible)
@@ -1112,33 +1112,33 @@ def task_change(
     if __option is None:
         return None
     before_row = __option
-    __option = before_row.task_source_comment
+    __option = before_row.source_comment
     if __option is None:
         return None
     p = __option
-    match before_row.task_status:
+    match before_row.status:
         case StatusPending():
             __option = rows_after.get(_rocq_positive_key(task))
             if __option is None:
                 return TaskCancelled(task)
             after_row = __option
-            match after_row.task_status:
+            match after_row.status:
                 case StatusPending():
-                    if before_row.metadata_changed(after_row):
+                    if task_metadata_changed(before_row, after_row):
                         return TaskModified(
                             task,
-                            after_row.task_title,
-                            after_row.task_description,
+                            after_row.title,
+                            after_row.description,
                         )
                     return None
                 case StatusCompleted():
                     return TaskCompleted(task)
                 case StatusBlocked():
-                    if before_row.metadata_changed(after_row):
+                    if task_metadata_changed(before_row, after_row):
                         return TaskModified(
                             task,
-                            after_row.task_title,
-                            after_row.task_description,
+                            after_row.title,
+                            after_row.description,
                         )
                     return None
                 case __impossible:
@@ -1150,23 +1150,23 @@ def task_change(
             if __option is None:
                 return TaskCancelled(task)
             after_row = __option
-            match after_row.task_status:
+            match after_row.status:
                 case StatusPending():
-                    if before_row.metadata_changed(after_row):
+                    if task_metadata_changed(before_row, after_row):
                         return TaskModified(
                             task,
-                            after_row.task_title,
-                            after_row.task_description,
+                            after_row.title,
+                            after_row.description,
                         )
                     return None
                 case StatusCompleted():
                     return TaskCompleted(task)
                 case StatusBlocked():
-                    if before_row.metadata_changed(after_row):
+                    if task_metadata_changed(before_row, after_row):
                         return TaskModified(
                             task,
-                            after_row.task_title,
-                            after_row.task_description,
+                            after_row.title,
+                            after_row.description,
                         )
                     return None
                 case __impossible:
@@ -1267,7 +1267,7 @@ def task_still_pending(
     if __option is None:
         return False
     row = __option
-    match row.task_status:
+    match row.status:
         case StatusPending():
             return True
         case StatusCompleted():
