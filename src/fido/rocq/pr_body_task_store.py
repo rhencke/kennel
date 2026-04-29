@@ -106,26 +106,19 @@ def find_comment_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         __option = rows.get(_rocq_positive_key(task))
         if __option is None:
-            comment, order, rows = comment, rest, rows
             continue
         row = __option
         __option = row.source_comment
         if __option is None:
-            comment, order, rows = comment, rest, rows
             continue
         existing = __option
         if existing == comment:
             return task
-        comment, order, rows = comment, rest, rows
         continue
+    return None
 
 
 def row_has_pending_title(
@@ -160,16 +153,11 @@ def find_pending_title_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         if task_has_pending_title(candidate_title, task, rows):
             return task
-        candidate_title, order, rows = candidate_title, rest, rows
         continue
+    return None
 
 
 def enqueue_task(

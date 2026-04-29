@@ -247,16 +247,11 @@ def all_claimable(
     claims: dict[int, ClaimRow],
     comments: list[int],
 ) -> bool:
-    while True:
-        __list = comments
-        if __list == []:
-            return True
-        comment = __list[0]
-        rest = __list[1:]
+    for comment in comments:
         if comment_claimable(claims, comment):
-            claims, comments = claims, rest
             continue
         return False
+    return True
 
 
 def in_progress_row(

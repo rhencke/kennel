@@ -200,26 +200,19 @@ def find_comment_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         __option = rows.get(_rocq_positive_key(task))
         if __option is None:
-            comment, order, rows = comment, rest, rows
             continue
         row = __option
         __option = row.source_comment
         if __option is None:
-            comment, order, rows = comment, rest, rows
             continue
         existing = __option
         if existing == comment:
             return task
-        comment, order, rows = comment, rest, rows
         continue
+    return None
 
 
 def row_has_pending_title(
@@ -254,16 +247,11 @@ def find_pending_title_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         if task_has_pending_title(candidate_title, task, rows):
             return task
-        candidate_title, order, rows = candidate_title, rest, rows
         continue
+    return None
 
 
 def enqueue_task(
@@ -323,42 +311,30 @@ def pick_first_ci(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         __option = rows.get(_rocq_positive_key(task))
         if __option is None:
-            order, rows = rest, rows
             continue
         row = __option
         if task_row_executable(row) and isinstance(row.kind, TaskCI):
             return task
-        order, rows = rest, rows
         continue
+    return None
 
 
 def pick_first_non_ci(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    while True:
-        __list = order
-        if __list == []:
-            return None
-        task = __list[0]
-        rest = __list[1:]
+    for task in order:
         __option = rows.get(_rocq_positive_key(task))
         if __option is None:
-            order, rows = rest, rows
             continue
         row = __option
         if task_row_executable(row) and not isinstance(row.kind, TaskCI):
             return task
-        order, rows = rest, rows
         continue
+    return None
 
 
 def pick_next_task(
@@ -548,48 +524,33 @@ def op_covers_task(
     task: int,
     ops: list[RescopeOp],
 ) -> bool:
-    while True:
-        __list = ops
-        if __list == []:
-            return False
-        op = __list[0]
-        rest = __list[1:]
+    for op in ops:
         if rescope_task_id(op) == task:
             return True
-        task, ops = task, rest
         continue
+    return False
 
 
 def rescope_ops_cover_snapshot(
     snapshot_order: list[int],
     ops: list[RescopeOp],
 ) -> bool:
-    while True:
-        __list = snapshot_order
-        if __list == []:
-            return True
-        task = __list[0]
-        rest = __list[1:]
+    for task in snapshot_order:
         if op_covers_task(task, ops):
-            snapshot_order, ops = rest, ops
             continue
         return False
+    return True
 
 
 def release_for_task(
     task: int,
     releases: list[RescopeRelease],
 ) -> RescopeOp | None:
-    while True:
-        __list = releases
-        if __list == []:
-            return None
-        release = __list[0]
-        rest = __list[1:]
+    for release in releases:
         if release.task_id() == task:
             return release.release_decision
-        task, releases = task, rest
         continue
+    return None
 
 
 def normalize_rescope_batch(
@@ -865,15 +826,9 @@ def rescope_preserves_task_identity(
     rows_before: dict[int, TaskRow],
     rows_after: dict[int, TaskRow],
 ) -> bool:
-    while True:
-        __list = snapshot_order
-        if __list == []:
-            return True
-        task = __list[0]
-        rest = __list[1:]
+    for task in snapshot_order:
         __option = rows_before.get(_rocq_positive_key(task))
         if __option is None:
-            snapshot_order, rows_before, rows_after = rest, rows_before, rows_after
             continue
         before_row = __option
         __option = rows_after.get(_rocq_positive_key(task))
@@ -882,8 +837,8 @@ def rescope_preserves_task_identity(
         after_row = __option
         if task_identity_changed(before_row, after_row):
             return False
-        snapshot_order, rows_before, rows_after = rest, rows_before, rows_after
         continue
+    return True
 
 
 def apply_rescope(

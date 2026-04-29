@@ -23,6 +23,14 @@ def _status_names(rows: list[Any]) -> list[str]:
     return [type(row.pr_body_status).__name__ for row in rows]
 
 
+def _function_source(source: str, name: str) -> str:
+    start = source.index(f"def {name}(")
+    next_function = source.find("\ndef ", start + 1)
+    if next_function == -1:
+        return source[start:]
+    return source[start:next_function]
+
+
 def test_projection_matches_rendered_pr_body_order() -> None:
     store = oracle.TaskStore(
         task_store_order=[1, 2, 3, 4],
@@ -98,3 +106,14 @@ def test_positive_membership_lowers_to_native_membership() -> None:
 
     assert "def positive_mem(" not in source
     assert "if task in snapshot_order:" in source
+
+
+def test_tail_recursive_duplicate_scans_lower_to_for_loops() -> None:
+    source = Path(oracle.__file__).read_text()
+    comment_duplicate = _function_source(source, "find_comment_duplicate")
+    pending_title_duplicate = _function_source(source, "find_pending_title_duplicate")
+
+    assert "while True:" not in comment_duplicate
+    assert "for task in order:" in comment_duplicate
+    assert "while True:" not in pending_title_duplicate
+    assert "for task in order:" in pending_title_duplicate

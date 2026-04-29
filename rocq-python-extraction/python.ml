@@ -178,7 +178,13 @@ type tail_context = {
   tail_params : Id.t list;
 }
 
+type list_scan_context = {
+  list_scan_list_param : Id.t;
+  list_scan_rest_param : Id.t;
+}
+
 let active_tail_context : tail_context option ref = ref None
+let active_list_scan_context : list_scan_context option ref = ref None
 
 let with_tail_context context f =
   let previous = !active_tail_context in
@@ -189,6 +195,17 @@ let with_tail_context context f =
     result
   with exn ->
     active_tail_context := previous;
+    raise exn
+
+let with_list_scan_context context f =
+  let previous = !active_list_scan_context in
+  active_list_scan_context := context;
+  try
+    let result = f () in
+    active_list_scan_context := previous;
+    result
+  with exn ->
+    active_list_scan_context := previous;
     raise exn
 
 let is_erased_arg = function
@@ -3148,17 +3165,42 @@ and is_active_tail_call state env head =
   | Some context, Some name -> String.equal context.tail_name name
   | _ -> false
 
+and arg_var_name env = function
+  | MLmagic a -> arg_var_name env a
+  | MLrel n -> Some (get_db_name n env)
+  | _ -> None
+
+and is_list_scan_tail_continue state env head args =
+  match !active_tail_context, !active_list_scan_context with
+  | Some context, Some scan_context
+    when is_active_tail_call state env head &&
+         Int.equal (List.length context.tail_params) (List.length args) ->
+      List.for_all2
+        (fun param arg ->
+           match arg_var_name env arg with
+           | None -> false
+           | Some arg_name ->
+               if Id.equal param scan_context.list_scan_list_param then
+                 Id.equal arg_name scan_context.list_scan_rest_param
+               else
+                 Id.equal arg_name param)
+        context.tail_params
+        args
+  | _, _ ->
+      false
+
 and pp_tail_self_rebind state env indent head args =
   match !active_tail_context with
   | Some context
     when is_active_tail_call state env head &&
          Int.equal (List.length context.tail_params) (List.length args) ->
-      let pfx = String.make indent ' ' in
-      let continuation_pfx = fnl () ++ str pfx in
       let pp_continue = str "continue" in
-      if List.is_empty context.tail_params then
+      if is_list_scan_tail_continue state env head args ||
+         List.is_empty context.tail_params then
         Some pp_continue
       else
+        let pfx = String.make indent ' ' in
+        let continuation_pfx = fnl () ++ str pfx in
         let lhs =
           prlist_with_sep (fun () -> str ", ") pp_pyid context.tail_params
         in
@@ -3180,6 +3222,100 @@ and pp_tail_self_rebind state env indent head args =
              str "," ++ fnl () ++ str pfx ++ str ")" ++
              continuation_pfx ++ pp_continue)
   | _ -> None
+
+and expr_has_active_tail_call state env expr =
+  match expr with
+  | MLmagic a ->
+      expr_has_active_tail_call state env a
+  | MLrel _ | MLglob _ | MLdummy _ | MLexn _ | MLaxiom _
+  | MLuint _ | MLfloat _ | MLstring _ | MLparray _ ->
+      false
+  | MLlam (id, body) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      expr_has_active_tail_call state env' body
+  | MLletin (id, a1, a2) ->
+      expr_has_active_tail_call state env a1 ||
+      let _, env' = push_vars [id_of_mlid id] env in
+      expr_has_active_tail_call state env' a2
+  | MLcons (_, _, args) | MLtuple args ->
+      List.exists (expr_has_active_tail_call state env) args
+  | MLcase (_, scrutinee, branches) ->
+      expr_has_active_tail_call state env scrutinee ||
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           expr_has_active_tail_call state env' body)
+        branches
+  | MLfix (_, ids, defs) ->
+      let id_list = List.rev (Array.to_list ids) in
+      let _, env' = push_vars id_list env in
+      Array.exists (expr_has_active_tail_call state env') defs
+  | MLapp (f, args) ->
+      let head, all_args = collect_app f args in
+      is_active_tail_call state env head ||
+      expr_has_active_tail_call state env f ||
+      List.exists (expr_has_active_tail_call state env) all_args
+
+and list_scan_body_has_continue state env expr =
+  match expr with
+  | MLmagic a ->
+      list_scan_body_has_continue state env a
+  | MLletin (id, _a1, a2) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      list_scan_body_has_continue state env' a2
+  | MLcase (_, _scrutinee, branches) ->
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           list_scan_body_has_continue state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          list_scan_body_has_continue state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          list_scan_body_has_continue state env
+            (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          is_list_scan_tail_continue state env head visible_args)
+  | _ ->
+      false
+
+and list_scan_body_supported state env expr =
+  match expr with
+  | MLmagic a ->
+      list_scan_body_supported state env a
+  | MLletin (id, a1, a2) ->
+      not (expr_has_active_tail_call state env a1) &&
+      (let _, env' = push_vars [id_of_mlid id] env in
+       list_scan_body_supported state env' a2)
+  | MLcase (_, scrutinee, branches) ->
+      not (expr_has_active_tail_call state env scrutinee) &&
+      Array.for_all
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           list_scan_body_supported state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          list_scan_body_supported state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          list_scan_body_supported state env
+            (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          if is_active_tail_call state env head then
+            is_list_scan_tail_continue state env head visible_args
+          else
+            not (expr_has_active_tail_call state env (MLapp (f, args))))
+  | _ ->
+      not (expr_has_active_tail_call state env expr)
 
 and has_tail_self_call state env expr =
   match expr with
@@ -3213,12 +3349,84 @@ and has_tail_self_call state env expr =
 and pp_return_body_with_tail_loop state env indent name params body =
   let context = Some { tail_name = name; tail_params = params } in
   with_tail_context context (fun () ->
+      match pp_list_scan_tail_loop state env indent params body with
+      | Some pp -> pp
+      | None ->
       if has_tail_self_call state env body then
         str "while True:" ++ fnl () ++
         str (String.make (indent + 4) ' ') ++
         pp_return_body state env (indent + 4) body
       else
         pp_return_body state env indent body)
+
+and pp_list_scan_tail_loop state env indent function_params body =
+  let find_function_param id =
+    List.find_opt (fun param -> Id.equal param id) function_params
+  in
+  let classify_list_branches branches =
+    let nil_arm = ref None in
+    let cons_arm = ref None in
+    let wildcard_arm = ref None in
+    let classify (ids, pat, body) =
+      match expand_pusual (List.length ids) pat with
+      | Pcons (r, []) when is_std_list_nil_ref r ->
+          set_once nil_arm (ids, body)
+      | Pcons (r, _) when is_std_list_cons_ref r ->
+          set_once cons_arm (ids, body)
+      | Pwild ->
+          set_once wildcard_arm (ids, body)
+      | _ ->
+          ()
+    in
+    Array.iter classify branches;
+    (!nil_arm, !cons_arm, !wildcard_arm)
+  in
+  match body with
+  | MLcase (ty, scrutinee, branches) when is_std_list_type ty -> (
+      match arg_var_name env scrutinee with
+      | None -> None
+      | Some scrutinee_name -> (
+          match find_function_param scrutinee_name with
+          | None -> None
+          | Some list_param -> (
+              let nil_arm, cons_arm, _wildcard_arm =
+                classify_list_branches branches
+              in
+              match nil_arm, cons_arm with
+              | Some (nil_ids, nil_body), Some (cons_ids, cons_body) -> (
+                  let cons_ids', cons_env =
+                    push_vars (List.rev_map id_of_mlid cons_ids) env
+                  in
+                  let cons_params = List.rev cons_ids' in
+                  match visible_params cons_params with
+                  | head_param :: rest_param :: _ ->
+                      let scan_context = Some {
+                        list_scan_list_param = list_param;
+                        list_scan_rest_param = rest_param;
+                      } in
+                      with_list_scan_context scan_context (fun () ->
+                          if
+                            list_scan_body_has_continue state cons_env cons_body &&
+                            list_scan_body_supported state cons_env cons_body &&
+                            not (expr_has_active_tail_call state env nil_body)
+                          then
+                            let loop_pfx = String.make indent ' ' in
+                            let body_pfx = String.make (indent + 4) ' ' in
+                            Some
+                              (str "for " ++ pp_pyid head_param ++ str " in " ++
+                               pp_expr state env scrutinee ++ str ":" ++ fnl () ++
+                               str body_pfx ++
+                               pp_return_body state cons_env (indent + 4) cons_body ++
+                               fnl () ++ str loop_pfx ++
+                               pp_return_arm state env indent nil_ids [] nil_body)
+                          else
+                            None)
+                  | _ ->
+                      None)
+              | _, _ ->
+                  None)))
+  | _ ->
+      None
 
 and pp_return_arm state env indent ids values body =
   let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
