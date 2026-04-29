@@ -519,15 +519,6 @@ let is_std_collection_module_name name =
 let is_std_remapped_module_name name =
   is_std_collection_module_name name || name = "Pos" || has_suffix name ".Pos"
 
-let is_std_collection_term_ref r =
-  let names = ["empty"; "add"; "remove"; "find"; "mem"; "cardinal"; "elements"; "fold";
-               "union"; "inter"; "diff"] in
-  List.exists
-    (fun name ->
-       is_positive_map_ref r name || is_string_map_ref r name ||
-       is_positive_set_ref r name || is_string_set_ref r name)
-    names || is_std_list_app_ref r
-
 type lowering_family =
   | LoweringBool
   | LoweringPrimitiveComparison
@@ -654,9 +645,29 @@ let lowering_rule_is_bool_or_primitive rule =
   lowering_rule_has_family LoweringBool rule ||
   lowering_rule_has_family LoweringPrimitiveComparison rule
 
-let is_bool_or_primitive_lowering_ref r =
+let lowering_rule_is_collection rule =
+  lowering_rule_has_family LoweringList rule ||
+  lowering_rule_has_family LoweringPositiveMap rule ||
+  lowering_rule_has_family LoweringStringMap rule ||
+  lowering_rule_has_family LoweringPositiveSet rule ||
+  lowering_rule_has_family LoweringStringSet rule
+
+let lowering_collection_key_kind = function
+  | LoweringPositiveMap | LoweringPositiveSet -> Some `Positive
+  | LoweringStringMap | LoweringStringSet -> Some `String
+  | _ -> None
+
+let lowering_rule_is_primitive_or_collection rule =
+  lowering_rule_is_bool_or_primitive rule || lowering_rule_is_collection rule
+
+let is_primitive_or_collection_lowering_ref r =
   match lowering_rule_of_ref r with
-  | Some rule -> lowering_rule_is_bool_or_primitive rule
+  | Some rule -> lowering_rule_is_primitive_or_collection rule
+  | None -> false
+
+let lowering_rule_suppresses_declaration r =
+  match lowering_rule_of_ref r with
+  | Some rule -> rule.lowering_suppress_declaration
   | None -> false
 
 let std_byte_constructor_value r =
@@ -1573,7 +1584,7 @@ let lowering_rule_app_precedence rule args =
        | None -> py_prec_not)
   | LoweringPrimitiveComparison, _, [_; _] ->
       py_prec_compare
-  | LoweringBool, LoweringEmitInfix operator, [_; _] ->
+  | _, LoweringEmitInfix operator, [_; _] ->
       lowering_infix_precedence operator
   | _, _, _ ->
       py_prec_call
@@ -1620,28 +1631,13 @@ let rec py_expr_precedence expr =
       let app_head, app_args = collect_app app_head app_args in
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
-       | MLglob r, _ when is_bool_or_primitive_lowering_ref r -> (
+       | MLglob r, _ when is_primitive_or_collection_lowering_ref r -> (
            match lowering_rule_of_ref r with
-           | Some rule when lowering_rule_is_bool_or_primitive rule ->
+           | Some rule when lowering_rule_is_primitive_or_collection rule ->
                lowering_rule_app_precedence rule app_args
            | Some _ | None ->
                py_prec_call)
        | MLglob r, [_; _] when is_native_equality_marker_ref r ->
-           py_prec_compare
-       | MLglob r, [_; _] when is_std_list_app_ref r ->
-           py_prec_add
-       | MLglob r, [_; _]
-         when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
-           py_prec_bit_or
-       | MLglob r, [_; _]
-         when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
-           py_prec_bit_and
-       | MLglob r, [_; _]
-         when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
-           py_prec_add
-       | MLglob r, [_; _]
-         when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
-              is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
            py_prec_compare
        | _, _ ->
            (match marker_of_ast app_head with
@@ -1706,6 +1702,16 @@ and rendered_lowering_rule_app state env r rule args =
   let rendered_expr =
     pp_rendered_expr state env
   in
+  let collection_key kind key =
+    pp_collection_key kind (pp_py_rendered (rendered_expr key))
+  in
+  let runtime_call name args =
+    py_call (py_rendered (str name)) (rendered_args state env args)
+  in
+  let keyed_runtime_call kind name key args =
+    py_call (py_rendered (str name))
+      (collection_key kind key ++ str ", " ++ rendered_args state env args)
+  in
   match rule.lowering_family, rule.lowering_emit, args with
   | LoweringBool, LoweringEmitPrefix "not", [value] ->
       (match rendered_inverted_primitive_comparison_expr state env value with
@@ -1725,6 +1731,55 @@ and rendered_lowering_rule_app state env r rule args =
            Some (rendered_primitive_comparison state env operator left right)
        | None ->
            None)
+  | LoweringList, LoweringEmitInfix operator, [left; right] ->
+      Some
+        (py_infix operator
+           (lowering_infix_precedence operator)
+           (rendered_expr left)
+           (rendered_expr right))
+  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitLiteral literal, [] ->
+      Some (py_rendered (str literal))
+  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitLiteral literal, [] ->
+      Some (py_rendered (str literal))
+  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
+    [key; value; mapping] ->
+      Option.map
+        (fun kind -> keyed_runtime_call kind name key [value; mapping])
+        (lowering_collection_key_kind rule.lowering_family)
+  | (LoweringPositiveMap | LoweringStringMap | LoweringPositiveSet | LoweringStringSet),
+    LoweringEmitCall name, [key; collection] ->
+      Option.map
+        (fun kind -> keyed_runtime_call kind name key [collection])
+        (lowering_collection_key_kind rule.lowering_family)
+  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name, args ->
+      Some (runtime_call name args)
+  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitCall name, args ->
+      Some (runtime_call name args)
+  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitMethod method_name,
+    [key; mapping] ->
+      Option.map
+        (fun kind ->
+           py_method_call (rendered_expr mapping) method_name
+             (collection_key kind key))
+        (lowering_collection_key_kind rule.lowering_family)
+  | (LoweringPositiveMap | LoweringStringMap | LoweringPositiveSet | LoweringStringSet),
+    LoweringEmitInfix "in", [key; collection] ->
+      Option.map
+        (fun kind ->
+           py_infix ~associativity:PyAssocNone "in"
+             py_prec_compare
+             (py_rendered (collection_key kind key))
+             (rendered_expr collection))
+        (lowering_collection_key_kind rule.lowering_family)
+  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitInfix operator, [left; right] ->
+      let associativity =
+        if String.equal operator "-" then PyAssocNone else PyAssocLeft
+      in
+      Some
+        (py_infix ~associativity operator
+           (lowering_infix_precedence operator)
+           (rendered_expr left)
+           (rendered_expr right))
   | _, _, _ ->
       None
 
@@ -1800,17 +1855,17 @@ and pp_expr state env expr =
       extraction_diagnostic_error ~detail:(find_custom r) "PYEX043"
   | MLglob r when is_custom r && is_concurrency_marker_string (find_custom r) ->
       extraction_diagnostic_error ~detail:(find_custom r) "PYEX044"
-  | MLglob r when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
-      str "{}"
-  | MLglob r when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
-      str "frozenset()"
+  | MLglob r -> (
+      match lowering_rule_of_ref r with
+      | Some { lowering_emit = LoweringEmitLiteral literal; _ } ->
+          str literal
+      | Some _ | None ->
+          pp_glob state r)
   | MLrel n ->
       (* De Bruijn variable: look up the binder name.  The dummy name [_]
          signals an erased binder; emit [__] (the module-level sentinel). *)
       let id = get_db_name n env in
       if Id.equal id dummy_name then str "__" else pp_pyid id
-  | MLglob r ->
-      pp_glob state r
   | MLdummy Kprop ->
       pp_impossible_expr ()
   | MLdummy _ ->
@@ -1842,9 +1897,6 @@ and pp_expr state env expr =
       let rendered_expr =
         pp_rendered_expr state env
       in
-      let runtime_call name args =
-        py_call (py_rendered (str name)) (rendered_args state env args)
-      in
       let pp_method_call_expr =
         match head, all_args with
         | MLglob r, self_arg :: method_args -> (
@@ -1870,97 +1922,6 @@ and pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
-      let collection_key kind key =
-        pp_collection_key kind (pp_py_rendered (rendered_expr key))
-      in
-      let pp_map_app kind r =
-        match all_args with
-        | [] when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
-            Some (py_rendered (str "{}"))
-        | [key; value; mapping] when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
-            Some
-              (py_call (py_rendered (str "_rocq_map_add"))
-                 (collection_key kind key ++ str ", " ++
-                  rendered_args state env [value; mapping]))
-        | [key; mapping] when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
-            Some
-              (py_call (py_rendered (str "_rocq_map_remove"))
-                 (collection_key kind key ++ str ", " ++
-                  pp_py_rendered (rendered_expr mapping)))
-        | [key; mapping] when is_positive_map_ref r "find" || is_string_map_ref r "find" ->
-            Some
-              (py_method_call (rendered_expr mapping) "get"
-                 (collection_key kind key))
-        | [key; mapping] when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "in"
-                 py_prec_compare
-                 (py_rendered (collection_key kind key))
-                 (rendered_expr mapping))
-        | [mapping] when is_positive_map_ref r "cardinal" || is_string_map_ref r "cardinal" ->
-            Some (runtime_call "len" [mapping])
-        | [mapping] when is_positive_map_ref r "elements" || is_string_map_ref r "elements" ->
-            Some (runtime_call "_rocq_map_elements" [mapping])
-        | [fn; mapping; initial] when is_positive_map_ref r "fold" || is_string_map_ref r "fold" ->
-            Some (runtime_call "_rocq_map_fold" [fn; mapping; initial])
-        | _ -> None
-      in
-      let pp_set_app kind r =
-        match all_args with
-        | [] when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
-            Some (py_call (py_rendered (str "frozenset")) (mt ()))
-        | [key; values] when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
-            Some
-              (py_call (py_rendered (str "_rocq_set_add"))
-                 (collection_key kind key ++ str ", " ++
-                  pp_py_rendered (rendered_expr values)))
-        | [key; values] when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
-            Some
-              (py_call (py_rendered (str "_rocq_set_remove"))
-                 (collection_key kind key ++ str ", " ++
-                  pp_py_rendered (rendered_expr values)))
-        | [key; values] when is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "in"
-                 py_prec_compare
-                 (py_rendered (collection_key kind key))
-                 (rendered_expr values))
-        | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
-            Some
-              (py_infix "|"
-                 py_prec_bit_or
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
-            Some
-              (py_infix "&"
-                 py_prec_bit_and
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "-"
-                 py_prec_add
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [values] when is_positive_set_ref r "cardinal" || is_string_set_ref r "cardinal" ->
-            Some (runtime_call "len" [values])
-        | [values] when is_positive_set_ref r "elements" || is_string_set_ref r "elements" ->
-            Some (runtime_call "_rocq_set_elements" [values])
-        | [fn; values; initial] when is_positive_set_ref r "fold" || is_string_set_ref r "fold" ->
-            Some (runtime_call "_rocq_set_fold" [fn; values; initial])
-        | _ -> None
-      in
-      let pp_list_app r =
-        match all_args with
-        | [left; right] when is_std_list_app_ref r ->
-            Some
-              (py_infix "+"
-                 py_prec_add
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | _ -> None
-      in
       let pp_prod_projection r =
         match all_args with
         | [pair] when is_std_prod_fst_ref r ->
@@ -1969,7 +1930,7 @@ and pp_expr state env expr =
             Some (py_index (rendered_expr pair) "1")
         | _ -> None
       in
-      let pp_bool_or_primitive_lowering_app r rule =
+      let pp_primitive_or_collection_lowering_app r rule =
         rendered_lowering_rule_app state env r rule all_args
       in
       let pp_native_equality_app r =
@@ -2005,10 +1966,10 @@ and pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
-        | MLglob r when is_bool_or_primitive_lowering_ref r -> (
+        | MLglob r when is_primitive_or_collection_lowering_ref r -> (
             match lowering_rule_of_ref r with
-            | Some rule when lowering_rule_is_bool_or_primitive rule ->
-                pp_bool_or_primitive_lowering_app r rule
+            | Some rule when lowering_rule_is_primitive_or_collection rule ->
+                pp_primitive_or_collection_lowering_app r rule
             | Some _ | None ->
                 None)
         | MLglob r when is_native_equality_marker_ref r ->
@@ -2017,32 +1978,8 @@ and pp_expr state env expr =
             pp_constructor_tag_predicate_app r
         | MLglob r when is_active_list_membership_predicate (pp_global state Term r) ->
             pp_list_membership_predicate_app r
-        | MLglob r when is_std_list_app_ref r ->
-            pp_list_app r
         | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
             pp_prod_projection r
-        | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
-                        is_positive_map_ref r "remove" || is_positive_map_ref r "find" ||
-                        is_positive_map_ref r "mem" || is_positive_map_ref r "cardinal" ||
-                        is_positive_map_ref r "elements" || is_positive_map_ref r "fold" ->
-            pp_map_app `Positive r
-        | MLglob r when is_string_map_ref r "empty" || is_string_map_ref r "add" ||
-                        is_string_map_ref r "remove" || is_string_map_ref r "find" ||
-                        is_string_map_ref r "mem" || is_string_map_ref r "cardinal" ||
-                        is_string_map_ref r "elements" || is_string_map_ref r "fold" ->
-            pp_map_app `String r
-        | MLglob r when is_positive_set_ref r "empty" || is_positive_set_ref r "add" ||
-                        is_positive_set_ref r "remove" || is_positive_set_ref r "mem" ||
-                        is_positive_set_ref r "union" || is_positive_set_ref r "inter" ||
-                        is_positive_set_ref r "diff" || is_positive_set_ref r "cardinal" ||
-                        is_positive_set_ref r "elements" || is_positive_set_ref r "fold" ->
-            pp_set_app `Positive r
-        | MLglob r when is_string_set_ref r "empty" || is_string_set_ref r "add" ||
-                        is_string_set_ref r "remove" || is_string_set_ref r "mem" ||
-                        is_string_set_ref r "union" || is_string_set_ref r "inter" ||
-                        is_string_set_ref r "diff" || is_string_set_ref r "cardinal" ||
-                        is_string_set_ref r "elements" || is_string_set_ref r "fold" ->
-            pp_set_app `String r
         | _ -> None
       in
       let pp_option_bind_expr opt_expr fn_expr =
@@ -3007,6 +2944,38 @@ let rec pp_statement_expr state env indent = function
             pp_multiline_items indent callee
               (List.map (pp_statement_expr state env (indent + 4)) args)
           in
+          let pp_statement_lowering_rule_app r rule =
+            match rule.lowering_family, rule.lowering_emit, all_args with
+            | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
+              [key; value; mapping] ->
+                Option.map
+                  (fun kind ->
+                     pp_multiline_items indent (str name)
+                       [ collection_key kind key;
+                         pp_statement_expr state env (indent + 4) value;
+                         pp_statement_expr state env (indent + 4) mapping ])
+                  (lowering_collection_key_kind rule.lowering_family)
+            | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
+              [key; collection] ->
+                Option.map
+                  (fun kind ->
+                     pp_multiline_items indent (str name)
+                       [ collection_key kind key;
+                         pp_statement_expr state env (indent + 4) collection ])
+                  (lowering_collection_key_kind rule.lowering_family)
+            | (LoweringPositiveSet | LoweringStringSet), LoweringEmitCall name,
+              [key; collection]
+              when String.equal name "_rocq_set_remove" ->
+                Option.map
+                  (fun kind ->
+                     pp_multiline_items indent (str name)
+                       [ collection_key kind key;
+                         pp_statement_expr state env (indent + 4) collection ])
+                  (lowering_collection_key_kind rule.lowering_family)
+            | _, _, _ ->
+                Option.map pp_py_rendered
+                  (rendered_lowering_rule_app state env r rule all_args)
+          in
           match head, all_args with
           | MLglob r, [value]
             when is_active_constructor_tag_predicate (pp_global state Term r) -> (
@@ -3023,46 +2992,14 @@ let rec pp_statement_expr state env indent = function
                    py_prec_compare
                    (pp_rendered_expr state env target)
                    (pp_rendered_expr state env items))
-          | MLglob r, [left; right] when is_std_list_app_ref r ->
-              pp_py_rendered
-                (py_infix "+"
-                   py_prec_add
-                   (pp_rendered_expr state env left)
-                   (pp_rendered_expr state env right))
-          | MLglob r, [key; value; mapping]
-            when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
-              let kind =
-                if is_positive_map_ref r "add" then `Positive else `String
-              in
-              pp_multiline_items indent (str "_rocq_map_add")
-                [ collection_key kind key;
-                  pp_statement_expr state env (indent + 4) value;
-                  pp_statement_expr state env (indent + 4) mapping ]
-          | MLglob r, [key; mapping]
-            when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
-              let kind =
-                if is_positive_map_ref r "remove" then `Positive else `String
-              in
-              pp_multiline_items indent (str "_rocq_map_remove")
-                [ collection_key kind key;
-                  pp_statement_expr state env (indent + 4) mapping ]
-          | MLglob r, [key; value; values]
-            when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
-              let kind =
-                if is_positive_set_ref r "add" then `Positive else `String
-              in
-              pp_multiline_items indent (str "_rocq_set_add")
-                [ collection_key kind key;
-                  pp_statement_expr state env (indent + 4) value;
-                  pp_statement_expr state env (indent + 4) values ]
-          | MLglob r, [key; values]
-            when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
-              let kind =
-                if is_positive_set_ref r "remove" then `Positive else `String
-              in
-              pp_multiline_items indent (str "_rocq_set_remove")
-                [ collection_key kind key;
-                  pp_statement_expr state env (indent + 4) values ]
+          | MLglob r, _ when is_primitive_or_collection_lowering_ref r -> (
+              match lowering_rule_of_ref r with
+              | Some rule when lowering_rule_is_primitive_or_collection rule -> (
+                  match pp_statement_lowering_rule_app r rule with
+                  | Some pp -> pp
+                  | None -> pp_expr state env (MLapp (f, args)))
+              | Some _ | None ->
+                  pp_expr state env (MLapp (f, args)))
           | _, _ when List.length all_args >= 3 ->
               call (pp_expr state env head) all_args
           | _ ->
@@ -4901,8 +4838,7 @@ let classify_term_decl state r typ =
   else if is_runtime_marker_ref r then TermDeclSuppress
   else if is_native_equality_marker_ref r then TermDeclSuppress
   else if is_inline_custom r then TermDeclSuppress
-  else if is_bool_or_primitive_lowering_ref r then TermDeclSuppress
-  else if is_std_collection_term_ref r then TermDeclSuppress
+  else if lowering_rule_suppresses_declaration r then TermDeclSuppress
   else if is_active_record_field_target (pp_global state Term r) then
     TermDeclSuppress
   else if is_custom r then TermDeclCustomAlias (find_custom r)
