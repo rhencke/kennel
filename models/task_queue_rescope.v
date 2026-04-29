@@ -484,14 +484,6 @@ Definition task_is_ci
   | None => false
   end.
 
-Definition task_is_non_ci
-    (rows : PositiveMap.t TaskRow)
-    (task : positive) : bool :=
-  match PositiveMap.find task rows with
-  | Some row => negb (task_kind_is_ci (task_kind row))
-  | None => false
-  end.
-
 Fixpoint collect_ci_tasks
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list positive :=
@@ -509,7 +501,11 @@ Fixpoint collect_non_ci_tasks
   | [] => []
   | task :: rest =>
       let rest' := collect_non_ci_tasks rest rows in
-      if task_is_non_ci rows task then task :: rest' else rest'
+      match PositiveMap.find task rows with
+      | Some row =>
+          if negb (task_kind_is_ci (task_kind row)) then task :: rest' else rest'
+      | None => rest'
+      end
   end.
 
 Definition stable_ci_first

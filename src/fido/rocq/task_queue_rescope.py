@@ -867,17 +867,6 @@ def task_is_ci(
     return task_kind_is_ci(row.task_kind)
 
 
-def task_is_non_ci(
-    rows: dict[int, TaskRow],
-    task: int,
-) -> bool:
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return False
-    row = __option
-    return not task_kind_is_ci(row.task_kind)
-
-
 def collect_ci_tasks(
     order: list[int],
     rows: dict[int, TaskRow],
@@ -903,7 +892,11 @@ def collect_non_ci_tasks(
     task = __list[0]
     rest = __list[1:]
     rest_ = collect_non_ci_tasks(rest, rows)
-    if task_is_non_ci(rows, task):
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return rest_
+    row = __option
+    if not task_kind_is_ci(row.task_kind):
         return [task] + rest_
     return rest_
 
