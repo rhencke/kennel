@@ -903,14 +903,20 @@ let expression_lowering_rule_of_ref r =
   | Some rule when lowering_rule_is_expression_lowering rule -> Some rule
   | Some _ | None -> None
 
+let stdlib_type_ref_is_remapped = function
+  | StdlibRealType ->
+      false
+  | (StdlibStringType | StdlibAsciiType | StdlibByteType | StdlibPrimStringType
+    | StdlibNatType | StdlibPositiveType | StdlibNType | StdlibZType
+    | StdlibQType | StdlibOptionType | StdlibListType | StdlibProdType
+    | StdlibPositiveMapType | StdlibPositiveSetType | StdlibStringMapType
+    | StdlibStringSetType | StdlibBoolType) ->
+      true
+
 let is_std_remapped_type_ref r =
-  is_std_string_type_ref r || is_std_ascii_type_ref r || is_std_byte_type_ref r ||
-  is_prim_string_type_ref r || is_std_nat_type_ref r ||
-  is_std_positive_type_ref r || is_std_N_type_ref r || is_std_Z_type_ref r ||
-  is_std_Q_type_ref r || is_std_option_type_ref r || is_std_list_type_ref r ||
-  is_std_prod_type_ref r || is_positive_map_type_ref r ||
-  is_positive_set_type_ref r || is_string_map_type_ref r ||
-  is_string_set_type_ref r || is_std_bool_type_ref r
+  match classify_stdlib_type_ref r with
+  | Some type_ref -> stdlib_type_ref_is_remapped type_ref
+  | None -> false
 
 let is_std_string_type = function
   | Tglob (r, _) -> is_std_string_type_ref r
@@ -5134,9 +5140,12 @@ let register_inline_term_decl state r a action =
       action
 
 let classify_type_decl r =
-  if is_std_real_type_ref r then TypeDeclError "PYEX041"
-  else if is_custom r || is_std_remapped_type_ref r then TypeDeclSuppress
-  else TypeDeclUnsupported
+  if is_custom r then TypeDeclSuppress
+  else
+    match classify_stdlib_type_ref r with
+    | Some StdlibRealType -> TypeDeclError "PYEX041"
+    | Some type_ref when stdlib_type_ref_is_remapped type_ref -> TypeDeclSuppress
+    | Some _ | None -> TypeDeclUnsupported
 
 let pp_classified_term_decl state env r a typ =
   match register_inline_term_decl state r a (classify_term_decl state r typ) with
