@@ -497,7 +497,8 @@ def preserve_newly_added(
             assert_never(__impossible)
 
 
-def task_is_ci(
+def task_matches_ci_filter(
+    include_ci: bool,
     rows: dict[int, TaskRow],
     task: int,
 ) -> bool:
@@ -505,10 +506,13 @@ def task_is_ci(
     if __option is None:
         return False
     row = __option
-    return task_kind_is_ci(row.kind)
+    if include_ci:
+        return task_kind_is_ci(row.kind)
+    return not task_kind_is_ci(row.kind)
 
 
-def collect_ci_tasks(
+def collect_tasks(
+    include_ci: bool,
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> list[int]:
@@ -517,27 +521,12 @@ def collect_ci_tasks(
         return []
     task = __list[0]
     rest = __list[1:]
-    rest_ = collect_ci_tasks(rest, rows)
-    if task_is_ci(rows, task):
-        return [task] + rest_
-    return rest_
-
-
-def collect_non_ci_tasks(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> list[int]:
-    __list = order
-    if __list == []:
-        return []
-    task = __list[0]
-    rest = __list[1:]
-    rest_ = collect_non_ci_tasks(rest, rows)
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return rest_
-    row = __option
-    if not task_kind_is_ci(row.kind):
+    rest_ = collect_tasks(
+        include_ci,
+        rest,
+        rows,
+    )
+    if task_matches_ci_filter(include_ci, rows, task):
         return [task] + rest_
     return rest_
 
@@ -546,8 +535,16 @@ def stable_ci_first(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> list[int]:
-    ci = collect_ci_tasks(order, rows)
-    non_ci = collect_non_ci_tasks(order, rows)
+    ci = collect_tasks(
+        True,
+        order,
+        rows,
+    )
+    non_ci = collect_tasks(
+        False,
+        order,
+        rows,
+    )
     return ci + non_ci
 
 

@@ -486,43 +486,36 @@ Fixpoint preserve_newly_added
         end
   end.
 
-Definition task_is_ci
+Definition task_matches_ci_filter
+    (include_ci : bool)
     (rows : PositiveMap.t TaskRow)
     (task : positive) : bool :=
   match PositiveMap.find task rows with
-  | Some row => task_kind_is_ci (kind row)
+  | Some row =>
+      if include_ci
+      then task_kind_is_ci (kind row)
+      else negb (task_kind_is_ci (kind row))
   | None => false
   end.
 
-Fixpoint collect_ci_tasks
+Fixpoint collect_tasks
+    (include_ci : bool)
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list positive :=
   match order with
   | [] => []
   | task :: rest =>
-      let rest' := collect_ci_tasks rest rows in
-      if task_is_ci rows task then task :: rest' else rest'
-  end.
-
-Fixpoint collect_non_ci_tasks
-    (order : list positive)
-    (rows : PositiveMap.t TaskRow) : list positive :=
-  match order with
-  | [] => []
-  | task :: rest =>
-      let rest' := collect_non_ci_tasks rest rows in
-      match PositiveMap.find task rows with
-      | Some row =>
-          if negb (task_kind_is_ci (kind row)) then task :: rest' else rest'
-      | None => rest'
-      end
+      let rest' := collect_tasks include_ci rest rows in
+      if task_matches_ci_filter include_ci rows task
+      then task :: rest'
+      else rest'
   end.
 
 Definition stable_ci_first
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list positive :=
-  let ci := collect_ci_tasks order rows in
-  let non_ci := collect_non_ci_tasks order rows in
+  let ci := collect_tasks true order rows in
+  let non_ci := collect_tasks false order rows in
   List.app ci non_ci.
 
 Definition task_title_changed (before_row after_row : TaskRow) : bool :=
