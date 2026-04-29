@@ -141,3 +141,6 @@ Remediation: Model deterministic wrapper boundaries only; do not extract schedul
 
 ## PYEX044 Concurrency Marker Arity Mismatch
 Remediation: Use supported __PYCONC_* markers with the documented number of computational arguments.
+
+## PYEX045 Lowering Rule Arity Mismatch
+Remediation: Use supported primitive and collection lowerings with the documented number of computational arguments.

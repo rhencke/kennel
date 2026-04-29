@@ -528,6 +528,125 @@ let is_std_collection_term_ref r =
        is_positive_set_ref r name || is_string_set_ref r name)
     names || is_std_list_app_ref r
 
+type lowering_family =
+  | LoweringBool
+  | LoweringPrimitiveComparison
+  | LoweringList
+  | LoweringPositiveMap
+  | LoweringStringMap
+  | LoweringPositiveSet
+  | LoweringStringSet
+
+type lowering_ref_match =
+  | LoweringBoolRef of string
+  | LoweringPrimitiveCompareRef
+  | LoweringListAppRef
+  | LoweringPositiveMapRef of string
+  | LoweringStringMapRef of string
+  | LoweringPositiveSetRef of string
+  | LoweringStringSetRef of string
+
+type lowering_emit_form =
+  | LoweringEmitPrefix of string
+  | LoweringEmitInfix of string
+  | LoweringEmitCall of string
+  | LoweringEmitMethod of string
+  | LoweringEmitLiteral of string
+  | LoweringEmitIndex of int
+
+type lowering_rule = {
+  lowering_match : lowering_ref_match;
+  lowering_family : lowering_family;
+  lowering_operation : string;
+  lowering_arities : int list;
+  lowering_emit : lowering_emit_form;
+  lowering_suppress_declaration : bool;
+  lowering_suppress_export : bool;
+}
+
+let lowering_rule lowering_match lowering_family lowering_operation lowering_arities lowering_emit = {
+  lowering_match;
+  lowering_family;
+  lowering_operation;
+  lowering_arities;
+  lowering_emit;
+  lowering_suppress_declaration = true;
+  lowering_suppress_export = true;
+}
+
+let lowering_rules_for_operations ref_match family module_name specs =
+  List.map
+    (fun (name, arities, emit) ->
+       lowering_rule (ref_match name) family (module_name ^ "." ^ name) arities emit)
+    specs
+
+let bool_lowering_specs = [
+  ("negb", [1], LoweringEmitPrefix "not");
+  ("andb", [2], LoweringEmitInfix "and");
+  ("orb", [2], LoweringEmitInfix "or");
+  ("eqb", [2], LoweringEmitInfix "==");
+]
+
+let map_lowering_specs = [
+  ("empty", [0], LoweringEmitLiteral "{}");
+  ("add", [3], LoweringEmitCall "_rocq_map_add");
+  ("remove", [2], LoweringEmitCall "_rocq_map_remove");
+  ("find", [2], LoweringEmitMethod "get");
+  ("mem", [2], LoweringEmitInfix "in");
+  ("cardinal", [1], LoweringEmitCall "len");
+  ("elements", [1], LoweringEmitCall "_rocq_map_elements");
+  ("fold", [3], LoweringEmitCall "_rocq_map_fold");
+]
+
+let set_lowering_specs = [
+  ("empty", [0], LoweringEmitLiteral "frozenset()");
+  ("add", [2], LoweringEmitCall "_rocq_set_add");
+  ("remove", [2], LoweringEmitCall "_rocq_set_remove");
+  ("mem", [2], LoweringEmitInfix "in");
+  ("union", [2], LoweringEmitInfix "|");
+  ("inter", [2], LoweringEmitInfix "&");
+  ("diff", [2], LoweringEmitInfix "-");
+  ("cardinal", [1], LoweringEmitCall "len");
+  ("elements", [1], LoweringEmitCall "_rocq_set_elements");
+  ("fold", [3], LoweringEmitCall "_rocq_set_fold");
+]
+
+let primitive_collection_lowering_rules =
+  lowering_rules_for_operations
+    (fun name -> LoweringBoolRef name)
+    LoweringBool "Bool" bool_lowering_specs @
+  [
+    lowering_rule LoweringPrimitiveCompareRef LoweringPrimitiveComparison
+      "primitive comparison" [2] (LoweringEmitInfix "<compare>");
+    lowering_rule LoweringListAppRef LoweringList "List.app" [2]
+      (LoweringEmitInfix "+");
+  ] @
+  lowering_rules_for_operations
+    (fun name -> LoweringPositiveMapRef name)
+    LoweringPositiveMap "PositiveMap" map_lowering_specs @
+  lowering_rules_for_operations
+    (fun name -> LoweringStringMapRef name)
+    LoweringStringMap "StringMap" map_lowering_specs @
+  lowering_rules_for_operations
+    (fun name -> LoweringPositiveSetRef name)
+    LoweringPositiveSet "PositiveSet" set_lowering_specs @
+  lowering_rules_for_operations
+    (fun name -> LoweringStringSetRef name)
+    LoweringStringSet "StringSet" set_lowering_specs
+
+let lowering_rule_matches r rule =
+  match rule.lowering_match with
+  | LoweringBoolRef name -> is_std_bool_ref r name
+  | LoweringPrimitiveCompareRef -> is_std_primitive_compare_ref r
+  | LoweringListAppRef -> is_std_list_app_ref r
+  | LoweringPositiveMapRef name -> is_positive_map_ref r name
+  | LoweringStringMapRef name -> is_string_map_ref r name
+  | LoweringPositiveSetRef name -> is_positive_set_ref r name
+  | LoweringStringSetRef name -> is_string_set_ref r name
+
+let lowering_rule_of_ref r =
+  List.find_opt (lowering_rule_matches r) primitive_collection_lowering_rules
+
 let std_byte_constructor_value r =
   let name = global_basename r in
   if String.length name = 3 && name.[0] = 'x' then
@@ -880,6 +999,7 @@ let diagnostic_catalogue = [
   { code = "PYEX042"; title = "Unsupported IO effect extraction"; category = "io"; remediation = "Keep IO values at an async boundary or provide an explicit IO adapter remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex042-unsupported-io-effect-extraction" };
   { code = "PYEX043"; title = "Unsupported concurrency scheduling extraction"; category = "concurrency"; remediation = "Model deterministic wrapper boundaries only; do not extract scheduler interleavings as executable Python."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex043-unsupported-concurrency-scheduling-extraction" };
   { code = "PYEX044"; title = "Concurrency marker arity mismatch"; category = "concurrency"; remediation = "Use supported __PYCONC_* markers with the documented number of computational arguments."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex044-concurrency-marker-arity-mismatch" };
+  { code = "PYEX045"; title = "Lowering rule arity mismatch"; category = "primitive"; remediation = "Use supported primitive and collection lowerings with the documented number of computational arguments."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex045-lowering-rule-arity-mismatch" };
 ]
 
 let diagnostic_prefix = "PYTHON_EXTRACTION_DIAGNOSTIC_JSON: "
@@ -940,6 +1060,27 @@ let diagnostic_pp ?symbol ?detail code =
 
 let extraction_diagnostic_error ?symbol ?detail code =
   user_err (diagnostic_pp ?symbol ?detail code)
+
+let lowering_arity_text arities =
+  match arities with
+  | [] -> "no arities"
+  | [arity] -> string_of_int arity
+  | _ -> String.concat " or " (List.map string_of_int arities)
+
+let validate_lowering_rule_arity rule actual_arity =
+  if List.mem actual_arity rule.lowering_arities then ()
+  else
+    let detail =
+      rule.lowering_operation ^ " expects " ^
+      lowering_arity_text rule.lowering_arities ^
+      " computational argument(s), got " ^ string_of_int actual_arity
+    in
+    extraction_diagnostic_error ~detail "PYEX045"
+
+let validate_lowering_application_arity r args =
+  match lowering_rule_of_ref r with
+  | Some rule -> validate_lowering_rule_arity rule (List.length args)
+  | None -> ()
 
 let diagnostic_comment ?detail code =
   let d = diagnostic_by_code code in
@@ -1631,6 +1772,9 @@ and pp_expr state env expr =
          MLapp(MLapp(f,[a]),[b]) → f(a, b) *)
       let (head, all_args) = collect_app f args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head with
+       | MLglob r -> validate_lowering_application_arity r all_args
+       | _ -> ());
       let rendered_expr =
         pp_rendered_expr state env
       in
@@ -2824,6 +2968,9 @@ let rec pp_statement_expr state env indent = function
           pp_statement_expr state env indent (MLletin (id, a1, MLapp (a2, all_args)))
       | _ ->
           let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+          (match head with
+           | MLglob r -> validate_lowering_application_arity r all_args
+           | _ -> ());
           let collection_key kind key =
             pp_collection_key kind (pp_expr state env key)
           in
