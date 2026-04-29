@@ -662,10 +662,10 @@ let lowering_collection_key_kind = function
 let lowering_rule_is_primitive_or_collection rule =
   lowering_rule_is_bool_or_primitive rule || lowering_rule_is_collection rule
 
-let is_primitive_or_collection_lowering_ref r =
+let primitive_or_collection_lowering_rule_of_ref r =
   match lowering_rule_of_ref r with
-  | Some rule -> lowering_rule_is_primitive_or_collection rule
-  | None -> false
+  | Some rule when lowering_rule_is_primitive_or_collection rule -> Some rule
+  | Some _ | None -> None
 
 let std_byte_constructor_value r =
   let name = global_basename r in
@@ -1678,6 +1678,16 @@ let lowering_rule_app_precedence rule args =
   | _, _, _ ->
       py_prec_call
 
+let marker_lowering_ast_precedence ast =
+  match marker_of_lowering_ast ast with
+  | Some marker
+    when String.equal marker marker_reader_pure ||
+         String.equal marker marker_reader_bind ||
+         String.equal marker marker_reader_ask ->
+      py_prec_lambda
+  | Some _ | None ->
+      py_prec_call
+
 let rec py_expr_precedence expr =
   match std_string_expr_value expr with
   | Some _ -> py_prec_atom
@@ -1720,23 +1730,15 @@ let rec py_expr_precedence expr =
       let app_head, app_args = collect_app app_head app_args in
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
-       | MLglob r, _ when is_primitive_or_collection_lowering_ref r -> (
-           match lowering_rule_of_ref r with
-           | Some rule when lowering_rule_is_primitive_or_collection rule ->
-               lowering_rule_app_precedence rule app_args
-           | Some _ | None ->
-               py_prec_call)
-       | MLglob r, [_; _] when is_native_equality_marker_ref r ->
-           py_prec_compare
+       | MLglob r, _ -> (
+           match primitive_or_collection_lowering_rule_of_ref r with
+           | Some rule -> lowering_rule_app_precedence rule app_args
+           | None when List.length app_args = 2 && is_native_equality_marker_ref r ->
+               py_prec_compare
+           | None ->
+               marker_lowering_ast_precedence app_head)
        | _, _ ->
-           (match marker_of_lowering_ast app_head with
-            | Some marker
-              when String.equal marker marker_reader_pure ||
-                   String.equal marker marker_reader_bind ||
-                   String.equal marker marker_reader_ask ->
-                py_prec_lambda
-            | _ ->
-                py_prec_call))
+           marker_lowering_ast_precedence app_head)
   | MLcase _ ->
       py_prec_conditional
   | MLfix _ ->
@@ -2029,20 +2031,18 @@ and pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
-        | MLglob r when is_primitive_or_collection_lowering_ref r -> (
-            match lowering_rule_of_ref r with
-            | Some rule when lowering_rule_is_primitive_or_collection rule ->
-                pp_primitive_or_collection_lowering_app r rule
-            | Some _ | None ->
-                None)
-        | MLglob r when is_native_equality_marker_ref r ->
-            pp_native_equality_app r
-        | MLglob r when is_active_constructor_tag_predicate (pp_global state Term r) ->
-            pp_constructor_tag_predicate_app r
-        | MLglob r when is_active_list_membership_predicate (pp_global state Term r) ->
-            pp_list_membership_predicate_app r
-        | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
-            pp_prod_projection r
+        | MLglob r -> (
+            match primitive_or_collection_lowering_rule_of_ref r with
+            | Some rule -> pp_primitive_or_collection_lowering_app r rule
+            | None when is_native_equality_marker_ref r ->
+                pp_native_equality_app r
+            | None when is_active_constructor_tag_predicate (pp_global state Term r) ->
+                pp_constructor_tag_predicate_app r
+            | None when is_active_list_membership_predicate (pp_global state Term r) ->
+                pp_list_membership_predicate_app r
+            | None when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
+                pp_prod_projection r
+            | None -> None)
         | _ -> None
       in
       let pp_option_bind_expr opt_expr fn_expr =
@@ -3055,14 +3055,15 @@ let rec pp_statement_expr state env indent = function
                    py_prec_compare
                    (pp_rendered_expr state env target)
                    (pp_rendered_expr state env items))
-          | MLglob r, _ when is_primitive_or_collection_lowering_ref r -> (
-              match lowering_rule_of_ref r with
-              | Some rule when lowering_rule_is_primitive_or_collection rule -> (
+          | MLglob r, _ -> (
+              match primitive_or_collection_lowering_rule_of_ref r with
+              | Some rule -> (
                   match pp_statement_lowering_rule_app r rule with
                   | Some pp -> pp
                   | None -> pp_expr state env (MLapp (f, args)))
-              | Some _ | None ->
-                  pp_expr state env (MLapp (f, args)))
+              | None when List.length all_args >= 3 ->
+                  call (pp_expr state env head) all_args
+              | None -> pp_expr state env (MLapp (f, args)))
           | _, _ when List.length all_args >= 3 ->
               call (pp_expr state env head) all_args
           | _ ->
