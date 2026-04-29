@@ -647,6 +647,18 @@ let lowering_rule_matches r rule =
 let lowering_rule_of_ref r =
   List.find_opt (lowering_rule_matches r) primitive_collection_lowering_rules
 
+let lowering_rule_has_family family rule =
+  rule.lowering_family = family
+
+let lowering_rule_is_bool_or_primitive rule =
+  lowering_rule_has_family LoweringBool rule ||
+  lowering_rule_has_family LoweringPrimitiveComparison rule
+
+let is_bool_or_primitive_lowering_ref r =
+  match lowering_rule_of_ref r with
+  | Some rule -> lowering_rule_is_bool_or_primitive rule
+  | None -> false
+
 let std_byte_constructor_value r =
   let name = global_basename r in
   if String.length name = 3 && name.[0] = 'x' then
@@ -1460,6 +1472,15 @@ let rec collect_app_args acc = function
 let collect_app head args =
   collect_app_args args head
 
+let primitive_comparison_operators_for_rule r rule =
+  match rule.lowering_family, rule.lowering_emit with
+  | LoweringBool, LoweringEmitInfix "==" ->
+      Some ("==", "!=")
+  | LoweringPrimitiveComparison, _ ->
+      primitive_comparison_operators r
+  | _, _ ->
+      None
+
 let primitive_comparison_expr_parts expr =
   match expr with
   | MLapp (head, args) ->
@@ -1467,7 +1488,8 @@ let primitive_comparison_expr_parts expr =
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       (match head, all_args with
        | MLglob r, [left; right] ->
-           (match primitive_comparison_operators r with
+           (match Option.bind (lowering_rule_of_ref r)
+                    (primitive_comparison_operators_for_rule r) with
             | Some (operator, inverted_operator) ->
                 Some (operator, inverted_operator, left, right)
             | None ->
@@ -1534,6 +1556,28 @@ let record_replace_expr_parts state r args =
   else
     loop None 0 [] 0 args
 
+let lowering_infix_precedence = function
+  | "or" -> py_prec_or
+  | "and" -> py_prec_and
+  | "==" | "!=" | "<=" | ">=" | "<" | ">" | "in" -> py_prec_compare
+  | "|" -> py_prec_bit_or
+  | "&" -> py_prec_bit_and
+  | "+" | "-" -> py_prec_add
+  | _ -> py_prec_call
+
+let lowering_rule_app_precedence rule args =
+  match rule.lowering_family, rule.lowering_emit, args with
+  | LoweringBool, LoweringEmitPrefix "not", [value] ->
+      (match primitive_comparison_expr_parts value with
+       | Some _ -> py_prec_compare
+       | None -> py_prec_not)
+  | LoweringPrimitiveComparison, _, [_; _] ->
+      py_prec_compare
+  | LoweringBool, LoweringEmitInfix operator, [_; _] ->
+      lowering_infix_precedence operator
+  | _, _, _ ->
+      py_prec_call
+
 let rec py_expr_precedence expr =
   match std_string_expr_value expr with
   | Some _ -> py_prec_atom
@@ -1576,18 +1620,12 @@ let rec py_expr_precedence expr =
       let app_head, app_args = collect_app app_head app_args in
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
-       | MLglob r, [value] when is_std_bool_ref r "negb" ->
-           (match primitive_comparison_expr_parts value with
-            | Some _ -> py_prec_compare
-            | None -> py_prec_not)
-       | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
-           py_prec_and
-       | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
-           py_prec_or
-       | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
-           py_prec_compare
-       | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
-           py_prec_compare
+       | MLglob r, _ when is_bool_or_primitive_lowering_ref r -> (
+           match lowering_rule_of_ref r with
+           | Some rule when lowering_rule_is_bool_or_primitive rule ->
+               lowering_rule_app_precedence rule app_args
+           | Some _ | None ->
+               py_prec_call)
        | MLglob r, [_; _] when is_native_equality_marker_ref r ->
            py_prec_compare
        | MLglob r, [_; _] when is_std_list_app_ref r ->
@@ -1662,6 +1700,32 @@ and rendered_inverted_primitive_comparison_expr state env expr =
   | Some (_, inverted_operator, left, right) ->
       Some (rendered_primitive_comparison state env inverted_operator left right)
   | None ->
+      None
+
+and rendered_lowering_rule_app state env r rule args =
+  let rendered_expr =
+    pp_rendered_expr state env
+  in
+  match rule.lowering_family, rule.lowering_emit, args with
+  | LoweringBool, LoweringEmitPrefix "not", [value] ->
+      (match rendered_inverted_primitive_comparison_expr state env value with
+       | Some rendered ->
+           Some rendered
+       | None ->
+           Some (py_prefix "not " py_prec_not (rendered_expr value)))
+  | LoweringBool, LoweringEmitInfix operator, [left; right] ->
+      Some
+        (py_infix operator
+           (lowering_infix_precedence operator)
+           (rendered_expr left)
+           (rendered_expr right))
+  | LoweringPrimitiveComparison, _, [left; right] ->
+      (match primitive_comparison_operators_for_rule r rule with
+       | Some (operator, _) ->
+           Some (rendered_primitive_comparison state env operator left right)
+       | None ->
+           None)
+  | _, _, _ ->
       None
 
 and py_list_prepend state env head tail =
@@ -1905,44 +1969,8 @@ and pp_expr state env expr =
             Some (py_index (rendered_expr pair) "1")
         | _ -> None
       in
-      let pp_std_bool_app r =
-        match all_args with
-        | [value] when is_std_bool_ref r "negb" ->
-            (match rendered_inverted_primitive_comparison_expr state env value with
-             | Some rendered ->
-                 Some rendered
-             | None ->
-                 Some
-                   (py_prefix "not " py_prec_not
-                      (rendered_expr value)))
-        | [left; right] when is_std_bool_ref r "andb" ->
-            Some
-              (py_infix "and"
-                 py_prec_and
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right] when is_std_bool_ref r "orb" ->
-            Some
-              (py_infix "or"
-                 py_prec_or
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right] when is_std_bool_ref r "eqb" ->
-            Some
-              (rendered_primitive_comparison state env "==" left right)
-        | _ ->
-            None
-      in
-      let pp_std_primitive_compare r =
-        match all_args with
-        | [left; right] ->
-            (match primitive_comparison_operators r with
-             | Some (operator, _) ->
-                 Some (rendered_primitive_comparison state env operator left right)
-             | None ->
-                 None)
-        | _ ->
-            None
+      let pp_bool_or_primitive_lowering_app r rule =
+        rendered_lowering_rule_app state env r rule all_args
       in
       let pp_native_equality_app r =
         match all_args with
@@ -1977,11 +2005,12 @@ and pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
-        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
-                        is_std_bool_ref r "negb" || is_std_bool_ref r "eqb" ->
-            pp_std_bool_app r
-        | MLglob r when is_std_primitive_compare_ref r ->
-            pp_std_primitive_compare r
+        | MLglob r when is_bool_or_primitive_lowering_ref r -> (
+            match lowering_rule_of_ref r with
+            | Some rule when lowering_rule_is_bool_or_primitive rule ->
+                pp_bool_or_primitive_lowering_app r rule
+            | Some _ | None ->
+                None)
         | MLglob r when is_native_equality_marker_ref r ->
             pp_native_equality_app r
         | MLglob r when is_active_constructor_tag_predicate (pp_global state Term r) ->
@@ -3090,8 +3119,13 @@ let is_negated_primitive_equality_expr expr =
       let head, all_args = collect_app head args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       (match head, all_args with
-       | MLglob r, [value] when is_std_bool_ref r "negb" ->
-           is_primitive_equality_expr value
+       | MLglob r, [value] -> (
+           match lowering_rule_of_ref r with
+           | Some { lowering_family = LoweringBool;
+                    lowering_emit = LoweringEmitPrefix "not"; _ } ->
+               is_primitive_equality_expr value
+           | Some _ | None ->
+               false)
        | _, _ ->
            false)
   | _ ->
@@ -4862,17 +4896,12 @@ type type_decl_action =
   | TypeDeclSuppress
   | TypeDeclUnsupported
 
-let is_std_bool_term_ref r =
-  is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
-  is_std_bool_ref r "negb" || is_std_bool_ref r "eqb"
-
 let classify_term_decl state r typ =
   if is_prop_type typ then TermDeclSuppress
   else if is_runtime_marker_ref r then TermDeclSuppress
   else if is_native_equality_marker_ref r then TermDeclSuppress
   else if is_inline_custom r then TermDeclSuppress
-  else if is_std_bool_term_ref r then TermDeclSuppress
-  else if is_std_primitive_compare_ref r then TermDeclSuppress
+  else if is_bool_or_primitive_lowering_ref r then TermDeclSuppress
   else if is_std_collection_term_ref r then TermDeclSuppress
   else if is_active_record_field_target (pp_global state Term r) then
     TermDeclSuppress
