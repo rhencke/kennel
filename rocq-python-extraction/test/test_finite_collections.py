@@ -23,6 +23,9 @@ def test_positive_sets_are_native_persistent_frozensets() -> None:
     assert fixtures.positive_claim_inter_expr == frozenset({2, 5})
     assert fixtures.positive_claim_diff_expr == frozenset({7})
     assert fixtures.positive_claim_nested_expr == frozenset({2, 5})
+    assert fixtures.positive_claim_union_inter_expr == frozenset({2, 5, 7})
+    assert fixtures.positive_claim_diff_union_expr == frozenset({2})
+    assert fixtures.positive_claim_inter_diff_expr == frozenset({2, 5})
     assert fixtures.positive_claim_removed == frozenset({5})
     assert fixtures.positive_claim_has_2 is True
     assert fixtures.positive_claim_count == 2
@@ -56,4 +59,16 @@ def test_set_infix_lowerings_preserve_precedence(build_default) -> None:
     assert (
         "positive_claim_nested_expr = "
         "((positive_claim_set | positive_claim_diff) & positive_claim_union)"
+    ) in source
+    assert (
+        "positive_claim_union_inter_expr = "
+        "(positive_claim_diff | positive_claim_set & positive_claim_union)"
+    ) in source
+    assert (
+        "positive_claim_diff_union_expr = "
+        "(positive_claim_union - (positive_claim_diff | positive_claim_inter))"
+    ) in source
+    assert (
+        "positive_claim_inter_diff_expr = "
+        "((positive_claim_union - positive_claim_diff) & positive_claim_set)"
     ) in source

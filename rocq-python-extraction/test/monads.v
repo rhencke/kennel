@@ -57,6 +57,13 @@ Definition option_bind {A B : Type}
 Definition option_chain (o : option nat) : option nat :=
   option_bind o (fun n => Some (S n)).
 
+(** [option_chain_twice] nests one lowered option-bind expression inside
+    another, covering bind-as-child precedence. *)
+Definition option_chain_twice (o : option nat) : option nat :=
+  option_bind
+    (option_bind o (fun n => Some (S n)))
+    (fun n => Some (S n)).
+
 Extract Constant StateT "'s" "'a" => "StateT".
 Extract Constant state_pure => "__PYMONAD_STATE_PURE__".
 Extract Constant state_bind => "__PYMONAD_STATE_BIND__".
@@ -66,3 +73,4 @@ Extract Constant option_bind => "__PYMONAD_OPTION_BIND__".
 
 Python Extraction tick.
 Python Extraction option_chain.
+Python Extraction option_chain_twice.

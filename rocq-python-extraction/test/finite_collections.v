@@ -101,6 +101,27 @@ Definition positive_claim_nested_expr : PositiveSet.t :=
     (PositiveSet.union positive_claim_set positive_claim_diff)
     positive_claim_union.
 
+(** [positive_claim_union_inter_expr] keeps higher-precedence intersection as
+    the right child of lowered set union without extra parentheses. *)
+Definition positive_claim_union_inter_expr : PositiveSet.t :=
+  PositiveSet.union
+    positive_claim_diff
+    (PositiveSet.inter positive_claim_set positive_claim_union).
+
+(** [positive_claim_diff_union_expr] parenthesizes a lowered union expression
+    used as the right operand of set difference. *)
+Definition positive_claim_diff_union_expr : PositiveSet.t :=
+  PositiveSet.diff
+    positive_claim_union
+    (PositiveSet.union positive_claim_diff positive_claim_inter).
+
+(** [positive_claim_inter_diff_expr] parenthesizes lowered set difference when
+    it feeds set intersection. *)
+Definition positive_claim_inter_diff_expr : PositiveSet.t :=
+  PositiveSet.inter
+    (PositiveSet.diff positive_claim_union positive_claim_diff)
+    positive_claim_set.
+
 (** [positive_claim_removed] removes [p2] from the base set, directly
     covering [PositiveSet.remove]. *)
 Definition positive_claim_removed : PositiveSet.t :=

@@ -14,6 +14,7 @@ eq_dec_bool.py
 proof_pair_zero.py
 tick.py
 option_chain.py
+option_chain_twice.py
 ModuleLookupFixture.py
 source_map_runtime_error.py
 source_map_runtime_error.pymap
@@ -22,6 +23,10 @@ nat_pred_or_zero.py
 nat_roundtrip.py
 positive_five.py
 positive_case.py
+nat_compare_and.py
+nat_compare_or.py
+nat_compare_neg.py
+nat_compare_bool_eq.py
 n_seven.py
 n_case.py
 z_neg_three.py
