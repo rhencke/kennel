@@ -537,17 +537,13 @@ Definition task_metadata_changed (before_row after_row : TaskRow) : bool :=
   else
     task_description_changed before_row after_row.
 
-Definition option_positive_eqb
-    (left right : option positive) : bool :=
-  match left, right with
-  | Some l, Some r => positive_eqb l r
-  | None, None => true
-  | _, _ => false
-  end.
-
 Definition task_source_comment_changed
     (before_source after_source : option positive) : bool :=
-  negb (option_positive_eqb before_source after_source).
+  match before_source, after_source with
+  | Some before, Some after => negb (Pos.eqb before after)
+  | None, None => false
+  | _, _ => true
+  end.
 
 (** [task_identity_changed] captures the D11 invariant boundary: rescope may
     reorder tasks, complete tasks, or revise mutable task text, but it may not

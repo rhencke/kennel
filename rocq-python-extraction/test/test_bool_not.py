@@ -16,6 +16,7 @@ from primitives import (
     list_append_match_child,
     list_append_right_nested,
     list_cons_append,
+    option_nat_neq,
 )
 
 
@@ -86,6 +87,14 @@ def test_bool_and_eq_round_trip() -> None:
     assert bool_and_eq(True, True, True) is True
     assert bool_and_eq(True, False, False) is True
     assert bool_and_eq(False, True, True) is False
+
+
+def test_option_nat_neq_round_trip() -> None:
+    assert option_nat_neq(None, None) is False
+    assert option_nat_neq(None, 1) is True
+    assert option_nat_neq(1, None) is True
+    assert option_nat_neq(1, 1) is False
+    assert option_nat_neq(1, 2) is True
 
 
 def test_list_cons_append_round_trip() -> None:
@@ -202,6 +211,22 @@ def test_bool_and_operand_is_parenthesized_for_equality(
         source,
         "return (b1 and b2) == b3",
         ("return b1 and b2 == b3",),
+    )
+
+
+def test_option_nat_neq_lowers_to_direct_comparison(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert_rendered_source(
+        source,
+        "return left != right",
+        (
+            "return not (left == right)",
+            "if __option is None",
+        ),
     )
 
 

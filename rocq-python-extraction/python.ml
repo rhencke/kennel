@@ -2613,6 +2613,85 @@ let rec pp_statement_expr state env indent = function
       pp_expr state env expr
       )
 
+let classify_std_option_branches branches =
+  let none_arm = ref None in
+  let some_arm = ref None in
+  let wildcard_arm = ref None in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_option_none_ref r ->
+        set_once none_arm (ids, body)
+    | Pcons (r, _) when is_std_option_some_ref r ->
+        set_once some_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  (!none_arm, !some_arm, !wildcard_arm)
+
+let is_primitive_equality_expr expr =
+  match expr with
+  | MLapp (head, args) ->
+      let head, all_args = collect_app head args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head, all_args with
+       | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
+           true
+       | MLglob r, [_; _]
+         when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
+              is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
+           true
+       | _, _ ->
+           false)
+  | _ ->
+      false
+
+let is_negated_primitive_equality_expr expr =
+  match expr with
+  | MLapp (head, args) ->
+      let head, all_args = collect_app head args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head, all_args with
+       | MLglob r, [value] when is_std_bool_ref r "negb" ->
+           is_primitive_equality_expr value
+       | _, _ ->
+           false)
+  | _ ->
+      false
+
+let option_neq_expr_parts = function
+  | MLcase (left_ty, left_scrutinee, left_branches)
+    when is_std_option_type left_ty ->
+      let left_none, left_some, _ = classify_std_option_branches left_branches in
+      (match left_none, left_some with
+       | Some (_, MLcase (right_none_ty, right_none_scrutinee, right_none_branches)),
+         Some (_, MLcase (right_some_ty, _right_some_scrutinee, right_some_branches))
+         when is_std_option_type right_none_ty &&
+              is_std_option_type right_some_ty ->
+           let right_none_none, right_none_some, _ =
+             classify_std_option_branches right_none_branches
+           in
+           let right_some_none, right_some_some, _ =
+             classify_std_option_branches right_some_branches
+           in
+           (match right_none_none, right_none_some,
+                  right_some_none, right_some_some with
+            | Some (_, none_none_body), Some (_, none_some_body),
+              Some (_, some_none_body), Some (_, some_some_body)
+              when std_bool_expr none_none_body = Some false &&
+                   std_bool_expr none_some_body = Some true &&
+                   std_bool_expr some_none_body = Some true &&
+                   is_negated_primitive_equality_expr some_some_body ->
+                Some (left_scrutinee, right_none_scrutinee)
+            | _, _, _, _ ->
+                None)
+       | _, _ ->
+           None)
+  | _ ->
+      None
+
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
     a statement, not an expression.  This printer recurses into [MLcase]
@@ -2631,6 +2710,15 @@ let rec pp_return_body state env indent = function
       pp_impossible_stmt ()
   | MLmagic a ->
       pp_return_body state env indent a
+  | expr
+    when (match option_neq_expr_parts expr with Some _ -> true | None -> false) ->
+      let left, right = Option.get (option_neq_expr_parts expr) in
+      str "return " ++
+      pp_py_rendered
+        (py_infix ~associativity:PyAssocNone "!="
+           py_prec_compare
+           (pp_rendered_expr state env left)
+           (pp_rendered_expr state env right))
   | MLcase (ty, scrutinee, branches) as expr ->
       let is_bool =
         Array.length branches = 2 &&
@@ -2904,37 +2992,25 @@ and pp_std_list_return_body state env indent scrutinee branches =
   str pfx ++ pp_cons
 
 and pp_std_option_return_body state env indent scrutinee branches =
-  let none_arm = ref None in
-  let some_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_option_none_ref r ->
-        set_once none_arm (ids, body)
-    | Pcons (r, _) when is_std_option_some_ref r ->
-        set_once some_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  let none_arm, some_arm, wildcard_arm =
+    classify_std_option_branches branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback body_indent =
-    pp_return_or_impossible state env body_indent !wildcard_arm
+    pp_return_or_impossible state env body_indent wildcard_arm
   in
   let pp_none =
-    match !none_arm with
+    match none_arm with
     | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
     | None -> fallback (indent + 4)
   in
   let pp_some =
-    match !some_arm with
+    match some_arm with
     | Some (ids, body) ->
         pp_return_arm state env indent ids [str "__option"] body
     | None ->
-        pp_return_or_impossible state env indent !wildcard_arm
+        pp_return_or_impossible state env indent wildcard_arm
   in
   str "__option = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __option is None:" ++ fnl () ++

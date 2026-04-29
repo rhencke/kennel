@@ -928,30 +928,11 @@ def stable_ci_first(
     return ci + non_ci
 
 
-def option_positive_eqb(
-    left: int | None,
-    right: int | None,
-) -> bool:
-    __option = left
-    if __option is None:
-        __option = right
-        if __option is None:
-            return True
-        p = __option
-        return False
-    l = __option
-    __option = right
-    if __option is None:
-        return False
-    r = __option
-    return positive_eqb(l, r)
-
-
 def task_source_comment_changed(
     before_source: int | None,
     after_source: int | None,
 ) -> bool:
-    return not option_positive_eqb(before_source, after_source)
+    return before_source != after_source
 
 
 def rescope_preserves_task_identity(
