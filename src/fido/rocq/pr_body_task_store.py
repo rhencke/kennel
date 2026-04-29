@@ -652,7 +652,17 @@ class PRBodyRow:
     pr_body_status: PRBodyStatus
 
 
-def pending_ci_projection(
+def task_kind_matches_ci_filter(
+    include_ci: bool,
+    kind0: TaskKind,
+) -> bool:
+    if include_ci:
+        return task_kind_is_ci(kind0)
+    return not task_kind_is_ci(kind0)
+
+
+def pending_projection(
+    include_ci: bool,
     task: int,
     rows: dict[int, TaskRow],
 ) -> list[PRBodyRow]:
@@ -662,36 +672,7 @@ def pending_ci_projection(
     row = __option
     match row.status:
         case StatusPending():
-            if task_kind_is_ci(row.kind):
-                return [
-                    PRBodyRow(
-                        pr_body_task=task,
-                        pr_body_title=row.title,
-                        pr_body_description=row.description,
-                        pr_body_kind=row.kind,
-                        pr_body_status=PRPending(),
-                    ),
-                ] + []
-            return []
-        case StatusCompleted():
-            return []
-        case StatusBlocked():
-            return []
-        case __impossible:
-            assert_never(__impossible)
-
-
-def pending_non_ci_projection(
-    task: int,
-    rows: dict[int, TaskRow],
-) -> list[PRBodyRow]:
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return []
-    row = __option
-    match row.status:
-        case StatusPending():
-            if not task_kind_is_ci(row.kind):
+            if task_kind_matches_ci_filter(include_ci, row.kind):
                 return [
                     PRBodyRow(
                         pr_body_task=task,
@@ -737,7 +718,8 @@ def completed_projection(
             assert_never(__impossible)
 
 
-def project_pending_ci(
+def project_pending(
+    include_ci: bool,
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> list[PRBodyRow]:
@@ -746,19 +728,17 @@ def project_pending_ci(
         return []
     task = __list[0]
     rest = __list[1:]
-    return pending_ci_projection(task, rows) + project_pending_ci(rest, rows)
-
-
-def project_pending_non_ci(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> list[PRBodyRow]:
-    __list = order
-    if __list == []:
-        return []
-    task = __list[0]
-    rest = __list[1:]
-    return pending_non_ci_projection(task, rows) + project_pending_non_ci(rest, rows)
+    current = pending_projection(
+        include_ci,
+        task,
+        rows,
+    )
+    remaining = project_pending(
+        include_ci,
+        rest,
+        rows,
+    )
+    return current + remaining
 
 
 def project_completed(
@@ -776,8 +756,16 @@ def project_completed(
 def project_task_store(store: TaskStore) -> list[PRBodyRow]:
     order = store.task_store_order
     rows = store.task_store_rows
-    pending_ci = project_pending_ci(order, rows)
-    pending_non_ci = project_pending_non_ci(order, rows)
+    pending_ci = project_pending(
+        True,
+        order,
+        rows,
+    )
+    pending_non_ci = project_pending(
+        False,
+        order,
+        rows,
+    )
     completed = project_completed(order, rows)
     return pending_ci + pending_non_ci + completed
 

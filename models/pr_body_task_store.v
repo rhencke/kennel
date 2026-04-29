@@ -63,35 +63,22 @@ Record PRBodyRow : Type := {
   pr_body_status : PRBodyStatus
 }.
 
-Definition pending_ci_projection
-    (task : positive)
-    (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
-  match PositiveMap.find task rows with
-  | Some row =>
-      match status row with
-      | StatusPending =>
-          if task_kind_is_ci (kind row)
-          then [{|
-            pr_body_task := task;
-            pr_body_title := title row;
-            pr_body_description := description row;
-            pr_body_kind := kind row;
-            pr_body_status := PRPending
-          |}]
-          else []
-      | _ => []
-      end
-  | None => []
-  end.
+Definition task_kind_matches_ci_filter
+    (include_ci : bool)
+    (kind : TaskKind) : bool :=
+  if include_ci
+  then task_kind_is_ci kind
+  else negb (task_kind_is_ci kind).
 
-Definition pending_non_ci_projection
+Definition pending_projection
+    (include_ci : bool)
     (task : positive)
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
       match status row with
       | StatusPending =>
-          if negb (task_kind_is_ci (kind row))
+          if task_kind_matches_ci_filter include_ci (kind row)
           then [{|
             pr_body_task := task;
             pr_body_title := title row;
@@ -123,23 +110,16 @@ Definition completed_projection
   | None => []
   end.
 
-Fixpoint project_pending_ci
+Fixpoint project_pending
+    (include_ci : bool)
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match order with
   | [] => []
   | task :: rest =>
-      List.app (pending_ci_projection task rows) (project_pending_ci rest rows)
-  end.
-
-Fixpoint project_pending_non_ci
-    (order : list positive)
-    (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
-  match order with
-  | [] => []
-  | task :: rest =>
-      List.app (pending_non_ci_projection task rows)
-        (project_pending_non_ci rest rows)
+      let current := pending_projection include_ci task rows in
+      let remaining := project_pending include_ci rest rows in
+      List.app current remaining
   end.
 
 Fixpoint project_completed
@@ -159,8 +139,8 @@ Fixpoint project_completed
 Definition project_task_store (store : TaskStore) : list PRBodyRow :=
   let order := task_store_order store in
   let rows := task_store_rows store in
-  let pending_ci := project_pending_ci order rows in
-  let pending_non_ci := project_pending_non_ci order rows in
+  let pending_ci := project_pending true order rows in
+  let pending_non_ci := project_pending false order rows in
   let completed := project_completed order rows in
   List.app pending_ci (List.app pending_non_ci completed).
 
