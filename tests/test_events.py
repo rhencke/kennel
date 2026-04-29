@@ -28,6 +28,7 @@ from fido.events import (
     launch_worker,
     maybe_react,
     needs_more_context,
+    queue_reply_tasks,
     recover_reply_promises,
     reply_to_comment,
     reply_to_issue_comment,
@@ -2876,6 +2877,37 @@ class TestCreateTask:
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
+    def test_queues_resolved_thread_when_comment_is_fresh_human_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """A new human reply on a resolved thread is fresh work, not stale triage."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 1002}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.return_value = True
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 1000, "author": "owner", "body": "original"},
+            {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
+            {"id": 1002, "author": "owner", "body": "actually queue it"},
+            {"id": 1003, "author": "FidoCanCode", "body": "will do"},
+        ]
+        with patch("fido.events.launch_sync"):
+            result = create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=thread
+        )
+        assert result["status"] == "pending"
+
     def test_queues_when_thread_resolved_check_raises(self, tmp_path: Path) -> None:
         """If the GitHub thread-resolved check fails, fail open and queue
         the task — better to dedup later than drop work."""
@@ -2912,6 +2944,29 @@ class TestCreateTask:
                 "do something", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
             )
         assert result == fake_task
+
+    def test_queue_reply_tasks_counts_only_created_tasks(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+
+        def fake_create(title: str, *args: object, **kwargs: object) -> dict[str, str]:
+            if title == "skip":
+                return {"title": title, "status": "skipped_resolved"}
+            return {"title": title, "status": "pending"}
+
+        assert (
+            queue_reply_tasks(
+                "ACT",
+                ["create", "skip"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                create_task_fn=fake_create,
+            )
+            == 1
+        )
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
