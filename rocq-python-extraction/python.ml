@@ -4277,79 +4277,78 @@ let rec pp_type_with state pp_tvar = function
          (e.g. [option → ""]); fall back to [object] in that case.
          Inductive type names are capitalized to match the class names
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
+      let stdlib_type_ref = classify_stdlib_type_ref r in
+      let marker = marker_of_ast (MLglob r) in
       let name =
-        if is_std_real_type_ref r then extraction_diagnostic_error "PYEX041"
-        else if is_std_bool_type_ref r then "bool"
-        else if is_std_string_type_ref r then "str"
-        else if is_prim_string_type_ref r then "bytes"
-        else if is_std_ascii_type_ref r then "str"
-        else if is_std_byte_type_ref r then "int"
-        else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
-                is_std_N_type_ref r || is_std_Z_type_ref r then "int"
-        else if is_std_Q_type_ref r then "Fraction"
-        else if is_std_option_type_ref r then
-          (match args with
-           | [arg] ->
-               Pp.string_of_ppcmds (pp_type_with state pp_tvar arg) ^ " | None"
-           | _ -> "object | None")
-        else if is_std_list_type_ref r then "list"
-        else if is_std_prod_type_ref r then "tuple"
-        else if is_positive_map_type_ref r then "dict[int, object]"
-        else if is_positive_set_type_ref r then "frozenset[int]"
-        else if is_string_map_type_ref r then "dict[str, object]"
-        else if is_string_set_type_ref r then "frozenset[str]"
-        else if is_custom r && String.equal (find_custom r) marker_io_type then "IO"
-        else if is_custom r && String.equal (find_custom r) marker_mutex_type then "Mutex"
-        else if is_custom r && String.equal (find_custom r) marker_channel_type then "Channel"
-        else if is_custom r && String.equal (find_custom r) marker_future_type then "Future"
-        else if is_custom r then find_custom r
-        else
-          let n = pp_global state Term r in
-          let open GlobRef in
-          match r.glob with
-          | IndRef _ -> capitalize_first n
-          | _        -> n
+        match stdlib_type_ref with
+        | Some StdlibRealType -> extraction_diagnostic_error "PYEX041"
+        | Some StdlibBoolType -> "bool"
+        | Some (StdlibStringType | StdlibAsciiType) -> "str"
+        | Some StdlibPrimStringType -> "bytes"
+        | Some (StdlibByteType | StdlibNatType | StdlibPositiveType
+               | StdlibNType | StdlibZType) -> "int"
+        | Some StdlibQType -> "Fraction"
+        | Some StdlibOptionType ->
+            (match args with
+             | [arg] ->
+                 Pp.string_of_ppcmds (pp_type_with state pp_tvar arg) ^ " | None"
+             | _ -> "object | None")
+        | Some StdlibListType -> "list"
+        | Some StdlibProdType -> "tuple"
+        | Some StdlibPositiveMapType -> "dict[int, object]"
+        | Some StdlibPositiveSetType -> "frozenset[int]"
+        | Some StdlibStringMapType -> "dict[str, object]"
+        | Some StdlibStringSetType -> "frozenset[str]"
+        | None ->
+            (match marker, is_custom r with
+             | Some marker, _ when String.equal marker marker_io_type -> "IO"
+             | Some marker, _ when String.equal marker marker_mutex_type -> "Mutex"
+             | Some marker, _ when String.equal marker marker_channel_type -> "Channel"
+             | Some marker, _ when String.equal marker marker_future_type -> "Future"
+             | _, true -> find_custom r
+             | _, false ->
+                 let n = pp_global state Term r in
+                 let open GlobRef in
+                 match r.glob with
+                 | IndRef _ -> capitalize_first n
+                 | _        -> n)
       in
-      if String.contains name '|' then str name
-      else if String.equal "" name then str "object"
-      else if is_std_list_type_ref r then
-        (match args with
-         | [arg] -> str "list[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "list[object]")
-      else if is_std_prod_type_ref r then
-        (match args with
-         | [left; right] ->
-             str "tuple[" ++ pp_type_with state pp_tvar left ++ str ", " ++
-             pp_type_with state pp_tvar right ++ str "]"
-         | _ -> str "tuple[object, object]")
-      else if is_positive_map_type_ref r then
-        (match args with
-         | [arg] -> str "dict[int, " ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "dict[int, object]")
-      else if is_string_map_type_ref r then
-        (match args with
-         | [arg] -> str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "dict[str, object]")
-      else if is_custom r && String.equal (find_custom r) marker_io_type then
-        (match args with
-         | [arg] -> str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "IO[object]")
-      else if is_custom r && String.equal (find_custom r) marker_mutex_type then
-        str "Mutex"
-      else if is_custom r && String.equal (find_custom r) marker_channel_type then
-        (match args with
-         | [arg] -> str "Channel[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "Channel[object]")
-      else if is_custom r && String.equal (find_custom r) marker_future_type then
-        (match args with
-         | [arg] -> str "Future[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "Future[object]")
-      else if is_positive_set_type_ref r || is_string_set_type_ref r then str name
-      else if List.is_empty args then str name
-      else
-        str name ++ str "[" ++
-        prlist_with_sep (fun () -> str ", ") (pp_type_with state pp_tvar) args ++
-        str "]"
+      (match name, stdlib_type_ref, marker, args with
+      | name, _, _, _ when String.contains name '|' -> str name
+      | "", _, _, _ -> str "object"
+      | _, Some StdlibListType, _, [arg] ->
+          str "list[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibListType, _, _ -> str "list[object]"
+      | _, Some StdlibProdType, _, [left; right] ->
+          str "tuple[" ++ pp_type_with state pp_tvar left ++ str ", " ++
+          pp_type_with state pp_tvar right ++ str "]"
+      | _, Some StdlibProdType, _, _ -> str "tuple[object, object]"
+      | _, Some StdlibPositiveMapType, _, [arg] ->
+          str "dict[int, " ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibPositiveMapType, _, _ -> str "dict[int, object]"
+      | _, Some StdlibStringMapType, _, [arg] ->
+          str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibStringMapType, _, _ -> str "dict[str, object]"
+      | _, Some (StdlibPositiveSetType | StdlibStringSetType), _, _ -> str name
+      | _, _, Some marker, [arg] when String.equal marker marker_io_type ->
+          str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_io_type ->
+          str "IO[object]"
+      | _, _, Some marker, _ when String.equal marker marker_mutex_type ->
+          str "Mutex"
+      | _, _, Some marker, [arg] when String.equal marker marker_channel_type ->
+          str "Channel[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_channel_type ->
+          str "Channel[object]"
+      | _, _, Some marker, [arg] when String.equal marker marker_future_type ->
+          str "Future[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_future_type ->
+          str "Future[object]"
+      | _, _, _, [] -> str name
+      | _, _, _, _ ->
+          str name ++ str "[" ++
+          prlist_with_sep (fun () -> str ", ") (pp_type_with state pp_tvar) args ++
+          str "]")
   | Tvar i | Tvar' i ->
       (* Emit the TypeVar name corresponding to the [i]-th type parameter.
          The TypeVar declaration itself is emitted by [pp_ind_decl]. *)
