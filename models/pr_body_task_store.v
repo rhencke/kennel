@@ -173,7 +173,7 @@ Definition pr_body_row_eqb (left right : PRBodyRow) : bool :=
   let same_metadata := andb same_kind same_status in
   andb same_task (andb same_text same_metadata).
 
-Extract Constant pr_body_row_eqb => "__import__(""operator"").eq".
+Extract Constant pr_body_row_eqb => "__PY_NATIVE_EQ__".
 
 Fixpoint pr_body_eqb (left right : list PRBodyRow) : bool :=
   match left, right with

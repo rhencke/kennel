@@ -50,6 +50,12 @@ Definition swap_pair_r (p : pair_r) : pair_r :=
   | MkPairR f s => {| pfst_r := s ; psnd_r := f |}
   end.
 
+Axiom pair_r_eq : pair_r -> pair_r -> bool.
+Extract Constant pair_r_eq => "__PY_NATIVE_EQ__".
+
+Definition pair_r_same (left right : pair_r) : bool :=
+  pair_r_eq left right.
+
 (* ------------------------------------------------------------------ *)
 (*  2. 5-field record — acceptance criterion for issue #720            *)
 (*                                                                     *)
@@ -91,4 +97,4 @@ Definition get_p5_v (p : point5) : nat :=
 
 (** [records.py]: covers 2-field record projection and swap, and
     5-field record individual field projections (issue #720). *)
-Python File Extraction records "proj_first proj_second swap_pair_r get_p5_x get_p5_y get_p5_z get_p5_w get_p5_v".
+Python File Extraction records "proj_first proj_second swap_pair_r pair_r_same get_p5_x get_p5_y get_p5_z get_p5_w get_p5_v".

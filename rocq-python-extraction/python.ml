@@ -895,6 +895,7 @@ let marker_future_set = "__PYCONC_FUTURE_SET__"
 let marker_future_result = "__PYCONC_FUTURE_RESULT__"
 let marker_future_done = "__PYCONC_FUTURE_DONE__"
 let marker_interleave = "__PYCONC_INTERLEAVE__"
+let marker_native_eq = "__PY_NATIVE_EQ__"
 
 let is_monad_marker_string s =
   let prefix = "__PYMONAD_" in
@@ -907,6 +908,9 @@ let is_concurrency_marker_string s =
   let prefix_len = String.length prefix in
   String.length s >= prefix_len &&
   String.equal prefix (String.sub s 0 prefix_len)
+
+let is_native_equality_marker_ref r =
+  is_custom r && String.equal (find_custom r) marker_native_eq
 
 let is_monad_marker_ref r =
   is_custom r && is_monad_marker_string (find_custom r)
@@ -1305,6 +1309,8 @@ let rec py_expr_precedence expr =
            py_prec_compare
        | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
            py_prec_compare
+       | MLglob r, [_; _] when is_native_equality_marker_ref r ->
+           py_prec_compare
        | MLglob r, [_; _] when is_std_list_app_ref r ->
            py_prec_add
        | MLglob r, [_; _]
@@ -1634,6 +1640,14 @@ and pp_expr state env expr =
         | _ ->
             None
       in
+      let pp_native_equality_app r =
+        match all_args with
+        | [left; right] when is_native_equality_marker_ref r ->
+            Some
+              (rendered_primitive_comparison state env "==" left right)
+        | _ ->
+            None
+      in
       let pp_collection_expr =
         match head with
         | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
@@ -1641,6 +1655,8 @@ and pp_expr state env expr =
             pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
+        | MLglob r when is_native_equality_marker_ref r ->
+            pp_native_equality_app r
         | MLglob r when is_std_list_app_ref r ->
             pp_list_app r
         | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
@@ -4145,6 +4161,7 @@ let is_std_bool_term_ref r =
 let classify_term_decl state r typ =
   if is_prop_type typ then TermDeclSuppress
   else if is_runtime_marker_ref r then TermDeclSuppress
+  else if is_native_equality_marker_ref r then TermDeclSuppress
   else if is_inline_custom r then TermDeclSuppress
   else if is_std_bool_term_ref r then TermDeclSuppress
   else if is_std_primitive_compare_ref r then TermDeclSuppress

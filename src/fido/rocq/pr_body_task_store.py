@@ -841,9 +841,6 @@ def pr_body_status_eqb(
             assert_never(__impossible)
 
 
-pr_body_row_eqb = __import__("operator").eq
-
-
 def pr_body_eqb(
     left: list[PRBodyRow],
     right: list[PRBodyRow],
@@ -863,7 +860,7 @@ def pr_body_eqb(
         return False
     right_row = __list[0]
     right_rest = __list[1:]
-    return pr_body_row_eqb(left_row, right_row) and pr_body_eqb(left_rest, right_rest)
+    return left_row == right_row and pr_body_eqb(left_rest, right_rest)
 
 
 @dataclass(frozen=True)
