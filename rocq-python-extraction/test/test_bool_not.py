@@ -195,6 +195,13 @@ def test_bool_eq_lowers_to_native_equality(build_default) -> None:
     assert "return b1 == b2" in source
 
 
+def test_bool_lowering_helpers_are_suppressed(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    for helper in ("andb", "orb", "negb", "eqb"):
+        assert f"def {helper}(" not in source
+
+
 def test_bool_equality_operand_keeps_and_precedence(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 

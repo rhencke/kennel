@@ -13,3 +13,16 @@ def test_tick_extracts_to_state_class(build_default) -> None:
     assert "def get_state" in source
     assert "def put_state" in source
     assert ".bind(" in source
+
+
+def test_state_monad_marker_calls_lower_to_runtime_methods(build_default) -> None:
+    source = (build_default / "tick.py").read_text()
+
+    for snippet in (
+        "StateT.get_state()",
+        "StateT.put_state(n + 1)",
+        "StateT.pure(n)",
+        ".bind(",
+    ):
+        assert snippet in source
+    assert "__PYMONAD_STATE_" not in source

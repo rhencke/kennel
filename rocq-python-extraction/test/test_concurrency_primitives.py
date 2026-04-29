@@ -53,6 +53,25 @@ def test_generated_concurrency_source_documents_runtime_assumptions(
     assert "return await _io_lock_channel_future_demo.run()" in source
 
 
+def test_concurrency_marker_calls_lower_to_runtime_methods(build_default: Path) -> None:
+    source = (build_default / "concurrency_primitives.py").read_text()
+
+    for snippet in (
+        "Mutex.new()",
+        "Channel.new()",
+        "Future.new()",
+        "mutex.acquire()",
+        "mutex.release()",
+        "channel.send(7)",
+        "channel.receive()",
+        "future.set_result(value)",
+        "future.result()",
+        "future.done()",
+    ):
+        assert snippet in source
+    assert "__PYCONC_" not in source
+
+
 def test_wrapper_instances_are_explicit_runtime_types() -> None:
     mutex = asyncio.run(Mutex.new().run())
     channel = asyncio.run(Channel[int].new().run())

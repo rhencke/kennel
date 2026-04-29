@@ -8,6 +8,7 @@ def test_option_chain_uses_none_short_circuit(build_default) -> None:
 
     source = (build_default / "option_chain.py").read_text()
     assert "None if __option_value is None else" in source
+    assert "__PYMONAD_OPTION_BIND__" not in source
 
 
 def test_nested_option_bind_child_preserves_precedence(build_default) -> None:
@@ -17,3 +18,4 @@ def test_nested_option_bind_child_preserves_precedence(build_default) -> None:
     source = (build_default / "option_chain_twice.py").read_text()
     assert "None if __option_value is None else" in source
     assert ")(__option_value))((lambda __option_value:" in source
+    assert "__PYMONAD_OPTION_BIND__" not in source

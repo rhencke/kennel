@@ -52,6 +52,26 @@ Definition positive_task_missing : option String.string :=
 Definition positive_task_removed : PositiveMap.t String.string :=
   PositiveMap.remove p1 positive_task_map.
 
+(** [positive_task_find_expr] directly covers native map lookup lowering. *)
+Definition positive_task_find_expr : option String.string :=
+  PositiveMap.find p1 positive_task_map.
+
+(** [positive_task_mem_expr] directly covers native map membership lowering. *)
+Definition positive_task_mem_expr : bool :=
+  PositiveMap.mem p3 positive_task_map.
+
+(** [positive_task_cardinal_expr] directly covers native map cardinal lowering. *)
+Definition positive_task_cardinal_expr : nat :=
+  PositiveMap.cardinal positive_task_map.
+
+(** [positive_task_elements_expr] directly covers native ordered-map lowering. *)
+Definition positive_task_elements_expr : list (positive * String.string) :=
+  PositiveMap.elements positive_task_map.
+
+(** [positive_task_fold_count] directly covers native map fold lowering. *)
+Definition positive_task_fold_count : nat :=
+  PositiveMap.fold (fun _ _ acc => S acc) positive_task_map O.
+
 (** [positive_task_has_3] is the expected membership result for [p3]. *)
 Definition positive_task_has_3 : bool :=
   true.
@@ -126,6 +146,22 @@ Definition positive_claim_inter_diff_expr : PositiveSet.t :=
     covering [PositiveSet.remove]. *)
 Definition positive_claim_removed : PositiveSet.t :=
   PositiveSet.remove p2 positive_claim_set.
+
+(** [positive_claim_mem_expr] directly covers native set membership lowering. *)
+Definition positive_claim_mem_expr : bool :=
+  PositiveSet.mem p2 positive_claim_set.
+
+(** [positive_claim_cardinal_expr] directly covers native set cardinal lowering. *)
+Definition positive_claim_cardinal_expr : nat :=
+  PositiveSet.cardinal positive_claim_set.
+
+(** [positive_claim_elements_expr] directly covers native ordered-set lowering. *)
+Definition positive_claim_elements_expr : list positive :=
+  PositiveSet.elements positive_claim_set.
+
+(** [positive_claim_fold_count] directly covers native set fold lowering. *)
+Definition positive_claim_fold_count : nat :=
+  PositiveSet.fold (fun _ acc => S acc) positive_claim_set O.
 
 (** [positive_claim_has_2] is the expected membership result for [p2]. *)
 Definition positive_claim_has_2 : bool :=
