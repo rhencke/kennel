@@ -5,10 +5,12 @@ import pytest
 
 from fido.provider import (
     ProviderID,
+    ProviderInterruptTimeout,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
     ProviderPressureStatus,
+    is_recoverable_provider_wedge,
     safe_voice_turn,
 )
 
@@ -29,6 +31,15 @@ class TestProviderLimitWindow:
     def test_pressure_returns_none_when_limit_not_positive(self) -> None:
         window = ProviderLimitWindow(name="requests", used=9, limit=0)
         assert window.pressure is None
+
+
+class TestRecoverableProviderWedge:
+    def test_interrupt_timeout_is_recoverable_wedge(self) -> None:
+        exc = ProviderInterruptTimeout("interrupt timed out")
+        assert is_recoverable_provider_wedge(exc) is True
+
+    def test_unrelated_exception_is_not_recoverable_wedge(self) -> None:
+        assert is_recoverable_provider_wedge(RuntimeError("boom")) is False
 
 
 class TestProviderLimitSnapshot:

@@ -25,6 +25,19 @@ import fido.rocq.transition as fsm
 log = logging.getLogger(__name__)
 
 
+class RecoverableProviderWedgeError(RuntimeError):
+    """A provider transport wedged but can be killed and resumed from state."""
+
+
+class ProviderInterruptTimeout(RecoverableProviderWedgeError):
+    """Provider did not acknowledge a worker interrupt within the deadline."""
+
+
+def is_recoverable_provider_wedge(exc: BaseException) -> bool:
+    """Return true when *exc* means the provider should be killed and resumed."""
+    return isinstance(exc, RecoverableProviderWedgeError)
+
+
 class ProviderID(StrEnum):
     """Supported LLM providers for fido."""
 

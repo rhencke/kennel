@@ -21,6 +21,7 @@ from fido.provider import (
     ProviderAgent,
     ProviderAPI,
     ProviderID,
+    ProviderInterruptTimeout,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
@@ -864,9 +865,16 @@ class CodexSession(OwnedSession):
             client = self._client
         if thread_id is None or turn_id is None or not client.is_alive():
             return
-        client.request(
-            "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=5
-        )
+        try:
+            client.request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout=5,
+            )
+        except TimeoutError as exc:
+            raise ProviderInterruptTimeout(
+                f"Codex turn/interrupt timed out for thread {thread_id} turn {turn_id}"
+            ) from exc
 
     def __enter__(self) -> "CodexSession":
         depth = getattr(self._reentry_tls, "depth", 0)
