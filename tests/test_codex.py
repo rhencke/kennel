@@ -674,6 +674,30 @@ class TestCodexSession:
         assert replacement.requests[0][0] == "thread/resume"
         assert replacement.requests[0][1]["threadId"] == "thread-new"
 
+    def test_recover_clears_stale_cancelled_turn_state(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        replacement = _FakeAppServer()
+        clients = [fake, replacement]
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: clients.pop(0),
+        )
+
+        session.send("work")
+        with session._state_lock:
+            session._last_turn_cancelled = True
+
+        session.recover()
+        session._fire_worker_cancel()
+
+        assert fake.stopped
+        assert session.last_turn_cancelled is False
+        assert replacement.requests == [("thread/resume", {"threadId": "thread-new"})]
+
 
 class TestCodexClient:
     def test_model_slots_and_provider_id(self) -> None:

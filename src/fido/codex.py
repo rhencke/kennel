@@ -825,9 +825,12 @@ class CodexSession(OwnedSession):
         del tools
 
     def recover(self) -> None:
+        with self._turn_lock:
+            self._active_turn_id = None
         with self._state_lock:
             old_session_id = self._session_id
             old_client = self._client
+            self._last_turn_cancelled = False
         old_client.stop()
         new_client = self._client_factory(cwd=self._work_dir)
         with self._state_lock:

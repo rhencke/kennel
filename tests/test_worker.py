@@ -3605,6 +3605,24 @@ class TestProviderRun:
             session_mode=TurnSessionMode.REUSE,
         )
 
+    def test_session_path_can_disable_preempt_retry(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        client = _client()
+        client.session = session
+        provider_run(
+            fido_dir,
+            agent=client,
+            model=client.work_model,
+            retry_on_preempt=False,
+        )
+        client.run_turn.assert_called_once_with(
+            "skill text\n\n---\n\nprompt text",
+            model=client.work_model,
+            retry_on_preempt=False,
+            session_mode=TurnSessionMode.REUSE,
+        )
+
     def test_session_path_calls_agent_once(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
@@ -8699,6 +8717,43 @@ class TestExecuteTask:
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
+
+    def test_preempted_task_turn_yields_before_commit_or_retry(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Implement feature")
+        session = MagicMock()
+        session.last_turn_cancelled = False
+        worker._provider_agent.session = session
+
+        def preempt_provider_turn(*_args: object, **_kwargs: object) -> tuple[str, str]:
+            session.last_turn_cancelled = True
+            return "sid", ""
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run", side_effect=preempt_provider_turn
+            ) as mock_provider_run,
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any"
+            ) as mock_commit_leftovers,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert result is True
+        mock_provider_run.assert_called_once()
+        assert mock_provider_run.call_args.kwargs["retry_on_preempt"] is False
+        mock_commit_leftovers.assert_not_called()
+        mock_complete.assert_not_called()
 
     def test_calls_set_status_with_task_title(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)

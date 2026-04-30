@@ -398,6 +398,7 @@ def provider_run(
     timeout: int = 300,
     cwd: Path | str = ".",
     session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+    retry_on_preempt: bool = True,
 ) -> tuple[str, str]:
     """Continue or start a provider session, streaming progress as raw text.
 
@@ -416,7 +417,7 @@ def provider_run(
         agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
-            retry_on_preempt=True,
+            retry_on_preempt=retry_on_preempt,
             session_mode=session_mode,
         )
         return "", ""
@@ -2620,6 +2621,10 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
+    def _provider_turn_was_preempted(self) -> bool:
+        session = self._provider_agent.session
+        return bool(session is not None and session.last_turn_cancelled)
+
     def _has_durable_webhook_demand(self) -> bool:
         """Return whether durable PR-comment demand should run before work."""
         return FidoStore(self.work_dir).has_pending_pr_comments(self._repo_name)
@@ -2800,8 +2805,15 @@ class Worker:
             cwd=self.work_dir,
             session=None,
             session_mode=self._consume_turn_session_mode(),
+            retry_on_preempt=False,
         )
         log.info("task done (session=%s)", session_id)
+        if self._provider_turn_was_preempted():
+            log.info(
+                "task provider turn preempted for %s — yielding to worker loop",
+                repo_ctx.repo,
+            )
+            return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
         if self._abort_task.is_set():
@@ -2892,8 +2904,15 @@ class Worker:
                 cwd=self.work_dir,
                 session=session_id or None,
                 session_mode=session_mode,
+                retry_on_preempt=False,
             )
             log.info("task resume done (session=%s)", session_id)
+            if self._provider_turn_was_preempted():
+                log.info(
+                    "task provider resume preempted for %s — yielding to worker loop",
+                    repo_ctx.repo,
+                )
+                return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
             if self._abort_task.is_set():
