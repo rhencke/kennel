@@ -42,7 +42,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.store import FidoStore, ReplyPromiseRecord
+from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.types import GitIdentity, TaskStatus, TaskType
 
@@ -2234,6 +2234,167 @@ class Worker:
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
+    def handle_queued_comments(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Drain durable PR-comment FIFO entries before normal worker turns."""
+        del fido_dir, slug
+        store = FidoStore(self.work_dir)
+        processed_any = False
+        while True:
+            queued = store.claim_next_pr_comment(
+                owner="worker", repo=repo_ctx.repo, pr_number=pr_number
+            )
+            if queued is None:
+                if processed_any and self._registry is not None:
+                    self._registry.note_durable_demand_drained(self._repo_name)
+                return processed_any
+            processed_any = True
+            self._handle_queued_comment(store, queued, repo_ctx)
+
+    def _handle_queued_comment(
+        self,
+        store: FidoStore,
+        queued: PRCommentQueueRecord,
+        repo_ctx: RepoContext,
+    ) -> None:
+        from fido import events
+
+        config = self._config
+        repo_cfg = self._repo_cfg
+        if config is None or repo_cfg is None:
+            raise RuntimeError("queued comment handling requires explicit config")
+        pr_data = self.gh.get_pr(repo_ctx.repo, queued.pr_number)
+        pr_title = pr_data.get("title") or ""
+        pr_body = pr_data.get("body") or ""
+        promise: ReplyPromiseRecord | None = None
+        try:
+            action = self._queued_comment_action(
+                queued, repo_ctx.repo, pr_title, pr_body
+            )
+            if action is None:
+                store.complete_pr_comment(queued.queue_id)
+                return
+            promise = store.prepare_reply(
+                owner="worker",
+                comment_type=queued.comment_type,
+                anchor_comment_id=queued.comment_id,
+            )
+            if promise is None:
+                store.complete_pr_comment(queued.queue_id)
+                return
+            action.context = {
+                **(action.context or {}),
+                "reply_promise_id": promise.promise_id,
+            }
+            category, titles = self._reply_to_queued_comment(
+                queued, action, config, repo_cfg
+            )
+            events.queue_reply_tasks(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                self.gh,
+                thread=action.reply_to
+                if queued.comment_type == "pulls"
+                else action.thread,
+                is_bot=action.is_bot,
+                registry=self._registry,
+            )
+            store.ack_promise(promise.promise_id)
+        except Exception as exc:
+            if promise is not None:
+                store.mark_failed(promise.promise_id)
+            store.retry_pr_comment(queued.queue_id, failure_reason=str(exc))
+            raise
+        store.complete_pr_comment(queued.queue_id)
+        tasks.sync_tasks_background(self.work_dir, self.gh)
+
+    def _queued_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        if queued.comment_type == "pulls":
+            return self._queued_review_comment_action(queued, repo, pr_title, pr_body)
+        return self._queued_issue_comment_action(queued, repo, pr_title, pr_body)
+
+    def _reply_to_queued_comment(
+        self,
+        queued: PRCommentQueueRecord,
+        action: Any,
+        config: Config,
+        repo_cfg: RepoConfig,
+    ) -> tuple[str, list[str]]:
+        from fido import events
+
+        if queued.comment_type == "pulls":
+            return events.reply_to_comment(
+                action,
+                config,
+                repo_cfg,
+                self.gh,
+                agent=self._provider_agent,
+                prompts=self._get_prompts(),
+            )
+        return events.reply_to_issue_comment(
+            action,
+            config,
+            repo_cfg,
+            self.gh,
+            agent=self._provider_agent,
+            prompts=self._get_prompts(),
+        )
+
+    def _queued_review_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        from fido import events
+
+        comment = self.gh.get_pull_comment(repo, queued.comment_id)
+        if comment is None:
+            log.info("queued review comment %s is gone — completing", queued.comment_id)
+            return None
+        return events.build_review_comment_action(
+            repo,
+            queued.pr_number,
+            pr_title,
+            pr_body,
+            comment,
+        )
+
+    def _queued_issue_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        from fido import events
+
+        comment = self.gh.get_issue_comment(repo, queued.comment_id)
+        if comment is None:
+            log.info("queued issue comment %s is gone — completing", queued.comment_id)
+            return None
+        return events._build_issue_comment_action(  # pyright: ignore[reportPrivateUsage]
+            repo,
+            queued.pr_number,
+            pr_title,
+            pr_body,
+            comment,
+        )
+
     def ensure_pushed(self, remote: str, slug: str) -> bool | None:
         """Ensure the branch is pushed to *remote*.
 
@@ -3331,6 +3492,8 @@ class Worker:
                 if self.handle_merge_conflict(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1

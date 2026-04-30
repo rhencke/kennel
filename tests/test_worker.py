@@ -27,7 +27,7 @@ from fido.state import (
     State,
     _resolve_git_dir,
 )
-from fido.store import FidoStore, ReplyPromiseRecord
+from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import (
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
@@ -7535,6 +7535,177 @@ class TestHandleThreads:
             )
         assert result is True
         assert FidoStore(tmp_path).claim_state(1) == "retryable_failed"
+
+
+class TestHandleQueuedComments:
+    """Tests for Worker.handle_queued_comments."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        repo_cfg = RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        config = Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": repo_cfg},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        return (
+            Worker(
+                tmp_path,
+                gh,
+                config=config,
+                repo_cfg=repo_cfg,
+                repo_name="owner/repo",
+                issue_cache=MagicMock(),
+            ),
+            gh,
+        )
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        return fido_dir
+
+    def _enqueue(
+        self,
+        tmp_path: Path,
+        *,
+        comment_type: str,
+        comment_id: int,
+    ) -> PRCommentQueueRecord:
+        return FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id=f"delivery-{comment_type}-{comment_id}",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type=comment_type,
+            comment_id=comment_id,
+            author="owner",
+            is_bot=False,
+            body="please fix",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+
+    def test_drains_issue_comment_and_queues_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="issues", comment_id=301)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_issue_comment.return_value = {
+            "id": 301,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-301",
+        }
+
+        with (
+            patch(
+                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+            ) as mock_reply,
+            patch("fido.events.create_task") as mock_create_task,
+            patch("fido.tasks.sync_tasks_background") as mock_sync,
+        ):
+            result = worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        assert result is True
+        mock_reply.assert_called_once()
+        mock_create_task.assert_called_once()
+        mock_sync.assert_called()
+        store = FidoStore(tmp_path)
+        assert store.pending_pr_comments(repo="owner/repo") == []
+        assert store.claim_state(301) == "completed"
+
+    def test_drains_review_comment_and_queues_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="pulls", comment_id=401)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = {
+            "id": 401,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r401",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
+
+        with (
+            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.create_task") as mock_create_task,
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            result = worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        assert result is True
+        mock_create_task.assert_called_once()
+        assert FidoStore(tmp_path).claim_state(401) == "completed"
+
+    def test_retries_queue_record_on_reply_failure(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        queued = self._enqueue(tmp_path, comment_type="issues", comment_id=501)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_issue_comment.return_value = {
+            "id": 501,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-501",
+        }
+
+        with (
+            patch(
+                "fido.events.reply_to_issue_comment",
+                side_effect=RuntimeError("network down"),
+            ),
+            pytest.raises(RuntimeError, match="network down"),
+        ):
+            worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        store = FidoStore(tmp_path)
+        assert store.claim_state(501) == "retryable_failed"
+        with store._connect() as conn:  # pyright: ignore[reportPrivateUsage]
+            row = conn.execute(
+                "SELECT state, failure_reason FROM pr_comment_queue WHERE queue_id = ?",
+                (queued.queue_id,),
+            ).fetchone()
+        assert row["state"] == "retryable_failed"
+        assert row["failure_reason"] == "network down"
+
+    def test_completes_queue_record_when_comment_disappeared(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="pulls", comment_id=601)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = None
+
+        result = worker.handle_queued_comments(
+            self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+        )
+
+        assert result is True
+        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
 
 class TestRunThreadsIntegration:
