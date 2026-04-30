@@ -755,6 +755,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(500, "dispatch error")
             return
 
+        if action and self._action_records_durable_demand(action):
+            self.registry.note_durable_demand(repo_cfg.name)
+            self.registry.note_provider_interrupt_requested(repo_cfg.name)
+
         # Patch the issue tree cache before ACK too — failure here is
         # recoverable (hourly reconcile heals drift), so log and continue
         # rather than 500-ing the webhook (#812).
@@ -799,7 +803,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _preempt_worker_best_effort(self, repo_name: str) -> None:
         """Try to interrupt the current worker after durable demand is recorded."""
-        self.registry.note_durable_demand(repo_name)
         session = self.registry.get_session(repo_name)
         if session is None:
             return
@@ -930,6 +933,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def _action_preempts_worker(self, action: Action) -> bool:
         """True when the action must run before the next worker provider turn."""
         return self._action_uses_model(action) or action.preempts_worker
+
+    def _action_records_durable_demand(self, action: Action) -> bool:
+        """True when dispatch already enqueued durable PR-comment demand."""
+        return action.preempts_worker and action.thread is not None
 
     def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""

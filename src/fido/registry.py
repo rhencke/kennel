@@ -581,6 +581,13 @@ class WorkerRegistry:
                 repo_name, preemption_fsm.DurableDemandRecorded()
             )
 
+    def note_provider_interrupt_requested(self, repo_name: str) -> None:
+        """Record that a queued durable demand requested provider interrupt."""
+        with self._untriaged_lock:
+            self._preemption_fsm_transition(
+                repo_name, preemption_fsm.InterruptRequested()
+            )
+
     def note_durable_demand_drained(self, repo_name: str) -> None:
         """Record that durable webhook demand for *repo_name* has drained."""
         with self._untriaged_lock:
