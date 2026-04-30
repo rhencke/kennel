@@ -5126,87 +5126,201 @@ let pp_ind_decl state (ind : ml_ind) =
 
 (*s Declaration printer. *)
 
-type term_decl_action =
-  | TermDeclSuppress
-  | TermDeclCustomAlias of string
+type term_decl_classification =
   | TermDeclEmit
+  | TermDeclEmitCustomAlias of string
+  | TermDeclSuppressConstructorTagPredicate of string * global
+  | TermDeclSuppressErasedProp
+  | TermDeclSuppressInlineCustom
+  | TermDeclSuppressInlinePrimitive
+  | TermDeclSuppressListMembershipPredicate of string
+  | TermDeclSuppressNativeEqualityMarker
+  | TermDeclSuppressRuntimeMarker
 
-type type_decl_action =
-  | TypeDeclError of string
-  | TypeDeclSuppress
+type type_decl_classification =
+  | TypeDeclEmitDiagnostic of string
+  | TypeDeclSuppressCustomAlias
+  | TypeDeclSuppressRemappedStdlib
   | TypeDeclUnsupported
 
-let classify_term_decl state r typ =
-  if is_prop_type typ then TermDeclSuppress
-  else if is_runtime_marker_ref r then TermDeclSuppress
-  else if is_native_equality_marker_ref r then TermDeclSuppress
-  else if is_inline_custom r then TermDeclSuppress
-  else
-    match rewrite_lowering_rule_of_ref state r with
-    | Some rule when rule.lowering_suppress_declaration -> TermDeclSuppress
-    | Some _ | None ->
-        if is_custom r then TermDeclCustomAlias (find_custom r)
-        else TermDeclEmit
+type classified_term_decl =
+  { term_decl_ref : global;
+    term_decl_body : ml_ast;
+    term_decl_type : ml_type;
+    term_decl_classification : term_decl_classification }
 
-let register_inline_term_decl state r a action =
-  let source_name = pp_global state Term r in
-  match action, constructor_tag_predicate_target a with
-  | TermDeclEmit, Some constructor_ref ->
+type classified_decl =
+  | ClassifiedInd of ml_ind
+  | ClassifiedType of global * type_decl_classification
+  | ClassifiedTerm of classified_term_decl
+  | ClassifiedFix of classified_term_decl list
+
+let classify_term_decl_base state r typ =
+  if is_prop_type typ then TermDeclSuppressErasedProp
+  else if is_runtime_marker_ref r then TermDeclSuppressRuntimeMarker
+  else if is_native_equality_marker_ref r then
+    TermDeclSuppressNativeEqualityMarker
+  else if is_inline_custom r then TermDeclSuppressInlineCustom
+  else
+    match rewrite_lowering_rule_of_ref state r, is_custom r with
+    | Some { lowering_suppress_declaration = true; _ }, _ ->
+        TermDeclSuppressInlinePrimitive
+    | (Some _ | None), true -> TermDeclEmitCustomAlias (find_custom r)
+    | (Some _ | None), false -> TermDeclEmit
+
+let classify_term_decl state r a typ =
+  match classify_term_decl_base state r typ with
+  | TermDeclEmit ->
+      let source_name = pp_global state Term r in
+      (match constructor_tag_predicate_target a with
+       | Some constructor_ref ->
+           TermDeclSuppressConstructorTagPredicate (source_name, constructor_ref)
+       | None when String.equal (source_name_tail source_name) "positive_mem" ->
+           TermDeclSuppressListMembershipPredicate source_name
+       | None -> TermDeclEmit)
+  | action -> action
+
+let apply_term_decl_classification_effects = function
+  | TermDeclSuppressConstructorTagPredicate (source_name, constructor_ref) ->
       active_constructor_tag_predicates :=
-        (source_name, constructor_ref) :: !active_constructor_tag_predicates;
-      TermDeclSuppress
-  | TermDeclEmit, _ when String.equal (source_name_tail source_name) "positive_mem" ->
+        (source_name, constructor_ref) :: !active_constructor_tag_predicates
+  | TermDeclSuppressListMembershipPredicate source_name ->
       active_list_membership_predicates :=
-        source_name :: !active_list_membership_predicates;
-      TermDeclSuppress
-  | _, _ ->
-      action
+        source_name :: !active_list_membership_predicates
+  | TermDeclEmit
+  | TermDeclEmitCustomAlias _
+  | TermDeclSuppressErasedProp
+  | TermDeclSuppressInlineCustom
+  | TermDeclSuppressInlinePrimitive
+  | TermDeclSuppressNativeEqualityMarker
+  | TermDeclSuppressRuntimeMarker ->
+      ()
+
+let term_decl_is_emitted = function
+  | TermDeclEmit | TermDeclEmitCustomAlias _ -> true
+  | TermDeclSuppressConstructorTagPredicate _
+  | TermDeclSuppressErasedProp
+  | TermDeclSuppressInlineCustom
+  | TermDeclSuppressInlinePrimitive
+  | TermDeclSuppressListMembershipPredicate _
+  | TermDeclSuppressNativeEqualityMarker
+  | TermDeclSuppressRuntimeMarker ->
+      false
 
 let classify_type_decl r =
-  if is_custom r then TypeDeclSuppress
-  else
-    match classify_stdlib_type_ref r with
-    | Some StdlibRealType -> TypeDeclError "PYEX041"
-    | Some type_ref when stdlib_type_ref_is_remapped type_ref -> TypeDeclSuppress
-    | Some _ | None -> TypeDeclUnsupported
+  match classify_stdlib_type_ref r, is_custom r with
+  | _, true -> TypeDeclSuppressCustomAlias
+  | Some StdlibRealType, false -> TypeDeclEmitDiagnostic "PYEX041"
+  | Some type_ref, false -> (
+      match stdlib_type_ref_is_remapped type_ref with
+      | true -> TypeDeclSuppressRemappedStdlib
+      | false -> TypeDeclUnsupported)
+  | None, false -> TypeDeclUnsupported
 
-let pp_classified_term_decl state env r a typ =
-  match register_inline_term_decl state r a (classify_term_decl state r typ) with
-  | TermDeclSuppress -> mt ()
-  | TermDeclCustomAlias alias ->
-      fnl () ++ fnl () ++
-      str (pp_global state Term r) ++ str " = " ++ str alias ++ fnl ()
-  | TermDeclEmit ->
-      let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
-      fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
+let classify_term_decl_record state r a typ =
+  { term_decl_ref = r;
+    term_decl_body = a;
+    term_decl_type = typ;
+    term_decl_classification = classify_term_decl state r a typ }
 
-let term_decl_export_names state r a typ =
-  match register_inline_term_decl state r a (classify_term_decl state r typ) with
-  | TermDeclSuppress -> []
-  | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
-
-let fixed_term_decl_export_names state r typ =
-  match classify_term_decl state r typ with
-  | TermDeclSuppress -> []
-  | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
-
-let pp_decl state = function
-  | Dind  ind   -> pp_ind_decl state ind
-  | Dtype (r, _, _) -> (
-      match classify_type_decl r with
-      | TypeDeclError code -> extraction_diagnostic_error code
-      | TypeDeclSuppress -> mt ()
-      | TypeDeclUnsupported -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003")
-  | Dterm (r, a, typ) ->
-      pp_classified_term_decl state (empty_env state ()) r a typ
+let classify_decl state = function
+  | Dind ind -> ClassifiedInd ind
+  | Dtype (r, _, _) -> ClassifiedType (r, classify_type_decl r)
+  | Dterm (r, a, typ) -> ClassifiedTerm (classify_term_decl_record state r a typ)
   | Dfix (rv, defs, typs) ->
+      let classify_one i =
+        classify_term_decl_record state rv.(i) defs.(i) typs.(i)
+      in
+      ClassifiedFix (List.init (Array.length rv) classify_one)
+
+let pp_classified_term_decl state env term_decl =
+  apply_term_decl_classification_effects term_decl.term_decl_classification;
+  match term_decl.term_decl_classification with
+  | action when not (term_decl_is_emitted action) -> mt ()
+  | TermDeclEmitCustomAlias alias ->
+      fnl () ++ fnl () ++
+      str (pp_global state Term term_decl.term_decl_ref) ++
+      str " = " ++ str alias ++ fnl ()
+  | TermDeclEmit ->
+      let () =
+        validate_prop_discipline_decl
+          (Dterm
+             ( term_decl.term_decl_ref,
+               term_decl.term_decl_body,
+               term_decl.term_decl_type ))
+      in
+      fnl () ++ fnl () ++
+      pp_term_decl
+        state
+        env
+        (pp_global state Term term_decl.term_decl_ref)
+        term_decl.term_decl_body
+        term_decl.term_decl_type
+  | TermDeclSuppressConstructorTagPredicate _
+  | TermDeclSuppressErasedProp
+  | TermDeclSuppressInlineCustom
+  | TermDeclSuppressInlinePrimitive
+  | TermDeclSuppressListMembershipPredicate _
+  | TermDeclSuppressNativeEqualityMarker
+  | TermDeclSuppressRuntimeMarker ->
+      mt ()
+
+let classified_term_decl_export_names state term_decl =
+  match term_decl.term_decl_classification with
+  | action when not (term_decl_is_emitted action) -> []
+  | TermDeclEmitCustomAlias _ | TermDeclEmit ->
+      [pp_global state Term term_decl.term_decl_ref]
+  | TermDeclSuppressConstructorTagPredicate _
+  | TermDeclSuppressErasedProp
+  | TermDeclSuppressInlineCustom
+  | TermDeclSuppressInlinePrimitive
+  | TermDeclSuppressListMembershipPredicate _
+  | TermDeclSuppressNativeEqualityMarker
+  | TermDeclSuppressRuntimeMarker ->
+      []
+
+let classified_ind_export_names state ind =
+  let packet_names packet =
+    if is_std_remapped_type_ref packet.ip_typename_ref then []
+    else
+      let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+      let cnames =
+        Array.to_list packet.ip_consnames_ref |> List.map (pp_global state Cons)
+      in
+      tname :: cnames
+  in
+  Array.to_list ind.ind_packets |> List.concat_map packet_names
+
+let classified_decl_export_names state = function
+  | ClassifiedTerm term_decl -> classified_term_decl_export_names state term_decl
+  | ClassifiedFix term_decls ->
+      List.concat_map (classified_term_decl_export_names state) term_decls
+  | ClassifiedType (r, classification) -> (
+      match classification with
+      | TypeDeclEmitDiagnostic _
+      | TypeDeclSuppressCustomAlias
+      | TypeDeclSuppressRemappedStdlib ->
+          []
+      | TypeDeclUnsupported -> [pp_global state Type r])
+  | ClassifiedInd ind -> classified_ind_export_names state ind
+
+let pp_classified_decl state = function
+  | ClassifiedInd ind -> pp_ind_decl state ind
+  | ClassifiedType (_r, classification) -> (
+      match classification with
+      | TypeDeclEmitDiagnostic code -> extraction_diagnostic_error code
+      | TypeDeclSuppressCustomAlias | TypeDeclSuppressRemappedStdlib -> mt ()
+      | TypeDeclUnsupported -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003")
+  | ClassifiedTerm term_decl ->
+      pp_classified_term_decl state (empty_env state ()) term_decl
+  | ClassifiedFix term_decls ->
       (* Each function in the fix block is named globally; the bodies use
          [MLglob] references for mutual recursion, so [empty_env] suffices. *)
       let env = empty_env state () in
-      let pp_one i =
-        pp_classified_term_decl state env rv.(i) defs.(i) typs.(i)
-      in
-      prlist_with_sep mt pp_one (List.init (Array.length rv) (fun i -> i))
+      prlist_with_sep mt (pp_classified_term_decl state env) term_decls
+
+let pp_decl state decl =
+  pp_classified_decl state (classify_decl state decl)
 
 (*s Module structure walker.
     [State.with_visibility] must be called around each module so that
@@ -5228,29 +5342,6 @@ let rec module_type_annotation state = function
       str "], " ++
       module_type_annotation state ret_mt ++
       str "]"
-
-let decl_export_names state = function
-  | Dterm (r, a, typ) ->
-      term_decl_export_names state r a typ
-  | Dfix (rv, _, typs) ->
-      List.init (Array.length rv) Fun.id
-      |> List.concat_map (fun i -> fixed_term_decl_export_names state rv.(i) typs.(i))
-  | Dtype (r, _, _) ->
-      (match classify_type_decl r with
-       | TypeDeclError _ | TypeDeclSuppress -> []
-       | TypeDeclUnsupported -> [pp_global state Type r])
-  | Dind ind ->
-      let packet_names packet =
-        if is_std_remapped_type_ref packet.ip_typename_ref then []
-        else
-          let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
-          let cnames =
-            Array.to_list packet.ip_consnames_ref
-            |> List.map (pp_global state Cons)
-          in
-          tname :: cnames
-      in
-      Array.to_list ind.ind_packets |> List.concat_map packet_names
 
 let pp_decl_exports target names indent =
   prlist
@@ -5381,8 +5472,12 @@ and pp_module_expr_return state indent local_name = function
 
 and pp_module_structure_elem_into state indent target = function
   | (_, SEdecl d) ->
-      indent_pp indent (pp_decl state d) ++
-      pp_decl_exports target (decl_export_names state d) indent
+      let classified_decl = classify_decl state d in
+      indent_pp indent (pp_classified_decl state classified_decl) ++
+      pp_decl_exports
+        target
+        (classified_decl_export_names state classified_decl)
+        indent
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
       if is_std_remapped_module_name name then mt ()
