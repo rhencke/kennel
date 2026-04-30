@@ -248,6 +248,27 @@ class Prompts:
             f"{plain}"
         )
 
+    def task_completed_without_commit_comment_prompt(self, task_title: str) -> str:
+        """Prompt for a Fido-voiced PR note when a task completes with no commit."""
+        plain = (
+            "I marked a task complete, but it did not produce a git commit. "
+            "Explain why no commit was needed using the context you already "
+            "have from this PR and task. I am marking the task done, advancing "
+            "to the next task, and preserving this PR branch instead of running "
+            "branch cleanup or replacing the PR. "
+            f"Task: {task_title}"
+        )
+        return (
+            f"{self.persona}\n\n"
+            "Rewrite the following GitHub pull request comment in character as "
+            "Fido. Keep it to 2-3 sentences. Explain why the task completed "
+            "without a commit, using your existing context from this PR and "
+            "task. Also say that the work queue will advance while the PR is "
+            "preserved. "
+            "Output only the comment text, no quotes, no explanation.\n\n"
+            f"{plain}"
+        )
+
     def status_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
         """Build the combined status-text + emoji prompt for a session nudge.
 
