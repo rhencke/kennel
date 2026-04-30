@@ -1583,7 +1583,12 @@ class TestTasksCompleteWithResolve:
             {
                 "id": "thread_node_abc",
                 "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "reviewer"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
             }
         ]
 
@@ -1657,13 +1662,66 @@ class TestTasksCompleteWithResolve:
             {
                 "id": "thread_node_abc",
                 "isResolved": True,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [{"databaseId": 42, "author": {"login": "fido-bot"}}]
+                },
             }
         ]
 
         Tasks(work_dir).complete_with_resolve(task["id"], gh)
 
         gh.resolve_thread.assert_not_called()
+
+    def test_skips_resolve_when_pending_sibling_task_remains(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+        add_task(
+            work_dir,
+            "pending sibling",
+            TaskType.THREAD,
+            thread={"repo": "a/b", "pr": 1, "comment_id": 77},
+        )
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = [
+            {
+                "id": 42,
+                "in_reply_to_id": None,
+                "user": {"login": "reviewer"},
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+            {
+                "id": 99,
+                "in_reply_to_id": 42,
+                "user": {"login": "fido-bot"},
+                "created_at": "2024-01-02T00:00:00Z",
+            },
+        ]
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "reviewer"}},
+                        {"databaseId": 77, "author": {"login": "reviewer"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
+            }
+        ]
+
+        with caplog.at_level(logging.INFO, logger="fido"):
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_not_called()
+        assert "pending same-thread work" in caplog.text
 
     def test_exception_silenced_and_logged(self, tmp_path: Path, caplog) -> None:
         import logging

@@ -19,6 +19,7 @@ from fido.prompts import Prompts
 from fido.provider import ProviderAgent
 from fido.rocq import pr_body_task_store as task_store_oracle
 from fido.rocq import task_queue_rescope as rescope_oracle
+from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.state import (
     JsonFileStore,
     State,
@@ -60,6 +61,84 @@ def _task_source_comment_for_oracle(task: dict[str, Any]) -> int | None:
     if comment_id is None:
         return None
     return int(comment_id)
+
+
+def _thread_task_status_for_oracle(
+    task: dict[str, Any],
+) -> thread_resolve_oracle.TaskStatus:
+    match task.get("status", TaskStatus.PENDING):
+        case TaskStatus.COMPLETED | "completed":
+            return thread_resolve_oracle.StatusCompleted()
+        case TaskStatus.BLOCKED | "blocked":
+            return thread_resolve_oracle.StatusBlocked()
+        case _:
+            return thread_resolve_oracle.StatusPending()
+
+
+def _thread_task_for_oracle(
+    task: dict[str, Any],
+) -> thread_resolve_oracle.ThreadTask | None:
+    comment_id = (task.get("thread") or {}).get("comment_id")
+    if comment_id is None:
+        return None
+    return thread_resolve_oracle.ThreadTask(
+        thread_task_comment=int(comment_id),
+        thread_task_status=_thread_task_status_for_oracle(task),
+    )
+
+
+def _thread_tasks_for_oracle(
+    task_list: list[dict[str, Any]],
+) -> list[thread_resolve_oracle.ThreadTask]:
+    tasks: list[thread_resolve_oracle.ThreadTask] = []
+    for task in task_list:
+        oracle_task = _thread_task_for_oracle(task)
+        if oracle_task is not None:
+            tasks.append(oracle_task)
+    return tasks
+
+
+def _thread_comment_author_for_oracle(
+    login: str,
+    gh_user: str,
+) -> thread_resolve_oracle.ThreadCommentAuthor:
+    if login == gh_user:
+        return thread_resolve_oracle.CommentByFido()
+    return thread_resolve_oracle.CommentByHuman()
+
+
+def _review_thread_for_oracle(
+    node: dict[str, Any],
+    gh_user: str,
+) -> thread_resolve_oracle.ReviewThread:
+    comments: list[thread_resolve_oracle.ThreadComment] = []
+    for comment in node.get("comments", {}).get("nodes", []):
+        database_id = comment.get("databaseId")
+        if database_id is None:
+            continue
+        author = (comment.get("author") or {}).get("login", "")
+        comments.append(
+            thread_resolve_oracle.ThreadComment(
+                thread_comment_id=int(database_id),
+                thread_comment_author=_thread_comment_author_for_oracle(
+                    str(author), gh_user
+                ),
+            )
+        )
+    return thread_resolve_oracle.ReviewThread(
+        review_thread_resolved=bool(node.get("isResolved", False)),
+        review_thread_comments=comments,
+    )
+
+
+def _review_thread_contains_comment(
+    node: dict[str, Any],
+    comment_id: int,
+) -> bool:
+    for comment in node.get("comments", {}).get("nodes", []):
+        if comment.get("databaseId") == comment_id:
+            return True
+    return False
 
 
 def _task_store_for_oracle(
@@ -983,11 +1062,18 @@ class Tasks(JsonFileStore):
                 return
             owner, repo_name = repo.split("/", 1)
             threads = gh.get_review_threads(owner, repo_name, pr)
+            pending_tasks = _thread_tasks_for_oracle(self.list())
             for t in threads:
-                if t["isResolved"]:
-                    continue
-                nodes = t["comments"]["nodes"]
-                if nodes and nodes[0].get("databaseId") == comment_id:
+                if _review_thread_contains_comment(t, int(comment_id)):
+                    decision = thread_resolve_oracle.resolution_decision(
+                        _review_thread_for_oracle(t, us),
+                        pending_tasks,
+                    )
+                    if not isinstance(
+                        decision, thread_resolve_oracle.ResolveReviewThread
+                    ):
+                        log.info("thread has pending same-thread work — not resolving")
+                        return
                     gh.resolve_thread(t["id"])
                     log.info("thread resolved: %s", t["id"])
                     return

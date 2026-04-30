@@ -9360,7 +9360,12 @@ class TestExecuteTask:
             {
                 "id": "thread-node-xyz",
                 "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "reviewer"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
             }
         ]
 
