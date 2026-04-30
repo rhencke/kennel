@@ -185,7 +185,7 @@ def enqueue_task(
         if __option is None:
             return (
                 (
-                    order + [task] + [],
+                    order + [task],
                     _rocq_map_add(
                         _rocq_positive_key(task),
                         row,
@@ -207,7 +207,7 @@ def enqueue_task(
     if __option is None:
         return (
             (
-                order + [task] + [],
+                order + [task],
                 _rocq_map_add(
                     _rocq_positive_key(task),
                     row,
@@ -256,7 +256,7 @@ def apply_rescope_op(
                 return (
                     (
                         rows,
-                        pending_ids + [task] + [],
+                        pending_ids + [task],
                     ),
                     completed_ids,
                 )
@@ -272,7 +272,7 @@ def apply_rescope_op(
                             row_,
                             rows,
                         ),
-                        pending_ids + [task] + [],
+                        pending_ids + [task],
                     ),
                     completed_ids,
                 )
@@ -290,7 +290,7 @@ def apply_rescope_op(
                         ),
                         pending_ids,
                     ),
-                    completed_ids + [task] + [],
+                    completed_ids + [task],
                 )
             case __impossible:
                 assert_never(__impossible)
@@ -583,7 +583,7 @@ def pending_projection(
                         kind=row.kind,
                         status=PRPending(),
                     ),
-                ] + []
+                ]
             return []
         case StatusCompleted():
             return []
@@ -613,7 +613,7 @@ def completed_projection(
                     kind=row.kind,
                     status=PRCompleted(),
                 ),
-            ] + []
+            ]
         case StatusBlocked():
             return []
         case __impossible:

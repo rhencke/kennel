@@ -2323,6 +2323,21 @@ and py_list_prepend state env head tail =
        (str "[" ++ pp_py_rendered (pp_rendered_expr state env head) ++ str "]"))
     (pp_rendered_expr state env tail)
 
+and std_list_literal_items = function
+  | MLcons (_, r, []) when is_std_list_nil_ref r ->
+      Some []
+  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r -> (
+      match std_list_literal_items tail with
+      | Some tail_items -> Some (head :: tail_items)
+      | None -> None)
+  | _ ->
+      None
+
+and pp_std_list_literal state env items =
+  str "[" ++
+  prlist_with_sep (fun () -> str ", ") (pp_expr state env) items ++
+  str "]"
+
 and py_string_cons state env head tail =
   py_infix "+"
     py_prec_add
@@ -2622,8 +2637,10 @@ and pp_expr state env expr =
       pp_expr state env value
   | MLcons (_, r, []) when is_std_list_nil_ref r ->
       str "[]"
-  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r ->
-      pp_py_rendered (py_list_prepend state env head tail)
+  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r -> (
+      match std_list_literal_items expr with
+      | Some items -> pp_std_list_literal state env items
+      | None -> pp_py_rendered (py_list_prepend state env head tail))
   | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
       str "(" ++ pp_expr state env left ++ str ", " ++
       pp_expr state env right ++ str ")"
@@ -3367,14 +3384,19 @@ let rec pp_statement_expr state env indent = function
     when is_std_list_cons_ref r &&
          not (List.is_empty (get_record_fields (PrinterState.get_table state) head_r)) &&
          not (is_std_Q_make_ref head_r) ->
-      pp_py_rendered
-        (py_infix "+"
-           py_prec_add
-           (py_rendered
-              ~precedence:py_prec_atom
-              (pp_multiline_enclosed indent (str "[") (str "]")
-                 [pp_statement_expr state env (indent + 4) head]))
-           (pp_rendered_expr state env tail))
+      let head_list =
+        pp_multiline_enclosed indent (str "[") (str "]")
+          [pp_statement_expr state env (indent + 4) head]
+      in
+      (match tail with
+       | MLcons (_, tail_r, []) when is_std_list_nil_ref tail_r ->
+           head_list
+       | _ ->
+           pp_py_rendered
+             (py_infix "+"
+                py_prec_add
+                (py_rendered ~precedence:py_prec_atom head_list)
+                (pp_rendered_expr state env tail)))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&

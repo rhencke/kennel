@@ -267,12 +267,12 @@ def test_list_append_low_precedence_children_are_parenthesized(
 
     assert_rendered_source(
         source,
-        "return (lambda prefix: prefix)([h] + []) + right",
+        "return (lambda prefix: prefix)([h]) + right",
     )
     assert_rendered_source(
         source,
-        "return ([0] + [] if flag else [0 + 1] + []) + right",
-        ("return [0] + [] if flag else [0 + 1] + [] + right",),
+        "return ([0] if flag else [0 + 1]) + right",
+        ("return [0] if flag else [0 + 1] + right",),
     )
 
 

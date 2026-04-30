@@ -137,6 +137,15 @@ def test_pr_body_row_fields_drop_redundant_record_prefix() -> None:
     assert "pr_body_" not in pr_body_row
 
 
+def test_singleton_projection_rows_do_not_append_empty_lists() -> None:
+    source = Path(oracle.__file__).read_text()
+    pending_projection = _function_source(source, "pending_projection")
+    completed_projection = _function_source(source, "completed_projection")
+
+    assert "] + []" not in pending_projection
+    assert "] + []" not in completed_projection
+
+
 def test_tail_recursive_duplicate_scans_lower_to_for_loops() -> None:
     source = Path(oracle.__file__).read_text()
     comment_duplicate = _function_source(source, "find_comment_duplicate")
