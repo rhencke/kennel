@@ -251,7 +251,7 @@ let source_name_tail source_name =
 
 type lowering_environment = {
   lowering_method_targets : (string * (string * string)) list;
-  lowering_record_field_targets : (string * string) list;
+  lowering_record_field_targets : (string * (string * string)) list;
 }
 
 let empty_lowering_environment = {
@@ -847,7 +847,7 @@ type lowering_emit_form =
   | LoweringEmitCall of string
   | LoweringEmitMethod of string
   | LoweringEmitLiteral of string
-  | LoweringEmitAttribute of string
+  | LoweringEmitAttribute of string * string
   | LoweringEmitIndex of int
 
 type lowering_rule = {
@@ -1564,17 +1564,18 @@ let marker_of_lowering_ast ast =
   | Some _ as marker -> marker
   | None -> marker_of_ast ast
 
-let record_field_lowering_rule source_name field_name =
+let record_field_lowering_rule source_name class_name field_name =
   lowering_rule
     (LoweringRecordFieldRef source_name)
     LoweringRecordField
     ("record field " ^ field_name)
     [1]
-    (LoweringEmitAttribute field_name)
+    (LoweringEmitAttribute (class_name, field_name))
 
 let record_field_lowering_rule_of_source_name state source_name =
   match lookup_record_field_target state source_name with
-  | Some field_name -> Some (record_field_lowering_rule source_name field_name)
+  | Some (class_name, field_name) ->
+      Some (record_field_lowering_rule source_name class_name field_name)
   | None -> None
 
 let record_field_lowering_rule_of_ref state r =
@@ -1760,11 +1761,118 @@ let cons_arg_names_from_kernel packet j nargs =
       collect nargs arg_ty []
   | _ -> List.init nargs (fun _ -> None)
 
+let string_has_prefix ~prefix value =
+  let prefix_length = String.length prefix in
+  String.length value >= prefix_length &&
+  String.equal prefix (String.sub value 0 prefix_length)
+
+let is_lower_ascii c =
+  c >= 'a' && c <= 'z'
+
+let is_upper_ascii c =
+  c >= 'A' && c <= 'Z'
+
+let is_digit_ascii c =
+  c >= '0' && c <= '9'
+
+let camel_to_snake name =
+  let buffer = Buffer.create (String.length name) in
+  String.iteri
+    (fun i c ->
+       if is_upper_ascii c then (
+         let prev_upper =
+           i > 0 && is_upper_ascii name.[i - 1]
+         in
+         let prev_word =
+           i > 0 && (is_lower_ascii name.[i - 1] || is_digit_ascii name.[i - 1])
+         in
+         let next_lower =
+           i + 1 < String.length name && is_lower_ascii name.[i + 1]
+         in
+         if i > 0 && (prev_word || (prev_upper && next_lower)) then
+           Buffer.add_char buffer '_';
+         Buffer.add_char buffer (Char.lowercase_ascii c))
+       else
+         Buffer.add_char buffer c)
+    name;
+  Buffer.contents buffer
+
+let rec common_components left right =
+  match left, right with
+  | left_head :: left_tail, right_head :: right_tail
+    when String.equal left_head right_head ->
+      left_head :: common_components left_tail right_tail
+  | _ -> []
+
+let common_underscore_prefix field_names =
+  match List.map (String.split_on_char '_') field_names with
+  | [] -> None
+  | first :: rest -> (
+      match List.fold_left common_components first rest with
+      | [] -> None
+      | common ->
+          let prefix = String.concat "_" common in
+          let prefix_with_separator = prefix ^ "_" in
+          if List.for_all (string_has_prefix ~prefix:prefix_with_separator) field_names then
+            Some prefix
+          else
+            None)
+
+let record_field_prefix_for_class class_name field_names =
+  match common_underscore_prefix field_names with
+  | Some prefix ->
+      let class_prefix = camel_to_snake class_name in
+      if string_has_prefix ~prefix:(prefix ^ "_") class_prefix then
+        Some prefix
+      else
+        None
+  | None -> None
+
+let strip_record_field_prefix prefix field_name =
+  let prefix_with_separator = prefix ^ "_" in
+  if string_has_prefix ~prefix:prefix_with_separator field_name then
+    String.sub field_name (String.length prefix_with_separator)
+      (String.length field_name - String.length prefix_with_separator)
+  else
+    field_name
+
+let record_field_display_name class_name field_names field_name =
+  match record_field_prefix_for_class class_name field_names with
+  | Some prefix when String.contains prefix '_' ->
+      strip_record_field_prefix prefix field_name
+  | None -> field_name
+  | Some _ -> field_name
+
+let record_field_names state ind_kn fields =
+  List.filter_map
+    (function
+      | Some r' -> Some (pp_global_with_key state Term ind_kn r')
+      | None -> None)
+    fields
+
+let underscore_prefix name =
+  match String.index_opt name '_' with
+  | None -> None
+  | Some index when index > 0 -> Some (String.sub name 0 index)
+  | Some _ -> None
+
+let consistent_method_prefix field_names =
+  match List.filter_map underscore_prefix field_names with
+  | [] -> None
+  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
+  | _ -> None
+
 (** Python keyword-argument name for record field at position [i].
     Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
 let pp_field_name state r fds i =
+  let ind_ref = get_ind r in
+  let ind_kn = kn_of_ind ind_ref in
+  let class_name = capitalize_first (pp_global state Term ind_ref) in
+  let field_names = record_field_names state ind_kn fds in
   match List.nth fds i with
-  | Some r' -> str (pp_global_with_key state Term (kn_of_ind (get_ind r)) r')
+  | Some r' ->
+      let field_name = pp_global_with_key state Term ind_kn r' in
+      str (record_field_display_name class_name field_names field_name)
   | None    -> str (Printf.sprintf "arg%d" i)
 
 (** Raw constructor name for [r], accounting for inline-custom declarations. *)
@@ -1939,8 +2047,8 @@ let record_projection_parts state expr =
       match head, List.rev all_args with
       | MLglob r, base :: _ -> (
           match record_field_lowering_rule_of_ref state r with
-          | Some { lowering_emit = LoweringEmitAttribute field_name; _ } ->
-              Some (field_name, base)
+          | Some { lowering_emit = LoweringEmitAttribute (class_name, field_name); _ } ->
+              Some (class_name, field_name, base)
           | Some _ -> None
           | None -> None)
       | _ -> None)
@@ -1948,6 +2056,7 @@ let record_projection_parts state expr =
 
 let record_replace_expr_parts state r args =
   let fields = get_record_fields (PrinterState.get_table state) r in
+  let expected_class = capitalize_first (pp_global state Term (get_ind r)) in
   let field_name i = Pp.string_of_ppcmds (pp_field_name state r fields i) in
   let same_base expected actual =
     match expected with
@@ -1963,8 +2072,9 @@ let record_replace_expr_parts state r args =
     | arg :: rest ->
         let expected_field = field_name i in
         match record_projection_parts state arg with
-        | Some (actual_field, base)
-          when String.equal actual_field expected_field -> (
+        | Some (actual_class, actual_field, base)
+          when String.equal actual_class expected_class &&
+               String.equal actual_field expected_field -> (
             match same_base base_opt base with
             | Some base_opt ->
                 loop (Some base_opt) (unchanged_count + 1) changes (i + 1) rest
@@ -2201,7 +2311,7 @@ and rendered_lowering_rule_app state env r rule args =
 
 and rendered_record_field_rule_app state env rule args =
   match rule.lowering_emit, args with
-  | LoweringEmitAttribute field_name, self_arg :: _ ->
+  | LoweringEmitAttribute (_, field_name), self_arg :: _ ->
       Some (py_attr (pp_rendered_expr state env self_arg) field_name)
   | _, _ ->
       None
@@ -4829,18 +4939,6 @@ let pp_method_term_decl state env method_name a typ =
            str "    " ++ pp_return_body state env' 4 body ++ fnl ())
   | _ -> extraction_diagnostic_error "PYEX040"
 
-let underscore_prefix name =
-  match String.index_opt name '_' with
-  | None -> None
-  | Some index when index > 0 -> Some (String.sub name 0 index)
-  | Some _ -> None
-
-let consistent_field_prefix field_names =
-  match List.filter_map underscore_prefix field_names with
-  | [] -> None
-  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
-  | _ -> None
-
 let method_target_of_term_decl state record_class_prefixes record_field_names = function
   | Dterm (r, _a, typ) -> (
       if is_custom r then None else
@@ -4892,17 +4990,25 @@ let record_field_targets_of_decl state = function
       | Record fields when Array.length ind.ind_packets > 0 ->
           let packet = ind.ind_packets.(0) in
           let ind_kn = kn_of_ind packet.ip_typename_ref in
+          let class_name = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+          let field_names = record_field_names state ind_kn fields in
           Some
             (List.filter_map
                (function
                  | Some r' ->
                      let source_name = pp_global state Term r' in
                      let field_name = pp_global_with_key state Term ind_kn r' in
+                     let display_name =
+                       record_field_display_name class_name field_names field_name
+                     in
                      Some
                        (if String.equal source_name field_name then
-                          [(source_name, field_name)]
+                          [(source_name, (class_name, display_name))]
                         else
-                          [(source_name, field_name); (field_name, field_name)])
+                          [
+                            (source_name, (class_name, display_name));
+                            (field_name, (class_name, display_name));
+                          ])
                  | None -> None)
                fields
             |> List.concat)
@@ -4911,7 +5017,9 @@ let record_field_targets_of_decl state = function
 
 let record_class_prefix_of_decl state decl =
   match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
-  | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
+  | Some class_name, Some field_names ->
+      Option.map (fun prefix -> (class_name, prefix))
+        (consistent_method_prefix field_names)
   | _ -> None
 
 (*s Inductive type emission as Python dataclasses.
@@ -4954,6 +5062,9 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
     | Some name -> name
     | None -> pp_global state Cons packet.ip_consnames_ref.(j)
   in
+  let record_class_name =
+    capitalize_first (pp_global state Term packet.ip_typename_ref)
+  in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
   let kernel_names =
@@ -4964,8 +5075,11 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
   let field_name i =
     match fields_opt with
     | Some fds ->
+        let field_names = record_field_names state ind_kn fds in
         ( match List.nth fds i with
-          | Some r' -> pp_global_with_key state Term ind_kn r'
+          | Some r' ->
+              let field_name = pp_global_with_key state Term ind_kn r' in
+              record_field_display_name record_class_name field_names field_name
           | None    -> Printf.sprintf "arg%d" i )
     | None ->
         ( match List.nth kernel_names i with

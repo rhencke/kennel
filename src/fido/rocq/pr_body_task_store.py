@@ -547,11 +547,11 @@ PRBodyStatusT = PRPending | PRCompleted
 @final
 @dataclass(frozen=True)
 class PRBodyRow:
-    pr_body_task: int
-    pr_body_title: str
-    pr_body_description: str
-    pr_body_kind: TaskKind
-    pr_body_status: PRBodyStatus
+    task: int
+    title: str
+    description: str
+    kind: TaskKind
+    status: PRBodyStatus
 
 
 def task_kind_matches_ci_filter(
@@ -577,11 +577,11 @@ def pending_projection(
             if task_kind_matches_ci_filter(include_ci, row.kind):
                 return [
                     PRBodyRow(
-                        pr_body_task=task,
-                        pr_body_title=row.title,
-                        pr_body_description=row.description,
-                        pr_body_kind=row.kind,
-                        pr_body_status=PRPending(),
+                        task=task,
+                        title=row.title,
+                        description=row.description,
+                        kind=row.kind,
+                        status=PRPending(),
                     ),
                 ] + []
             return []
@@ -607,11 +607,11 @@ def completed_projection(
         case StatusCompleted():
             return [
                 PRBodyRow(
-                    pr_body_task=task,
-                    pr_body_title=row.title,
-                    pr_body_description=row.description,
-                    pr_body_kind=row.kind,
-                    pr_body_status=PRCompleted(),
+                    task=task,
+                    title=row.title,
+                    description=row.description,
+                    kind=row.kind,
+                    status=PRCompleted(),
                 ),
             ] + []
         case StatusBlocked():

@@ -20,7 +20,7 @@ def _row(
 
 
 def _status_names(rows: list[Any]) -> list[str]:
-    return [type(row.pr_body_status).__name__ for row in rows]
+    return [type(row.status).__name__ for row in rows]
 
 
 def _function_source(source: str, name: str) -> str:
@@ -44,8 +44,8 @@ def test_projection_matches_rendered_pr_body_order() -> None:
 
     projected = oracle.project_task_store(store)
 
-    assert [row.pr_body_task for row in projected] == [3, 1, 2]
-    assert [row.pr_body_title for row in projected] == [
+    assert [row.task for row in projected] == [3, 1, 2]
+    assert [row.title for row in projected] == [
         "ci fix",
         "spec work",
         "completed work",
@@ -64,7 +64,7 @@ def test_transition_resyncs_after_add_complete_and_rescope() -> None:
     after_add = oracle.transition(state, oracle.WriteTaskAdd(2, added_row))
     assert after_add is not None
     assert oracle.pr_body_matches_store_bool(after_add)
-    assert [row.pr_body_task for row in after_add.visible_pr_body] == [2, 1]
+    assert [row.task for row in after_add.visible_pr_body] == [2, 1]
 
     after_complete = oracle.transition(after_add, oracle.WriteTaskComplete(2))
     assert after_complete is not None
@@ -77,7 +77,7 @@ def test_transition_resyncs_after_add_complete_and_rescope() -> None:
     )
     assert after_rescope is not None
     assert oracle.pr_body_matches_store_bool(after_rescope)
-    assert [row.pr_body_title for row in after_rescope.visible_pr_body] == [
+    assert [row.title for row in after_rescope.visible_pr_body] == [
         "renamed spec",
         "ci fix",
     ]
@@ -117,6 +117,22 @@ def test_imported_record_fields_lower_to_attribute_access() -> None:
     assert "description(row)" not in source
     assert "match row.status:" in source
     assert "row.kind" in source
+
+
+def test_pr_body_row_fields_drop_redundant_record_prefix() -> None:
+    source = Path(oracle.__file__).read_text()
+    pr_body_row = source[
+        source.index("class PRBodyRow:") : source.index(
+            "\ndef task_kind_matches_ci_filter",
+        )
+    ]
+
+    assert "    task: int" in pr_body_row
+    assert "    title: str" in pr_body_row
+    assert "    description: str" in pr_body_row
+    assert "    kind: TaskKind" in pr_body_row
+    assert "    status: PRBodyStatus" in pr_body_row
+    assert "pr_body_" not in pr_body_row
 
 
 def test_tail_recursive_duplicate_scans_lower_to_for_loops() -> None:
