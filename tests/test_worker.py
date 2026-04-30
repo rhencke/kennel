@@ -8862,25 +8862,34 @@ class TestExecuteTask:
         assert mock_run.call_count == 4
         mock_complete.assert_called_once()
 
-    def test_breaks_retry_loop_when_task_externally_completed(
+    def test_advances_completed_task_without_commit_and_explains_on_pr(
         self, tmp_path: Path
     ) -> None:
-        # Task is pending on first list_tasks call (execute_task picks it up),
-        # then externally completed before the retry loop re-checks — loop
-        # should break without calling provider_run a second time.
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        task = self._pending_task("Already done task")
-        completed_task = {**task, "status": "completed"}
-        # HEAD never changes — no commits will ever appear.
-        git_mock = MagicMock(
-            side_effect=lambda args, **kw: MagicMock(
-                returncode=0,
-                stdout="aaa" if args == ["rev-parse", "HEAD"] else "",
-                stderr="",
-            )
+        # Some tasks are legitimately planning/no-op tasks. If such a task is
+        # completed without a commit, the worker should advance the queue, but
+        # must not run the normal push/sentinel-cleanup path because that can
+        # make GitHub close an otherwise valid empty-sentinel PR.
+        mock_agent = _client()
+        mock_agent.generate_reply.return_value = (
+            "Woof — this task finished without a code change because it was "
+            "planning-only, so I am marking it done and keeping this PR intact."
         )
-        list_tasks_calls = iter([[task], [completed_task]])
+        gh = MagicMock()
+        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t1"})
+        task = self._pending_task("Already done task")
+        in_progress_task = {**task, "status": "in_progress"}
+        completed_task = {**task, "status": "completed"}
+
+        def fake_git(args, **kw):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        list_tasks_calls = iter([[task], [in_progress_task], [completed_task]])
         with (
             patch(
                 "fido.tasks.Tasks.list",
@@ -8889,18 +8898,36 @@ class TestExecuteTask:
             patch.object(worker, "set_status"),
             patch("fido.worker.build_prompt"),
             patch(
-                "fido.worker.provider_run", return_value=("sess-1", "output")
+                "fido.worker.provider_run",
+                return_value=("sess-1", "output"),
             ) as mock_run,
-            patch.object(worker, "_git", git_mock),
-            patch.object(worker, "ensure_pushed", return_value=True),
+            patch.object(worker, "_git", MagicMock(side_effect=fake_git)),
+            patch.object(worker, "_squash_wip_commit") as mock_squash,
+            patch.object(worker, "ensure_pushed") as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        # provider_run called exactly once (initial dispatch), not again after break
         mock_run.assert_called_once()
-        # complete_with_resolve still called (idempotent — task already completed externally)
+        gh.comment_issue.assert_called_once()
+        comment_args = gh.comment_issue.call_args.args
+        assert comment_args[0] == "owner/repo"
+        assert comment_args[1] == 1
+        assert "Woof" in comment_args[2]
+        assert "<!-- fido:task-complete-no-commit -->" in comment_args[2]
+        mock_agent.generate_reply.assert_called_once()
+        assert mock_agent.generate_reply.call_args.args[1] == mock_agent.voice_model
+        prompt = mock_agent.generate_reply.call_args.args[0]
+        assert "Already done task" in prompt
+        assert (
+            "Explain why no commit was needed using the context you already have"
+            in prompt
+        )
+        mock_squash.assert_not_called()
+        mock_push.assert_not_called()
         mock_complete.assert_called_once_with(task["id"], worker.gh)
+        assert "current_task_id" not in State(fido_dir).load()
+        mock_sync.assert_any_call(tmp_path, gh, blocking=True)
 
     def test_does_not_treat_in_progress_task_as_externally_completed(
         self, tmp_path: Path
@@ -8926,7 +8953,9 @@ class TestExecuteTask:
             )
         )
         # Picker sees PENDING; resume loop's re-check sees IN_PROGRESS.
-        list_tasks_calls = iter([[task], [in_progress_task]])
+        list_tasks_calls = iter(
+            [[task], [in_progress_task], [in_progress_task], [in_progress_task]]
+        )
         with (
             patch(
                 "fido.tasks.Tasks.list",

@@ -2378,6 +2378,29 @@ class Worker:
             for t in current_task_list
         )
 
+    def _report_task_completed_without_commit(
+        self,
+        repo: str,
+        pr_number: int,
+        task_id: str,
+        task_title: str,
+    ) -> None:
+        """Explain a completed task that did not produce git progress."""
+        log.warning(
+            "task %s was marked completed but HEAD did not change; "
+            "advancing without branch cleanup",
+            task_id,
+        )
+        prompts = self._get_prompts()
+        prompt = prompts.task_completed_without_commit_comment_prompt(task_title)
+        msg = self._provider_agent.generate_reply(
+            prompt, self._provider_agent.voice_model
+        )
+        if not msg:
+            raise ValueError("task completed without commit comment was empty")
+        body = f"{msg}\n\n<!-- fido:task-complete-no-commit -->"
+        self.gh.comment_issue(repo, pr_number, body)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -2476,18 +2499,20 @@ class Worker:
         # Resume loop: let the provider agent cook until commits appear
         attempt = 0
         fresh_session_retry_used = False
+        completed_without_commit = False
         while head_before == head_after:
-            # If the task was completed externally (e.g. via `fido task
-            # complete`) while we were waiting, stop retrying — the work is
-            # already recorded as done and no commits will ever appear.
             current_task_list = self._tasks.list()
             if any(
                 t["id"] == task["id"] and t.get("status") == TaskStatus.COMPLETED
                 for t in current_task_list
             ):
-                log.info(
-                    "task externally completed — stopping retry (id=%s)", task["id"]
+                self._report_task_completed_without_commit(
+                    repo_ctx.repo,
+                    pr_number,
+                    task["id"],
+                    task_title,
                 )
+                completed_without_commit = True
                 break
             attempt += 1
             use_fresh_session = (
@@ -2561,6 +2586,16 @@ class Worker:
             # Yield at the retry boundary so untriaged handlers get their turn
             # before we loop back for another provider run (#1067).
             self._yield_for_untriaged()
+
+        if completed_without_commit:
+            self._tasks.complete_with_resolve(task["id"], self.gh)
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
+            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+            self._delete_leaked_task_comments(
+                repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+            )
+            return True
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
