@@ -259,6 +259,42 @@ let empty_lowering_environment = {
   lowering_record_field_targets = [];
 }
 
+type printer_state = {
+  extraction_state : Common.State.t;
+  lowering_environment : lowering_environment ref;
+}
+
+let initial_printer_state extraction_state = {
+  extraction_state;
+  lowering_environment = ref empty_lowering_environment;
+}
+
+module ExtractionState = State
+
+module PrinterState = struct
+  let get_table state =
+    ExtractionState.get_table state.extraction_state
+
+  let get_top_visible_mp state =
+    ExtractionState.get_top_visible_mp state.extraction_state
+
+  let with_visibility state mp visible f =
+    ExtractionState.with_visibility state.extraction_state mp visible
+      (fun extraction_state -> f { state with extraction_state })
+end
+
+let pp_global state =
+  pp_global state.extraction_state
+
+let pp_global_with_key state =
+  pp_global_with_key state.extraction_state
+
+let pp_module state =
+  pp_module state.extraction_state
+
+let empty_env state =
+  empty_env state.extraction_state
+
 let lookup_lowering_method_target environment source_name =
   List.assoc_opt source_name environment.lowering_method_targets
 
@@ -275,32 +311,30 @@ let extend_lowering_environment ~method_targets ~record_field_targets environmen
     record_field_targets @ environment.lowering_record_field_targets;
 }
 
-let active_lowering_environment = ref empty_lowering_environment
-
-let install_active_lowering_environment_extension ~method_targets ~record_field_targets =
-  let previous = !active_lowering_environment in
-  active_lowering_environment :=
+let install_lowering_environment_extension state ~method_targets ~record_field_targets =
+  let previous = !(state.lowering_environment) in
+  state.lowering_environment :=
     extend_lowering_environment ~method_targets ~record_field_targets previous;
   previous
 
-let with_extended_active_lowering_environment ~method_targets ~record_field_targets f =
+let with_extended_lowering_environment state ~method_targets ~record_field_targets f =
   let previous =
-    install_active_lowering_environment_extension ~method_targets
+    install_lowering_environment_extension state ~method_targets
       ~record_field_targets
   in
   try
     let result = f () in
-    active_lowering_environment := previous;
+    state.lowering_environment := previous;
     result
   with exn ->
-    active_lowering_environment := previous;
+    state.lowering_environment := previous;
     raise exn
 
-let lookup_active_method_target source_name =
-  lookup_lowering_method_target !active_lowering_environment source_name
+let lookup_method_target state source_name =
+  lookup_lowering_method_target !(state.lowering_environment) source_name
 
-let lookup_active_record_field_target source_name =
-  lookup_lowering_record_field_target !active_lowering_environment source_name
+let lookup_record_field_target state source_name =
+  lookup_lowering_record_field_target !(state.lowering_environment) source_name
 
 let active_constructor_tag_predicates = ref []
 
@@ -1538,13 +1572,13 @@ let record_field_lowering_rule source_name field_name =
     [1]
     (LoweringEmitAttribute field_name)
 
-let record_field_lowering_rule_of_source_name source_name =
-  match lookup_active_record_field_target source_name with
+let record_field_lowering_rule_of_source_name state source_name =
+  match lookup_record_field_target state source_name with
   | Some field_name -> Some (record_field_lowering_rule source_name field_name)
   | None -> None
 
 let record_field_lowering_rule_of_ref state r =
-  record_field_lowering_rule_of_source_name (pp_global state Term r)
+  record_field_lowering_rule_of_source_name state (pp_global state Term r)
 
 let rewrite_lowering_rule_of_ref state r =
   match lowering_rule_of_ref r with
@@ -1626,7 +1660,7 @@ let capitalize_first s =
 
 let type_is_coinductive state = function
   | Tglob (r, _) ->
-      is_coinductive (State.get_table state) r
+      is_coinductive (PrinterState.get_table state) r
   | _ ->
       false
 
@@ -1833,7 +1867,7 @@ let record_proj_info state branches =
     let (ids, pat, _) = branches.(0) in
     match pat with
     | Pusual r | Pcons (r, _) ->
-        let fds = get_record_fields (State.get_table state) r in
+        let fds = get_record_fields (PrinterState.get_table state) r in
         if List.is_empty fds then None
         else
           (* Expand [Pusual r] into [Pcons(r, pats)] for uniform treatment;
@@ -1913,7 +1947,7 @@ let record_projection_parts state expr =
   | _ -> None
 
 let record_replace_expr_parts state r args =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
   let field_name i = Pp.string_of_ppcmds (pp_field_name state r fields i) in
   let same_base expected actual =
     match expected with
@@ -2256,7 +2290,7 @@ and pp_expr state env expr =
       let pp_method_call_expr =
         match head, all_args with
         | MLglob r, self_arg :: method_args -> (
-            match lookup_active_method_target (pp_global state Term r) with
+            match lookup_method_target state (pp_global state Term r) with
             | Some (_class_name, method_name) ->
                 Some
                   (py_method_call (rendered_expr self_arg) method_name
@@ -2272,7 +2306,7 @@ and pp_expr state env expr =
               | MLglob r -> pp_global state Term r
               | _ -> Pp.string_of_ppcmds (pp_expr state env head)
             in
-            match record_field_lowering_rule_of_source_name head_name with
+            match record_field_lowering_rule_of_source_name state head_name with
             | Some rule ->
                 rendered_record_field_rule_app state env rule [self_arg]
             | None -> None)
@@ -2551,7 +2585,7 @@ and pp_expr state env expr =
       str (string_of_int (Option.get (std_byte_constructor_value r)))
   | MLcons (_, r, args) ->
       let cons_name = str_cons state r in
-      if is_coinductive (State.get_table state) r then
+      if is_coinductive (PrinterState.get_table state) r then
         (* Coinductive values stay lazy via a packet wrapper.  The wrapper is
            callable for one-step forcing, and stream-shaped packets also expose
            [__iter__] so finite consumers can use [itertools.islice]. *)
@@ -2579,7 +2613,7 @@ and pp_expr state env expr =
               prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
               str ")" )
       else
-        let fds = get_record_fields (State.get_table state) r in
+        let fds = get_record_fields (PrinterState.get_table state) r in
         if not (List.is_empty fds) then
           (match record_replace_expr_parts state r args with
            | Some (base, changes) ->
@@ -3221,7 +3255,7 @@ let rec pp_statement_expr state env indent = function
           pp_statement_expr state env (indent + 4) right ]
   | MLcons (_, r, [((MLcons (_, head_r, _) as head)); tail])
     when is_std_list_cons_ref r &&
-         not (List.is_empty (get_record_fields (State.get_table state) head_r)) &&
+         not (List.is_empty (get_record_fields (PrinterState.get_table state) head_r)) &&
          not (is_std_Q_make_ref head_r) ->
       pp_py_rendered
         (py_infix "+"
@@ -3234,7 +3268,7 @@ let rec pp_statement_expr state env indent = function
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
-         not (List.is_empty (get_record_fields (State.get_table state) r)) ->
+         not (List.is_empty (get_record_fields (PrinterState.get_table state) r)) ->
       (match record_replace_expr_parts state r args with
        | Some (base, changes) ->
            pp_multiline_items indent (str "replace")
@@ -3246,7 +3280,7 @@ let rec pp_statement_expr state env indent = function
                 changes)
        | None ->
            let cons_name = str_cons state r in
-           let fds = get_record_fields (State.get_table state) r in
+           let fds = get_record_fields (PrinterState.get_table state) r in
            pp_multiline_items indent (str cons_name)
              (List.mapi
                 (fun i a ->
@@ -3256,7 +3290,7 @@ let rec pp_statement_expr state env indent = function
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
-         List.is_empty (get_record_fields (State.get_table state) r) &&
+         List.is_empty (get_record_fields (PrinterState.get_table state) r) &&
          not (is_std_list_cons_ref r) &&
          not (is_std_ascii_cons_ref r) &&
          List.length args >= 2 ->
@@ -4649,7 +4683,7 @@ let pp_io_term_decl state env name a typ ret_typ =
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
 
 let pp_top_level_record_value state env name typ r args =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
   let pp_field_arg (index, value) =
     str "    " ++ pp_field_name state r fields index ++ str "=" ++ pp_expr state env value
   in
@@ -4663,7 +4697,7 @@ let pp_top_level_record_value state env name typ r args =
   str ")" ++ fnl ()
 
 let uses_native_record_constructor state r =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
   not (List.is_empty fields) && not (is_std_Q_make_ref r)
 
 let pp_term_decl state env name a typ =
@@ -5364,11 +5398,11 @@ let pp_decl state decl =
   pp_classified_decl state (classify_decl state decl)
 
 (*s Module structure walker.
-    [State.with_visibility] must be called around each module so that
+    [PrinterState.with_visibility] must be called around each module so that
     [pp_global] can resolve names relative to the current module path. *)
 
 let module_binding_name state l =
-  pp_module state (MPdot (State.get_top_visible_mp state, l))
+  pp_module state (MPdot (PrinterState.get_top_visible_mp state, l))
 
 let rec module_type_annotation state = function
   | MTident mp ->
@@ -5436,7 +5470,7 @@ let pp_protocol_decl_from_sig state name msig =
 
 let rec pp_named_module_type_decl state name = function
   | MTsig (mp, msig) ->
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         pp_protocol_decl_from_sig state name msig)
   | MTident mp ->
       str name ++ str " = " ++ str (pp_module state mp) ++ fnl () ++ fnl ()
@@ -5451,7 +5485,7 @@ let rec ensure_module_type_name state fallback = function
   | MTident mp ->
       mt (), pp_module state mp
   | MTsig (mp, msig) ->
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         pp_protocol_decl_from_sig state fallback msig), fallback
   | MTwith (mt, _) ->
       ensure_module_type_name state fallback mt
@@ -5468,7 +5502,7 @@ let rec pp_module_expr_value state indent local_name = function
       str (indent_string indent) ++ str local_name ++ str " = " ++ str (pp_module state mp) ++ fnl ()
   | MEstruct (mp, sel) ->
       str (indent_string indent) ++ str local_name ++ str ": Any = __ModuleNamespace()" ++ fnl () ++
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         prlist (pp_module_structure_elem_into state (indent + 0) local_name) sel)
   | MEapply (me, me_arg) ->
       let pp_fun, fun_name = pp_module_expr_callable state indent (local_name ^ "_fun") me in
@@ -5482,7 +5516,7 @@ let rec pp_module_expr_value state indent local_name = function
       let ret_pp, ret_annot =
         ensure_module_type_name state ret_name (mtyp_of_mexpr me)
       in
-      let nested_state = State.with_visibility state (State.get_top_visible_mp state) [mbid] Fun.id in
+      let nested_state = PrinterState.with_visibility state (PrinterState.get_top_visible_mp state) [mbid] Fun.id in
       pp_arg_mt ++ ret_pp ++
       str (indent_string indent) ++ str "def " ++ str local_name ++ str "(" ++
       str param_name ++ str ": " ++ str arg_annot ++ str ") -> " ++ str ret_annot ++ str ":" ++ fnl () ++
@@ -5506,7 +5540,7 @@ and pp_module_expr_arg state indent local_name = function
 and pp_module_expr_return state indent local_name = function
   | MEstruct (mp, sel) ->
       str (indent_string indent) ++ str local_name ++ str ": Any = __ModuleNamespace()" ++ fnl () ++
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         prlist (pp_module_structure_elem_into state indent local_name) sel)
   | me ->
       pp_module_expr_value state indent local_name me
@@ -5541,7 +5575,7 @@ and pp_named_module_binding state indent name m =
       str (indent_string indent) ++ str "def __" ++ str name ++ str "_impl(" ++
       str param_name ++ str ": " ++ str arg_annot ++ str ") -> " ++ str ret_annot ++ str ":" ++ fnl () ++
       pp_module_expr_return
-        (State.with_visibility state (State.get_top_visible_mp state) [mbid] Fun.id)
+        (PrinterState.with_visibility state (PrinterState.get_top_visible_mp state) [mbid] Fun.id)
         (indent + 4) "__result" body ++
       str (indent_string (indent + 4)) ++ str "return cast(" ++ str ret_annot ++ str ", __result)" ++ fnl () ++
       str (indent_string indent) ++ str "__" ++ str name ++ str "_cache: dict[int, " ++ str ret_annot ++ str "] = {}" ++ fnl () ++
@@ -5631,7 +5665,7 @@ let pp_structure_sel state sel =
               methods)
   in
   let prior_lowering_environment =
-    install_active_lowering_environment_extension ~method_targets
+    install_lowering_environment_extension state ~method_targets
       ~record_field_targets
   in
   let rendered =
@@ -5669,15 +5703,15 @@ let pp_structure_sel state sel =
           pp_named_module_type_decl state name mt)
     sel
   in
-  active_lowering_environment :=
-    { !active_lowering_environment with
+  state.lowering_environment :=
+    { !(state.lowering_environment) with
       lowering_method_targets =
         prior_lowering_environment.lowering_method_targets };
   rendered
 
 let pp_struct state struc =
   let pp_mod (mp, sel) =
-    State.with_visibility state mp [] (fun state ->
+    PrinterState.with_visibility state mp [] (fun state ->
       pp_structure_sel state sel)
   in
   prlist pp_mod struc
@@ -5695,9 +5729,11 @@ let python_descr : Common.State.t language_descr = {
   file_suffix    = ".py";
   file_naming;
   preamble;
-  pp_struct;
+  pp_struct = (fun state struc ->
+    pp_struct (initial_printer_state state) struc);
   sig_suffix     = None;
   sig_preamble;
   pp_sig;
-  pp_decl;
+  pp_decl = (fun state decl ->
+    pp_decl (initial_printer_state state) decl);
 }
