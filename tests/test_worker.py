@@ -8637,7 +8637,12 @@ class TestExecuteTask:
             patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_complete.assert_called_once_with(task["id"], gh)
+        mock_complete.assert_called_once_with(
+            task["id"],
+            gh,
+            collaborators=frozenset({"owner"}),
+            allowed_bots=frozenset(),
+        )
 
     def test_skips_complete_when_push_fails(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -8705,7 +8710,12 @@ class TestExecuteTask:
             patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_complete.assert_called_once_with(task["id"], gh)
+        mock_complete.assert_called_once_with(
+            task["id"],
+            gh,
+            collaborators=frozenset({"owner"}),
+            allowed_bots=frozenset(),
+        )
 
     def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -8960,7 +8970,12 @@ class TestExecuteTask:
         )
         mock_squash.assert_not_called()
         mock_push.assert_not_called()
-        mock_complete.assert_called_once_with(task["id"], worker.gh)
+        mock_complete.assert_called_once_with(
+            task["id"],
+            worker.gh,
+            collaborators=frozenset({"owner"}),
+            allowed_bots=frozenset(),
+        )
         assert "current_task_id" not in State(fido_dir).load()
         mock_sync.assert_any_call(tmp_path, gh, blocking=True)
 
@@ -9340,27 +9355,18 @@ class TestExecuteTask:
         thread = {"repo": "owner/repo", "pr": 5, "comment_id": 42}
         Tasks(tmp_path).add("Fix the review comment", TaskType.THREAD, thread=thread)
 
-        # Set up gh to confirm fido posted the last reply on the thread.
+        # Set up gh to confirm fido posted the last modeled reply on the thread.
         gh.get_user.return_value = "fido-bot"
-        gh.get_pull_comments.return_value = [
-            {
-                "id": 42,
-                "in_reply_to_id": None,
-                "user": {"login": "reviewer"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-            {
-                "id": 99,
-                "in_reply_to_id": 42,
-                "user": {"login": "fido-bot"},
-                "created_at": "2024-01-02T00:00:00Z",
-            },
-        ]
         gh.get_review_threads.return_value = [
             {
                 "id": "thread-node-xyz",
                 "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "owner"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
             }
         ]
 

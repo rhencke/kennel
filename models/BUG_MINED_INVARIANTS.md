@@ -269,8 +269,21 @@ resolved via `resolveReviewThread` — not just replied to.
 
 **Bugs.** #961 (open — fido replies "done" but doesn't resolve thread).
 
-**Status.** Likely a sub-invariant of **D13 (#751) — model thread
-auto-resolve with race coverage**.
+**Status.** Covered by **D13 (#751) — model thread auto-resolve with
+race coverage**. The Rocq model is the oracle for today's
+`Tasks.complete_with_resolve`, `Worker.resolve_addressed_threads`, and
+resolved-thread duplicate suppression paths: Python projects GitHub
+thread state plus durable task rows into the model, then only emits
+`resolveReviewThread` when the oracle returns `ResolveReviewThread`.
+Resolved-thread webhook comments are admitted only when the modeled
+queue decision says the latest actionable input is fresh.
+
+**E1 flip point.** When the scheduler/reducer boundary becomes
+authoritative, D13 should stop being a side oracle around Python
+resolution checks. The reducer should commit the task/feedback command
+state first, then return a resolve-thread outbox effect only when the
+same transition proves no pending same-thread work remains and the latest
+actionable comment is Fido's.
 
 ---
 

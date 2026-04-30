@@ -22,6 +22,8 @@ from fido.events import (
     _task_snapshot,
     _triage,
     _try_resolve_thread,
+    bot_feedback_creates_tasks,
+    bot_feedback_resolves_thread,
     create_task,
     dispatch,
     launch_sync,
@@ -1523,7 +1525,7 @@ class TestTriage:
         assert titles == ["add result caching"]
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
-        """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
+        """Ensure bot-specific categories (DO/DUMP) are used when is_bot=True."""
         captured = {}
 
         def fake_pp(prompt, model, **kwargs):
@@ -1535,6 +1537,8 @@ class TestTriage:
         )
         assert cat == "DO"
         assert "DO" in captured["prompt"]
+        assert "DEFER" not in captured["prompt"]
+        assert "DUMP" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
 
     def test_requires_agent(self) -> None:
@@ -1810,6 +1814,25 @@ class TestReplyToComment:
     ) -> None:
         assert review_outcome_creates_tasks(category) is creates_tasks
         assert review_outcome_resolves_thread(category) is resolves_thread
+
+    @pytest.mark.parametrize(
+        ("category", "creates_tasks", "resolves_thread"),
+        [
+            ("DO", True, False),
+            ("DUMP", False, True),
+            ("DEFER", False, False),
+        ],
+    )
+    def test_bot_feedback_outcome_helpers(
+        self,
+        category: str,
+        creates_tasks: bool,
+        resolves_thread: bool,
+    ) -> None:
+        assert bot_feedback_creates_tasks(category) is creates_tasks
+        assert bot_feedback_resolves_thread(category) is resolves_thread
+        assert review_outcome_creates_tasks(category, is_bot=True) is creates_tasks
+        assert review_outcome_resolves_thread(category, is_bot=True) is resolves_thread
 
     def test_review_outcome_helpers_return_false_for_unknown_category(self) -> None:
         assert review_outcome_creates_tasks("UNKNOWN") is False
@@ -2971,6 +2994,92 @@ class TestCreateTask:
         )
         assert result["status"] == "pending"
 
+    def test_skips_resolved_thread_when_comment_is_stale_human_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """An older human comment on a resolved thread is stale duplicate work."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 1000}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.return_value = True
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 1000, "author": "owner", "body": "original"},
+            {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
+            {"id": 1002, "author": "owner", "body": "new follow-up"},
+        ]
+        with patch("fido.events.launch_sync"):
+            result = create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_not_called()
+        assert result["status"] == "skipped_resolved"
+
+    def test_queues_resolved_thread_when_comment_is_fresh_bot_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """A latest bot reply is fresh work, but it is modeled separately."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 1002}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.return_value = True
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 1000, "author": "owner", "body": "original"},
+            {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
+            {"id": 1002, "author": "copilot[bot]", "body": "suggestion"},
+        ]
+        with patch("fido.events.launch_sync"):
+            result = create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_called_once_with(
+            title="do something", task_type=ANY, thread=thread
+        )
+        assert result["status"] == "pending"
+
+    def test_skips_resolved_thread_when_comment_is_ignored_outsider(
+        self, tmp_path: Path
+    ) -> None:
+        """A latest outsider reply is ignored for now and does not queue work."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 1002}
+        mock_tasks = self._mock_tasks()
+        mock_gh = MagicMock()
+        mock_gh.is_thread_resolved_for_comment.return_value = True
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 1000, "author": "owner", "body": "original"},
+            {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
+            {"id": 1002, "author": "drive-by", "body": "noise"},
+        ]
+        with patch("fido.events.launch_sync"):
+            result = create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
+        mock_tasks.add.assert_not_called()
+        assert result["status"] == "skipped_resolved"
+
     def test_queues_when_thread_resolved_check_raises(self, tmp_path: Path) -> None:
         """If the GitHub thread-resolved check fails, fail open and queue
         the task — better to dedup later than drop work."""
@@ -3030,6 +3139,45 @@ class TestCreateTask:
             )
             == 1
         )
+
+    def test_queue_reply_tasks_uses_bot_do_dump_oracle(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        create_task_fn = MagicMock(
+            return_value={"title": "take it", "status": "pending"}
+        )
+
+        assert (
+            queue_reply_tasks(
+                "DO",
+                ["take it"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                is_bot=True,
+                create_task_fn=create_task_fn,
+            )
+            == 1
+        )
+        create_task_fn.assert_called_once()
+        create_task_fn.reset_mock()
+
+        assert (
+            queue_reply_tasks(
+                "DUMP",
+                ["skip it"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                is_bot=True,
+                create_task_fn=create_task_fn,
+            )
+            == 0
+        )
+        create_task_fn.assert_not_called()
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)

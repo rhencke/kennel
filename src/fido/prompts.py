@@ -53,9 +53,8 @@ def triage_categories(is_bot: bool) -> str:
     """Return the category list string for a triage prompt."""
     if is_bot:
         return (
-            "DO (worth implementing now or later in this repo), "
-            "DEFER (out of scope — file a separate issue), "
-            "DUMP (not applicable)"
+            "DO (take the bot suggestion with a reply saying so), "
+            "DUMP (decline the suggestion with a reason and consider it closed)"
         )
     return (
         "ACT (code change needed on this PR), "

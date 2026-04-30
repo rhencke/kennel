@@ -14,6 +14,7 @@
   replied_comment_claims
   task_queue_rescope
   ci_task_lifecycle
+  thread_auto_resolve
   pr_body_task_store
   session_ownership_fifo
   worker_claude_lifecycle

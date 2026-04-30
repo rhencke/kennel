@@ -26,7 +26,7 @@ class TestTriageCategories:
     def test_bot_categories(self) -> None:
         result = triage_categories(is_bot=True)
         assert "DO" in result
-        assert "DEFER" in result
+        assert "DEFER" not in result
         assert "DUMP" in result
         assert "TASK" not in result
         assert "ACT" not in result

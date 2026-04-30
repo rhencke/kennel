@@ -7,6 +7,7 @@ import pytest
 from fido.claude import ClaudeClient
 from fido.prompts import Prompts
 from fido.rocq import pr_body_task_store as oracle
+from fido.rocq import thread_auto_resolve as thread_oracle
 from fido.tasks import (
     Tasks,
     _apply_reorder,
@@ -31,6 +32,7 @@ from fido.tasks import (
     list_tasks,
     remove_task,
     reorder_tasks,
+    review_thread_for_auto_resolve_oracle,
     unblock_tasks,
     update_task,
 )
@@ -51,6 +53,39 @@ def _task_file(tmp_path: Path) -> Path:
     git_dir = tmp_path / ".git" / "fido"
     git_dir.mkdir(parents=True)
     return git_dir / "tasks.json"
+
+
+class TestThreadAutoResolveOracleAdapter:
+    def test_maps_thread_comment_actor_classes(self) -> None:
+        thread = review_thread_for_auto_resolve_oracle(
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 1, "author": {"login": "fido-bot"}},
+                        {"databaseId": 2, "author": {"login": "owner"}},
+                        {"databaseId": 3, "author": {"login": "collab"}},
+                        {"databaseId": 4, "author": {"login": "ci-helper"}},
+                        {"databaseId": 5, "author": {"login": "copilot[bot]"}},
+                        {"databaseId": 6, "author": {"login": "drive-by"}},
+                    ]
+                },
+            },
+            "fido-bot",
+            owner="owner",
+            collaborators=frozenset({"collab"}),
+            allowed_bots=frozenset({"ci-helper"}),
+        )
+
+        authors = [
+            comment.thread_comment_author for comment in thread.review_thread_comments
+        ]
+        assert isinstance(authors[0], thread_oracle.CommentByFido)
+        assert isinstance(authors[1], thread_oracle.CommentByActionable)
+        assert isinstance(authors[2], thread_oracle.CommentByActionable)
+        assert isinstance(authors[3], thread_oracle.CommentByBot)
+        assert isinstance(authors[4], thread_oracle.CommentByBot)
+        assert isinstance(authors[5], thread_oracle.CommentIgnored)
 
 
 class TestTaskStoreOracleAdapter:
@@ -1565,25 +1600,16 @@ class TestTasksCompleteWithResolve:
 
         gh = MagicMock()
         gh.get_user.return_value = "fido-bot"
-        gh.get_pull_comments.return_value = [
-            {
-                "id": 42,
-                "in_reply_to_id": None,
-                "user": {"login": "reviewer"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-            {
-                "id": 99,
-                "in_reply_to_id": 42,
-                "user": {"login": "fido-bot"},
-                "created_at": "2024-01-02T00:00:00Z",
-            },
-        ]
         gh.get_review_threads.return_value = [
             {
                 "id": "thread_node_abc",
                 "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "a"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
             }
         ]
 
@@ -1604,19 +1630,17 @@ class TestTasksCompleteWithResolve:
 
         gh = MagicMock()
         gh.get_user.return_value = "fido-bot"
-        gh.get_pull_comments.return_value = [
+        gh.get_review_threads.return_value = [
             {
-                "id": 42,
-                "in_reply_to_id": None,
-                "user": {"login": "fido-bot"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-            {
-                "id": 99,
-                "in_reply_to_id": 42,
-                "user": {"login": "reviewer"},
-                "created_at": "2024-01-02T00:00:00Z",
-            },
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "fido-bot"}},
+                        {"databaseId": 99, "author": {"login": "a"}},
+                    ]
+                },
+            }
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
@@ -1632,11 +1656,38 @@ class TestTasksCompleteWithResolve:
 
         gh = MagicMock()
         gh.get_user.return_value = "fido-bot"
-        gh.get_pull_comments.return_value = []
+        gh.get_review_threads.return_value = []
 
         Tasks(work_dir).complete_with_resolve(task["id"], gh)
 
         gh.resolve_thread.assert_not_called()
+
+    def test_resolves_thread_when_ignored_outsider_replied_after_us(
+        self, tmp_path: Path
+    ) -> None:
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "a"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                        {"databaseId": 100, "author": {"login": "drive-by"}},
+                    ]
+                },
+            }
+        ]
+
+        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_called_once_with("thread_node_abc")
 
     def test_skips_resolve_when_thread_already_resolved(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
@@ -1645,25 +1696,56 @@ class TestTasksCompleteWithResolve:
 
         gh = MagicMock()
         gh.get_user.return_value = "fido-bot"
-        gh.get_pull_comments.return_value = [
-            {
-                "id": 42,
-                "in_reply_to_id": None,
-                "user": {"login": "fido-bot"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-        ]
         gh.get_review_threads.return_value = [
             {
                 "id": "thread_node_abc",
                 "isResolved": True,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [{"databaseId": 42, "author": {"login": "fido-bot"}}]
+                },
             }
         ]
 
         Tasks(work_dir).complete_with_resolve(task["id"], gh)
 
         gh.resolve_thread.assert_not_called()
+
+    def test_skips_resolve_when_pending_sibling_task_remains(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        work_dir = self._work_dir(tmp_path)
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        task = add_task(work_dir, "threaded task", TaskType.THREAD, thread=thread)
+        add_task(
+            work_dir,
+            "pending sibling",
+            TaskType.THREAD,
+            thread={"repo": "a/b", "pr": 1, "comment_id": 77},
+        )
+
+        gh = MagicMock()
+        gh.get_user.return_value = "fido-bot"
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "a"}},
+                        {"databaseId": 77, "author": {"login": "a"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ]
+                },
+            }
+        ]
+
+        with caplog.at_level(logging.INFO, logger="fido"):
+            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+
+        gh.resolve_thread.assert_not_called()
+        assert "pending same-thread work" in caplog.text
 
     def test_exception_silenced_and_logged(self, tmp_path: Path, caplog) -> None:
         import logging

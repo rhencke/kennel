@@ -1003,7 +1003,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
                 # ACT, DO → add each task title to work queue.
                 if category is not None:
-                    if reply_outcome_creates_tasks(category, thread=action.reply_to):
+                    if reply_outcome_creates_tasks(
+                        category,
+                        thread=action.reply_to,
+                        is_bot=action.is_bot,
+                    ):
                         activity.set_description(
                             "queuing review comment tasks"
                             if len(titles or []) != 1
@@ -1016,6 +1020,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         repo_cfg,
                         gh,
                         thread=action.reply_to,
+                        is_bot=action.is_bot,
                         registry=self.registry,
                         create_task_fn=type(self)._fn_create_task,
                     )
@@ -1042,7 +1047,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     self._ack_reply(repo_cfg, promise)
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
-                if reply_outcome_creates_tasks(category or "", thread=action.thread):
+                if reply_outcome_creates_tasks(
+                    category or "",
+                    thread=action.thread,
+                    is_bot=action.is_bot,
+                ):
                     activity.set_description(
                         "queuing PR comment tasks"
                         if len(titles) != 1
@@ -1055,6 +1064,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     repo_cfg,
                     gh,
                     thread=action.thread,
+                    is_bot=action.is_bot,
                     registry=self.registry,
                     create_task_fn=type(self)._fn_create_task,
                 )

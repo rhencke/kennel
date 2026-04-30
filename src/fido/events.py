@@ -20,16 +20,17 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
+from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
 from fido.rocq import webhook_ingress_dedupe as ingress_fsm
 from fido.state import State
 from fido.store import FidoStore, append_reply_promise_markers
-from fido.tasks import Tasks
+from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import TaskType
 
 log = logging.getLogger(__name__)
 
-_FIDO_LOGINS = {"fidocancode", "fido-can-code"}
+_FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
 
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
@@ -334,15 +335,50 @@ def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
     }[category]
 
 
-def review_outcome_creates_tasks(category: str) -> bool:
+def _bot_feedback_outcome(
+    category: str,
+) -> thread_resolve_oracle.BotFeedbackOutcome | None:
+    return {
+        "DO": thread_resolve_oracle.BotFeedbackDo(),
+        "DUMP": thread_resolve_oracle.BotFeedbackDump(),
+    }.get(category)
+
+
+def bot_feedback_creates_tasks(category: str) -> bool:
+    """Return whether a bot feedback outcome should create task objects."""
+    outcome = _bot_feedback_outcome(category)
+    if outcome is None:
+        return False
+    return isinstance(
+        thread_resolve_oracle.bot_feedback_decision(outcome),
+        thread_resolve_oracle.TakeBotSuggestion,
+    )
+
+
+def bot_feedback_resolves_thread(category: str) -> bool:
+    """Return whether a bot feedback outcome should resolve the thread."""
+    outcome = _bot_feedback_outcome(category)
+    if outcome is None:
+        return False
+    return isinstance(
+        thread_resolve_oracle.bot_feedback_decision(outcome),
+        thread_resolve_oracle.DumpBotSuggestionAndClose,
+    )
+
+
+def review_outcome_creates_tasks(category: str, *, is_bot: bool = False) -> bool:
     """Return whether a review reply outcome should create task objects."""
+    if is_bot:
+        return bot_feedback_creates_tasks(category)
     if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
         return False
     return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
 
 
-def review_outcome_resolves_thread(category: str) -> bool:
+def review_outcome_resolves_thread(category: str, *, is_bot: bool = False) -> bool:
     """Return whether a review reply outcome should resolve the thread."""
+    if is_bot:
+        return bot_feedback_resolves_thread(category)
     if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
         return False
     return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
@@ -352,10 +388,11 @@ def reply_outcome_creates_tasks(
     category: str,
     *,
     thread: dict[str, Any] | None,
+    is_bot: bool = False,
 ) -> bool:
     """Return whether a reply outcome should create task objects."""
     if thread is not None:
-        return review_outcome_creates_tasks(category)
+        return review_outcome_creates_tasks(category, is_bot=is_bot)
     return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
 
 
@@ -367,6 +404,7 @@ def queue_reply_tasks(
     gh: GitHub,
     *,
     thread: dict[str, Any] | None,
+    is_bot: bool = False,
     registry: Any = None,
     create_task_fn: Callable[..., object] | None = None,
 ) -> int:
@@ -374,7 +412,7 @@ def queue_reply_tasks(
 
     Returns the number of created task objects.
     """
-    if not reply_outcome_creates_tasks(category, thread=thread):
+    if not reply_outcome_creates_tasks(category, thread=thread, is_bot=is_bot):
         return 0
     task_fn = create_task if create_task_fn is None else create_task_fn
     created = 0
@@ -1082,7 +1120,9 @@ def reply_to_comment(
         prompts=prompts,
     )
 
-    if review_outcome_resolves_thread(category) and info.get("comment_id"):
+    if review_outcome_resolves_thread(category, is_bot=action.is_bot) and info.get(
+        "comment_id"
+    ):
         _try_resolve_thread(info, gh)
 
     return (category, titles)
@@ -1934,7 +1974,28 @@ def _reorder_tasks_background(
         raise
 
 
-def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
+def _resolved_thread_comment_author_for_oracle(
+    login: str,
+    owner: str,
+    collaborators: frozenset[str],
+    allowed_bots: frozenset[str],
+) -> thread_resolve_oracle.ThreadCommentAuthor:
+    return thread_comment_author_for_auto_resolve_oracle(
+        login,
+        fido_logins=_FIDO_LOGINS,
+        owner=owner,
+        collaborators=collaborators,
+        allowed_bots=allowed_bots,
+    )
+
+
+def _thread_task_is_stale_resolved(
+    gh: GitHub,
+    thread: dict[str, Any],
+    *,
+    collaborators: frozenset[str] = frozenset(),
+    allowed_bots: frozenset[str] = frozenset(),
+) -> bool:
     """Return whether a resolved-thread task request is stale duplicate work.
 
     Resolved-thread suppression exists for late handlers racing with Fido's
@@ -1945,16 +2006,30 @@ def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
     comment_id = thread.get("comment_id")
     if comment_id is None:
         return True
+    owner, _repo_name = str(thread["repo"]).split("/", 1)
     comments = gh.fetch_comment_thread(thread["repo"], thread["pr"], int(comment_id))
     if not comments:
         return True
-    latest_human_id: int | None = None
-    for comment in comments:
-        author = str(comment.get("author", "")).lower()
-        if author in _FIDO_LOGINS:
-            continue
-        latest_human_id = int(comment["id"])
-    return latest_human_id != int(comment_id)
+    oracle_comments = [
+        thread_resolve_oracle.ThreadComment(
+            thread_comment_id=int(comment["id"]),
+            thread_comment_author=_resolved_thread_comment_author_for_oracle(
+                str(comment.get("author", "")),
+                owner,
+                collaborators,
+                allowed_bots,
+            ),
+        )
+        for comment in comments
+    ]
+    decision = thread_resolve_oracle.resolved_thread_queue_decision(
+        thread_resolve_oracle.ReviewThread(
+            review_thread_resolved=True,
+            review_thread_comments=oracle_comments,
+        ),
+        int(comment_id),
+    )
+    return isinstance(decision, thread_resolve_oracle.DismissStaleResolvedThread)
 
 
 def create_task(
@@ -2009,7 +2084,12 @@ def create_task(
         # return another MagicMock — truthy by default) don't cause this
         # guard to swallow every test-level task creation.  Real GitHub
         # always returns a real bool from ``is_thread_resolved_for_comment``.
-        if already is True and _thread_task_is_stale_resolved(gh, thread):
+        if already is True and _thread_task_is_stale_resolved(
+            gh,
+            thread,
+            collaborators=repo_cfg.membership.collaborators,
+            allowed_bots=config.allowed_bots,
+        ):
             log.info(
                 "create_task: thread for comment %s already resolved on GitHub — "
                 "skipping queue (closes #520)",

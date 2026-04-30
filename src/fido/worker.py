@@ -37,6 +37,7 @@ from fido.provider import (
 )
 from fido.provider_factory import DefaultProviderFactory
 from fido.rocq import ci_task_lifecycle as ci_oracle
+from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -2084,24 +2085,32 @@ class Worker:
         nodes = self.gh.get_review_threads(
             repo_ctx.owner, repo_ctx.repo_name, pr_number
         )
+        pending_tasks = tasks.thread_tasks_for_auto_resolve_oracle(self._tasks.list())
+        config = self._config
+        allowed_bots = config.allowed_bots if config is not None else frozenset()
         resolved_any = False
         for node in nodes:
-            if node["isResolved"]:
-                continue
-            comments = node["comments"]["nodes"]
-            if not comments:
-                continue
-            last_author = (comments[-1].get("author") or {}).get("login", "")
-            if last_author != repo_ctx.gh_user:
-                continue
-            comment_ids = [
-                c.get("databaseId") for c in comments if c.get("databaseId") is not None
-            ]
-            if any(self._tasks.has_pending_for_comment(cid) for cid in comment_ids):
-                log.info(
-                    "skipping resolve for thread %s — pending sibling tasks remain",
-                    node["id"],
-                )
+            review_thread = tasks.review_thread_for_auto_resolve_oracle(
+                node,
+                repo_ctx.gh_user,
+                owner=repo_ctx.owner,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
+            )
+            decision = thread_resolve_oracle.resolution_decision(
+                review_thread,
+                pending_tasks,
+            )
+            if not isinstance(decision, thread_resolve_oracle.ResolveReviewThread):
+                if (
+                    not review_thread.review_thread_resolved
+                    and thread_resolve_oracle.latest_comment_is_fido(review_thread)
+                ):
+                    log.info(
+                        "skipping resolve for thread %s — pending same-thread work "
+                        "remains",
+                        node["id"],
+                    )
                 continue
             thread_id = node["id"]
             self.gh.resolve_thread(thread_id)
@@ -2214,6 +2223,7 @@ class Worker:
                 repo_cfg,
                 self.gh,
                 thread=action.reply_to,
+                is_bot=action.is_bot,
                 registry=self._registry,
             )
         log.info("threads done")
@@ -2692,7 +2702,14 @@ class Worker:
             self._yield_for_untriaged()
 
         if completed_without_commit:
-            self._tasks.complete_with_resolve(task["id"], self.gh)
+            config = self._config
+            allowed_bots = config.allowed_bots if config is not None else frozenset()
+            self._tasks.complete_with_resolve(
+                task["id"],
+                self.gh,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
+            )
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
@@ -2704,7 +2721,14 @@ class Worker:
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            self._tasks.complete_with_resolve(task["id"], self.gh)
+            config = self._config
+            allowed_bots = config.allowed_bots if config is not None else frozenset()
+            self._tasks.complete_with_resolve(
+                task["id"],
+                self.gh,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
+            )
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
