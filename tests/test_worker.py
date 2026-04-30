@@ -45,6 +45,7 @@ from fido.worker import (
     RepoContextFilter,
     RepoNameFilter,
     WorkerContext,
+    _assert_ci_failure_matches_oracle,
     _is_leaked_task_comment,
     _node_to_dict,
     _pick_next_task,
@@ -6103,6 +6104,40 @@ class TestHandleCi:
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
+
+    def test_ci_failure_runs_lifecycle_oracle(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": "runs/99"},
+        ]
+        gh.get_run_log.return_value = "line1\nline2"
+        gh.get_review_threads.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker._assert_ci_failure_matches_oracle") as mock_oracle,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        mock_oracle.assert_called_once_with([], "test", "FAILURE", "99")
+
+    def test_ci_failure_oracle_accepts_current_task_queue(self) -> None:
+        _assert_ci_failure_matches_oracle(
+            [
+                {
+                    "title": "Implement feature",
+                    "description": "",
+                    "status": "pending",
+                    "type": "spec",
+                }
+            ],
+            "ci / test",
+            "FAILURE",
+            "99",
+        )
 
     def test_returns_true_on_error_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

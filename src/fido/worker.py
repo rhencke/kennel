@@ -1,13 +1,14 @@
 """Fido worker — runs one iteration of the work loop for a single repo."""
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from fido.provider import (
     set_thread_repo,
 )
 from fido.provider_factory import DefaultProviderFactory
+from fido.rocq import ci_task_lifecycle as ci_oracle
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -708,6 +710,102 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
         if t.get("type") == TaskType.CI:
             return t
     return eligible[0]
+
+
+def _ci_oracle_task_kind(task: Mapping[str, object]) -> ci_oracle.TaskKind:
+    title = task.get("title", "")
+    title_upper = title.upper() if isinstance(title, str) else ""
+    if title_upper.startswith("ASK:"):
+        return ci_oracle.TaskAsk()
+    if title_upper.startswith("DEFER:"):
+        return ci_oracle.TaskDefer()
+    if title_upper.startswith("CI FAILURE:") or task.get("type") == TaskType.CI:
+        return ci_oracle.TaskCI()
+    if task.get("type") == TaskType.THREAD:
+        return ci_oracle.TaskThread()
+    return ci_oracle.TaskSpec()
+
+
+def _ci_oracle_task_status(task: Mapping[str, object]) -> ci_oracle.TaskStatus:
+    match task.get("status", TaskStatus.PENDING):
+        case TaskStatus.COMPLETED | "completed":
+            return ci_oracle.StatusCompleted()
+        case TaskStatus.BLOCKED | "blocked":
+            return ci_oracle.StatusBlocked()
+        case _:
+            return ci_oracle.StatusPending()
+
+
+def _ci_oracle_task_rows(
+    task_list: Sequence[Mapping[str, object]],
+) -> tuple[list[int], dict[int, ci_oracle.TaskRow]]:
+    order: list[int] = []
+    rows: dict[int, ci_oracle.TaskRow] = {}
+    for task_id, task in enumerate(task_list, 1):
+        thread = task.get("thread")
+        comment_id = thread.get("comment_id") if isinstance(thread, Mapping) else None
+        title = task.get("title", "")
+        description = task.get("description", "")
+        order.append(task_id)
+        rows[task_id] = ci_oracle.TaskRow(
+            title=title if isinstance(title, str) else "",
+            description=description if isinstance(description, str) else "",
+            kind=_ci_oracle_task_kind(task),
+            status=_ci_oracle_task_status(task),
+            source_comment=int(comment_id) if comment_id is not None else None,
+        )
+    return order, rows
+
+
+def _ci_oracle_check_key(check_name: str) -> int:
+    digest = hashlib.blake2s(check_name.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") + 1
+
+
+def _ci_oracle_snapshot(
+    check_name: str,
+    state: str,
+    run_id: str,
+) -> ci_oracle.CIFailureSnapshot:
+    try:
+        run = int(run_id)
+    except ValueError:
+        run = 1
+    if run <= 0:
+        run = 1
+    conclusion: ci_oracle.CIConclusion = ci_oracle.CIConclusionFailure()
+    if state == "TIMED_OUT":
+        conclusion = ci_oracle.CIConclusionTimedOut()
+    return ci_oracle.CIFailureSnapshot(
+        ci_run=run,
+        ci_check_name=check_name,
+        ci_conclusion=conclusion,
+    )
+
+
+def _assert_ci_failure_matches_oracle(
+    task_list: list[dict[str, Any]],
+    check_name: str,
+    state: str,
+    run_id: str,
+) -> None:
+    order, rows = _ci_oracle_task_rows(task_list)
+    new_task = len(order) + 1
+    result, created_task = ci_oracle.record_ci_failure(
+        _ci_oracle_check_key(check_name),
+        _ci_oracle_snapshot(check_name, state, run_id),
+        new_task,
+        {},
+        order,
+        rows,
+    )
+    store_order, next_rows = result
+    _store, next_order = store_order
+    picked = ci_oracle.pick_next_task(next_order, next_rows)
+    if picked != created_task:
+        raise AssertionError(
+            "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
+        )
 
 
 def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
@@ -1873,6 +1971,12 @@ class Worker:
         self.set_status(f"Fixing CI: {check_name} on PR #{pr_number}")
 
         run_id = self._extract_run_id(failing.get("link", ""))
+        _assert_ci_failure_matches_oracle(
+            self._tasks.list(),
+            check_name,
+            failing.get("state", ""),
+            run_id,
+        )
         if run_id:
             raw_log = self.gh.get_run_log(repo_ctx.repo, run_id)
             lines = raw_log.splitlines()
