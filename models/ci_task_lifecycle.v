@@ -242,7 +242,7 @@ Definition record_ci_resolved
   end.
 
 Python File Extraction ci_task_lifecycle
-  "ci_max_attempts ci_task_title ci_task_row ci_live_task ci_update_latest ci_new_live_row record_ci_failure start_ci_fix ci_attempt_can_retry record_ci_attempt_failed complete_ci_task_if_present record_ci_resolved".
+  "ci_max_attempts ci_task_title ci_task_row ci_live_task ci_update_latest ci_new_live_row record_ci_failure start_ci_fix ci_attempt_can_retry record_ci_attempt_failed complete_ci_task_if_present record_ci_resolved pick_next_task".
 
 (** Concrete witnesses used by the theorems below. *)
 Definition sample_spec_row : TaskRow := {|

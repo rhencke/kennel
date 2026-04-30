@@ -235,6 +235,47 @@ def enqueue_task(
     )
 
 
+def pick_first_ci(
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> int | None:
+    for task in order:
+        __option = rows.get(_rocq_positive_key(task))
+        if __option is None:
+            continue
+        row = __option
+        if task_row_executable(row) and isinstance(row.kind, TaskCI):
+            return task
+        continue
+    return None
+
+
+def pick_first_non_ci(
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> int | None:
+    for task in order:
+        __option = rows.get(_rocq_positive_key(task))
+        if __option is None:
+            continue
+        row = __option
+        if task_row_executable(row) and not isinstance(row.kind, TaskCI):
+            return task
+        continue
+    return None
+
+
+def pick_next_task(
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> int | None:
+    __option = pick_first_ci(order, rows)
+    if __option is None:
+        return pick_first_non_ci(order, rows)
+    task = __option
+    return task
+
+
 def begin_task(
     task: int,
     lease: ExecutionLease | None,
