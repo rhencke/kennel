@@ -4147,6 +4147,34 @@ and pp_return_or_impossible state env indent = function
   | Some (ids, body) -> pp_return_arm state env indent ids [] body
   | None -> pp_impossible_stmt ()
 
+and pp_return_or_fallback state env indent wildcard_arm = function
+  | Some (ids, body) -> pp_return_arm state env indent ids [] body
+  | None -> pp_return_or_impossible state env indent wildcard_arm
+
+and pp_if_followed_return_body indent condition first_body following_body =
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  str "if " ++ condition ++ str ":" ++ fnl () ++
+  str body_pfx ++ first_body ++ fnl () ++
+  str pfx ++ following_body
+
+and pp_bound_if_followed_return_body
+    state env indent binding scrutinee condition first_body following_body =
+  str binding ++ str " = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str (String.make indent ' ') ++
+  pp_if_followed_return_body indent condition first_body following_body
+
+and pp_bound_pair_return_body state env indent binding scrutinee arm wildcard_arm =
+  match arm with
+  | Some (ids, body) ->
+      str binding ++ str " = " ++ pp_expr state env scrutinee ++ fnl () ++
+      str (String.make indent ' ') ++
+      pp_return_arm state env indent ids
+        [str (binding ^ "[0]"); str (binding ^ "[1]")]
+        body
+  | None ->
+      pp_return_or_impossible state env indent wildcard_arm
+
 and pp_std_list_return_body state env indent scrutinee branches =
   let nil_arm = ref None in
   let cons_arm = ref None in
@@ -4159,15 +4187,8 @@ and pp_std_list_return_body state env indent scrutinee branches =
       ]
       branches
   in
-  let pfx = String.make indent ' ' in
-  let body_pfx = String.make (indent + 4) ' ' in
-  let fallback () =
-    pp_return_or_impossible state env (indent + 4) wildcard_arm
-  in
   let pp_nil =
-    match !nil_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> fallback ()
+    pp_return_or_fallback state env (indent + 4) wildcard_arm !nil_arm
   in
   let pp_cons =
     match !cons_arm with
@@ -4178,24 +4199,15 @@ and pp_std_list_return_body state env indent scrutinee branches =
     | None ->
         pp_return_or_impossible state env indent wildcard_arm
   in
-  str "__list = " ++ pp_expr state env scrutinee ++ fnl () ++
-  str pfx ++ str "if __list == []:" ++ fnl () ++
-  str body_pfx ++ pp_nil ++ fnl () ++
-  str pfx ++ pp_cons
+  pp_bound_if_followed_return_body state env indent "__list" scrutinee
+    (str "__list == []") pp_nil pp_cons
 
 and pp_std_option_return_body state env indent scrutinee branches =
   let none_arm, some_arm, wildcard_arm =
     classify_std_option_branches branches
   in
-  let pfx = String.make indent ' ' in
-  let body_pfx = String.make (indent + 4) ' ' in
-  let fallback body_indent =
-    pp_return_or_impossible state env body_indent wildcard_arm
-  in
   let pp_none =
-    match none_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> fallback (indent + 4)
+    pp_return_or_fallback state env (indent + 4) wildcard_arm none_arm
   in
   let pp_some =
     match some_arm with
@@ -4204,10 +4216,8 @@ and pp_std_option_return_body state env indent scrutinee branches =
     | None ->
         pp_return_or_impossible state env indent wildcard_arm
   in
-  str "__option = " ++ pp_expr state env scrutinee ++ fnl () ++
-  str pfx ++ str "if __option is None:" ++ fnl () ++
-  str body_pfx ++ pp_none ++ fnl () ++
-  str pfx ++ pp_some
+  pp_bound_if_followed_return_body state env indent "__option" scrutinee
+    (str "__option is None") pp_none pp_some
 
 and pp_std_bool_return_body state env indent scrutinee branches =
   let true_arm = ref None in
@@ -4221,25 +4231,14 @@ and pp_std_bool_return_body state env indent scrutinee branches =
       ]
       branches
   in
-  let pfx = String.make indent ' ' in
-  let body_pfx = String.make (indent + 4) ' ' in
-  let fallback body_indent =
-    pp_return_or_impossible state env body_indent wildcard_arm
-  in
   let pp_true =
-    match !true_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> fallback (indent + 4)
+    pp_return_or_fallback state env (indent + 4) wildcard_arm !true_arm
   in
   let pp_false =
-    match !false_arm with
-    | Some (ids, body) -> pp_return_arm state env indent ids [] body
-    | None ->
-        pp_return_or_impossible state env indent wildcard_arm
+    pp_return_or_fallback state env indent wildcard_arm !false_arm
   in
-  str "if " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
-  str body_pfx ++ pp_true ++ fnl () ++
-  str pfx ++ pp_false
+  pp_if_followed_return_body indent (pp_expr state env scrutinee)
+    pp_true pp_false
 
 and pp_std_string_return_body state env indent scrutinee branches =
   let empty_arm = ref None in
@@ -4253,15 +4252,8 @@ and pp_std_string_return_body state env indent scrutinee branches =
       ]
       branches
   in
-  let pfx = String.make indent ' ' in
-  let body_pfx = String.make (indent + 4) ' ' in
-  let fallback () =
-    pp_return_or_impossible state env (indent + 4) wildcard_arm
-  in
   let pp_empty =
-    match !empty_arm with
-    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
-    | None -> fallback ()
+    pp_return_or_fallback state env (indent + 4) wildcard_arm !empty_arm
   in
   let pp_cons =
     match !cons_arm with
@@ -4272,10 +4264,8 @@ and pp_std_string_return_body state env indent scrutinee branches =
     | None ->
         pp_return_or_impossible state env indent wildcard_arm
   in
-  str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
-  str pfx ++ str "if __s == \"\":" ++ fnl () ++
-  str body_pfx ++ pp_empty ++ fnl () ++
-  str pfx ++ pp_cons
+  pp_bound_if_followed_return_body state env indent "__s" scrutinee
+    (str "__s == \"\"") pp_empty pp_cons
 
 and pp_std_N_return_body state env indent scrutinee branches =
   let zero_arm = ref None in
@@ -4319,13 +4309,8 @@ and pp_std_prod_return_body state env indent scrutinee branches =
       [(std_constructor is_std_prod_pair_ref, pair_arm)]
       branches
   in
-  match !pair_arm with
-  | Some (ids, body) ->
-      str "__pair = " ++ pp_expr state env scrutinee ++ fnl () ++
-      str (String.make indent ' ') ++
-      pp_return_arm state env indent ids [str "__pair[0]"; str "__pair[1]"] body
-  | None ->
-      pp_return_or_impossible state env indent wildcard_arm
+  pp_bound_pair_return_body state env indent "__pair" scrutinee
+    !pair_arm wildcard_arm
 
 and pp_fix_statement state env indent i ids defs =
   let n = Array.length ids in
