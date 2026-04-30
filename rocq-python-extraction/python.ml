@@ -4440,15 +4440,52 @@ let rec collect_typevars acc = function
 let typevars_of_type typ =
   List.sort_uniq compare (collect_typevars [] typ)
 
+type typevar_variance =
+  | TypevarInvariant
+  | TypevarCovariant
+  | TypevarContravariant
+
+type typevar_decl =
+  { typevar_decl_name : string;
+    typevar_decl_variance : typevar_variance }
+
+let typevar_decl ?(variance=TypevarInvariant) name =
+  { typevar_decl_name = name; typevar_decl_variance = variance }
+
+let dedup_typevar_decls decls =
+  let rec loop seen acc = function
+    | [] -> List.rev acc
+    | decl :: rest ->
+        if List.mem decl.typevar_decl_name seen then loop seen acc rest
+        else loop (decl.typevar_decl_name :: seen) (decl :: acc) rest
+  in
+  loop [] [] decls
+
+let pp_typevar_variance = function
+  | TypevarInvariant -> mt ()
+  | TypevarCovariant -> str ", covariant=True"
+  | TypevarContravariant -> str ", contravariant=True"
+
+let pp_typevar_decl decl =
+  let tv = decl.typevar_decl_name in
+  str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\"" ++
+  pp_typevar_variance decl.typevar_decl_variance ++ str ")" ++ fnl ()
+
+let rec pp_blank_lines = function
+  | n when n <= 0 -> mt ()
+  | n -> fnl () ++ pp_blank_lines (n - 1)
+
+let pp_typevar_decl_block ?(leading_blank=false) ?(trailing_blank_lines=0) decls =
+  match dedup_typevar_decls decls with
+  | [] -> mt ()
+  | decls ->
+      (if leading_blank then fnl () else mt ()) ++
+      prlist_with_sep mt pp_typevar_decl decls ++
+      pp_blank_lines trailing_blank_lines
+
 let pp_typevar_decls ids =
-  if List.is_empty ids then mt ()
-  else
-    fnl () ++
-    prlist_with_sep mt
-      (fun i ->
-         let tv = typevar_name i in
-         str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
-      ids ++ fnl () ++ fnl ()
+  List.map (fun i -> typevar_decl (typevar_name i)) ids
+  |> pp_typevar_decl_block ~leading_blank:true ~trailing_blank_lines:2
 
 type protocol_spec = {
   protocol_name : string;
@@ -4585,13 +4622,11 @@ let pp_protocol_decl state spec =
   in
   let rvar = protocol_return_name spec.protocol_name in
   let pp_variance =
-    prlist_with_sep mt
-      (fun tv ->
-         str tv ++ str " = TypeVar(\"" ++ str tv ++
-         str "\", contravariant=True)" ++ fnl ())
-      pvars ++
-    str rvar ++ str " = TypeVar(\"" ++ str rvar ++
-    str "\", covariant=True)" ++ fnl ()
+    (List.map
+       (fun tv -> typevar_decl ~variance:TypevarContravariant tv)
+       pvars) @
+    [typevar_decl ~variance:TypevarCovariant rvar]
+    |> pp_typevar_decl_block
   in
   let pp_generic_args =
     pvars @ [rvar]
@@ -4634,13 +4669,8 @@ let signature_data state name typ =
     pp_type_with state local_tvar_name typ
   in
   let pp_term_typevar_decls =
-    if List.is_empty tvars then mt ()
-    else
-      prlist_with_sep mt
-        (fun i ->
-           let tv = local_tvar_name (i + 1) in
-           str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
-        tvars ++ fnl () ++ fnl ()
+    List.map (fun i -> typevar_decl (local_tvar_name (i + 1))) tvars
+    |> pp_typevar_decl_block ~trailing_blank_lines:2
   in
   let args, ret = type_decomp typ in
   let protocols = ref [] in
@@ -5294,12 +5324,8 @@ let pp_ind_decl state (ind : ml_ind) =
           in
           let local_tvars = List.init ind.ind_nparams local_tvar_name in
           let pp_typevars =
-            if List.is_empty local_tvars then mt ()
-            else
-              prlist_with_sep mt
-                (fun tv ->
-                   str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
-                local_tvars ++ fnl ()
+            List.map typevar_decl local_tvars
+            |> pp_typevar_decl_block ~trailing_blank_lines:1
           in
           let ctor_base_opt =
             if List.is_empty local_tvars then None
