@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -712,8 +712,9 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
     return eligible[0]
 
 
-def _ci_oracle_task_kind(task: dict[str, Any]) -> ci_oracle.TaskKind:
-    title_upper = task.get("title", "").upper()
+def _ci_oracle_task_kind(task: Mapping[str, object]) -> ci_oracle.TaskKind:
+    title = task.get("title", "")
+    title_upper = title.upper() if isinstance(title, str) else ""
     if title_upper.startswith("ASK:"):
         return ci_oracle.TaskAsk()
     if title_upper.startswith("DEFER:"):
@@ -725,7 +726,7 @@ def _ci_oracle_task_kind(task: dict[str, Any]) -> ci_oracle.TaskKind:
     return ci_oracle.TaskSpec()
 
 
-def _ci_oracle_task_status(task: dict[str, Any]) -> ci_oracle.TaskStatus:
+def _ci_oracle_task_status(task: Mapping[str, object]) -> ci_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
         case TaskStatus.COMPLETED | "completed":
             return ci_oracle.StatusCompleted()
@@ -736,16 +737,19 @@ def _ci_oracle_task_status(task: dict[str, Any]) -> ci_oracle.TaskStatus:
 
 
 def _ci_oracle_task_rows(
-    task_list: list[dict[str, Any]],
+    task_list: Sequence[Mapping[str, object]],
 ) -> tuple[list[int], dict[int, ci_oracle.TaskRow]]:
     order: list[int] = []
     rows: dict[int, ci_oracle.TaskRow] = {}
     for task_id, task in enumerate(task_list, 1):
-        comment_id = (task.get("thread") or {}).get("comment_id")
+        thread = task.get("thread")
+        comment_id = thread.get("comment_id") if isinstance(thread, Mapping) else None
+        title = task.get("title", "")
+        description = task.get("description", "")
         order.append(task_id)
         rows[task_id] = ci_oracle.TaskRow(
-            title=task.get("title", ""),
-            description=task.get("description", ""),
+            title=title if isinstance(title, str) else "",
+            description=description if isinstance(description, str) else "",
             kind=_ci_oracle_task_kind(task),
             status=_ci_oracle_task_status(task),
             source_comment=int(comment_id) if comment_id is not None else None,
