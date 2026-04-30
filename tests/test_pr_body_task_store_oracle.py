@@ -19,10 +19,6 @@ def _row(
     )
 
 
-def _status_names(rows: list[Any]) -> list[str]:
-    return [type(row.status).__name__ for row in rows]
-
-
 def _function_source(source: str, name: str) -> str:
     start = source.index(f"def {name}(")
     next_function = source.find("\ndef ", start + 1)
@@ -50,7 +46,11 @@ def test_projection_matches_rendered_pr_body_order() -> None:
         "spec work",
         "completed work",
     ]
-    assert _status_names(projected) == ["PRPending", "PRPending", "PRCompleted"]
+    assert [type(row.status).__name__ for row in projected] == [
+        "PRPending",
+        "PRPending",
+        "PRCompleted",
+    ]
 
 
 def test_transition_resyncs_after_add_complete_and_rescope() -> None:
@@ -69,7 +69,10 @@ def test_transition_resyncs_after_add_complete_and_rescope() -> None:
     after_complete = oracle.transition(after_add, oracle.WriteTaskComplete(2))
     assert after_complete is not None
     assert oracle.pr_body_matches_store_bool(after_complete)
-    assert _status_names(after_complete.visible_pr_body) == ["PRPending", "PRCompleted"]
+    assert [type(row.status).__name__ for row in after_complete.visible_pr_body] == [
+        "PRPending",
+        "PRCompleted",
+    ]
 
     after_rescope = oracle.transition(
         after_complete,
