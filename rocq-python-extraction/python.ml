@@ -243,27 +243,68 @@ let set_once slot value =
   | None -> slot := Some value
   | Some _ -> ()
 
-let active_method_targets : (string * (string * string)) list ref = ref []
-
-let lookup_active_method_target source_name =
-  List.assoc_opt source_name !active_method_targets
-
-let active_record_field_targets : (string * string) list ref = ref []
-
-let active_constructor_tag_predicates = ref []
-
-let active_list_membership_predicates = ref []
-
 let source_name_tail source_name =
   match String.rindex_opt source_name '.' with
   | Some index ->
       String.sub source_name (index + 1) (String.length source_name - index - 1)
   | None -> source_name
 
-let lookup_active_record_field_target source_name =
-  match List.assoc_opt source_name !active_record_field_targets with
+type lowering_environment = {
+  lowering_method_targets : (string * (string * string)) list;
+  lowering_record_field_targets : (string * string) list;
+}
+
+let empty_lowering_environment = {
+  lowering_method_targets = [];
+  lowering_record_field_targets = [];
+}
+
+let lookup_lowering_method_target environment source_name =
+  List.assoc_opt source_name environment.lowering_method_targets
+
+let lookup_lowering_record_field_target environment source_name =
+  match List.assoc_opt source_name environment.lowering_record_field_targets with
   | Some _ as result -> result
-  | None -> List.assoc_opt (source_name_tail source_name) !active_record_field_targets
+  | None ->
+      List.assoc_opt (source_name_tail source_name)
+        environment.lowering_record_field_targets
+
+let extend_lowering_environment ~method_targets ~record_field_targets environment = {
+  lowering_method_targets = method_targets;
+  lowering_record_field_targets =
+    record_field_targets @ environment.lowering_record_field_targets;
+}
+
+let active_lowering_environment = ref empty_lowering_environment
+
+let install_active_lowering_environment_extension ~method_targets ~record_field_targets =
+  let previous = !active_lowering_environment in
+  active_lowering_environment :=
+    extend_lowering_environment ~method_targets ~record_field_targets previous;
+  previous
+
+let with_extended_active_lowering_environment ~method_targets ~record_field_targets f =
+  let previous =
+    install_active_lowering_environment_extension ~method_targets
+      ~record_field_targets
+  in
+  try
+    let result = f () in
+    active_lowering_environment := previous;
+    result
+  with exn ->
+    active_lowering_environment := previous;
+    raise exn
+
+let lookup_active_method_target source_name =
+  lookup_lowering_method_target !active_lowering_environment source_name
+
+let lookup_active_record_field_target source_name =
+  lookup_lowering_record_field_target !active_lowering_environment source_name
+
+let active_constructor_tag_predicates = ref []
+
+let active_list_membership_predicates = ref []
 
 let lookup_active_constructor_tag_predicate source_name =
   List.assoc_opt source_name !active_constructor_tag_predicates
@@ -5589,9 +5630,10 @@ let pp_structure_sel state sel =
                  | _ -> extraction_diagnostic_error "PYEX040")
               methods)
   in
-  let prior_method_targets = !active_method_targets in
-  active_method_targets := method_targets;
-  active_record_field_targets := record_field_targets @ !active_record_field_targets;
+  let prior_lowering_environment =
+    install_active_lowering_environment_extension ~method_targets
+      ~record_field_targets
+  in
   let rendered =
   let pp_record_methods class_name =
     match Hashtbl.find_opt methods_by_class class_name with
@@ -5627,7 +5669,10 @@ let pp_structure_sel state sel =
           pp_named_module_type_decl state name mt)
     sel
   in
-  active_method_targets := prior_method_targets;
+  active_lowering_environment :=
+    { !active_lowering_environment with
+      lowering_method_targets =
+        prior_lowering_environment.lowering_method_targets };
   rendered
 
 let pp_struct state struc =
