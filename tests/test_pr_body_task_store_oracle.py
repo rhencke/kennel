@@ -108,6 +108,17 @@ def test_positive_membership_lowers_to_native_membership() -> None:
     assert "if task in snapshot_order:" in source
 
 
+def test_imported_record_fields_lower_to_attribute_access() -> None:
+    source = Path(oracle.__file__).read_text()
+
+    assert "status(row)" not in source
+    assert "kind(row)" not in source
+    assert "title(row)" not in source
+    assert "description(row)" not in source
+    assert "match row.status:" in source
+    assert "row.kind" in source
+
+
 def test_tail_recursive_duplicate_scans_lower_to_for_loops() -> None:
     source = Path(oracle.__file__).read_text()
     comment_duplicate = _function_source(source, "find_comment_duplicate")

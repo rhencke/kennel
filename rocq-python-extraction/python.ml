@@ -5701,11 +5701,26 @@ let pp_structure_sel state sel =
          sel)
 
 let pp_struct state struc =
+  let top_level_record_field_targets =
+    List.concat
+      (List.map
+         (fun (mp, sel) ->
+            PrinterState.with_visibility state mp [] (fun state ->
+              List.concat
+                (List.filter_map
+                   (function
+                     | (_, SEdecl d) -> record_field_targets_of_decl state d
+                     | (_, SEmodule _) | (_, SEmodtype _) -> None)
+                   sel)))
+         struc)
+  in
   let pp_mod (mp, sel) =
     PrinterState.with_visibility state mp [] (fun state ->
       pp_structure_sel state sel)
   in
-  prlist pp_mod struc
+  with_extended_lowering_environment state ~method_targets:[]
+    ~record_field_targets:top_level_record_field_targets
+    (fun () -> prlist pp_mod struc)
 
 (*s No interface file for Python. *)
 
