@@ -1027,6 +1027,22 @@ class TestPreemptionFsmOracle:
         with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
             reg.assert_worker_turn_ok("foo/bar")
 
+    def test_assert_worker_turn_ok_raises_when_durable_demand_pending(
+        self,
+    ) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    def test_assert_worker_turn_ok_succeeds_after_durable_demand_drains(
+        self,
+    ) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        reg.note_durable_demand_drained("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+
     # ── worker_turn_proceeds_when_empty ──────────────────────────────────
 
     def test_assert_worker_turn_ok_succeeds_when_empty(self) -> None:

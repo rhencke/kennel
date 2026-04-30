@@ -9585,6 +9585,20 @@ class TestAssertWorkerTurnOk:
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
 
+    def _enqueue_comment(self, tmp_path: Path) -> None:
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-1",
+            repo="owner/repo",
+            pr_number=1,
+            comment_type="issues",
+            comment_id=101,
+            author="owner",
+            is_bot=False,
+            body="please triage first",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+
     def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
         gh = MagicMock()
         registry = MagicMock()
@@ -9610,6 +9624,54 @@ class TestAdmitWorkerTurn:
 
         registry.wait_for_inbox_drain.assert_not_called()
         registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+    def test_yields_when_durable_webhook_demand_pending(self, tmp_path: Path) -> None:
+        self._enqueue_comment(tmp_path)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        admitted = worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+
+        assert admitted is False
+        registry.note_durable_demand.assert_called_once_with("owner/repo")
+        registry.assert_worker_turn_ok.assert_not_called()
+
+    def test_execute_task_defers_pickup_when_durable_webhook_demand_pending(
+        self, tmp_path: Path
+    ) -> None:
+        self._enqueue_comment(tmp_path)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status") as mock_status,
+            patch("fido.worker.provider_run") as mock_provider_run,
+        ):
+            result = worker.execute_task(
+                tmp_path / ".git" / "fido",
+                RepoContext(
+                    repo="owner/repo",
+                    owner="owner",
+                    repo_name="repo",
+                    gh_user="fido-bot",
+                    default_branch="main",
+                    membership=RepoMembership(collaborators=frozenset({"owner"})),
+                ),
+                1,
+                "branch",
+            )
+
+        assert result is True
+        registry.note_durable_demand.assert_called_once_with("owner/repo")
+        mock_status.assert_not_called()
+        mock_provider_run.assert_not_called()
 
 
 class TestRunExecuteTaskIntegration:

@@ -166,6 +166,10 @@ class ActivityReporter(Protocol):
         self, repo_name: str, timeout: float | None = None
     ) -> bool: ...
 
+    def note_durable_demand(self, repo_name: str) -> None: ...
+
+    def note_durable_demand_drained(self, repo_name: str) -> None: ...
+
     def assert_worker_turn_ok(self, repo_name: str) -> None: ...
 
 
@@ -2452,22 +2456,38 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
-    def _admit_worker_turn(self) -> None:
+    def _has_durable_webhook_demand(self) -> bool:
+        """Return whether durable PR-comment demand should run before work."""
+        return FidoStore(self.work_dir).has_pending_pr_comments(self._repo_name)
+
+    def _admit_worker_turn(self) -> bool:
         """Wait until webhook/rescope work drains, then validate turn admission.
 
         This is the pre-provider gate.  A webhook can arrive after task pickup
         but before ``provider_run()`` starts; in that case the worker must wait
         rather than fire the oracle while the inbox is intentionally non-empty.
+
+        Returns ``False`` when durable PR-comment demand is queued.  The caller
+        must yield the worker turn instead of starting provider work.
         """
         if self._registry is None:
-            return
+            return True
         if self._registry.has_untriaged(self._repo_name):
             log.info(
                 "inbox non-empty for %s before provider turn — waiting",
                 self._repo_name,
             )
             self._registry.wait_for_inbox_drain(self._repo_name, timeout=None)
+        if self._has_durable_webhook_demand():
+            log.info(
+                "durable webhook demand pending for %s — yielding worker turn",
+                self._repo_name,
+            )
+            self._registry.note_durable_demand(self._repo_name)
+            return False
+        self._registry.note_durable_demand_drained(self._repo_name)
         self._registry.assert_worker_turn_ok(self._repo_name)
+        return True
 
     def _assert_worker_turn_ok(self) -> None:
         """Fire the handler-preemption oracle before each ``provider_run()``.
@@ -2536,6 +2556,14 @@ class Worker:
         task = _pick_next_task(task_list)
         if task is None:
             return False
+        if self._has_durable_webhook_demand():
+            log.info(
+                "durable webhook demand pending for %s — deferring task pickup",
+                self._repo_name,
+            )
+            if self._registry is not None:
+                self._registry.note_durable_demand(self._repo_name)
+            return True
         task_title = task["title"]
         log.info("task: %s", task_title)
         self.set_status(f"Working on: {task_title}")
@@ -2582,7 +2610,11 @@ class Worker:
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
-        self._admit_worker_turn()
+        if not self._admit_worker_turn():
+            self._tasks.update(task["id"], TaskStatus.PENDING)
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
+            return True
         if self._abort_task.is_set():
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
@@ -2672,7 +2704,8 @@ class Worker:
                 if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
                 else TurnSessionMode.REUSE
             )
-            self._admit_worker_turn()
+            if not self._admit_worker_turn():
+                return True
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
