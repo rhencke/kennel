@@ -988,6 +988,17 @@ let lowering_rule_is_collection rule =
 let lowering_rule_is_product rule =
   lowering_rule_has_family LoweringProduct rule
 
+let lowering_family_is_map = function
+  | LoweringPositiveMap | LoweringStringMap -> true
+  | _ -> false
+
+let lowering_family_is_set = function
+  | LoweringPositiveSet | LoweringStringSet -> true
+  | _ -> false
+
+let lowering_family_is_map_or_set family =
+  lowering_family_is_map family || lowering_family_is_set family
+
 let lowering_collection_key_kind = function
   | LoweringPositiveMap | LoweringPositiveSet -> Some `Positive
   | LoweringStringMap | LoweringStringSet -> Some `String
@@ -2228,6 +2239,11 @@ and rendered_lowering_rule_app state env r rule args =
     py_call (py_rendered (str name))
       (collection_key kind key ++ str ", " ++ rendered_args state env args)
   in
+  let keyed_collection_call name key args =
+    Option.map
+      (fun kind -> keyed_runtime_call kind name key args)
+      (lowering_collection_key_kind rule.lowering_family)
+  in
   match rule.lowering_family, rule.lowering_emit, args with
   | LoweringBool, LoweringEmitPrefix "not", [value] ->
       (match rendered_inverted_primitive_comparison_expr state env value with
@@ -2255,23 +2271,17 @@ and rendered_lowering_rule_app state env r rule args =
            (rendered_expr right))
   | LoweringProduct, LoweringEmitIndex index, [pair] ->
       Some (py_index (rendered_expr pair) (string_of_int index))
-  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitLiteral literal, [] ->
-      Some (py_rendered (str literal))
-  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitLiteral literal, [] ->
+  | family, LoweringEmitLiteral literal, []
+    when lowering_family_is_map_or_set family ->
       Some (py_rendered (str literal))
   | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
     [key; value; mapping] ->
-      Option.map
-        (fun kind -> keyed_runtime_call kind name key [value; mapping])
-        (lowering_collection_key_kind rule.lowering_family)
-  | (LoweringPositiveMap | LoweringStringMap | LoweringPositiveSet | LoweringStringSet),
-    LoweringEmitCall name, [key; collection] ->
-      Option.map
-        (fun kind -> keyed_runtime_call kind name key [collection])
-        (lowering_collection_key_kind rule.lowering_family)
-  | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name, args ->
-      Some (runtime_call name args)
-  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitCall name, args ->
+      keyed_collection_call name key [value; mapping]
+  | family, LoweringEmitCall name, [key; collection]
+    when lowering_family_is_map_or_set family ->
+      keyed_collection_call name key [collection]
+  | family, LoweringEmitCall name, args
+    when lowering_family_is_map_or_set family ->
       Some (runtime_call name args)
   | (LoweringPositiveMap | LoweringStringMap), LoweringEmitMethod method_name,
     [key; mapping] ->
@@ -2280,8 +2290,8 @@ and rendered_lowering_rule_app state env r rule args =
            py_method_call (rendered_expr mapping) method_name
              (collection_key kind key))
         (lowering_collection_key_kind rule.lowering_family)
-  | (LoweringPositiveMap | LoweringStringMap | LoweringPositiveSet | LoweringStringSet),
-    LoweringEmitInfix "in", [key; collection] ->
+  | family, LoweringEmitInfix "in", [key; collection]
+    when lowering_family_is_map_or_set family ->
       Option.map
         (fun kind ->
            py_infix ~associativity:PyAssocNone "in"
@@ -2289,7 +2299,8 @@ and rendered_lowering_rule_app state env r rule args =
              (py_rendered (collection_key kind key))
              (rendered_expr collection))
         (lowering_collection_key_kind rule.lowering_family)
-  | (LoweringPositiveSet | LoweringStringSet), LoweringEmitInfix operator, [left; right] ->
+  | family, LoweringEmitInfix operator, [left; right]
+    when lowering_family_is_set family ->
       let associativity =
         if String.equal operator "-" then PyAssocNone else PyAssocLeft
       in
@@ -3422,33 +3433,24 @@ let rec pp_statement_expr state env indent = function
               (List.map (pp_statement_expr state env (indent + 4)) args)
           in
           let pp_statement_lowering_rule_app r rule =
+            let keyed_collection_call name key args =
+              Option.map
+                (fun kind ->
+                   pp_multiline_items indent (str name)
+                     (collection_key kind key ::
+                      List.map
+                        (pp_statement_expr state env (indent + 4))
+                        args))
+                (lowering_collection_key_kind rule.lowering_family)
+            in
             match rule.lowering_family, rule.lowering_emit, all_args with
             | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
               [key; value; mapping] ->
-                Option.map
-                  (fun kind ->
-                     pp_multiline_items indent (str name)
-                       [ collection_key kind key;
-                         pp_statement_expr state env (indent + 4) value;
-                         pp_statement_expr state env (indent + 4) mapping ])
-                  (lowering_collection_key_kind rule.lowering_family)
-            | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
-              [key; collection] ->
-                Option.map
-                  (fun kind ->
-                     pp_multiline_items indent (str name)
-                       [ collection_key kind key;
-                         pp_statement_expr state env (indent + 4) collection ])
-                  (lowering_collection_key_kind rule.lowering_family)
-            | (LoweringPositiveSet | LoweringStringSet), LoweringEmitCall name,
-              [key; collection]
-              when String.equal name "_rocq_set_remove" ->
-                Option.map
-                  (fun kind ->
-                     pp_multiline_items indent (str name)
-                       [ collection_key kind key;
-                         pp_statement_expr state env (indent + 4) collection ])
-                  (lowering_collection_key_kind rule.lowering_family)
+                keyed_collection_call name key [value; mapping]
+            | family, LoweringEmitCall name, [key; collection]
+              when lowering_family_is_map family ||
+                   String.equal name "_rocq_set_remove" ->
+                keyed_collection_call name key [collection]
             | _, _, _ ->
                 Option.map pp_py_rendered
                   (rendered_lowering_rule_app state env r rule all_args)
