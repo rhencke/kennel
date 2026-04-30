@@ -30,6 +30,14 @@ def _unpack_resolved(
     return store, rows, lease
 
 
+def _unpack_paused(
+    result: tuple[tuple[dict[int, object], dict[int, object]], int | None],
+) -> tuple[dict[int, object], dict[int, object], int | None]:
+    pair, lease = result
+    store, rows = pair
+    return store, rows, lease
+
+
 def test_latest_failure_reuses_live_ci_task() -> None:
     old_snapshot = _snapshot(10)
     new_snapshot = _snapshot(11, conclusion=oracle.CIConclusionTimedOut())
@@ -71,20 +79,69 @@ def test_fresh_ci_failure_creates_first_pickup_task() -> None:
     assert oracle.pick_next_task(order, rows) == 2
 
 
-def test_failed_attempt_exhausts_retry_budget() -> None:
+def test_failed_attempt_retries_until_fixed() -> None:
     row = oracle.CIRow(
         ci_snapshot=_snapshot(10),
         ci_phase=oracle.CIFixing(),
         ci_task=7,
-        ci_attempts=2,
+        ci_attempts=4,
     )
 
     next_store = oracle.record_ci_attempt_failed(1, {1: row})
 
-    assert isinstance(next_store[1].ci_phase, oracle.CIGivenUp)
-    assert next_store[1].ci_task is None
-    assert next_store[1].ci_attempts == oracle.ci_max_attempts
+    assert isinstance(next_store[1].ci_phase, oracle.CIFailing)
+    assert next_store[1].ci_task == 7
+    assert next_store[1].ci_attempts == 5
+    assert next_store[1].live_task() == 7
+
+
+def test_human_pause_blocks_live_task_and_clears_lease() -> None:
+    snapshot = _snapshot(10)
+    row = oracle.CIRow(
+        ci_snapshot=snapshot,
+        ci_phase=oracle.CIFixing(),
+        ci_task=7,
+        ci_attempts=1,
+    )
+    task_rows = {7: snapshot.task_row()}
+
+    next_store, next_rows, lease = _unpack_paused(
+        oracle.pause_ci_for_human(1, {1: row}, task_rows, 7)
+    )
+
+    assert isinstance(next_store[1].ci_phase, oracle.CIPaused)
+    assert next_store[1].ci_task == 7
+    assert next_store[1].ci_attempts == 1
     assert next_store[1].live_task() is None
+    assert isinstance(next_rows[7].status, oracle.StatusBlocked)
+    assert lease is None
+
+
+def test_human_resume_restores_retry_task() -> None:
+    snapshot = _snapshot(10)
+    row = oracle.CIRow(
+        ci_snapshot=snapshot,
+        ci_phase=oracle.CIPaused(),
+        ci_task=7,
+        ci_attempts=1,
+    )
+    task_rows = {
+        7: oracle.TaskRow(
+            title="ci / test",
+            description="",
+            kind=oracle.TaskCI(),
+            status=oracle.StatusBlocked(),
+            source_comment=None,
+        )
+    }
+
+    next_store, next_rows = oracle.resume_ci_after_human(1, {1: row}, task_rows)
+
+    assert isinstance(next_store[1].ci_phase, oracle.CIFailing)
+    assert next_store[1].ci_task == 7
+    assert next_store[1].ci_attempts == 1
+    assert next_store[1].live_task() == 7
+    assert isinstance(next_rows[7].status, oracle.StatusPending)
 
 
 def test_resolution_completes_live_task_and_clears_lease() -> None:

@@ -334,6 +334,58 @@ def complete_task(
     )
 
 
+def abort_task(
+    task: int,
+    lease: ExecutionLease | None,
+) -> ExecutionLease | None:
+    __option = lease
+    if __option is None:
+        return None
+    active = __option
+    if lease_task(active) == task:
+        return None
+    return lease
+
+
+def unblock_task_row(
+    task: int,
+    row: TaskRow,
+    rows: dict[int, TaskRow],
+) -> dict[int, TaskRow]:
+    match row.status:
+        case StatusPending():
+            return rows
+        case StatusCompleted():
+            return rows
+        case StatusBlocked():
+            row_ = replace(
+                row,
+                status=StatusPending(),
+            )
+            return _rocq_map_add(
+                _rocq_positive_key(task),
+                row_,
+                rows,
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+def unblock_task_if_present(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> dict[int, TaskRow]:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return rows
+    row = __option
+    return unblock_task_row(
+        task,
+        row,
+        rows,
+    )
+
+
 # Python ExtractionDiagnostic [PYEX003]: Type alias declaration is not emitted Remediation: Use a concrete inductive/record or add an extraction remapping for the type.
 
 
@@ -388,6 +440,17 @@ class CIFailureSnapshot:
             ci_phase=CIFailing(),
         )
 
+    def update_paused_latest(
+        self,
+        row: CIRow,
+    ) -> CIRow:
+        snapshot = self
+        return replace(
+            row,
+            ci_snapshot=snapshot,
+            ci_phase=CIPaused(),
+        )
+
     def new_live_row(
         self,
         task: int,
@@ -425,7 +488,7 @@ class CIFixing(CIPhase):
 
 @final
 @dataclass(frozen=True)
-class CIGivenUp(CIPhase):
+class CIPaused(CIPhase):
     pass
 
 
@@ -435,7 +498,7 @@ class CIResolved(CIPhase):
     pass
 
 
-CIPhaseT = CINoFailure | CIFailing | CIFixing | CIGivenUp | CIResolved
+CIPhaseT = CINoFailure | CIFailing | CIFixing | CIPaused | CIResolved
 
 
 @final
@@ -463,7 +526,7 @@ class CIRow:
                     return None
                 task = __option
                 return task
-            case CIGivenUp():
+            case CIPaused():
                 return None
             case CIResolved():
                 return None
@@ -474,7 +537,35 @@ class CIRow:
 # Python ExtractionDiagnostic [PYEX003]: Type alias declaration is not emitted Remediation: Use a concrete inductive/record or add an extraction remapping for the type.
 
 
-ci_max_attempts: int = 3
+def ci_record_new_failure(
+    check: requiredCheck,
+    snapshot: CIFailureSnapshot,
+    new_task: int,
+    ci_store: cIStore,
+    task_order: list[int],
+    task_rows: dict[int, TaskRow],
+) -> tuple[tuple[tuple[cIStore, list[int]], dict[int, TaskRow]], int]:
+    row = snapshot.new_live_row(new_task)
+    __pair = enqueue_task(new_task, snapshot.task_row(), task_order, task_rows)
+    p = __pair[0]
+    created_task = __pair[1]
+    __pair = p
+    task_order_ = __pair[0]
+    task_rows_ = __pair[1]
+    return (
+        (
+            (
+                _rocq_map_add(
+                    _rocq_positive_key(check),
+                    row,
+                    ci_store,
+                ),
+                task_order_,
+            ),
+            task_rows_,
+        ),
+        created_task,
+    )
 
 
 def record_ci_failure(
@@ -487,67 +578,189 @@ def record_ci_failure(
 ) -> tuple[tuple[tuple[cIStore, list[int]], dict[int, TaskRow]], int]:
     __option = ci_store.get(_rocq_positive_key(check))
     if __option is None:
-        row = snapshot.new_live_row(new_task)
-        __pair = enqueue_task(new_task, snapshot.task_row(), task_order, task_rows)
-        p = __pair[0]
-        created_task = __pair[1]
-        __pair = p
-        task_order_ = __pair[0]
-        task_rows_ = __pair[1]
-        return (
-            (
-                (
-                    _rocq_map_add(
-                        _rocq_positive_key(check),
-                        row,
-                        ci_store,
-                    ),
-                    task_order_,
-                ),
-                task_rows_,
-            ),
-            created_task,
+        return ci_record_new_failure(
+            check,
+            snapshot,
+            new_task,
+            ci_store,
+            task_order,
+            task_rows,
         )
     row = __option
-    __option = row.live_task()
-    if __option is None:
-        row_ = snapshot.new_live_row(new_task)
-        __pair = enqueue_task(new_task, snapshot.task_row(), task_order, task_rows)
-        p = __pair[0]
-        created_task = __pair[1]
-        __pair = p
-        task_order_ = __pair[0]
-        task_rows_ = __pair[1]
-        return (
-            (
-                (
-                    _rocq_map_add(
-                        _rocq_positive_key(check),
-                        row_,
-                        ci_store,
-                    ),
-                    task_order_,
-                ),
-                task_rows_,
-            ),
-            created_task,
-        )
-    existing_task = __option
-    row_ = snapshot.update_latest(row)
-    return (
-        (
-            (
-                _rocq_map_add(
-                    _rocq_positive_key(check),
-                    row_,
+    match row.ci_phase:
+        case CINoFailure():
+            __option = row.live_task()
+            if __option is None:
+                return ci_record_new_failure(
+                    check,
+                    snapshot,
+                    new_task,
                     ci_store,
+                    task_order,
+                    task_rows,
+                )
+            existing_task = __option
+            row_ = snapshot.update_latest(row)
+            return (
+                (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(check),
+                            row_,
+                            ci_store,
+                        ),
+                        task_order,
+                    ),
+                    task_rows,
                 ),
-                task_order,
-            ),
-            task_rows,
-        ),
-        existing_task,
-    )
+                existing_task,
+            )
+        case CIFailing():
+            __option = row.live_task()
+            if __option is None:
+                return ci_record_new_failure(
+                    check,
+                    snapshot,
+                    new_task,
+                    ci_store,
+                    task_order,
+                    task_rows,
+                )
+            existing_task = __option
+            row_ = snapshot.update_latest(row)
+            return (
+                (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(check),
+                            row_,
+                            ci_store,
+                        ),
+                        task_order,
+                    ),
+                    task_rows,
+                ),
+                existing_task,
+            )
+        case CIFixing():
+            __option = row.live_task()
+            if __option is None:
+                return ci_record_new_failure(
+                    check,
+                    snapshot,
+                    new_task,
+                    ci_store,
+                    task_order,
+                    task_rows,
+                )
+            existing_task = __option
+            row_ = snapshot.update_latest(row)
+            return (
+                (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(check),
+                            row_,
+                            ci_store,
+                        ),
+                        task_order,
+                    ),
+                    task_rows,
+                ),
+                existing_task,
+            )
+        case CIPaused():
+            __option = row.live_task()
+            if __option is None:
+                __option = row.ci_task
+                if __option is None:
+                    return ci_record_new_failure(
+                        check,
+                        snapshot,
+                        new_task,
+                        ci_store,
+                        task_order,
+                        task_rows,
+                    )
+                paused_task = __option
+                row_ = snapshot.update_paused_latest(row)
+                return (
+                    (
+                        (
+                            _rocq_map_add(
+                                _rocq_positive_key(check),
+                                row_,
+                                ci_store,
+                            ),
+                            task_order,
+                        ),
+                        task_rows,
+                    ),
+                    paused_task,
+                )
+            existing_task = __option
+            __option = row.ci_task
+            if __option is None:
+                row_ = snapshot.update_latest(row)
+                return (
+                    (
+                        (
+                            _rocq_map_add(
+                                _rocq_positive_key(check),
+                                row_,
+                                ci_store,
+                            ),
+                            task_order,
+                        ),
+                        task_rows,
+                    ),
+                    existing_task,
+                )
+            paused_task = __option
+            row_ = snapshot.update_paused_latest(row)
+            return (
+                (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(check),
+                            row_,
+                            ci_store,
+                        ),
+                        task_order,
+                    ),
+                    task_rows,
+                ),
+                paused_task,
+            )
+        case CIResolved():
+            __option = row.live_task()
+            if __option is None:
+                return ci_record_new_failure(
+                    check,
+                    snapshot,
+                    new_task,
+                    ci_store,
+                    task_order,
+                    task_rows,
+                )
+            existing_task = __option
+            row_ = snapshot.update_latest(row)
+            return (
+                (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(check),
+                            row_,
+                            ci_store,
+                        ),
+                        task_order,
+                    ),
+                    task_rows,
+                ),
+                existing_task,
+            )
+        case __impossible:
+            assert_never(__impossible)
 
 
 def start_ci_fix(
@@ -592,10 +805,6 @@ def start_ci_fix(
     )
 
 
-def ci_attempt_can_retry(attempts: int) -> bool:
-    return attempts < ci_max_attempts
-
-
 def record_ci_attempt_failed(
     check: requiredCheck,
     ci_store: cIStore,
@@ -615,22 +824,10 @@ def record_ci_attempt_failed(
                 return ci_store
             task = __option
             attempts_ = row.ci_attempts + 1
-            if ci_attempt_can_retry(attempts_):
-                row_ = replace(
-                    row,
-                    ci_phase=CIFailing(),
-                    ci_task=task,
-                    ci_attempts=attempts_,
-                )
-                return _rocq_map_add(
-                    _rocq_positive_key(check),
-                    row_,
-                    ci_store,
-                )
             row_ = replace(
                 row,
-                ci_phase=CIGivenUp(),
-                ci_task=None,
+                ci_phase=CIFailing(),
+                ci_task=task,
                 ci_attempts=attempts_,
             )
             return _rocq_map_add(
@@ -638,10 +835,190 @@ def record_ci_attempt_failed(
                 row_,
                 ci_store,
             )
-        case CIGivenUp():
+        case CIPaused():
             return ci_store
         case CIResolved():
             return ci_store
+        case __impossible:
+            assert_never(__impossible)
+
+
+def block_task_if_present(
+    task: int | None,
+    task_rows: dict[int, TaskRow],
+) -> dict[int, TaskRow]:
+    __option = task
+    if __option is None:
+        return task_rows
+    task_id = __option
+    __option = task_rows.get(_rocq_positive_key(task_id))
+    if __option is None:
+        return task_rows
+    row = __option
+    row_ = replace(
+        row,
+        status=StatusBlocked(),
+    )
+    return _rocq_map_add(
+        _rocq_positive_key(task_id),
+        row_,
+        task_rows,
+    )
+
+
+def pause_ci_for_human(
+    check: requiredCheck,
+    ci_store: cIStore,
+    task_rows: dict[int, TaskRow],
+    lease: ExecutionLease | None,
+) -> tuple[tuple[cIStore, dict[int, TaskRow]], ExecutionLease | None]:
+    __option = ci_store.get(_rocq_positive_key(check))
+    if __option is None:
+        return (
+            (
+                ci_store,
+                task_rows,
+            ),
+            lease,
+        )
+    row = __option
+    match row.ci_phase:
+        case CINoFailure():
+            return (
+                (
+                    ci_store,
+                    task_rows,
+                ),
+                lease,
+            )
+        case CIFailing():
+            __option = row.ci_task
+            if __option is None:
+                return (
+                    (
+                        ci_store,
+                        task_rows,
+                    ),
+                    lease,
+                )
+            task = __option
+            row_ = replace(
+                row,
+                ci_phase=CIPaused(),
+                ci_task=task,
+            )
+            return (
+                (
+                    _rocq_map_add(
+                        _rocq_positive_key(check),
+                        row_,
+                        ci_store,
+                    ),
+                    block_task_if_present(task, task_rows),
+                ),
+                lease,
+            )
+        case CIFixing():
+            __option = row.ci_task
+            if __option is None:
+                return (
+                    (
+                        ci_store,
+                        task_rows,
+                    ),
+                    lease,
+                )
+            task = __option
+            row_ = replace(
+                row,
+                ci_phase=CIPaused(),
+                ci_task=task,
+            )
+            return (
+                (
+                    _rocq_map_add(
+                        _rocq_positive_key(check),
+                        row_,
+                        ci_store,
+                    ),
+                    block_task_if_present(task, task_rows),
+                ),
+                abort_task(task, lease),
+            )
+        case CIPaused():
+            return (
+                (
+                    ci_store,
+                    task_rows,
+                ),
+                lease,
+            )
+        case CIResolved():
+            return (
+                (
+                    ci_store,
+                    task_rows,
+                ),
+                lease,
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+def resume_ci_after_human(
+    check: requiredCheck,
+    ci_store: cIStore,
+    task_rows: dict[int, TaskRow],
+) -> tuple[cIStore, dict[int, TaskRow]]:
+    __option = ci_store.get(_rocq_positive_key(check))
+    if __option is None:
+        return (
+            ci_store,
+            task_rows,
+        )
+    row = __option
+    match row.ci_phase:
+        case CINoFailure():
+            return (
+                ci_store,
+                task_rows,
+            )
+        case CIFailing():
+            return (
+                ci_store,
+                task_rows,
+            )
+        case CIFixing():
+            return (
+                ci_store,
+                task_rows,
+            )
+        case CIPaused():
+            __option = row.ci_task
+            if __option is None:
+                return (
+                    ci_store,
+                    task_rows,
+                )
+            task = __option
+            row_ = replace(
+                row,
+                ci_phase=CIFailing(),
+                ci_task=task,
+            )
+            return (
+                _rocq_map_add(
+                    _rocq_positive_key(check),
+                    row_,
+                    ci_store,
+                ),
+                unblock_task_if_present(task, task_rows),
+            )
+        case CIResolved():
+            return (
+                ci_store,
+                task_rows,
+            )
         case __impossible:
             assert_never(__impossible)
 

@@ -4,7 +4,7 @@
     is durable and keyed by the required check name (represented here by a
     stable positive key supplied by the Python adapter).  For each required
     check, the store keeps the latest failing snapshot, at most one live CI
-    task, the retry count, and the lifecycle phase.
+    task, the attempt count, and the lifecycle phase.
 
     Today's Python still detects check-run failures through webhook actions
     and uses the handwritten task queue.  The intended boundary is stricter:
@@ -17,10 +17,11 @@
 
     E1 flip point: once the scheduler/reducer boundary is authoritative, the
     extracted transition from this model becomes the implementation for CI
-    failure admission, retry/give-up policy, and resolution.  Python should
-    only translate GitHub check events and worker outcomes into modeled
-    inputs, commit the returned store/task state, then emit GitHub comments,
-    worker wakeups, and task execution effects after the commit. *)
+    failure admission, retry-until-fixed policy, human pause/resume, and
+    resolution.  Python should only translate GitHub check events and worker
+    outcomes into modeled inputs, commit the returned store/task state, then
+    emit GitHub comments, worker wakeups, and task execution effects after the
+    commit. *)
 
 From FidoModels Require Import preamble task_queue_rescope.
 
@@ -60,7 +61,7 @@ Inductive CIPhase : Type :=
 | CINoFailure
 | CIFailing
 | CIFixing
-| CIGivenUp
+| CIPaused
 | CIResolved.
 
 (** [CIRow] is the durable state for one required check. *)
@@ -72,9 +73,6 @@ Record CIRow : Type := {
 }.
 
 Definition CIStore := PositiveMap.t CIRow.
-
-(** Keep the retry ceiling as policy data in the model. *)
-Definition ci_max_attempts : nat := S (S (S O)).
 
 Definition ci_task_title (snapshot : CIFailureSnapshot) : string :=
   ci_check_name snapshot.
@@ -103,6 +101,15 @@ Definition ci_update_latest
   ci_attempts := ci_attempts row
 |}.
 
+Definition ci_update_paused_latest
+    (snapshot : CIFailureSnapshot)
+    (row : CIRow) : CIRow := {|
+  ci_snapshot := Some snapshot;
+  ci_phase := CIPaused;
+  ci_task := ci_task row;
+  ci_attempts := ci_attempts row
+|}.
+
 Definition ci_new_live_row
     (snapshot : CIFailureSnapshot)
     (task : positive) : CIRow := {|
@@ -111,6 +118,22 @@ Definition ci_new_live_row
   ci_task := Some task;
   ci_attempts := O
 |}.
+
+Definition ci_record_new_failure
+    (check : RequiredCheck)
+    (snapshot : CIFailureSnapshot)
+    (new_task : positive)
+    (ci_store : CIStore)
+    (task_order : list positive)
+    (task_rows : PositiveMap.t TaskRow)
+    : CIStore * list positive * PositiveMap.t TaskRow * positive :=
+  let row := ci_new_live_row snapshot new_task in
+  let '(task_order', task_rows', created_task) :=
+    enqueue_task new_task (ci_task_row snapshot) task_order task_rows in
+  (PositiveMap.add check row ci_store,
+    task_order',
+    task_rows',
+    created_task).
 
 (** [record_ci_failure] is the admission transition for a failing required
     check.  A fresh failure creates one CI task.  A newer failure for a check
@@ -126,30 +149,26 @@ Definition record_ci_failure
     : CIStore * list positive * PositiveMap.t TaskRow * positive :=
   match PositiveMap.find check ci_store with
   | Some row =>
-      match ci_live_task row with
-      | Some existing_task =>
+      match ci_phase row, ci_live_task row, ci_task row with
+      | CIPaused, _, Some paused_task =>
+          let row' := ci_update_paused_latest snapshot row in
+          (PositiveMap.add check row' ci_store,
+            task_order,
+            task_rows,
+            paused_task)
+      | _, Some existing_task, _ =>
           let row' := ci_update_latest snapshot row in
           (PositiveMap.add check row' ci_store,
             task_order,
             task_rows,
             existing_task)
-      | None =>
-          let row' := ci_new_live_row snapshot new_task in
-          let '(task_order', task_rows', created_task) :=
-            enqueue_task new_task (ci_task_row snapshot) task_order task_rows in
-          (PositiveMap.add check row' ci_store,
-            task_order',
-            task_rows',
-            created_task)
+      | _, None, _ =>
+          ci_record_new_failure check snapshot new_task
+            ci_store task_order task_rows
       end
   | None =>
-      let row := ci_new_live_row snapshot new_task in
-      let '(task_order', task_rows', created_task) :=
-        enqueue_task new_task (ci_task_row snapshot) task_order task_rows in
-      (PositiveMap.add check row ci_store,
-        task_order',
-        task_rows',
-        created_task)
+      ci_record_new_failure check snapshot new_task
+        ci_store task_order task_rows
   end.
 
 Definition start_ci_fix
@@ -178,9 +197,6 @@ Definition start_ci_fix
   | None => (ci_store, lease)
   end.
 
-Definition ci_attempt_can_retry (attempts : nat) : bool :=
-  Nat.ltb attempts ci_max_attempts.
-
 Definition record_ci_attempt_failed
     (check : RequiredCheck)
     (ci_store : CIStore) : CIStore :=
@@ -189,26 +205,93 @@ Definition record_ci_attempt_failed
       match ci_phase row, ci_task row with
       | CIFixing, Some task =>
           let attempts' := S (ci_attempts row) in
-          if ci_attempt_can_retry attempts'
-          then
-            let row' := {|
-              ci_snapshot := ci_snapshot row;
-              ci_phase := CIFailing;
-              ci_task := Some task;
-              ci_attempts := attempts'
-            |} in
-            PositiveMap.add check row' ci_store
-          else
-            let row' := {|
-              ci_snapshot := ci_snapshot row;
-              ci_phase := CIGivenUp;
-              ci_task := None;
-              ci_attempts := attempts'
-            |} in
-            PositiveMap.add check row' ci_store
+          let row' := {|
+            ci_snapshot := ci_snapshot row;
+            ci_phase := CIFailing;
+            ci_task := Some task;
+            ci_attempts := attempts'
+          |} in
+          PositiveMap.add check row' ci_store
       | _, _ => ci_store
       end
   | None => ci_store
+  end.
+
+Definition block_task_if_present
+    (task : option positive)
+    (task_rows : PositiveMap.t TaskRow)
+    : PositiveMap.t TaskRow :=
+  match task with
+  | None => task_rows
+  | Some task_id =>
+      match PositiveMap.find task_id task_rows with
+      | None => task_rows
+      | Some row =>
+          let row' := {|
+            title := title row;
+            description := description row;
+            kind := kind row;
+            status := StatusBlocked;
+            source_comment := source_comment row
+          |} in
+          PositiveMap.add task_id row' task_rows
+      end
+  end.
+
+Definition pause_ci_for_human
+    (check : RequiredCheck)
+    (ci_store : CIStore)
+    (task_rows : PositiveMap.t TaskRow)
+    (lease : option ExecutionLease)
+    : CIStore * PositiveMap.t TaskRow * option ExecutionLease :=
+  match PositiveMap.find check ci_store with
+  | Some row =>
+      match ci_phase row, ci_task row with
+      | CIFixing, Some task =>
+          let row' := {|
+            ci_snapshot := ci_snapshot row;
+            ci_phase := CIPaused;
+            ci_task := Some task;
+            ci_attempts := ci_attempts row
+          |} in
+          (PositiveMap.add check row' ci_store,
+            block_task_if_present (Some task) task_rows,
+            abort_task task lease)
+      | CIFailing, Some task =>
+          let row' := {|
+            ci_snapshot := ci_snapshot row;
+            ci_phase := CIPaused;
+            ci_task := Some task;
+            ci_attempts := ci_attempts row
+          |} in
+          (PositiveMap.add check row' ci_store,
+            block_task_if_present (Some task) task_rows,
+            lease)
+      | _, _ => (ci_store, task_rows, lease)
+      end
+  | None => (ci_store, task_rows, lease)
+  end.
+
+Definition resume_ci_after_human
+    (check : RequiredCheck)
+    (ci_store : CIStore)
+    (task_rows : PositiveMap.t TaskRow)
+    : CIStore * PositiveMap.t TaskRow :=
+  match PositiveMap.find check ci_store with
+  | Some row =>
+      match ci_phase row, ci_task row with
+      | CIPaused, Some task =>
+          let row' := {|
+            ci_snapshot := ci_snapshot row;
+            ci_phase := CIFailing;
+            ci_task := Some task;
+            ci_attempts := ci_attempts row
+          |} in
+          (PositiveMap.add check row' ci_store,
+            unblock_task_if_present task task_rows)
+      | _, _ => (ci_store, task_rows)
+      end
+  | None => (ci_store, task_rows)
   end.
 
 Definition complete_ci_task_if_present
@@ -242,7 +325,7 @@ Definition record_ci_resolved
   end.
 
 Python File Extraction ci_task_lifecycle
-  "ci_max_attempts ci_task_title ci_task_row ci_live_task ci_update_latest ci_new_live_row record_ci_failure start_ci_fix ci_attempt_can_retry record_ci_attempt_failed complete_ci_task_if_present record_ci_resolved pick_next_task".
+  "ci_task_title ci_task_row ci_live_task ci_update_latest ci_update_paused_latest ci_new_live_row ci_record_new_failure record_ci_failure start_ci_fix record_ci_attempt_failed block_task_if_present pause_ci_for_human resume_ci_after_human complete_ci_task_if_present record_ci_resolved pick_next_task".
 
 (** Concrete witnesses used by the theorems below. *)
 Definition sample_spec_row : TaskRow := {|
@@ -295,27 +378,101 @@ Proof.
   reflexivity.
 Qed.
 
-(** [third_failed_attempt_gives_up] states the retry ceiling: after the third
-    failed fixing attempt, the check leaves the live-task set and enters
-    [CIGivenUp]. *)
-Lemma third_failed_attempt_gives_up :
+(** [failed_attempt_retries_until_fixed] states the retry-until-fixed policy:
+    a failed fixing attempt increments the attempt count but returns the same
+    live CI task to the failing phase instead of exhausting a retry budget. *)
+Lemma failed_attempt_retries_until_fixed :
   let row := {|
     ci_snapshot := Some sample_snapshot_old;
     ci_phase := CIFixing;
     ci_task := Some 7;
-    ci_attempts := S (S O)
+    ci_attempts := S (S (S (S O)))
   |} in
   let ci_store := PositiveMap.add 1 row (PositiveMap.empty CIRow) in
   let ci_store' := record_ci_attempt_failed 1 ci_store in
   PositiveMap.find 1 ci_store' =
     Some {|
       ci_snapshot := Some sample_snapshot_old;
-      ci_phase := CIGivenUp;
-      ci_task := None;
-      ci_attempts := S (S (S O))
+      ci_phase := CIFailing;
+      ci_task := Some 7;
+      ci_attempts := S (S (S (S (S O))))
     |}.
 Proof.
   reflexivity.
+Qed.
+
+(** [human_pause_blocks_live_task] states that a check needing human attention
+    leaves the retry loop without losing the task: the CI row enters
+    [CIPaused], the task row becomes blocked, and the active lease is cleared. *)
+Lemma human_pause_blocks_live_task :
+  let row := {|
+    ci_snapshot := Some sample_snapshot_old;
+    ci_phase := CIFixing;
+    ci_task := Some 7;
+    ci_attempts := S O
+  |} in
+  let ci_store := PositiveMap.add 1 row (PositiveMap.empty CIRow) in
+  let task_rows := PositiveMap.add 7 (ci_task_row sample_snapshot_old)
+      (PositiveMap.empty TaskRow) in
+  let '(ci_store', task_rows', lease') :=
+    pause_ci_for_human 1 ci_store task_rows (Some {| lease_task := 7 |}) in
+  PositiveMap.find 1 ci_store' =
+    Some {|
+      ci_snapshot := Some sample_snapshot_old;
+      ci_phase := CIPaused;
+      ci_task := Some 7;
+      ci_attempts := S O
+    |} /\
+  lease' = None /\
+  (match PositiveMap.find 7 task_rows' with
+  | Some row' =>
+      match status row' with
+      | StatusBlocked => true
+      | _ => false
+      end
+  | None => false
+  end) = true.
+Proof.
+  repeat split; reflexivity.
+Qed.
+
+(** [human_resume_restores_retry] states that human input can resume a paused
+    CI task by returning the check to [CIFailing] and unblocking its task row. *)
+Lemma human_resume_restores_retry :
+  let row := {|
+    ci_snapshot := Some sample_snapshot_old;
+    ci_phase := CIPaused;
+    ci_task := Some 7;
+    ci_attempts := S O
+  |} in
+  let blocked_row := {|
+    title := ci_task_title sample_snapshot_old;
+    description := "";
+    kind := TaskCI;
+    status := StatusBlocked;
+    source_comment := None
+  |} in
+  let ci_store := PositiveMap.add 1 row (PositiveMap.empty CIRow) in
+  let task_rows := PositiveMap.add 7 blocked_row (PositiveMap.empty TaskRow) in
+  let '(ci_store', task_rows') :=
+    resume_ci_after_human 1 ci_store task_rows in
+  PositiveMap.find 1 ci_store' =
+    Some {|
+      ci_snapshot := Some sample_snapshot_old;
+      ci_phase := CIFailing;
+      ci_task := Some 7;
+      ci_attempts := S O
+    |} /\
+  (match PositiveMap.find 7 task_rows' with
+  | Some row' =>
+      match status row' with
+      | StatusPending => true
+      | _ => false
+      end
+  | None => false
+  end) = true.
+Proof.
+  repeat split; reflexivity.
 Qed.
 
 (** [successful_resolution_completes_live_task] states that a successful
