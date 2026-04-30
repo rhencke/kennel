@@ -2965,26 +2965,50 @@ and pp_branch_pair_expr state env ids body pair_expr =
   str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
   str ")(__pair[0], __pair[1]))(" ++ pair_expr ++ str ")"
 
+and std_nullary_constructor predicate r args =
+  match args with
+  | [] -> predicate r
+  | _ -> false
+
+and std_constructor predicate r _args =
+  predicate r
+
+and classify_std_match_branches detail branch_specs branches =
+  let wildcard_arm = ref None in
+  let classify (ids, pat, body) =
+    let expanded_pat = expand_pusual (List.length ids) pat in
+    match expanded_pat with
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | Pcons (r, args) -> (
+        match
+          List.find_opt
+            (fun (matches, _arm) -> matches r args)
+            branch_specs
+        with
+        | Some (_matches, arm) -> set_once arm (ids, body)
+        | None ->
+            extraction_diagnostic_error ~detail "PYEX040")
+    | _ ->
+        extraction_diagnostic_error ~detail "PYEX040"
+  in
+  Array.iter classify branches;
+  !wildcard_arm
+
 and pp_std_string_match_expr state env scrutinee branches =
   let empty_arm = ref None in
   let cons_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_string_empty_ref r ->
-        set_once empty_arm (ids, body)
-    | Pcons (r, _) when is_std_string_cons_ref r ->
-        set_once cons_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error
-          ~detail:"unsupported nested String.string pattern shape"
-          "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported nested String.string pattern shape"
+      [
+        (std_nullary_constructor is_std_string_empty_ref, empty_arm);
+        (std_constructor is_std_string_cons_ref, cons_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_empty =
     pp_branch_or_fallback_expr state env fallback !empty_arm
@@ -3001,19 +3025,12 @@ and pp_std_string_match_expr state env scrutinee branches =
 
 and pp_std_ascii_match_expr state env scrutinee branches =
   let ascii_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, _) when is_std_ascii_cons_ref r ->
-        set_once ascii_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error
-          ~detail:"unsupported Ascii.ascii pattern shape"
-          "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported Ascii.ascii pattern shape"
+      [(std_constructor is_std_ascii_cons_ref, ascii_arm)]
+      branches
   in
-  Array.iter classify branches;
   match !ascii_arm with
   | Some (ids, body) ->
       str "(lambda __c: (" ++
@@ -3021,26 +3038,22 @@ and pp_std_ascii_match_expr state env scrutinee branches =
       str ")(bool(__c & 1), bool(__c & 2), bool(__c & 4), bool(__c & 8), bool(__c & 16), bool(__c & 32), bool(__c & 64), bool(__c & 128)))(ord(" ++
       pp_expr state env scrutinee ++ str "))"
   | None ->
-      pp_branch_or_impossible_expr state env !wildcard_arm
+      pp_branch_or_impossible_expr state env wildcard_arm
 
 and pp_std_nat_match_expr state env scrutinee branches =
   let zero_arm = ref None in
   let succ_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_nat_zero_ref r ->
-        set_once zero_arm (ids, body)
-    | Pcons (r, _) when is_std_nat_succ_ref r ->
-        set_once succ_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported nat pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported nat pattern shape"
+      [
+        (std_nullary_constructor is_std_nat_zero_ref, zero_arm);
+        (std_constructor is_std_nat_succ_ref, succ_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_zero =
     pp_branch_or_fallback_expr state env fallback !zero_arm
@@ -3059,25 +3072,18 @@ and pp_std_positive_match_expr state env scrutinee branches =
   let xh_arm = ref None in
   let xo_arm = ref None in
   let xi_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_positive_xh_ref r ->
-        set_once xh_arm (ids, body)
-    | Pcons (r, _) when is_std_positive_xo_ref r ->
-        set_once xo_arm (ids, body)
-    | Pcons (r, _) when is_std_positive_xi_ref r ->
-        set_once xi_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error
-          ~detail:"unsupported positive pattern shape"
-          "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported positive pattern shape"
+      [
+        (std_nullary_constructor is_std_positive_xh_ref, xh_arm);
+        (std_constructor is_std_positive_xo_ref, xo_arm);
+        (std_constructor is_std_positive_xi_ref, xi_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_xh =
     pp_branch_or_fallback_expr state env fallback !xh_arm
@@ -3102,21 +3108,17 @@ and pp_std_positive_match_expr state env scrutinee branches =
 and pp_std_N_match_expr state env scrutinee branches =
   let zero_arm = ref None in
   let pos_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_N_zero_ref r ->
-        set_once zero_arm (ids, body)
-    | Pcons (r, _) when is_std_N_pos_ref r ->
-        set_once pos_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported N pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported N pattern shape"
+      [
+        (std_nullary_constructor is_std_N_zero_ref, zero_arm);
+        (std_constructor is_std_N_pos_ref, pos_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_zero =
     pp_branch_or_fallback_expr state env fallback !zero_arm
@@ -3134,23 +3136,18 @@ and pp_std_Z_match_expr state env scrutinee branches =
   let zero_arm = ref None in
   let pos_arm = ref None in
   let neg_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_Z_zero_ref r ->
-        set_once zero_arm (ids, body)
-    | Pcons (r, _) when is_std_Z_pos_ref r ->
-        set_once pos_arm (ids, body)
-    | Pcons (r, _) when is_std_Z_neg_ref r ->
-        set_once neg_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported Z pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported Z pattern shape"
+      [
+        (std_nullary_constructor is_std_Z_zero_ref, zero_arm);
+        (std_constructor is_std_Z_pos_ref, pos_arm);
+        (std_constructor is_std_Z_neg_ref, neg_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_zero =
     pp_branch_or_fallback_expr state env fallback !zero_arm
@@ -3171,17 +3168,12 @@ and pp_std_Z_match_expr state env scrutinee branches =
 
 and pp_std_Q_match_expr state env scrutinee branches =
   let q_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, _) when is_std_Q_make_ref r ->
-        set_once q_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported Q pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported Q pattern shape"
+      [(std_constructor is_std_Q_make_ref, q_arm)]
+      branches
   in
-  Array.iter classify branches;
   match !q_arm with
   | Some (ids, body) ->
       str "(lambda __q: (" ++
@@ -3189,26 +3181,22 @@ and pp_std_Q_match_expr state env scrutinee branches =
       str ")(__q.numerator, __q.denominator))(" ++
       pp_expr state env scrutinee ++ str ")"
   | None ->
-      pp_branch_or_impossible_expr state env !wildcard_arm
+      pp_branch_or_impossible_expr state env wildcard_arm
 
 and pp_std_bool_match_expr state env scrutinee branches =
   let true_arm = ref None in
   let false_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_bool_true_ref r ->
-        set_once true_arm (ids, body)
-    | Pcons (r, []) when is_std_bool_false_ref r ->
-        set_once false_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported bool pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported bool pattern shape"
+      [
+        (std_nullary_constructor is_std_bool_true_ref, true_arm);
+        (std_nullary_constructor is_std_bool_false_ref, false_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_true =
     pp_branch_or_fallback_expr state env fallback !true_arm
@@ -3221,21 +3209,17 @@ and pp_std_bool_match_expr state env scrutinee branches =
 and pp_std_option_match_expr state env scrutinee branches =
   let none_arm = ref None in
   let some_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_option_none_ref r ->
-        set_once none_arm (ids, body)
-    | Pcons (r, _) when is_std_option_some_ref r ->
-        set_once some_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported option pattern shape"
+      [
+        (std_nullary_constructor is_std_option_none_ref, none_arm);
+        (std_constructor is_std_option_some_ref, some_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_none =
     pp_branch_or_fallback_expr state env fallback !none_arm
@@ -3257,21 +3241,17 @@ and pp_std_option_match_expr state env scrutinee branches =
 and pp_std_list_match_expr state env scrutinee branches =
   let nil_arm = ref None in
   let cons_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_list_nil_ref r ->
-        set_once nil_arm (ids, body)
-    | Pcons (r, _) when is_std_list_cons_ref r ->
-        set_once cons_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported list pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported list pattern shape"
+      [
+        (std_nullary_constructor is_std_list_nil_ref, nil_arm);
+        (std_constructor is_std_list_cons_ref, cons_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let fallback () =
-    pp_branch_or_impossible_expr state env !wildcard_arm
+    pp_branch_or_impossible_expr state env wildcard_arm
   in
   let pp_nil =
     pp_branch_or_fallback_expr state env fallback !nil_arm
@@ -3287,22 +3267,17 @@ and pp_std_list_match_expr state env scrutinee branches =
 
 and pp_std_prod_match_expr state env scrutinee branches =
   let pair_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, _) when is_std_prod_pair_ref r ->
-        set_once pair_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported prod pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported prod pattern shape"
+      [(std_constructor is_std_prod_pair_ref, pair_arm)]
+      branches
   in
-  Array.iter classify branches;
   match !pair_arm with
   | Some (ids, body) ->
       pp_branch_pair_expr state env ids body (pp_expr state env scrutinee)
   | None ->
-      pp_branch_or_impossible_expr state env !wildcard_arm
+      pp_branch_or_impossible_expr state env wildcard_arm
 
 (*s Custom-match expression emitter.
     When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
@@ -3519,20 +3494,16 @@ let rec pp_statement_expr state env indent = function
 let classify_std_option_branches branches =
   let none_arm = ref None in
   let some_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_option_none_ref r ->
-        set_once none_arm (ids, body)
-    | Pcons (r, _) when is_std_option_some_ref r ->
-        set_once some_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported option pattern shape"
+      [
+        (std_nullary_constructor is_std_option_none_ref, none_arm);
+        (std_constructor is_std_option_some_ref, some_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
-  (!none_arm, !some_arm, !wildcard_arm)
+  (!none_arm, !some_arm, wildcard_arm)
 
 let is_primitive_equality_expr expr =
   match primitive_equality_expr_parts expr with
@@ -4179,23 +4150,19 @@ and pp_return_or_impossible state env indent = function
 and pp_std_list_return_body state env indent scrutinee branches =
   let nil_arm = ref None in
   let cons_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_list_nil_ref r ->
-        set_once nil_arm (ids, body)
-    | Pcons (r, _) when is_std_list_cons_ref r ->
-        set_once cons_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported list pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported list pattern shape"
+      [
+        (std_nullary_constructor is_std_list_nil_ref, nil_arm);
+        (std_constructor is_std_list_cons_ref, cons_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback () =
-    pp_return_or_impossible state env (indent + 4) !wildcard_arm
+    pp_return_or_impossible state env (indent + 4) wildcard_arm
   in
   let pp_nil =
     match !nil_arm with
@@ -4209,7 +4176,7 @@ and pp_std_list_return_body state env indent scrutinee branches =
           [str "__list[0]"; str "__list[1:]"]
           body
     | None ->
-        pp_return_or_impossible state env indent !wildcard_arm
+        pp_return_or_impossible state env indent wildcard_arm
   in
   str "__list = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __list == []:" ++ fnl () ++
@@ -4245,23 +4212,19 @@ and pp_std_option_return_body state env indent scrutinee branches =
 and pp_std_bool_return_body state env indent scrutinee branches =
   let true_arm = ref None in
   let false_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_bool_true_ref r ->
-        set_once true_arm (ids, body)
-    | Pcons (r, []) when is_std_bool_false_ref r ->
-        set_once false_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported bool pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported bool pattern shape"
+      [
+        (std_nullary_constructor is_std_bool_true_ref, true_arm);
+        (std_nullary_constructor is_std_bool_false_ref, false_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback body_indent =
-    pp_return_or_impossible state env body_indent !wildcard_arm
+    pp_return_or_impossible state env body_indent wildcard_arm
   in
   let pp_true =
     match !true_arm with
@@ -4272,7 +4235,7 @@ and pp_std_bool_return_body state env indent scrutinee branches =
     match !false_arm with
     | Some (ids, body) -> pp_return_arm state env indent ids [] body
     | None ->
-        pp_return_or_impossible state env indent !wildcard_arm
+        pp_return_or_impossible state env indent wildcard_arm
   in
   str "if " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
   str body_pfx ++ pp_true ++ fnl () ++
@@ -4281,23 +4244,19 @@ and pp_std_bool_return_body state env indent scrutinee branches =
 and pp_std_string_return_body state env indent scrutinee branches =
   let empty_arm = ref None in
   let cons_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_string_empty_ref r ->
-        set_once empty_arm (ids, body)
-    | Pcons (r, _) when is_std_string_cons_ref r ->
-        set_once cons_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported string pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported string pattern shape"
+      [
+        (std_nullary_constructor is_std_string_empty_ref, empty_arm);
+        (std_constructor is_std_string_cons_ref, cons_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback () =
-    pp_return_or_impossible state env (indent + 4) !wildcard_arm
+    pp_return_or_impossible state env (indent + 4) wildcard_arm
   in
   let pp_empty =
     match !empty_arm with
@@ -4311,7 +4270,7 @@ and pp_std_string_return_body state env indent scrutinee branches =
           [str "__s[0]"; str "__s[1:]"]
           body
     | None ->
-        pp_return_or_impossible state env indent !wildcard_arm
+        pp_return_or_impossible state env indent wildcard_arm
   in
   str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __s == \"\":" ++ fnl () ++
@@ -4321,23 +4280,19 @@ and pp_std_string_return_body state env indent scrutinee branches =
 and pp_std_N_return_body state env indent scrutinee branches =
   let zero_arm = ref None in
   let pos_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_N_zero_ref r ->
-        set_once zero_arm (ids, body)
-    | Pcons (r, _) when is_std_N_pos_ref r ->
-        set_once pos_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported N pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported N pattern shape"
+      [
+        (std_nullary_constructor is_std_N_zero_ref, zero_arm);
+        (std_constructor is_std_N_pos_ref, pos_arm);
+      ]
+      branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback branch_indent =
-    pp_return_or_impossible state env branch_indent !wildcard_arm
+    pp_return_or_impossible state env branch_indent wildcard_arm
   in
   let pp_zero =
     match !zero_arm with
@@ -4358,24 +4313,19 @@ and pp_std_N_return_body state env indent scrutinee branches =
 
 and pp_std_prod_return_body state env indent scrutinee branches =
   let pair_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, _) when is_std_prod_pair_ref r ->
-        set_once pair_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported prod pattern shape" "PYEX040"
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported prod pattern shape"
+      [(std_constructor is_std_prod_pair_ref, pair_arm)]
+      branches
   in
-  Array.iter classify branches;
   match !pair_arm with
   | Some (ids, body) ->
       str "__pair = " ++ pp_expr state env scrutinee ++ fnl () ++
       str (String.make indent ' ') ++
       pp_return_arm state env indent ids [str "__pair[0]"; str "__pair[1]"] body
   | None ->
-      pp_return_or_impossible state env indent !wildcard_arm
+      pp_return_or_impossible state env indent wildcard_arm
 
 and pp_fix_statement state env indent i ids defs =
   let n = Array.length ids in
