@@ -649,7 +649,6 @@ def recover_reply_promises(
         except Exception:
             _mark_promises_failed(store, (promise_id for promise_id, _ in group))
             raise
-        _ack_promises(store, (promise_id for promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -659,6 +658,7 @@ def recover_reply_promises(
             thread=action.thread,
             registry=registry,
         )
+        _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
 
     for promise in promises:
@@ -716,7 +716,6 @@ def recover_reply_promises(
                 store, (group_promise_id for group_promise_id, _ in group)
             )
             raise
-        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -726,6 +725,7 @@ def recover_reply_promises(
             thread=action.reply_to,
             registry=registry,
         )
+        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
 
     return processed_any

@@ -586,7 +586,7 @@ class TestRecoverReplyPromises:
         mock_create_task.assert_not_called()
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
 
-    def test_issue_recovery_clears_promise_before_task_creation(
+    def test_issue_recovery_commits_tasks_before_promise_ack(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -602,7 +602,7 @@ class TestRecoverReplyPromises:
         }
 
         def fail_after_reply(*args, **kwargs):
-            assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
+            assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
             raise RuntimeError("task add failed")
 
         with (
@@ -620,7 +620,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                 )
-        assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
 
     def test_coalesces_review_comment_promises_in_same_thread(
         self, tmp_path: Path
@@ -847,8 +847,8 @@ class TestRecoverReplyPromises:
 
         def fail_after_reply(*args, **kwargs):
             store = FidoStore(tmp_path)
-            assert store.promise(first.promise_id).state == "acked"
-            assert store.promise(second.promise_id).state == "acked"
+            assert store.promise(first.promise_id).state == "prepared"
+            assert store.promise(second.promise_id).state == "prepared"
             raise RuntimeError("task add failed")
 
         with (
@@ -864,8 +864,8 @@ class TestRecoverReplyPromises:
                     7,
                 )
         store = FidoStore(tmp_path)
-        assert store.promise(first.promise_id).state == "acked"
-        assert store.promise(second.promise_id).state == "acked"
+        assert store.promise(first.promise_id).state == "prepared"
+        assert store.promise(second.promise_id).state == "prepared"
 
     def test_review_recovery_replay_records_one_artifact_for_group(
         self, tmp_path: Path

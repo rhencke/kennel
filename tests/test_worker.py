@@ -7633,6 +7633,37 @@ class TestHandleQueuedComments:
         assert store.pending_pr_comments(repo="owner/repo") == []
         assert store.claim_state(301) == "completed"
 
+    def test_commits_task_before_promise_ack(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="issues", comment_id=302)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_issue_comment.return_value = {
+            "id": 302,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+        }
+
+        def assert_promise_unacked(*args: object, **kwargs: object) -> dict[str, str]:
+            del args, kwargs
+            promises = FidoStore(tmp_path).recoverable_promises()
+            assert len(promises) == 1
+            assert promises[0].state == "prepared"
+            return {"title": "do thing", "status": "pending"}
+
+        with (
+            patch(
+                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+            ),
+            patch("fido.events.create_task", side_effect=assert_promise_unacked),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        assert FidoStore(tmp_path).claim_state(302) == "completed"
+
     def test_drains_review_comment_and_queues_tasks(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         self._enqueue(tmp_path, comment_type="pulls", comment_id=401)
