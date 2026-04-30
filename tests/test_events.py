@@ -9,10 +9,14 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
     _apply_reply_result,
+    _build_issue_comment_action,
     _configured_agent,
+    _deferred_issue_key,
+    _existing_reply_artifact,
     _get_commit_summary,
     _is_allowed,
     _notify_thread_change,
+    _open_defer_issue_idempotent,
     _posted_comment_id,
     _record_reply_artifact,
     _reorder_tasks_background,
@@ -24,6 +28,7 @@ from fido.events import (
     _try_resolve_thread,
     bot_feedback_creates_tasks,
     bot_feedback_resolves_thread,
+    build_review_comment_action,
     create_task,
     dispatch,
     launch_sync,
@@ -37,6 +42,7 @@ from fido.events import (
     reply_to_review,
     review_outcome_creates_tasks,
     review_outcome_resolves_thread,
+    thread_lineage_comment_ids,
 )
 from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
@@ -586,7 +592,7 @@ class TestRecoverReplyPromises:
         mock_create_task.assert_not_called()
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
 
-    def test_issue_recovery_clears_promise_before_task_creation(
+    def test_issue_recovery_commits_tasks_before_promise_ack(
         self, tmp_path: Path
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
@@ -602,7 +608,7 @@ class TestRecoverReplyPromises:
         }
 
         def fail_after_reply(*args, **kwargs):
-            assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
+            assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
             raise RuntimeError("task add failed")
 
         with (
@@ -620,7 +626,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                 )
-        assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
+        assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
 
     def test_coalesces_review_comment_promises_in_same_thread(
         self, tmp_path: Path
@@ -847,8 +853,8 @@ class TestRecoverReplyPromises:
 
         def fail_after_reply(*args, **kwargs):
             store = FidoStore(tmp_path)
-            assert store.promise(first.promise_id).state == "acked"
-            assert store.promise(second.promise_id).state == "acked"
+            assert store.promise(first.promise_id).state == "prepared"
+            assert store.promise(second.promise_id).state == "prepared"
             raise RuntimeError("task add failed")
 
         with (
@@ -864,8 +870,8 @@ class TestRecoverReplyPromises:
                     7,
                 )
         store = FidoStore(tmp_path)
-        assert store.promise(first.promise_id).state == "acked"
-        assert store.promise(second.promise_id).state == "acked"
+        assert store.promise(first.promise_id).state == "prepared"
+        assert store.promise(second.promise_id).state == "prepared"
 
     def test_review_recovery_replay_records_one_artifact_for_group(
         self, tmp_path: Path
@@ -1136,6 +1142,48 @@ class TestReplyPromiseHelpers:
     def test_reply_promise_ids_handles_missing_context(self) -> None:
         assert _reply_promise_ids(None) == ()
 
+    def test_review_comment_action_carries_lineage(self) -> None:
+        action = build_review_comment_action(
+            "owner/repo",
+            7,
+            "PR title",
+            "PR body",
+            {
+                "id": 102,
+                "in_reply_to_id": 101,
+                "body": "follow up",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                "path": "x.py",
+                "line": 5,
+                "diff_hunk": "@@",
+                "user": {"login": "owner"},
+            },
+        )
+
+        assert action.reply_to is not None
+        assert action.reply_to["lineage_key"] == "pulls:owner/repo:7:thread:101"
+        assert action.reply_to["lineage_comment_ids"] == [101, 102]
+        assert thread_lineage_comment_ids(action.reply_to) == (101, 102)
+
+    def test_issue_comment_action_carries_pr_lineage(self) -> None:
+        action = _build_issue_comment_action(
+            "owner/repo",
+            7,
+            "PR title",
+            "PR body",
+            {
+                "id": 302,
+                "body": "please fix",
+                "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+                "user": {"login": "owner"},
+            },
+        )
+
+        assert action.thread is not None
+        assert action.thread["lineage_key"] == "issues:owner/repo:7"
+        assert action.thread["lineage_comment_ids"] == [302]
+        assert thread_lineage_comment_ids(action.thread) == (302,)
+
     def test_posted_comment_id_extracts_int_only(self) -> None:
         assert _posted_comment_id({"id": 7}) == 7
         assert _posted_comment_id({"id": "7"}) is None
@@ -1184,6 +1232,118 @@ class TestReplyPromiseHelpers:
 
         assert store.promise(promise.promise_id).state == "prepared"
         assert store.artifact_for_promise(promise.promise_id) is None
+
+    def test_existing_reply_artifact_requires_every_promise(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        first = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=702
+        )
+        second = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=703
+        )
+        assert first is not None
+        assert second is not None
+
+        assert _existing_reply_artifact(repo_cfg, ()) is None
+        assert _existing_reply_artifact(repo_cfg, (first.promise_id,)) is None
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9702,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(first.promise_id,),
+        )
+
+        assert (
+            _existing_reply_artifact(repo_cfg, (first.promise_id, second.promise_id))
+            is None
+        )
+        assert _existing_reply_artifact(repo_cfg, (first.promise_id,)) == 9702
+
+    def test_existing_reply_artifact_rejects_split_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        first = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=704
+        )
+        second = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=705
+        )
+        assert first is not None
+        assert second is not None
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9704,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(first.promise_id,),
+        )
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9705,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(second.promise_id,),
+        )
+
+        assert (
+            _existing_reply_artifact(repo_cfg, (first.promise_id, second.promise_id))
+            is None
+        )
+
+    def test_deferred_issue_key_deduplicates_and_sorts(self) -> None:
+        assert _deferred_issue_key(["b", "a", "a"]) == "deferred-issue:a,b"
+        assert _deferred_issue_key([]) is None
+
+    def test_open_defer_issue_idempotent_reuses_recorded_issue(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise_id = "00000000-0000-0000-0000-000000000001"
+        store.record_deferred_issue(
+            idempotence_key=f"deferred-issue:{promise_id}",
+            repo="owner/repo",
+            title="later",
+            body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
+            issue_url="https://github.com/owner/repo/issues/7",
+        )
+        gh = MagicMock()
+
+        url = _open_defer_issue_idempotent(
+            repo_cfg,
+            gh,
+            "owner/repo",
+            "https://github.com/owner/repo/pull/7",
+            "later",
+            "big refactor",
+            (promise_id,),
+        )
+
+        assert url == "https://github.com/owner/repo/issues/7"
+        gh.create_issue.assert_not_called()
+
+    def test_open_defer_issue_without_key_posts_directly(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/owner/repo/issues/8"
+
+        url = _open_defer_issue_idempotent(
+            _repo_cfg(tmp_path),
+            gh,
+            "owner/repo",
+            "",
+            "later",
+            "big refactor",
+            (),
+        )
+
+        assert url == "https://github.com/owner/repo/issues/8"
+        gh.create_issue.assert_called_once_with("owner/repo", "later", "big refactor")
 
 
 class TestDispatchPing:
@@ -1241,10 +1401,13 @@ class TestDispatchReviewComment:
             "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
         )
         assert result is not None
-        assert result.reply_to is not None
-        assert result.comment_body == "fix this"
-        assert result.reply_to["comment_id"] == 123
-        assert result.reply_to["url"] == "https://example.com"
+        assert result.reply_to is None
+        assert result.comment_body is None
+        assert result.preempts_worker is True
+        assert result.thread is not None
+        assert result.thread["comment_id"] == 123
+        assert result.thread["url"] == "https://example.com"
+        assert result.thread["comment_type"] == "pulls"
 
     def test_reply_to_includes_author(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -1266,9 +1429,138 @@ class TestDispatchReviewComment:
             "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
         )
         assert result is not None
-        assert result.reply_to is not None
-        assert result.reply_to["author"] == "owner"
-        assert result.reply_to["comment_type"] == "pulls"
+        assert result.thread is not None
+        assert result.thread["author"] == "owner"
+        assert result.thread["comment_type"] == "pulls"
+
+    def test_review_comment_webhook_enqueues_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 125,
+                "body": "please keep this durable",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        result = dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-125",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        record = records[0]
+        assert record.delivery_id == "delivery-review-125"
+        assert record.pr_number == 5
+        assert record.comment_type == "pulls"
+        assert record.comment_id == 125
+        assert record.author == "owner"
+        assert record.body == "please keep this durable"
+        assert record.github_created_at == "2026-04-30T12:00:00Z"
+        assert record.payload_json
+
+    def test_review_comment_webhook_deduplicates_fifo_record(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 126,
+                "body": "only once",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-126-a",
+        )
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-126-b",
+        )
+
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert [record.comment_id for record in records] == [126]
+
+    def test_review_comment_edit_updates_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 127,
+                "body": "original",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-127-a",
+        )
+        edited_payload = {
+            **payload,
+            "action": "edited",
+            "comment": {
+                **payload["comment"],
+                "body": "edited before drain",
+                "updated_at": "2026-04-30T12:05:00Z",
+            },
+        }
+        result = dispatch(
+            "pull_request_review_comment",
+            edited_payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-127-b",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        assert records[0].delivery_id == "delivery-review-127-b"
+        assert records[0].body == "edited before drain"
+        assert records[0].github_created_at == "2026-04-30T12:00:00Z"
 
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -1328,6 +1620,17 @@ class TestDispatchCheckRun:
 class TestDispatchPullRequest:
     def test_merged(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-queued",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type="issues",
+            comment_id=900,
+            author="owner",
+            is_bot=False,
+            body="queued",
+            github_created_at="2026-04-30T12:00:00Z",
+        )
         payload = {
             **_payload(),
             "action": "closed",
@@ -1336,9 +1639,21 @@ class TestDispatchPullRequest:
         result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "merged" in result.prompt
+        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
     def test_closed_not_merged(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-queued",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type="issues",
+            comment_id=900,
+            author="owner",
+            is_bot=False,
+            body="queued",
+            github_created_at="2026-04-30T12:00:00Z",
+        )
         payload = {
             **_payload(),
             "action": "closed",
@@ -1346,6 +1661,7 @@ class TestDispatchPullRequest:
         }
         result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
+        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
 
 class TestDispatchIssueComment:
@@ -1369,7 +1685,8 @@ class TestDispatchIssueComment:
         }
         result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
-        assert result.comment_body == "looks good"
+        assert result.comment_body is None
+        assert result.preempts_worker is True
         assert result.thread is not None
         assert (
             result.thread["url"]
@@ -1377,6 +1694,91 @@ class TestDispatchIssueComment:
         )
         assert result.thread["author"] == "owner"
         assert result.thread["comment_type"] == "issues"
+
+    def test_pr_issue_comment_webhook_enqueues_fifo_record(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 457,
+                "body": "top-level durability",
+                "created_at": "2026-04-30T12:01:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/10#issuecomment-457",
+            },
+            "issue": {
+                "number": 10,
+                "title": "test pr",
+                "body": "desc",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+
+        result = dispatch(
+            "issue_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-issue-457",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        record = records[0]
+        assert record.delivery_id == "delivery-issue-457"
+        assert record.pr_number == 10
+        assert record.comment_type == "issues"
+        assert record.comment_id == 457
+        assert record.author == "owner"
+        assert record.body == "top-level durability"
+        assert record.github_created_at == "2026-04-30T12:01:00Z"
+
+    def test_pr_issue_comment_edit_updates_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 458,
+                "body": "original",
+                "created_at": "2026-04-30T12:01:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/10#issuecomment-458",
+            },
+            "issue": {
+                "number": 10,
+                "title": "test pr",
+                "body": "desc",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+
+        dispatch("issue_comment", payload, cfg, repo_cfg, delivery_id="delivery-a")
+        edited_payload = {
+            **payload,
+            "action": "edited",
+            "comment": {
+                **payload["comment"],
+                "body": "edited before drain",
+                "updated_at": "2026-04-30T12:05:00Z",
+            },
+        }
+        result = dispatch(
+            "issue_comment", edited_payload, cfg, repo_cfg, delivery_id="delivery-b"
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        assert records[0].delivery_id == "delivery-b"
+        assert records[0].body == "edited before drain"
+        assert records[0].github_created_at == "2026-04-30T12:01:00Z"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -2043,6 +2445,48 @@ class TestReplyToComment:
             "Deferred from https://github.com/owner/repo/pull/1\n\n> refactor everything",
         )
 
+    def test_reuses_recorded_defer_issue_for_promise(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="pulls", anchor_comment_id=16
+        )
+        assert promise is not None
+        store.record_deferred_issue(
+            idempotence_key=f"deferred-issue:{promise.promise_id}",
+            repo="owner/repo",
+            title="out of scope",
+            body="Deferred from https://github.com/owner/repo/pull/1\n\n> refactor everything",
+            issue_url="https://github.com/owner/repo/issues/99",
+        )
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 16},
+            comment_body="refactor everything",
+            is_bot=False,
+            context={"reply_promise_id": promise.promise_id},
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "DEFER: out of scope"
+            assert "https://github.com/owner/repo/issues/99" in prompt
+            return "That's out of scope for this PR."
+
+        mock_gh = MagicMock()
+        cat, titles = reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert cat == "DEFER"
+        assert titles == ["out of scope"]
+        mock_gh.create_issue.assert_not_called()
+
     def test_full_flow_dump(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
@@ -2605,6 +3049,48 @@ class TestReplyToIssueComment:
             "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
         )
 
+    def test_reuses_recorded_defer_issue_for_issue_comment(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=43
+        )
+        assert promise is not None
+        store.record_deferred_issue(
+            idempotence_key=f"deferred-issue:{promise.promise_id}",
+            repo="owner/repo",
+            title="later",
+            body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
+            issue_url="https://github.com/owner/repo/issues/5",
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "DEFER: later"
+            assert "https://github.com/owner/repo/issues/5" in prompt
+            return "Out of scope."
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        action = self._action("big refactor", cid=43)
+        action.context = {
+            **(action.context or {}),
+            "reply_promise_id": promise.promise_id,
+        }
+        cat, titles = reply_to_issue_comment(
+            action,
+            cfg,
+            repo_cfg,
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert cat == "DEFER"
+        assert titles == ["later"]
+        mock_gh.create_issue.assert_not_called()
+
     def test_defer_reply_issue_creation_failure_propagates(
         self, tmp_path: Path
     ) -> None:
@@ -2627,6 +3113,52 @@ class TestReplyToIssueComment:
                 mock_gh,
                 agent=_client(side_effect=fake_pp),
             )
+        mock_gh.comment_issue.assert_not_called()
+
+    def test_skips_issue_reply_when_artifact_already_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=44
+        )
+        assert promise is not None
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9044,
+            comment_type="issues",
+            lane_key="issues:owner/repo:7",
+            promise_ids=(promise.promise_id,),
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: yep"
+            return "Yep."
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        cat, titles = reply_to_issue_comment(
+            Action(
+                prompt="PR top-level comment on #7 by owner:\n\nplease fix",
+                comment_body="please fix",
+                is_bot=False,
+                context={
+                    "pr_title": "My PR",
+                    "comment_id": 44,
+                    "reply_promise_id": promise.promise_id,
+                },
+            ),
+            cfg,
+            repo_cfg,
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        assert cat == "ANSWER"
+        assert titles == ["yep"]
         mock_gh.comment_issue.assert_not_called()
 
     def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
@@ -5180,6 +5712,8 @@ class TestReplyToCommentElseBranch:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: fix it"
+            if "Convert this PR review comment" in prompt:
+                return "Fix it"
             return "I'll fix it."
 
         mock_gh = MagicMock()
@@ -5192,6 +5726,56 @@ class TestReplyToCommentElseBranch:
                 mock_gh,
                 agent=_client(side_effect=fake_pp),
             )
+
+    def test_skips_review_reply_when_artifact_already_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="pulls", anchor_comment_id=52
+        )
+        assert promise is not None
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=9052,
+            comment_type="pulls",
+            lane_key="pulls:owner/repo:1:thread:52",
+            promise_ids=(promise.promise_id,),
+        )
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 52},
+            comment_body="please fix this",
+            is_bot=False,
+            context={"reply_promise_id": promise.promise_id},
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix it"
+            if "Convert this PR review comment" in prompt:
+                return "Fix it"
+            return "I'll fix it."
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 52, "author": "owner", "body": "please fix this"}
+        ]
+        cat, titles = reply_to_comment(
+            action,
+            cfg,
+            repo_cfg,
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        assert cat == "ACT"
+        assert titles == ["Fix it"]
+        mock_gh.reply_to_review_comment.assert_not_called()
 
 
 class TestReplyToCommentTerseEnrichment:

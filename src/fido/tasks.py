@@ -157,6 +157,51 @@ def _review_thread_contains_comment(
     return False
 
 
+def _thread_lineage_key(thread: dict[str, Any] | None) -> str | None:
+    if not thread:
+        return None
+    key = thread.get("lineage_key")
+    return str(key) if key else None
+
+
+def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
+    if not thread:
+        return []
+    comment_ids = thread.get("lineage_comment_ids")
+    raw_ids = (
+        comment_ids if isinstance(comment_ids, list) else [thread.get("comment_id")]
+    )
+    lineage: list[int] = []
+    for comment_id in raw_ids:
+        if not isinstance(comment_id, int | str):
+            continue
+        try:
+            value = int(comment_id)
+        except TypeError, ValueError:
+            continue
+        if value > 0 and value not in lineage:
+            lineage.append(value)
+    return lineage
+
+
+def _merge_thread_lineage(
+    existing_thread: dict[str, Any], new_thread: dict[str, Any]
+) -> bool:
+    """Merge related source comment ids into an existing task thread."""
+    merged = _thread_lineage_comment_ids(existing_thread)
+    changed = False
+    for comment_id in _thread_lineage_comment_ids(new_thread):
+        if comment_id not in merged:
+            merged.append(comment_id)
+            changed = True
+    if changed:
+        existing_thread["lineage_comment_ids"] = merged
+    if not existing_thread.get("lineage_key") and new_thread.get("lineage_key"):
+        existing_thread["lineage_key"] = new_thread["lineage_key"]
+        changed = True
+    return changed
+
+
 def _task_store_for_oracle(
     task_list: list[dict[str, Any]],
 ) -> tuple[task_store_oracle.TaskStore, dict[int, dict[str, Any]]]:
@@ -1001,12 +1046,28 @@ class Tasks(JsonFileStore):
         if thread:
             task["thread"] = thread
         comment_id = (thread or {}).get("comment_id")
+        lineage_key = _thread_lineage_key(thread)
         with _locked(self._data_path, write=True) as lock:
             existing = lock.read()
             for t in existing:
+                existing_thread = t.get("thread") or {}
+                existing_lineage_key = _thread_lineage_key(existing_thread)
+                if lineage_key is not None and lineage_key == existing_lineage_key:
+                    if _merge_thread_lineage(existing_thread, thread or {}):
+                        t["thread"] = existing_thread
+                        lock.write(existing)
+                    log.info(
+                        "task already exists for lineage %s (status: %s)",
+                        lineage_key,
+                        t["status"],
+                    )
+                    return t
                 if comment_id is not None:
                     # Never re-create a task for the same comment, regardless of status.
-                    if (t.get("thread") or {}).get("comment_id") == comment_id:
+                    if existing_thread.get("comment_id") == comment_id:
+                        if _merge_thread_lineage(existing_thread, thread or {}):
+                            t["thread"] = existing_thread
+                            lock.write(existing)
                         log.info(
                             "task already exists for comment_id %s (status: %s)",
                             comment_id,

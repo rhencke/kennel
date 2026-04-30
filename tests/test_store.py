@@ -351,14 +351,17 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 2
+    assert version == 5
     assert {
         "comment_claims",
         "reply_promises",
         "reply_promise_comments",
         "reply_artifacts",
         "reply_artifact_promises",
+        "deferred_issue_outbox",
         "command_queue",
+        "pr_comment_deliveries",
+        "pr_comment_queue",
         "implementation_tasks",
         "fido_state",
         "provider_sessions",
@@ -367,6 +370,508 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "restart_metadata",
         "transition_audit_log",
     } <= tables
+
+
+def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+
+    first = store.record_deferred_issue(
+        idempotence_key="deferred-issue:promise-1",
+        repo="owner/repo",
+        title="later",
+        body="body",
+        issue_url="https://github.com/owner/repo/issues/1",
+    )
+    second = store.record_deferred_issue(
+        idempotence_key="deferred-issue:promise-1",
+        repo="owner/repo",
+        title="later",
+        body="body",
+        issue_url="https://github.com/owner/repo/issues/2",
+    )
+
+    assert first.issue_url == "https://github.com/owner/repo/issues/1"
+    assert second.issue_url == first.issue_url
+    stored = store.deferred_issue("deferred-issue:promise-1")
+    assert stored is not None
+    assert stored.issue_url == first.issue_url
+
+
+def test_enqueue_pr_comment_persists_normalized_comment(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+
+    record = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=101,
+        author="rob",
+        is_bot=False,
+        body="please adjust this",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"path":"src/fido/store.py"}',
+    )
+
+    assert record.delivery_id == "delivery-1"
+    assert record.repo == "owner/repo"
+    assert record.pr_number == 7
+    assert record.comment_type == "pulls"
+    assert record.comment_id == 101
+    assert record.author == "rob"
+    assert record.is_bot is False
+    assert record.body == "please adjust this"
+    assert record.state == "pending"
+    assert record.payload_json == '{"path":"src/fido/store.py"}'
+    assert store.pending_pr_comments(repo="owner/repo") == [record]
+
+
+def test_enqueue_pr_comment_deduplicates_delivery_id(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=101,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+
+    second = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=102,
+        author="rob",
+        is_bot=False,
+        body="redelivery should not replace",
+        github_created_at="2026-04-30T10:01:00Z",
+    )
+
+    assert second.queue_id == first.queue_id
+    assert second.delivery_id == "delivery-2"
+    assert second.body == "safety-net duplicate"
+    assert second.github_created_at == "2026-04-30T10:00:00Z"
+    assert store.pending_pr_comments(repo="owner/repo") == [second]
+
+
+def test_enqueue_pr_comment_deduplicates_comment_identity(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+
+    second = store.enqueue_pr_comment(
+        delivery_id="delivery-2",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="safety-net duplicate",
+        github_created_at="2026-04-30T10:01:00Z",
+    )
+
+    assert second == first
+    assert store.pending_pr_comments(repo="owner/repo") == [first]
+
+
+def test_enqueue_pr_comment_updates_pending_comment_edit(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"body":"original"}',
+    )
+
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-2",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="edited before worker saw it",
+        github_created_at="2026-04-30T10:05:00Z",
+        payload_json='{"body":"edited"}',
+    )
+
+    assert edited.queue_id == first.queue_id
+    assert edited.delivery_id == "delivery-2"
+    assert edited.body == "edited before worker saw it"
+    assert edited.payload_json == '{"body":"edited"}'
+    assert edited.github_created_at == "2026-04-30T10:00:00Z"
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
+
+
+def test_enqueue_pr_comment_redelivery_does_not_regress_edit(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.enqueue_pr_comment(
+        delivery_id="delivery-original",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-edit",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="edited",
+        github_created_at="2026-04-30T10:05:00Z",
+    )
+
+    redelivery = store.enqueue_pr_comment(
+        delivery_id="delivery-original",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="stale original redelivery",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+
+    assert redelivery == edited
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
+
+
+def test_enqueue_pr_comment_edit_releases_retry_backoff(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=202,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is not None
+    retried = store.retry_pr_comment(queued.queue_id, failure_reason="network down")
+    assert retried is not None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-2",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=202,
+        author="rob",
+        is_bot=False,
+        body="edited",
+        github_created_at="2026-04-30T10:05:00Z",
+    )
+
+    assert edited.state == "pending"
+    assert edited.next_retry_after is None
+    assert edited.body == "edited"
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
+
+
+def test_pending_pr_comments_are_fifo_by_github_time_then_comment_id(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    later = store.enqueue_pr_comment(
+        delivery_id="delivery-later",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=300,
+        author="rob",
+        is_bot=False,
+        body="later",
+        github_created_at="2026-04-30T10:02:00Z",
+    )
+    earliest = store.enqueue_pr_comment(
+        delivery_id="delivery-earliest",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=301,
+        author="rob",
+        is_bot=False,
+        body="earliest",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    tie_breaker = store.enqueue_pr_comment(
+        delivery_id="delivery-tie",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=299,
+        author="rob",
+        is_bot=False,
+        body="same timestamp, lower id",
+        github_created_at="2026-04-30T10:02:00Z",
+    )
+
+    assert store.pending_pr_comments(repo="owner/repo") == [
+        earliest,
+        tie_breaker,
+        later,
+    ]
+
+
+def test_claim_next_pr_comment_marks_oldest_in_progress(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    oldest = store.enqueue_pr_comment(
+        delivery_id="delivery-oldest",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=401,
+        author="rob",
+        is_bot=False,
+        body="oldest",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    newer = store.enqueue_pr_comment(
+        delivery_id="delivery-newer",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=402,
+        author="rob",
+        is_bot=False,
+        body="newer",
+        github_created_at="2026-04-30T10:01:00Z",
+    )
+
+    claimed = store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+
+    assert claimed is not None
+    assert claimed.queue_id == oldest.queue_id
+    assert claimed.state == "in_progress"
+    assert claimed.claim_owner == "worker"
+    assert store.pending_pr_comments(repo="owner/repo") == [newer]
+
+
+def test_recover_in_progress_pr_comments_requeues_abandoned_claim(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=450,
+        author="rob",
+        is_bot=False,
+        body="queued",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is not None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+    recovered = store.recover_in_progress_pr_comments(repo="owner/repo")
+
+    assert len(recovered) == 1
+    assert recovered[0].queue_id == queued.queue_id
+    assert recovered[0].state == "pending"
+    assert recovered[0].claim_owner is None
+    assert recovered[0].next_retry_after is None
+    assert store.pending_pr_comments(repo="owner/repo") == recovered
+
+
+def test_recover_in_progress_pr_comments_is_repo_and_pr_scoped(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    target = store.enqueue_pr_comment(
+        delivery_id="delivery-target",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=451,
+        author="rob",
+        is_bot=False,
+        body="target",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    other_pr = store.enqueue_pr_comment(
+        delivery_id="delivery-other-pr",
+        repo="owner/repo",
+        pr_number=8,
+        comment_type="pulls",
+        comment_id=452,
+        author="rob",
+        is_bot=False,
+        body="other pr",
+        github_created_at="2026-04-30T10:01:00Z",
+    )
+    other_repo = store.enqueue_pr_comment(
+        delivery_id="delivery-other-repo",
+        repo="owner/other",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=453,
+        author="rob",
+        is_bot=False,
+        body="other repo",
+        github_created_at="2026-04-30T10:02:00Z",
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/repo", pr_number=7)
+        is not None
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/repo", pr_number=8)
+        is not None
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/other", pr_number=7)
+        is not None
+    )
+
+    recovered = store.recover_in_progress_pr_comments(repo="owner/repo", pr_number=7)
+
+    assert [record.queue_id for record in recovered] == [target.queue_id]
+    assert store.pending_pr_comments(repo="owner/repo", pr_number=7) == recovered
+    assert store.pending_pr_comments(repo="owner/repo", pr_number=8) == []
+    assert store.pending_pr_comments(repo="owner/other", pr_number=7) == []
+    assert other_pr.queue_id != target.queue_id
+    assert other_repo.queue_id != target.queue_id
+
+
+def test_complete_pr_comment_removes_it_from_pending_fifo(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=501,
+        author="rob",
+        is_bot=False,
+        body="queued",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    claimed = store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+    assert claimed is not None
+
+    completed = store.complete_pr_comment(queued.queue_id)
+
+    assert completed is not None
+    assert completed.state == "completed"
+    assert completed.claim_owner is None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+
+def test_retry_pr_comment_sets_backoff_and_becomes_claimable_after_delay(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=601,
+        author="rob",
+        is_bot=False,
+        body="queued",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is not None
+
+    retried = store.retry_pr_comment(queued.queue_id, failure_reason="provider paused")
+
+    assert retried is not None
+    assert retried.state == "retryable_failed"
+    assert retried.claim_owner is None
+    assert retried.retry_count == 1
+    assert retried.next_retry_after is not None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        conn.execute(
+            """
+            UPDATE pr_comment_queue
+            SET next_retry_after = NULL
+            WHERE queue_id = ?
+            """,
+            (queued.queue_id,),
+        )
+        conn.commit()
+
+    claimable = store.pending_pr_comments(repo="owner/repo")
+    assert len(claimable) == 1
+    assert claimable[0].queue_id == queued.queue_id
+
+
+def test_clear_pr_comment_queue_is_pr_scoped(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    removed = store.enqueue_pr_comment(
+        delivery_id="delivery-removed",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=701,
+        author="rob",
+        is_bot=False,
+        body="removed",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    kept = store.enqueue_pr_comment(
+        delivery_id="delivery-kept",
+        repo="owner/repo",
+        pr_number=8,
+        comment_type="pulls",
+        comment_id=702,
+        author="rob",
+        is_bot=False,
+        body="kept",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+
+    assert store.clear_pr_comment_queue(repo="owner/repo", pr_number=7) == 1
+
+    assert store.pending_pr_comments(repo="owner/repo") == [kept]
+    assert removed not in store.pending_pr_comments(repo="owner/repo")
+
+
+def test_missing_pr_comment_queue_ids_are_noops(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is None
+    assert store.complete_pr_comment("missing") is None
+    assert store.retry_pr_comment("missing") is None
 
 
 def test_record_artifact_tracks_many_promises(tmp_path: Path) -> None:
@@ -423,6 +928,44 @@ def test_schema_rejects_newer_user_version(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="unsupported fido.db schema version 999"):
         store.ensure_schema()
+
+
+def test_schema_upgrades_v2_database_to_current_store(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+    store.ensure_schema()
+
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        pr_comment_queue = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'pr_comment_queue'
+            """
+        ).fetchone()
+        deferred_issue_outbox = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'deferred_issue_outbox'
+            """
+        ).fetchone()
+        delivery_table = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'pr_comment_deliveries'
+            """
+        ).fetchone()
+    assert version == 5
+    assert pr_comment_queue is not None
+    assert delivery_table is not None
+    assert deferred_issue_outbox is not None
 
 
 def test_concurrent_prepare_has_one_winner(tmp_path: Path) -> None:

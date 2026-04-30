@@ -545,6 +545,29 @@ class WorkerRegistry:
         with self._untriaged_lock:
             return self._untriaged.get(repo_name, 0) > 0
 
+    def note_durable_demand(self, repo_name: str) -> None:
+        """Record that durable webhook demand is queued for *repo_name*."""
+        with self._untriaged_lock:
+            current = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
+            if isinstance(
+                current,
+                preemption_fsm.DurableDemand | preemption_fsm.PreemptedDemand,
+            ):
+                return
+            self._preemption_fsm_transition(
+                repo_name, preemption_fsm.DurableDemandRecorded()
+            )
+
+    def note_durable_demand_drained(self, repo_name: str) -> None:
+        """Record that durable webhook demand for *repo_name* has drained."""
+        with self._untriaged_lock:
+            current = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
+            if isinstance(current, preemption_fsm.Empty):
+                return
+            self._preemption_fsm_transition(
+                repo_name, preemption_fsm.DurableDemandDrained()
+            )
+
     def wait_for_inbox_drain(
         self, repo_name: str, timeout: float | None = None
     ) -> bool:

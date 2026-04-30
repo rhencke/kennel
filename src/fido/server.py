@@ -32,6 +32,7 @@ from fido.events import (
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
+    thread_lineage_comment_ids,
 )
 from fido.github import GitHub
 from fido.infra import (
@@ -789,14 +790,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # provider turn.  exit_untriaged is called in _process_action's finally
         # block when the handler finishes.
         if action and self._action_preempts_worker(action):
-            session = self.registry.get_session(repo_cfg.name)
-            if session is not None:
-                session.preempt_worker()
+            self._preempt_worker_best_effort(repo_cfg.name)
             self.registry.enter_untriaged(repo_cfg.name)
 
         # Process in background thread so we don't block the server.
         if action:
             type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+
+    def _preempt_worker_best_effort(self, repo_name: str) -> None:
+        """Try to interrupt the current worker after durable demand is recorded."""
+        session = self.registry.get_session(repo_name)
+        if session is None:
+            return
+        try:
+            session.preempt_worker()
+        except Exception:
+            log.exception(
+                "provider preempt failed for %s after durable webhook enqueue",
+                repo_name,
+            )
 
     def _patch_issue_cache(
         self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
@@ -908,6 +920,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return "handling review thread"
         if action.comment_body:
             return "handling PR comment"
+        if action.thread and action.preempts_worker:
+            return "ingesting PR comment"
         return "handling webhook action"
 
     def _reply_promise(self, action: Action) -> tuple[str, int] | None:
@@ -932,11 +946,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         promise_key = self._reply_promise(action)
         if promise_key is None:
             return None
+        thread = action.reply_to or action.thread
         comment_type, comment_id = promise_key
         promise = FidoStore(repo_cfg.work_dir).prepare_reply(
             owner="webhook",
             comment_type=comment_type,
             anchor_comment_id=comment_id,
+            covered_comment_ids=thread_lineage_comment_ids(thread),
         )
         if promise is None:
             log.info("already replied to comment %s — skipping", comment_id)
@@ -1077,7 +1093,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
             # When a human comments on a PR, transition any BLOCKED tasks back
             # to PENDING so the worker can re-evaluate and resume.
-            if action.reply_to or action.comment_body:
+            if action.reply_to or action.comment_body or action.thread:
                 type(self)._fn_unblock_tasks(repo_cfg.work_dir)
             # Non-comment events just trigger fido worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)

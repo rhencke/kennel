@@ -31,7 +31,19 @@ class NonEmpty(State):
     pass
 
 
-StateT = Empty | NonEmpty
+@final
+@dataclass(frozen=True)
+class DurableDemand(State):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class PreemptedDemand(State):
+    pass
+
+
+StateT = Empty | NonEmpty | DurableDemand | PreemptedDemand
 
 
 class Event:
@@ -46,7 +58,25 @@ class WebhookArrives(Event):
 
 @final
 @dataclass(frozen=True)
+class DurableDemandRecorded(Event):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class InterruptRequested(Event):
+    pass
+
+
+@final
+@dataclass(frozen=True)
 class HandlerDone(Event):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DurableDemandDrained(Event):
     pass
 
 
@@ -56,7 +86,14 @@ class WorkerTurnStart(Event):
     pass
 
 
-EventT = WebhookArrives | HandlerDone | WorkerTurnStart
+EventT = (
+    WebhookArrives
+    | DurableDemandRecorded
+    | InterruptRequested
+    | HandlerDone
+    | DurableDemandDrained
+    | WorkerTurnStart
+)
 
 
 def transition(
@@ -68,7 +105,13 @@ def transition(
             match event0:
                 case WebhookArrives():
                     return NonEmpty()
+                case DurableDemandRecorded():
+                    return DurableDemand()
+                case InterruptRequested():
+                    return None
                 case HandlerDone():
+                    return None
+                case DurableDemandDrained():
                     return None
                 case WorkerTurnStart():
                     return Empty()
@@ -78,8 +121,46 @@ def transition(
             match event0:
                 case WebhookArrives():
                     return NonEmpty()
+                case DurableDemandRecorded():
+                    return DurableDemand()
+                case InterruptRequested():
+                    return None
                 case HandlerDone():
                     return NonEmpty()
+                case DurableDemandDrained():
+                    return Empty()
+                case WorkerTurnStart():
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case DurableDemand():
+            match event0:
+                case WebhookArrives():
+                    return DurableDemand()
+                case DurableDemandRecorded():
+                    return DurableDemand()
+                case InterruptRequested():
+                    return PreemptedDemand()
+                case HandlerDone():
+                    return None
+                case DurableDemandDrained():
+                    return Empty()
+                case WorkerTurnStart():
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case PreemptedDemand():
+            match event0:
+                case WebhookArrives():
+                    return PreemptedDemand()
+                case DurableDemandRecorded():
+                    return PreemptedDemand()
+                case InterruptRequested():
+                    return PreemptedDemand()
+                case HandlerDone():
+                    return None
+                case DurableDemandDrained():
+                    return Empty()
                 case WorkerTurnStart():
                     return None
                 case __impossible:

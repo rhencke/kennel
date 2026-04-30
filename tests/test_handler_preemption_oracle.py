@@ -11,6 +11,13 @@ Proved invariants exercised:
     NonEmpty; the worker must not start a new provider turn while untriaged
     webhooks are pending.
 
+  ``worker_blocked_until_durable_demand_drains`` — WorkerTurnStart is rejected
+    from DurableDemand and PreemptedDemand; durable webhook demand owns the
+    next scheduler decision point.
+
+  ``interrupt_requires_durable_demand`` — InterruptRequested is rejected until
+    demand has been durably recorded.
+
   ``handler_done_rejected_from_empty``  — HandlerDone is rejected from Empty;
     an exit_untriaged without a matching enter_untriaged is a count underflow.
 
@@ -23,15 +30,22 @@ Proved invariants exercised:
 Field lesson covered:
 
   Worker grinds through an in-progress task without checking for pending
-  webhooks — fresh comments and CI events are starved (#1067).  The
-  ``worker_blocked_when_nonempty`` invariant machine-checks that this class
-  of bug cannot recur: WorkerTurnStart is always rejected from NonEmpty.
+  webhooks — fresh comments and CI events are starved (#1067).  A later
+  review-comment webhook times out during provider interrupt before triage or
+  durable work exists (#1085).  The preemption invariants machine-check that
+  worker turns are rejected while either legacy or durable webhook demand is
+  pending, and that interrupt can only follow durable demand.
 """
 
 from fido.rocq.handler_preemption import (
+    DurableDemand,
+    DurableDemandDrained,
+    DurableDemandRecorded,
     Empty,
     HandlerDone,
+    InterruptRequested,
     NonEmpty,
+    PreemptedDemand,
     WebhookArrives,
     WorkerTurnStart,
     transition,
@@ -57,6 +71,71 @@ def test_worker_turn_rejected_from_nonempty() -> None:
     assert result is None, (
         "worker_blocked_when_nonempty violated: WorkerTurnStart accepted from NonEmpty"
     )
+
+
+def test_worker_turn_rejected_from_durable_demand() -> None:
+    """WorkerTurnStart is rejected while durable demand is queued.
+
+    worker_blocked_until_durable_demand_drains: a durably recorded webhook owns
+    the next scheduler decision point, even before the provider interrupt has
+    been requested.
+    """
+    result = transition(DurableDemand(), WorkerTurnStart())
+    assert result is None, (
+        "worker_blocked_until_durable_demand_drains violated: "
+        "WorkerTurnStart accepted from DurableDemand"
+    )
+
+
+def test_worker_turn_rejected_from_preempted_demand() -> None:
+    """WorkerTurnStart is rejected after durable demand requests interrupt.
+
+    Interrupting the provider is only a signal to shorten the current turn; it
+    does not unblock stale worker work until the durable demand drains.
+    """
+    result = transition(PreemptedDemand(), WorkerTurnStart())
+    assert result is None, (
+        "worker_blocked_until_durable_demand_drains violated: "
+        "WorkerTurnStart accepted from PreemptedDemand"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Invariant: interrupt_requires_durable_demand
+#
+# InterruptRequested is rejected until demand has been durably recorded.
+# The interrupt RPC cannot be the correctness step that preserves a webhook.
+# ---------------------------------------------------------------------------
+
+
+def test_interrupt_rejected_from_empty() -> None:
+    """InterruptRequested is rejected before any demand exists."""
+    result = transition(Empty(), InterruptRequested())
+    assert result is None, (
+        "interrupt_requires_durable_demand violated: "
+        "InterruptRequested accepted from Empty"
+    )
+
+
+def test_interrupt_rejected_from_nonempty() -> None:
+    """InterruptRequested is rejected from legacy in-memory demand.
+
+    This pins the stronger durable model: cancellation must follow the durable
+    record, not just the in-memory untriaged counter.
+    """
+    result = transition(NonEmpty(), InterruptRequested())
+    assert result is None, (
+        "interrupt_requires_durable_demand violated: "
+        "InterruptRequested accepted from NonEmpty"
+    )
+
+
+def test_durable_record_then_interrupt_enters_preempted_demand() -> None:
+    """DurableDemandRecorded precedes InterruptRequested."""
+    recorded = transition(Empty(), DurableDemandRecorded())
+    assert isinstance(recorded, DurableDemand)
+    interrupted = transition(recorded, InterruptRequested())
+    assert isinstance(interrupted, PreemptedDemand)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +227,25 @@ def test_webhook_arrives_from_nonempty() -> None:
     )
 
 
+def test_webhook_arrives_from_durable_demand_preserves_durable_gate() -> None:
+    """WebhookArrives from DurableDemand keeps durable scheduler priority."""
+    result = transition(DurableDemand(), WebhookArrives())
+    assert isinstance(result, DurableDemand), (
+        "webhook_arrival_always_accepted violated: "
+        f"WebhookArrives from DurableDemand yielded {result!r}, expected DurableDemand"
+    )
+
+
+def test_webhook_arrives_from_preempted_demand_preserves_preempted_gate() -> None:
+    """WebhookArrives from PreemptedDemand keeps the preempted gate."""
+    result = transition(PreemptedDemand(), WebhookArrives())
+    assert isinstance(result, PreemptedDemand), (
+        "webhook_arrival_always_accepted violated: "
+        "WebhookArrives from PreemptedDemand yielded "
+        f"{result!r}, expected PreemptedDemand"
+    )
+
+
 # ---------------------------------------------------------------------------
 # HandlerDone from NonEmpty — stays NonEmpty
 #
@@ -205,3 +303,16 @@ def test_multiple_arrivals_then_worker_blocked() -> None:
         state = result
     # Worker blocked
     assert transition(state, WorkerTurnStart()) is None
+
+
+def test_durable_demand_drains_before_worker_turn() -> None:
+    """Durable demand blocks until explicitly drained."""
+    state = transition(Empty(), DurableDemandRecorded())
+    assert isinstance(state, DurableDemand)
+    assert transition(state, WorkerTurnStart()) is None
+    preempted = transition(state, InterruptRequested())
+    assert isinstance(preempted, PreemptedDemand)
+    assert transition(preempted, WorkerTurnStart()) is None
+    drained = transition(preempted, DurableDemandDrained())
+    assert isinstance(drained, Empty)
+    assert isinstance(transition(drained, WorkerTurnStart()), Empty)

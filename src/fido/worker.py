@@ -42,7 +42,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.store import FidoStore, ReplyPromiseRecord
+from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.types import GitIdentity, TaskStatus, TaskType
 
@@ -165,6 +165,10 @@ class ActivityReporter(Protocol):
     def wait_for_inbox_drain(
         self, repo_name: str, timeout: float | None = None
     ) -> bool: ...
+
+    def note_durable_demand(self, repo_name: str) -> None: ...
+
+    def note_durable_demand_drained(self, repo_name: str) -> None: ...
 
     def assert_worker_turn_ok(self, repo_name: str) -> None: ...
 
@@ -2230,6 +2234,170 @@ class Worker:
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
+    def handle_queued_comments(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Drain durable PR-comment FIFO entries before normal worker turns."""
+        del fido_dir, slug
+        store = FidoStore(self.work_dir)
+        processed_any = False
+        while True:
+            queued = store.claim_next_pr_comment(
+                owner="worker", repo=repo_ctx.repo, pr_number=pr_number
+            )
+            if queued is None:
+                if processed_any and self._registry is not None:
+                    self._registry.note_durable_demand_drained(self._repo_name)
+                return processed_any
+            processed_any = True
+            self._handle_queued_comment(store, queued, repo_ctx)
+
+    def _handle_queued_comment(
+        self,
+        store: FidoStore,
+        queued: PRCommentQueueRecord,
+        repo_ctx: RepoContext,
+    ) -> None:
+        from fido import events
+
+        config = self._config
+        repo_cfg = self._repo_cfg
+        if config is None or repo_cfg is None:
+            raise RuntimeError("queued comment handling requires explicit config")
+        pr_data = self.gh.get_pr(repo_ctx.repo, queued.pr_number)
+        pr_title = pr_data.get("title") or ""
+        pr_body = pr_data.get("body") or ""
+        promise: ReplyPromiseRecord | None = None
+        try:
+            action = self._queued_comment_action(
+                queued, repo_ctx.repo, pr_title, pr_body
+            )
+            if action is None:
+                store.complete_pr_comment(queued.queue_id)
+                return
+            promise = store.prepare_reply(
+                owner="worker",
+                comment_type=queued.comment_type,
+                anchor_comment_id=queued.comment_id,
+                covered_comment_ids=events.thread_lineage_comment_ids(
+                    action.reply_to if queued.comment_type == "pulls" else action.thread
+                ),
+            )
+            if promise is None:
+                store.complete_pr_comment(queued.queue_id)
+                return
+            action.context = {
+                **(action.context or {}),
+                "reply_promise_id": promise.promise_id,
+            }
+            category, titles = self._reply_to_queued_comment(
+                queued, action, config, repo_cfg
+            )
+            events.queue_reply_tasks(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                self.gh,
+                thread=action.reply_to
+                if queued.comment_type == "pulls"
+                else action.thread,
+                is_bot=action.is_bot,
+                registry=self._registry,
+            )
+            store.ack_promise(promise.promise_id)
+        except Exception as exc:
+            if promise is not None:
+                store.mark_failed(promise.promise_id)
+            store.retry_pr_comment(queued.queue_id, failure_reason=str(exc))
+            raise
+        store.complete_pr_comment(queued.queue_id)
+        tasks.sync_tasks_background(self.work_dir, self.gh)
+
+    def _queued_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        if queued.comment_type == "pulls":
+            return self._queued_review_comment_action(queued, repo, pr_title, pr_body)
+        return self._queued_issue_comment_action(queued, repo, pr_title, pr_body)
+
+    def _reply_to_queued_comment(
+        self,
+        queued: PRCommentQueueRecord,
+        action: Any,
+        config: Config,
+        repo_cfg: RepoConfig,
+    ) -> tuple[str, list[str]]:
+        from fido import events
+
+        if queued.comment_type == "pulls":
+            return events.reply_to_comment(
+                action,
+                config,
+                repo_cfg,
+                self.gh,
+                agent=self._provider_agent,
+                prompts=self._get_prompts(),
+            )
+        return events.reply_to_issue_comment(
+            action,
+            config,
+            repo_cfg,
+            self.gh,
+            agent=self._provider_agent,
+            prompts=self._get_prompts(),
+        )
+
+    def _queued_review_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        from fido import events
+
+        comment = self.gh.get_pull_comment(repo, queued.comment_id)
+        if comment is None:
+            log.info("queued review comment %s is gone — completing", queued.comment_id)
+            return None
+        return events.build_review_comment_action(
+            repo,
+            queued.pr_number,
+            pr_title,
+            pr_body,
+            comment,
+        )
+
+    def _queued_issue_comment_action(
+        self,
+        queued: PRCommentQueueRecord,
+        repo: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> Any | None:
+        from fido import events
+
+        comment = self.gh.get_issue_comment(repo, queued.comment_id)
+        if comment is None:
+            log.info("queued issue comment %s is gone — completing", queued.comment_id)
+            return None
+        return events._build_issue_comment_action(  # pyright: ignore[reportPrivateUsage]
+            repo,
+            queued.pr_number,
+            pr_title,
+            pr_body,
+            comment,
+        )
+
     def ensure_pushed(self, remote: str, slug: str) -> bool | None:
         """Ensure the branch is pushed to *remote*.
 
@@ -2452,22 +2620,38 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
-    def _admit_worker_turn(self) -> None:
+    def _has_durable_webhook_demand(self) -> bool:
+        """Return whether durable PR-comment demand should run before work."""
+        return FidoStore(self.work_dir).has_pending_pr_comments(self._repo_name)
+
+    def _admit_worker_turn(self) -> bool:
         """Wait until webhook/rescope work drains, then validate turn admission.
 
         This is the pre-provider gate.  A webhook can arrive after task pickup
         but before ``provider_run()`` starts; in that case the worker must wait
         rather than fire the oracle while the inbox is intentionally non-empty.
+
+        Returns ``False`` when durable PR-comment demand is queued.  The caller
+        must yield the worker turn instead of starting provider work.
         """
         if self._registry is None:
-            return
+            return True
         if self._registry.has_untriaged(self._repo_name):
             log.info(
                 "inbox non-empty for %s before provider turn — waiting",
                 self._repo_name,
             )
             self._registry.wait_for_inbox_drain(self._repo_name, timeout=None)
+        if self._has_durable_webhook_demand():
+            log.info(
+                "durable webhook demand pending for %s — yielding worker turn",
+                self._repo_name,
+            )
+            self._registry.note_durable_demand(self._repo_name)
+            return False
+        self._registry.note_durable_demand_drained(self._repo_name)
         self._registry.assert_worker_turn_ok(self._repo_name)
+        return True
 
     def _assert_worker_turn_ok(self) -> None:
         """Fire the handler-preemption oracle before each ``provider_run()``.
@@ -2536,6 +2720,14 @@ class Worker:
         task = _pick_next_task(task_list)
         if task is None:
             return False
+        if self._has_durable_webhook_demand():
+            log.info(
+                "durable webhook demand pending for %s — deferring task pickup",
+                self._repo_name,
+            )
+            if self._registry is not None:
+                self._registry.note_durable_demand(self._repo_name)
+            return True
         task_title = task["title"]
         log.info("task: %s", task_title)
         self.set_status(f"Working on: {task_title}")
@@ -2555,6 +2747,12 @@ class Worker:
             )
             if thread.get("url"):
                 context_parts.append(f"Thread URL: {thread['url']}")
+            lineage_ids = thread.get("lineage_comment_ids") or []
+            if lineage_ids:
+                context_parts.append(
+                    "Related thread comment_ids: "
+                    + ", ".join(str(comment_id) for comment_id in lineage_ids)
+                )
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         prompts = self._get_prompts()
@@ -2582,7 +2780,11 @@ class Worker:
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
-        self._admit_worker_turn()
+        if not self._admit_worker_turn():
+            self._tasks.update(task["id"], TaskStatus.PENDING)
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
+            return True
         if self._abort_task.is_set():
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
@@ -2672,7 +2874,8 @@ class Worker:
                 if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
                 else TurnSessionMode.REUSE
             )
-            self._admit_worker_turn()
+            if not self._admit_worker_turn():
+                return True
             if self._abort_task.is_set():
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
@@ -3245,6 +3448,16 @@ class Worker:
             pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                 ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
             )
+            if self._first_iteration:
+                recovered_comments = FidoStore(
+                    self.work_dir
+                ).recover_in_progress_pr_comments(repo=repo_ctx.repo)
+                if recovered_comments:
+                    log.warning(
+                        "recovered %s in-progress PR comment claim(s) for %s",
+                        len(recovered_comments),
+                        repo_ctx.repo,
+                    )
             recovery_provider = (
                 self._ensure_provider().provider_id
                 if self._repo_cfg is None
@@ -3298,6 +3511,8 @@ class Worker:
                 if self.handle_merge_conflict(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1

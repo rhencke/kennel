@@ -390,6 +390,43 @@ class TestAddTask:
         assert t1["id"] == t2["id"]
         assert len(list_tasks(tmp_path)) == 1
 
+    def test_deduplicates_by_comment_lineage_and_merges_sources(
+        self, tmp_path: Path
+    ) -> None:
+        first_thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 101,
+            "lineage_key": "pulls:r/r:1:thread:100",
+            "lineage_comment_ids": [100, 101],
+        }
+        second_thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 102,
+            "lineage_key": "pulls:r/r:1:thread:100",
+            "lineage_comment_ids": [100, 102],
+        }
+
+        first = add_task(
+            tmp_path,
+            title="handle first comment",
+            task_type=TaskType.THREAD,
+            thread=first_thread,
+        )
+        second = add_task(
+            tmp_path,
+            title="handle follow-up comment",
+            task_type=TaskType.THREAD,
+            thread=second_thread,
+        )
+
+        assert first["id"] == second["id"]
+        tasks = list_tasks(tmp_path)
+        assert len(tasks) == 1
+        assert tasks[0]["thread"]["comment_id"] == 101
+        assert tasks[0]["thread"]["lineage_comment_ids"] == [100, 101, 102]
+
     def test_different_comment_ids_are_not_deduplicated(self, tmp_path: Path) -> None:
         t1 = add_task(
             tmp_path,

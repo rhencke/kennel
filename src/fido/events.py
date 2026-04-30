@@ -1,9 +1,11 @@
+import json
 import logging
 import re
 import subprocess
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +212,7 @@ def build_review_comment_action(
     )
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
+    lineage_key, lineage_comment_ids = _review_lineage(repo, pr_number, comment)
     return Action(
         prompt=(
             f"Review comment on PR #{pr_number} by {user}"
@@ -222,6 +225,8 @@ def build_review_comment_action(
             "url": comment["html_url"],
             "author": user,
             "comment_type": "pulls",
+            "lineage_key": lineage_key,
+            "lineage_comment_ids": list(lineage_comment_ids),
         },
         comment_body=body,
         is_bot=is_bot,
@@ -249,6 +254,7 @@ def _build_issue_comment_action(
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     comment_id = int(comment["id"])
+    lineage_key = _issue_lane_key(repo, pr_number)
     return Action(
         prompt=f"PR top-level comment on #{pr_number} by {user}:\n\n{body}",
         reply_to=None,
@@ -266,6 +272,8 @@ def _build_issue_comment_action(
             "url": comment["html_url"],
             "author": user,
             "comment_type": "issues",
+            "lineage_key": lineage_key,
+            "lineage_comment_ids": [comment_id],
         },
     )
 
@@ -306,6 +314,69 @@ def _record_reply_artifact(
         store.mark_posted(promise_id)
 
 
+def _existing_reply_artifact(
+    repo_cfg: RepoConfig, promise_ids: Iterable[str]
+) -> int | None:
+    """Return a durable reply artifact when every promise is already covered."""
+    store = FidoStore(repo_cfg.work_dir)
+    normalized = tuple(
+        dict.fromkeys(promise_id for promise_id in promise_ids if promise_id)
+    )
+    if not normalized:
+        return None
+    artifacts = [store.artifact_for_promise(promise_id) for promise_id in normalized]
+    if any(artifact is None for artifact in artifacts):
+        return None
+    artifact_ids = {artifact.artifact_comment_id for artifact in artifacts if artifact}
+    if len(artifact_ids) != 1:
+        return None
+    for promise_id in normalized:
+        store.mark_posted(promise_id)
+    return next(iter(artifact_ids))
+
+
+def _deferred_issue_key(promise_ids: Iterable[str]) -> str | None:
+    """Return the stable idempotence key for a deferred issue side effect."""
+    normalized = tuple(
+        sorted(dict.fromkeys(promise_id for promise_id in promise_ids if promise_id))
+    )
+    if not normalized:
+        return None
+    return "deferred-issue:" + ",".join(normalized)
+
+
+def _open_defer_issue_idempotent(
+    repo_cfg: RepoConfig,
+    gh: Any,
+    repo: str,
+    pr_url: str,
+    title: str,
+    comment: str,
+    promise_ids: Iterable[str],
+) -> str:
+    """Create or reuse the deferred tracking issue for this reply promise."""
+    issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
+    key = _deferred_issue_key(promise_ids)
+    store = FidoStore(repo_cfg.work_dir)
+    if key is not None:
+        existing = store.deferred_issue(key)
+        if existing is not None:
+            log.info(
+                "reusing deferred tracking issue for %s: %s", key, existing.issue_url
+            )
+            return existing.issue_url
+    url = _open_defer_issue(gh, repo, pr_url, title, comment)
+    if key is not None:
+        store.record_deferred_issue(
+            idempotence_key=key,
+            repo=repo,
+            title=title,
+            body=issue_body,
+            issue_url=url,
+        )
+    return url
+
+
 def _posted_comment_id(posted: object) -> int | None:
     """Return the GitHub comment id from a post response, when available."""
     if not isinstance(posted, dict):
@@ -322,6 +393,133 @@ def _review_lane_key(repo: str, pr_number: int, root_comment_id: int) -> str:
 
 def _issue_lane_key(repo: str, pr_number: int) -> str:
     return f"issues:{repo}:{pr_number}"
+
+
+def _normalize_comment_ids(comment_ids: Iterable[object]) -> tuple[int, ...]:
+    """Return positive integer comment ids in stable first-seen order."""
+    normalized: list[int] = []
+    for comment_id in comment_ids:
+        if not isinstance(comment_id, int | str):
+            continue
+        try:
+            value = int(comment_id)
+        except TypeError, ValueError:
+            continue
+        if value > 0 and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _review_lineage(
+    repo: str,
+    pr_number: int,
+    comment: dict[str, Any],
+    thread_comments: Iterable[dict[str, Any]] = (),
+) -> tuple[str, tuple[int, ...]]:
+    """Return the durable lineage key and covered ids for a review thread."""
+    comment_id = int(comment["id"])
+    root_id = int(comment.get("in_reply_to_id") or comment_id)
+    lineage_ids = _normalize_comment_ids(
+        (
+            root_id,
+            *(thread_comment.get("id") for thread_comment in thread_comments),
+            comment_id,
+        )
+    )
+    return _review_lane_key(repo, pr_number, root_id), lineage_ids
+
+
+def thread_lineage_comment_ids(thread: dict[str, Any] | None) -> tuple[int, ...]:
+    """Return comment ids covered by a task/reply thread lineage."""
+    if not thread:
+        return ()
+    lineage = thread.get("lineage_comment_ids")
+    if isinstance(lineage, list):
+        return _normalize_comment_ids(lineage)
+    comment_id = thread.get("comment_id")
+    if comment_id is None:
+        return ()
+    return _normalize_comment_ids((comment_id,))
+
+
+def _comment_created_at(comment: dict[str, Any]) -> str:
+    """Return a stable GitHub timestamp for FIFO ordering."""
+    created_at = comment.get("created_at") or comment.get("updated_at")
+    if created_at:
+        return str(created_at)
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _enqueue_pr_comment_webhook(
+    *,
+    repo_cfg: RepoConfig,
+    repo: str,
+    pr_number: int,
+    comment_type: str,
+    comment: dict[str, Any],
+    author: str,
+    is_bot: bool,
+    body: str,
+    delivery_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Persist one normalized PR comment webhook before acting on it."""
+    comment_id = comment.get("id")
+    if delivery_id is None or comment_id is None:
+        return
+    FidoStore(repo_cfg.work_dir).enqueue_pr_comment(
+        delivery_id=delivery_id,
+        repo=repo,
+        pr_number=pr_number,
+        comment_type=comment_type,
+        comment_id=int(comment_id),
+        author=author,
+        is_bot=is_bot,
+        body=body,
+        github_created_at=_comment_created_at(comment),
+        payload_json=json.dumps(
+            {
+                "event": (
+                    "pull_request_review_comment"
+                    if comment_type == "pulls"
+                    else "issue_comment"
+                ),
+                "delivery_id": delivery_id,
+                "payload": payload,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _queued_pr_comment_action(
+    *,
+    prompt: str,
+    repo: str,
+    pr_number: int,
+    comment_type: str,
+    comment_id: int,
+    html_url: str,
+    author: str,
+    is_bot: bool,
+    context: dict[str, Any],
+) -> Action:
+    """Wake the worker for a durably queued PR comment without using provider."""
+    return Action(
+        prompt=prompt,
+        preempts_worker=True,
+        is_bot=is_bot,
+        context=context,
+        thread={
+            "repo": repo,
+            "pr": pr_number,
+            "comment_id": comment_id,
+            "url": html_url,
+            "author": author,
+            "comment_type": comment_type,
+        },
+    )
 
 
 def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
@@ -567,7 +765,6 @@ def recover_reply_promises(
         except Exception:
             _mark_promises_failed(store, (promise_id for promise_id, _ in group))
             raise
-        _ack_promises(store, (promise_id for promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -577,6 +774,7 @@ def recover_reply_promises(
             thread=action.thread,
             registry=registry,
         )
+        _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
 
     for promise in promises:
@@ -634,7 +832,6 @@ def recover_reply_promises(
                 store, (group_promise_id for group_promise_id, _ in group)
             )
             raise
-        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -644,6 +841,7 @@ def recover_reply_promises(
             thread=action.reply_to,
             registry=registry,
         )
+        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
 
     return processed_any
@@ -730,7 +928,7 @@ def dispatch(
             else None,
         )
 
-    if event == "pull_request_review_comment" and action == "created":
+    if event == "pull_request_review_comment" and action in {"created", "edited"}:
         comment = payload.get("comment", {})
         pr = payload.get("pull_request", {})
         number = pr.get("number")
@@ -748,32 +946,52 @@ def dispatch(
         log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
         is_bot = user.endswith("[bot]")
         if comment_id is not None:
+            comment_id = int(comment_id)
             wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
             assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
-        return Action(
-            prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
-            reply_to={
-                "repo": repo,
-                "pr": number,
-                "comment_id": comment_id,
-                "url": comment.get("html_url", ""),
-                "author": user,
-                "comment_type": "pulls",
-            },
-            comment_body=comment_body,
-            is_bot=is_bot,
-            context={
-                "pr_title": pr.get("title", ""),
-                "pr_body": pr.get("body", "") or "",
-                "file": comment.get("path", ""),
-                "line": comment.get("line"),
-                "diff_hunk": comment.get("diff_hunk", ""),
-            },
-        )
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
+            prefix = (
+                "Queued edited review comment"
+                if action == "edited"
+                else "Queued review comment"
+            )
+            return _queued_pr_comment_action(
+                prompt=(
+                    f"{prefix} on PR #{number} by {user}"
+                    f" ({'bot' if is_bot else 'human/owner'})"
+                ),
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "pr_title": pr.get("title", ""),
+                    "pr_body": pr.get("body", "") or "",
+                    "file": comment.get("path", ""),
+                    "line": comment.get("line"),
+                    "diff_hunk": comment.get("diff_hunk", ""),
+                },
+            )
+        return None
 
-    if event == "issue_comment" and action == "created":
+    if event == "issue_comment" and action in {"created", "edited"}:
         comment = payload.get("comment", {})
         issue = payload.get("issue", {})
         user = comment.get("user", {}).get("login", "")
@@ -793,31 +1011,44 @@ def dispatch(
         is_bot = user.endswith("[bot]")
         log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
         if number is not None and comment_id is not None:
+            comment_id = int(comment_id)
             wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
             assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
-        return Action(
-            prompt=f"PR top-level comment on #{number} by {user}:\n\n{comment_body}",
-            reply_to=None,  # top-level comments use issues API, not pulls
-            comment_body=comment_body,
-            is_bot=is_bot,
-            context={
-                "pr_title": issue.get("title", ""),
-                "pr_body": issue.get("body", "") or "",
-                "comment_id": comment_id,
-            },
-            thread={
-                "repo": repo,
-                "pr": number,
-                "comment_id": comment_id,
-                "url": comment.get("html_url", ""),
-                "author": user,
-                "comment_type": "issues",
-            }
-            if number and comment_id
-            else None,
-        )
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
+            prefix = (
+                "Queued edited PR top-level comment"
+                if action == "edited"
+                else "Queued PR top-level comment"
+            )
+            return _queued_pr_comment_action(
+                prompt=f"{prefix} on #{number} by {user}",
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "pr_title": issue.get("title", ""),
+                    "pr_body": issue.get("body", "") or "",
+                },
+            )
+        return None
 
     if event == "check_run" and action == "completed":
         check = payload.get("check_run", {})
@@ -845,10 +1076,19 @@ def dispatch(
 
     if event == "pull_request" and action == "closed":
         pr = payload.get("pull_request", {})
-        if not pr.get("merged"):
-            log.debug("PR #%s closed without merge — ignoring", pr.get("number"))
-            return None
         number = pr.get("number")
+        if number is not None:
+            removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
+                repo=repo,
+                pr_number=int(number),
+            )
+            if removed:
+                log.info(
+                    "cleared %d queued comment(s) for closed PR #%s", removed, number
+                )
+        if not pr.get("merged"):
+            log.debug("PR #%s closed without merge — ignoring", number)
+            return None
         log.info("PR #%s merged", number)
         if number is not None:
             wev = wct_oracle.EvtPRMerged(1, number)
@@ -967,6 +1207,21 @@ def reply_to_comment(
         if fetched:
             thread_comments = list(fetched)
             context["comment_thread"] = thread_comments
+            root_comment = next(
+                (
+                    thread_comment
+                    for thread_comment in thread_comments
+                    if thread_comment.get("in_reply_to_id") is None
+                ),
+                thread_comments[0],
+            )
+            lineage_ids = _normalize_comment_ids(
+                thread_comment.get("id") for thread_comment in thread_comments
+            )
+            info["lineage_key"] = _review_lane_key(
+                info["repo"], int(info["pr"]), int(root_comment["id"])
+            )
+            info["lineage_comment_ids"] = list(lineage_ids)
             log.info(
                 "fetched %d comment(s) in thread for context", len(thread_comments)
             )
@@ -1014,9 +1269,12 @@ def reply_to_comment(
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
+    promise_ids = _reply_promise_ids(context)
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_url = _open_defer_issue(gh, info["repo"], pr_url, titles[0], comment)
+        issue_url = _open_defer_issue_idempotent(
+            repo_cfg, gh, info["repo"], pr_url, titles[0], comment, promise_ids
+        )
 
     # Step 3: Opus reply based on triage
     instr = prompts.reply_instruction(
@@ -1085,25 +1343,30 @@ def reply_to_comment(
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
         return (category, titles)
 
-    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
-    log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    posted = gh.reply_to_review_comment(
-        info["repo"], info["pr"], body, info["comment_id"]
-    )
-    log.info("reply posted")
     root_comment_id = (
         thread_comments[0]["id"] if thread_comments else info["comment_id"]
     )
-    if root_comment_id is not None:
-        _record_reply_artifact(
-            repo_cfg,
-            artifact_comment_id=_posted_comment_id(posted),
-            comment_type="pulls",
-            lane_key=_review_lane_key(
-                info["repo"], int(info["pr"]), int(root_comment_id)
-            ),
-            promise_ids=promise_ids,
+    existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
+    if existing_artifact_id is None:
+        log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+        posted = gh.reply_to_review_comment(
+            info["repo"], info["pr"], body, info["comment_id"]
+        )
+        log.info("reply posted")
+        if root_comment_id is not None:
+            _record_reply_artifact(
+                repo_cfg,
+                artifact_comment_id=_posted_comment_id(posted),
+                comment_type="pulls",
+                lane_key=_review_lane_key(
+                    info["repo"], int(info["pr"]), int(root_comment_id)
+                ),
+                promise_ids=promise_ids,
+            )
+    else:
+        log.info(
+            "reply artifact %s already recorded — skipping post", existing_artifact_id
         )
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
@@ -1473,9 +1736,12 @@ def reply_to_issue_comment(
     # For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
+    promise_ids = _reply_promise_ids(context)
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_url = _open_defer_issue(gh, repo_full, pr_url, titles[0], comment)
+        issue_url = _open_defer_issue_idempotent(
+            repo_cfg, gh, repo_full, pr_url, titles[0], comment, promise_ids
+        )
 
     instr = prompts.issue_reply_instruction(
         category, comment, ", ".join(titles), action.context, issue_url=issue_url
@@ -1496,18 +1762,23 @@ def reply_to_issue_comment(
         body[:80],
     )
 
-    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
-    log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
-    posted = gh.comment_issue(repo_full, number, body)
-    log.info("reply posted on PR #%s", number)
-    _record_reply_artifact(
-        repo_cfg,
-        artifact_comment_id=_posted_comment_id(posted),
-        comment_type="issues",
-        lane_key=_issue_lane_key(repo_full, int(number)),
-        promise_ids=promise_ids,
-    )
+    existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
+    if existing_artifact_id is None:
+        log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
+        posted = gh.comment_issue(repo_full, number, body)
+        log.info("reply posted on PR #%s", number)
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=_posted_comment_id(posted),
+            comment_type="issues",
+            lane_key=_issue_lane_key(repo_full, int(number)),
+            promise_ids=promise_ids,
+        )
+    else:
+        log.info(
+            "reply artifact %s already recorded — skipping post", existing_artifact_id
+        )
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
