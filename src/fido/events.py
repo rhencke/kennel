@@ -923,7 +923,6 @@ def reply_to_comment(
         context["reply_promise_id"] = direct_promise.promise_id
 
     # Always fetch the full thread for this comment.
-    # Normalize to list so root_body extraction below is type-safe.
     thread_comments: list[dict[str, Any]] = []
     if info.get("repo") and info.get("pr") and info.get("comment_id"):
         fetched = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
@@ -941,10 +940,7 @@ def reply_to_comment(
         c["id"] for c in thread_comments if c.get("author", "").lower() in _FIDO_LOGINS
     }
 
-    # Root comment body — used for task title generation.
-    # When the webhook fires on a reply (e.g. "Yes" or "Woof, you're right!"),
-    # the task title should describe the reviewer's original feedback, not the reply.
-    root_body = thread_comments[0].get("body", comment) if thread_comments else comment
+    final_comment_id = info.get("comment_id")
 
     # Enrich context with sibling threads when the comment needs more context
     if needs_more_context(comment, agent=agent) and info.get("repo") and info.get("pr"):
@@ -962,14 +958,20 @@ def reply_to_comment(
     )
     log.info("triage: %s — %s", category, titles)
 
-    # Step 1b: Always derive task titles from the root comment body for action
-    # categories.  The originating PR comment is the source of truth for what
-    # was requested; triage may have run on a short reply body ("Yes", "Done")
-    # that produces a poor title.  Using root_body here ensures the task always
-    # reflects what the reviewer originally asked.
+    # Step 1b: Derive task titles from the full comment chain for action
+    # categories.  The final triggering comment is the ACT source, while prior
+    # comments provide the context needed for terse follow-ups.
     if category in ("ACT", "DO"):
-        log.info("deriving task title from root comment")
-        titles = [_summarize_as_action_item(root_body, agent=agent)]
+        log.info("deriving task title from comment chain")
+        titles = [
+            _comment_chain_action_title(
+                thread_comments,
+                final_comment_id if isinstance(final_comment_id, int) else None,
+                comment,
+                titles,
+                agent=agent,
+            )
+        ]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
@@ -1177,6 +1179,37 @@ def needs_more_context(
 _MAX_TITLE_LEN = 80
 
 
+def _shorten_title_if_needed(
+    title: str, *, agent: ProviderAgent, log_prefix: str
+) -> str:
+    """Shorten an overlong task title while preserving imperative wording."""
+    result = title
+    for _ in range(3):
+        if len(result) <= _MAX_TITLE_LEN:
+            break
+        log.info(
+            "%s: title too long (%d chars), requesting shorten",
+            log_prefix,
+            len(result),
+        )
+        shortened = safe_voice_turn(
+            agent,
+            f"{NO_TOOLS_CLAUSE}\n\n"
+            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
+            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
+            model=agent.voice_model,
+            log_prefix=f"{log_prefix}/shorten",
+        )
+        result = shortened.strip()
+        log.info(
+            "%s: shorten returned %d chars (preview=%r)",
+            log_prefix,
+            len(result),
+            result[:60],
+        )
+    return result[:_MAX_TITLE_LEN]
+
+
 def _summarize_as_action_item(
     comment_body: str, *, agent: ProviderAgent | None = None
 ) -> str:
@@ -1203,28 +1236,73 @@ def _summarize_as_action_item(
         len(result),
         result[:60],
     )
-    for _ in range(3):
-        if len(result) <= _MAX_TITLE_LEN:
-            break
-        log.info(
-            "summarize-action-item: title too long (%d chars), requesting shorten",
-            len(result),
+    return _shorten_title_if_needed(
+        result, agent=agent, log_prefix="_summarize_as_action_item"
+    )
+
+
+def _comment_chain_action_title(
+    thread_comments: list[dict[str, Any]],
+    final_comment_id: int | None,
+    final_comment_body: str,
+    triage_titles: list[str],
+    *,
+    agent: ProviderAgent | None = None,
+) -> str:
+    """Ask Opus for a task title using the whole comment chain."""
+    if agent is None:
+        raise ValueError("_comment_chain_action_title requires agent")
+    chain = list(thread_comments)
+    if final_comment_id is not None and not any(
+        c.get("id") == final_comment_id for c in chain
+    ):
+        chain.append(
+            {
+                "id": final_comment_id,
+                "author": "commenter",
+                "body": final_comment_body,
+            }
         )
-        shortened = safe_voice_turn(
-            agent,
-            f"{NO_TOOLS_CLAUSE}\n\n"
-            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
-            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
-            model=agent.voice_model,
-            log_prefix="_summarize_as_action_item/shorten",
+    if not chain:
+        chain.append(
+            {
+                "id": final_comment_id,
+                "author": "commenter",
+                "body": final_comment_body,
+            }
         )
-        result = shortened.strip()
-        log.info(
-            "summarize-action-item: shorten returned %d chars (preview=%r)",
-            len(result),
-            result[:60],
-        )
-    return result[:_MAX_TITLE_LEN]
+    lines: list[str] = []
+    for index, item in enumerate(chain, start=1):
+        marker = " (FINAL ACT COMMENT)" if item.get("id") == final_comment_id else ""
+        user = item.get("user")
+        user_login = user.get("login") if isinstance(user, dict) else None
+        author = item.get("author") or user_login or "unknown"
+        body = str(item.get("body", "") or "")
+        lines.append(f"{index}. {author}{marker}: {body}")
+    suggested = "\n".join(f"- {title}" for title in triage_titles if title.strip())
+    prompt = (
+        f"{NO_TOOLS_CLAUSE}\n\n"
+        "Convert this PR review comment chain into a short, imperative task title "
+        "starting with a verb. The comment marked FINAL ACT COMMENT is the comment "
+        "that produced the ACT decision; use the earlier comments only as context. "
+        "Preserve the concrete action from the final comment. Reply with ONLY the "
+        "title — no category prefix, no punctuation at the end.\n\n"
+        f"Suggested ACT title(s) from triage:\n{suggested or '- none'}\n\n"
+        "Comment chain:\n" + "\n".join(lines)
+    )
+    log.info("comment-chain-action-title: requesting title from opus")
+    raw = safe_voice_turn(
+        agent, prompt, model=agent.voice_model, log_prefix="_comment_chain_action_title"
+    )
+    result = raw.strip()
+    log.info(
+        "comment-chain-action-title: returned %d chars (preview=%r)",
+        len(result),
+        result[:60],
+    )
+    return _shorten_title_if_needed(
+        result, agent=agent, log_prefix="_comment_chain_action_title"
+    )
 
 
 def _triage(

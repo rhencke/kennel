@@ -1241,6 +1241,8 @@ class TestDispatchReviewComment:
         assert result is not None
         assert result.reply_to is not None
         assert result.comment_body == "fix this"
+        assert result.reply_to["comment_id"] == 123
+        assert result.reply_to["url"] == "https://example.com"
 
     def test_reply_to_includes_author(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -1899,6 +1901,38 @@ class TestReplyToComment:
             )
         mock_create_task.assert_not_called()
 
+    def test_apply_reply_result_preserves_triggering_comment_link(
+        self, tmp_path: Path
+    ) -> None:
+        """Task metadata links to the comment that requested work."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        thread = {
+            "repo": "owner/repo",
+            "pr": 1,
+            "comment_id": 102,
+            "url": "https://github.com/owner/repo/pull/1#discussion_r102",
+            "author": "rhencke",
+            "comment_type": "pulls",
+        }
+        with patch("fido.events.create_task") as mock_create_task:
+            _apply_reply_result(
+                "ACT",
+                ["Remove redundant empty-list concatenation"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                registry=None,
+            )
+        mock_create_task.assert_called_once()
+        _, kwargs = mock_create_task.call_args
+        assert kwargs["thread"]["comment_id"] == 102
+        assert (
+            kwargs["thread"]["url"]
+            == "https://github.com/owner/repo/pull/1#discussion_r102"
+        )
+
     def test_full_flow_answer(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
@@ -2118,8 +2152,8 @@ class TestReplyToComment:
         )
         assert cat == "ACT"
 
-    def test_act_title_from_summarize_not_triage(self, tmp_path: Path) -> None:
-        """ACT task title always comes from _summarize_as_action_item, not triage output."""
+    def test_act_title_from_comment_chain_not_raw_triage(self, tmp_path: Path) -> None:
+        """ACT task title uses the chain-aware title pass, not raw triage output."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2128,12 +2162,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
+        calls: list[str] = []
+
         def fake_pp(prompt, model, **kwargs):
+            calls.append(prompt)
             if model == "claude-haiku-4-5":
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: add unit tests\nACT: update documentation"
-            if "Convert this PR review comment" in prompt:
+            if "Convert this PR review comment chain" in prompt:
                 return "Add tests and update docs"
             return "On it!"
 
@@ -2145,16 +2182,25 @@ class TestReplyToComment:
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
-        # Title comes from _summarize_as_action_item(root_body), not multi-item triage
         assert titles == ["Add tests and update docs"]
+        chain_prompts = [
+            p for p in calls if "Convert this PR review comment chain" in p
+        ]
+        assert len(chain_prompts) == 1
+        assert "Suggested ACT title(s) from triage:" in chain_prompts[0]
+        assert "- add unit tests" in chain_prompts[0]
+        assert "- update documentation" in chain_prompts[0]
+        assert "FINAL ACT COMMENT" in chain_prompts[0]
 
-    def test_act_title_uses_root_comment_when_reply(self, tmp_path: Path) -> None:
-        """When the triggering comment is a reply, ACT title comes from the root."""
+    def test_act_title_uses_thread_context_and_final_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """When the triggering comment is a reply, ACT title sees the whole chain."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 42},
-            comment_body="Woof, you're right!",
+            comment_body="But what about ] + []?",
             is_bot=False,
         )
 
@@ -2165,20 +2211,22 @@ class TestReplyToComment:
             if model == "claude-haiku-4-5":
                 return "NO"
             if "Triage" in prompt:
-                return "ACT: do it"
-            if "Convert this PR review comment" in prompt:
-                return "Add null input validation"
+                return "ACT: remove redundant empty-list concatenation"
+            if "Convert this PR review comment chain" in prompt:
+                return "Remove redundant empty-list concatenation"
             return "Done!"
 
         mock_gh = MagicMock()
-        # Thread: root is reviewer feedback, second is fido's reply
+        # The root explains the surrounding concern; the final human reply
+        # supplies the concrete ACT request.
         mock_gh.fetch_comment_thread.return_value = [
             {
                 "id": 100,
-                "author": "reviewer",
-                "body": "Please add null input validation",
+                "author": "rhencke",
+                "body": "Why did generated fields get renamed?",
             },
-            {"id": 101, "author": "fidocancode", "body": "Woof, you're right!"},
+            {"id": 101, "author": "fidocancode", "body": "Woof, because..."},
+            {"id": 42, "author": "rhencke", "body": "But what about ] + []?"},
         ]
         cat, titles = reply_to_comment(
             action,
@@ -2188,12 +2236,16 @@ class TestReplyToComment:
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
-        # Title derived from root comment, not the "Woof" reply
-        assert titles == ["Add null input validation"]
-        # _summarize_as_action_item was called with the root body
-        summarize_calls = [p for p in calls if "Convert this PR review comment" in p]
-        assert len(summarize_calls) == 1
-        assert "Please add null input validation" in summarize_calls[0]
+        assert titles == ["Remove redundant empty-list concatenation"]
+        chain_prompts = [
+            p for p in calls if "Convert this PR review comment chain" in p
+        ]
+        assert len(chain_prompts) == 1
+        assert "1. rhencke: Why did generated fields get renamed?" in chain_prompts[0]
+        assert "2. fidocancode: Woof, because..." in chain_prompts[0]
+        assert (
+            "3. rhencke (FINAL ACT COMMENT): But what about ] + []?" in chain_prompts[0]
+        )
         # Posted replies are immutable; even with a prior Fido reply we post a new one.
         reply_args = mock_gh.reply_to_review_comment.call_args.args
         assert reply_args[:2] == ("owner/repo", 1)
@@ -2201,8 +2253,10 @@ class TestReplyToComment:
         assert "fido:reply-promise:" in reply_args[2]
         mock_gh.edit_review_comment.assert_not_called()
 
-    def test_act_title_always_from_root_comment(self, tmp_path: Path) -> None:
-        """ACT title is always derived from the root comment via _summarize_as_action_item."""
+    def test_act_title_marks_single_comment_thread_as_final(
+        self, tmp_path: Path
+    ) -> None:
+        """A single-comment thread is still explicitly marked as the ACT source."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2211,12 +2265,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
+        calls: list[str] = []
+
         def fake_pp(prompt, model, **kwargs):
+            calls.append(prompt)
             if model == "claude-haiku-4-5":
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: add error handling"
-            if "Convert this PR review comment" in prompt:
+            if "Convert this PR review comment chain" in prompt:
                 return "Add error handling for null inputs"
             return "Will do!"
 
@@ -2237,9 +2294,15 @@ class TestReplyToComment:
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
-        # Title always comes from _summarize_as_action_item(root_body), even when
-        # the triggering comment is the root itself
         assert titles == ["Add error handling for null inputs"]
+        chain_prompts = [
+            p for p in calls if "Convert this PR review comment chain" in p
+        ]
+        assert len(chain_prompts) == 1
+        assert (
+            "1. reviewer (FINAL ACT COMMENT): Add error handling for null inputs"
+            in chain_prompts[0]
+        )
         # No prior Fido reply in thread — a new reply is posted
         mock_gh.reply_to_review_comment.assert_called_once()
         mock_gh.edit_review_comment.assert_not_called()
