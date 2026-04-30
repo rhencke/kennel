@@ -362,29 +362,37 @@ Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
 
 ## Q. Handler preemption — webhook interrupt turn admission
 
-**Invariant.** When webhook interrupt work for a repo is non-empty, the
-worker must not start a new provider turn for that repo. Formally:
-`interrupt_work(r) ≠ ∅ ⟹ next_turn(r) ∈ Handler`. The worker yields at
-every turn boundary when comments, review feedback, CI failures, or
-handler-owned rescope work are waiting, blocking until the interrupt
-work drains.
+**Invariant.** When either legacy in-memory handler demand or durable
+queued webhook demand for a repo is non-empty, the worker must not start
+a new provider turn for that repo. Formally:
+`legacy_demand(r) ≠ ∅ ∨ durable_demand(r) ≠ ∅ ⟹ next_turn(r) ∈ Handler`.
+The worker yields at every turn boundary when comments, review feedback,
+CI failures, or handler-owned rescope work are waiting, blocking until
+both demand sources drain.
 
 **Bugs.** [#1067](https://github.com/FidoCanCode/home/issues/1067)
 (worker grinds through in-progress task without checking for pending
 webhooks — fresh comments and CI events are starved).
 
-**Model.** `handler_preemption.v` — states `{Empty, NonEmpty}`; events
-`WebhookArrives`, `HandlerDone`, `WorkerTurnStart`. Theorem:
-`WorkerTurnStart` is rejected when interrupt work is `NonEmpty`. The
-current runtime still uses a migration-era registry counter; D22 (#894)
-is the durable command-queue target.
+**Model.** `handler_preemption.v` — product state
+`legacy_demand × durable_demand × provider_interrupt`; events
+`WebhookArrives`, `DurableDemandRecorded`, `InterruptRequested`,
+`HandlerDone`, `DurableDemandDrained`, `WorkerTurnStart`. Theorems:
+`WorkerTurnStart` is rejected while either demand field is non-empty,
+durable demand must precede interrupt requests, provider interrupt state
+does not authorize or block worker admission, and mixed durable/legacy
+interleavings remain blocked until both demand sources drain.
 
-**Status.** Runtime implementation live
-([#1070](https://github.com/FidoCanCode/home/pull/1070)): per-repo
-`enter_untriaged` / `exit_untriaged` counter on `WorkerRegistry`,
-pre-provider turn admission in `Worker.execute_task`, server-side wiring
-in `_do_post_inner` / `_process_action`, CI-failure interrupts, and
-handler-owned rescope blocking. Rocq model and extracted oracle live.
+**Status.** Runtime implementation live and covered by the extracted
+oracle: per-repo `enter_untriaged` / `exit_untriaged` legacy demand on
+`WorkerRegistry`, enqueue-time durable demand and interrupt recording in
+`WebhookHandler`, pre-provider turn admission in `Worker.execute_task`,
+CI-failure interrupts, and handler-owned rescope blocking. The original
+runtime path landed in
+[#1070](https://github.com/FidoCanCode/home/pull/1070); product-state
+demand modeling and enqueue-time wiring are tracked by
+[#1132](https://github.com/FidoCanCode/home/issues/1132) /
+[#1134](https://github.com/FidoCanCode/home/pull/1134).
 
 ---
 
@@ -408,7 +416,7 @@ handler-owned rescope blocking. Rocq model and extracted oracle live.
 | N | Single runtime path | 1 | (deploy, not runtime) | mention in D8 (#746) |
 | O | Build cache | 1 | (CI, not coordination) | standard fix |
 | P | Worker registry slot lifecycle + crash recovery | lockfile race, provider orphan | ✓ worker_registry_crash.v live (#1056) | — |
-| Q | Handler preemption — untriaged inbox yield | 1 (#1067) | runtime live (#1070); Rocq pending | model + oracle |
+| Q | Handler preemption — product demand admission | 1 (#1067) | ✓ handler_preemption.v live (#1134) | — |
 
 **New issues filed (as of this survey):**
 - [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation) — **closed** ([#1052](https://github.com/FidoCanCode/home/pull/1052))
@@ -419,4 +427,4 @@ handler-owned rescope blocking. Rocq model and extracted oracle live.
 D3 (#741), D9 (#747), D10 (#748), D11 (#749), D13 (#751), D16 (#888), D18 (#890).
 
 **Runtime-first (model pending):**
-- [#1067](https://github.com/FidoCanCode/home/issues/1067) — handler preemption / untriaged inbox yield (cluster Q, runtime in [#1070](https://github.com/FidoCanCode/home/pull/1070))
+- None currently listed from this survey.

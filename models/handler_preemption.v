@@ -14,8 +14,16 @@
                             empty or non-empty.
     [provider_interrupt]  — whether a provider interrupt has been requested.
 
-    Provider interrupt state is observable because the adapter must fire the
-    oracle when the runtime asks the provider to preempt.  It is not authority
+    The demand fields are independent.  Durable demand is recorded when the
+    webhook dispatch path has committed queued work, before best-effort
+    provider cancellation or background handler execution.  Legacy demand is
+    recorded when the HTTP handler enters the in-memory untriaged inbox.
+    Either field may become non-empty first, and either may drain first; worker
+    admission remains blocked until both are empty.
+
+    Provider interrupt state is observable ordering evidence: the runtime must
+    record [InterruptRequested] only after durable demand exists, so an
+    interrupt can never stand in for lost durable work.  It is not authority
     for demand existence: [WorkerTurnStart] is accepted exactly when both
     demand fields are empty, regardless of interrupt state.
 
@@ -27,8 +35,8 @@
     [DurableDemandRecorded] — durable queue/store demand has been committed.
                               Sets [durable_demand] to non-empty and preserves
                               legacy demand.
-    [InterruptRequested]    — provider cancellation was requested after
-                              durable demand was recorded.  Sets only
+    [InterruptRequested]    — provider cancellation was requested for already
+                              recorded durable demand.  Sets only
                               [provider_interrupt].
     [HandlerDone]           — one legacy handler completes.  Clears only
                               [legacy_demand] in this boolean abstraction.
