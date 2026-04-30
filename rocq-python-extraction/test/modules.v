@@ -64,6 +64,33 @@ Module ModuleLookupFixture.
   Module FreshLookupA := FreshLookupAFunctor NatMap.
 (** [FreshLookupB] applies the B functor to [NatMap]. *)
   Module FreshLookupB := FreshLookupBFunctor NatMap.
+
+(** [ScopedLowering] keeps record field lowering local to the nested
+    structure.  The definition inside this module may lower [scoped_left] to
+    direct Python field access; callers outside the module should still use the
+    exported accessor. *)
+  Module ScopedLowering.
+(** [scoped_pair] is a small nested record used to guard structure-local
+    lowering environment scope. *)
+    Record scoped_pair := MkScopedPair {
+      scoped_left : nat ;
+      scoped_right : nat
+    }.
+
+(** [inside_left] is rendered while [scoped_pair]'s field lowering target is in
+    scope, so it should become direct attribute access. *)
+    Definition inside_left (p : scoped_pair) : nat := scoped_left p.
+
+(** [sample] provides a concrete nested record value for round-trip tests. *)
+    Definition sample : scoped_pair :=
+      {| scoped_left := 3 ; scoped_right := 4 |}.
+  End ScopedLowering.
+
+(** [outside_left] references the nested field accessor after
+    [ScopedLowering]'s structure has finished rendering.  This guards against
+    leaking the nested module's field lowering targets into outer scope. *)
+  Definition outside_left (p : ScopedLowering.scoped_pair) : nat :=
+    ScopedLowering.scoped_left p.
 End ModuleLookupFixture.
 
 Python Module Extraction ModuleLookupFixture.

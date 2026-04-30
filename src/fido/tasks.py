@@ -369,8 +369,8 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     completed: list[tuple[str, str]] = []
 
     def _fmt(row: task_store_oracle.PRBodyRow) -> tuple[str, str]:
-        task = tasks_by_oracle_id[row.pr_body_task]
-        title = row.pr_body_title
+        task = tasks_by_oracle_id[row.task]
+        title = row.title
         url = (task.get("thread") or {}).get("url", "")
         task_type = task.get("type", TaskType.SPEC)
         display = f"[{title}]({url})" if url else title
@@ -378,7 +378,7 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
 
     for row in projected_rows:
         display = _fmt(row)
-        if isinstance(row.pr_body_status, task_store_oracle.PRCompleted):
+        if isinstance(row.status, task_store_oracle.PRCompleted):
             completed.append(display)
         else:
             pending.append(display)

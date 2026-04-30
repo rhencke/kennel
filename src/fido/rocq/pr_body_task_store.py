@@ -185,7 +185,7 @@ def enqueue_task(
         if __option is None:
             return (
                 (
-                    order + [task] + [],
+                    order + [task],
                     _rocq_map_add(
                         _rocq_positive_key(task),
                         row,
@@ -207,7 +207,7 @@ def enqueue_task(
     if __option is None:
         return (
             (
-                order + [task] + [],
+                order + [task],
                 _rocq_map_add(
                     _rocq_positive_key(task),
                     row,
@@ -256,7 +256,7 @@ def apply_rescope_op(
                 return (
                     (
                         rows,
-                        pending_ids + [task] + [],
+                        pending_ids + [task],
                     ),
                     completed_ids,
                 )
@@ -272,7 +272,7 @@ def apply_rescope_op(
                             row_,
                             rows,
                         ),
-                        pending_ids + [task] + [],
+                        pending_ids + [task],
                     ),
                     completed_ids,
                 )
@@ -290,7 +290,7 @@ def apply_rescope_op(
                         ),
                         pending_ids,
                     ),
-                    completed_ids + [task] + [],
+                    completed_ids + [task],
                 )
             case __impossible:
                 assert_never(__impossible)
@@ -547,11 +547,11 @@ PRBodyStatusT = PRPending | PRCompleted
 @final
 @dataclass(frozen=True)
 class PRBodyRow:
-    pr_body_task: int
-    pr_body_title: str
-    pr_body_description: str
-    pr_body_kind: TaskKind
-    pr_body_status: PRBodyStatus
+    task: int
+    title: str
+    description: str
+    kind: TaskKind
+    status: PRBodyStatus
 
 
 def task_kind_matches_ci_filter(
@@ -577,13 +577,13 @@ def pending_projection(
             if task_kind_matches_ci_filter(include_ci, row.kind):
                 return [
                     PRBodyRow(
-                        pr_body_task=task,
-                        pr_body_title=row.title,
-                        pr_body_description=row.description,
-                        pr_body_kind=row.kind,
-                        pr_body_status=PRPending(),
+                        task=task,
+                        title=row.title,
+                        description=row.description,
+                        kind=row.kind,
+                        status=PRPending(),
                     ),
-                ] + []
+                ]
             return []
         case StatusCompleted():
             return []
@@ -607,13 +607,13 @@ def completed_projection(
         case StatusCompleted():
             return [
                 PRBodyRow(
-                    pr_body_task=task,
-                    pr_body_title=row.title,
-                    pr_body_description=row.description,
-                    pr_body_kind=row.kind,
-                    pr_body_status=PRCompleted(),
+                    task=task,
+                    title=row.title,
+                    description=row.description,
+                    kind=row.kind,
+                    status=PRCompleted(),
                 ),
-            ] + []
+            ]
         case StatusBlocked():
             return []
         case __impossible:

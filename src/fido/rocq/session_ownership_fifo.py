@@ -159,16 +159,16 @@ def transition(
                 case Idle():
                     return replace(
                         s,
-                        fifo_queue=s.fifo_queue + [c] + [],
+                        fifo_queue=s.fifo_queue + [c],
                     )
                 case HolderActive(c0):
                     return replace(
                         s,
-                        fifo_queue=s.fifo_queue + [c] + [],
+                        fifo_queue=s.fifo_queue + [c],
                     )
                 case WorkerActive():
                     return FifoState(
-                        fifo_queue=s.fifo_queue + [c] + [],
+                        fifo_queue=s.fifo_queue + [c],
                         fifo_active_slot=Idle(),
                         fifo_worker_deferred=True,
                     )

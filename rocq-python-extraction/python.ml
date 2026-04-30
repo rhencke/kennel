@@ -243,27 +243,102 @@ let set_once slot value =
   | None -> slot := Some value
   | Some _ -> ()
 
-let active_method_targets : (string * (string * string)) list ref = ref []
-
-let lookup_active_method_target source_name =
-  List.assoc_opt source_name !active_method_targets
-
-let active_record_field_targets : (string * string) list ref = ref []
-
-let active_constructor_tag_predicates = ref []
-
-let active_list_membership_predicates = ref []
-
 let source_name_tail source_name =
   match String.rindex_opt source_name '.' with
   | Some index ->
       String.sub source_name (index + 1) (String.length source_name - index - 1)
   | None -> source_name
 
-let lookup_active_record_field_target source_name =
-  match List.assoc_opt source_name !active_record_field_targets with
+type lowering_environment = {
+  lowering_method_targets : (string * (string * string)) list;
+  lowering_record_field_targets : (string * (string * string)) list;
+}
+
+let empty_lowering_environment = {
+  lowering_method_targets = [];
+  lowering_record_field_targets = [];
+}
+
+type printer_state = {
+  extraction_state : Common.State.t;
+  lowering_environment : lowering_environment ref;
+}
+
+let initial_printer_state extraction_state = {
+  extraction_state;
+  lowering_environment = ref empty_lowering_environment;
+}
+
+module ExtractionState = State
+
+module PrinterState = struct
+  let get_table state =
+    ExtractionState.get_table state.extraction_state
+
+  let get_top_visible_mp state =
+    ExtractionState.get_top_visible_mp state.extraction_state
+
+  let with_visibility state mp visible f =
+    ExtractionState.with_visibility state.extraction_state mp visible
+      (fun extraction_state -> f { state with extraction_state })
+end
+
+let pp_global state =
+  pp_global state.extraction_state
+
+let pp_global_with_key state =
+  pp_global_with_key state.extraction_state
+
+let pp_module state =
+  pp_module state.extraction_state
+
+let empty_env state =
+  empty_env state.extraction_state
+
+let lookup_lowering_method_target environment source_name =
+  List.assoc_opt source_name environment.lowering_method_targets
+
+let lookup_lowering_record_field_target environment source_name =
+  match List.assoc_opt source_name environment.lowering_record_field_targets with
   | Some _ as result -> result
-  | None -> List.assoc_opt (source_name_tail source_name) !active_record_field_targets
+  | None ->
+      List.assoc_opt (source_name_tail source_name)
+        environment.lowering_record_field_targets
+
+let extend_lowering_environment ~method_targets ~record_field_targets environment = {
+  lowering_method_targets = method_targets;
+  lowering_record_field_targets =
+    record_field_targets @ environment.lowering_record_field_targets;
+}
+
+let install_lowering_environment_extension state ~method_targets ~record_field_targets =
+  let previous = !(state.lowering_environment) in
+  state.lowering_environment :=
+    extend_lowering_environment ~method_targets ~record_field_targets previous;
+  previous
+
+let with_extended_lowering_environment state ~method_targets ~record_field_targets f =
+  let previous =
+    install_lowering_environment_extension state ~method_targets
+      ~record_field_targets
+  in
+  try
+    let result = f () in
+    state.lowering_environment := previous;
+    result
+  with exn ->
+    state.lowering_environment := previous;
+    raise exn
+
+let lookup_method_target state source_name =
+  lookup_lowering_method_target !(state.lowering_environment) source_name
+
+let lookup_record_field_target state source_name =
+  lookup_lowering_record_field_target !(state.lowering_environment) source_name
+
+let active_constructor_tag_predicates = ref []
+
+let active_list_membership_predicates = ref []
 
 let lookup_active_constructor_tag_predicate source_name =
   List.assoc_opt source_name !active_constructor_tag_predicates
@@ -772,7 +847,7 @@ type lowering_emit_form =
   | LoweringEmitCall of string
   | LoweringEmitMethod of string
   | LoweringEmitLiteral of string
-  | LoweringEmitAttribute of string
+  | LoweringEmitAttribute of string * string
   | LoweringEmitIndex of int
 
 type lowering_rule = {
@@ -1489,21 +1564,22 @@ let marker_of_lowering_ast ast =
   | Some _ as marker -> marker
   | None -> marker_of_ast ast
 
-let record_field_lowering_rule source_name field_name =
+let record_field_lowering_rule source_name class_name field_name =
   lowering_rule
     (LoweringRecordFieldRef source_name)
     LoweringRecordField
     ("record field " ^ field_name)
     [1]
-    (LoweringEmitAttribute field_name)
+    (LoweringEmitAttribute (class_name, field_name))
 
-let record_field_lowering_rule_of_source_name source_name =
-  match lookup_active_record_field_target source_name with
-  | Some field_name -> Some (record_field_lowering_rule source_name field_name)
+let record_field_lowering_rule_of_source_name state source_name =
+  match lookup_record_field_target state source_name with
+  | Some (class_name, field_name) ->
+      Some (record_field_lowering_rule source_name class_name field_name)
   | None -> None
 
 let record_field_lowering_rule_of_ref state r =
-  record_field_lowering_rule_of_source_name (pp_global state Term r)
+  record_field_lowering_rule_of_source_name state (pp_global state Term r)
 
 let rewrite_lowering_rule_of_ref state r =
   match lowering_rule_of_ref r with
@@ -1585,7 +1661,7 @@ let capitalize_first s =
 
 let type_is_coinductive state = function
   | Tglob (r, _) ->
-      is_coinductive (State.get_table state) r
+      is_coinductive (PrinterState.get_table state) r
   | _ ->
       false
 
@@ -1685,11 +1761,118 @@ let cons_arg_names_from_kernel packet j nargs =
       collect nargs arg_ty []
   | _ -> List.init nargs (fun _ -> None)
 
+let string_has_prefix ~prefix value =
+  let prefix_length = String.length prefix in
+  String.length value >= prefix_length &&
+  String.equal prefix (String.sub value 0 prefix_length)
+
+let is_lower_ascii c =
+  c >= 'a' && c <= 'z'
+
+let is_upper_ascii c =
+  c >= 'A' && c <= 'Z'
+
+let is_digit_ascii c =
+  c >= '0' && c <= '9'
+
+let camel_to_snake name =
+  let buffer = Buffer.create (String.length name) in
+  String.iteri
+    (fun i c ->
+       if is_upper_ascii c then (
+         let prev_upper =
+           i > 0 && is_upper_ascii name.[i - 1]
+         in
+         let prev_word =
+           i > 0 && (is_lower_ascii name.[i - 1] || is_digit_ascii name.[i - 1])
+         in
+         let next_lower =
+           i + 1 < String.length name && is_lower_ascii name.[i + 1]
+         in
+         if i > 0 && (prev_word || (prev_upper && next_lower)) then
+           Buffer.add_char buffer '_';
+         Buffer.add_char buffer (Char.lowercase_ascii c))
+       else
+         Buffer.add_char buffer c)
+    name;
+  Buffer.contents buffer
+
+let rec common_components left right =
+  match left, right with
+  | left_head :: left_tail, right_head :: right_tail
+    when String.equal left_head right_head ->
+      left_head :: common_components left_tail right_tail
+  | _ -> []
+
+let common_underscore_prefix field_names =
+  match List.map (String.split_on_char '_') field_names with
+  | [] -> None
+  | first :: rest -> (
+      match List.fold_left common_components first rest with
+      | [] -> None
+      | common ->
+          let prefix = String.concat "_" common in
+          let prefix_with_separator = prefix ^ "_" in
+          if List.for_all (string_has_prefix ~prefix:prefix_with_separator) field_names then
+            Some prefix
+          else
+            None)
+
+let record_field_prefix_for_class class_name field_names =
+  match common_underscore_prefix field_names with
+  | Some prefix ->
+      let class_prefix = camel_to_snake class_name in
+      if string_has_prefix ~prefix:(prefix ^ "_") class_prefix then
+        Some prefix
+      else
+        None
+  | None -> None
+
+let strip_record_field_prefix prefix field_name =
+  let prefix_with_separator = prefix ^ "_" in
+  if string_has_prefix ~prefix:prefix_with_separator field_name then
+    String.sub field_name (String.length prefix_with_separator)
+      (String.length field_name - String.length prefix_with_separator)
+  else
+    field_name
+
+let record_field_display_name class_name field_names field_name =
+  match record_field_prefix_for_class class_name field_names with
+  | Some prefix when String.contains prefix '_' ->
+      strip_record_field_prefix prefix field_name
+  | None -> field_name
+  | Some _ -> field_name
+
+let record_field_names state ind_kn fields =
+  List.filter_map
+    (function
+      | Some r' -> Some (pp_global_with_key state Term ind_kn r')
+      | None -> None)
+    fields
+
+let underscore_prefix name =
+  match String.index_opt name '_' with
+  | None -> None
+  | Some index when index > 0 -> Some (String.sub name 0 index)
+  | Some _ -> None
+
+let consistent_method_prefix field_names =
+  match List.filter_map underscore_prefix field_names with
+  | [] -> None
+  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
+  | _ -> None
+
 (** Python keyword-argument name for record field at position [i].
     Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
 let pp_field_name state r fds i =
+  let ind_ref = get_ind r in
+  let ind_kn = kn_of_ind ind_ref in
+  let class_name = capitalize_first (pp_global state Term ind_ref) in
+  let field_names = record_field_names state ind_kn fds in
   match List.nth fds i with
-  | Some r' -> str (pp_global_with_key state Term (kn_of_ind (get_ind r)) r')
+  | Some r' ->
+      let field_name = pp_global_with_key state Term ind_kn r' in
+      str (record_field_display_name class_name field_names field_name)
   | None    -> str (Printf.sprintf "arg%d" i)
 
 (** Raw constructor name for [r], accounting for inline-custom declarations. *)
@@ -1792,7 +1975,7 @@ let record_proj_info state branches =
     let (ids, pat, _) = branches.(0) in
     match pat with
     | Pusual r | Pcons (r, _) ->
-        let fds = get_record_fields (State.get_table state) r in
+        let fds = get_record_fields (PrinterState.get_table state) r in
         if List.is_empty fds then None
         else
           (* Expand [Pusual r] into [Pcons(r, pats)] for uniform treatment;
@@ -1864,15 +2047,16 @@ let record_projection_parts state expr =
       match head, List.rev all_args with
       | MLglob r, base :: _ -> (
           match record_field_lowering_rule_of_ref state r with
-          | Some { lowering_emit = LoweringEmitAttribute field_name; _ } ->
-              Some (field_name, base)
+          | Some { lowering_emit = LoweringEmitAttribute (class_name, field_name); _ } ->
+              Some (class_name, field_name, base)
           | Some _ -> None
           | None -> None)
       | _ -> None)
   | _ -> None
 
 let record_replace_expr_parts state r args =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
+  let expected_class = capitalize_first (pp_global state Term (get_ind r)) in
   let field_name i = Pp.string_of_ppcmds (pp_field_name state r fields i) in
   let same_base expected actual =
     match expected with
@@ -1888,8 +2072,9 @@ let record_replace_expr_parts state r args =
     | arg :: rest ->
         let expected_field = field_name i in
         match record_projection_parts state arg with
-        | Some (actual_field, base)
-          when String.equal actual_field expected_field -> (
+        | Some (actual_class, actual_field, base)
+          when String.equal actual_class expected_class &&
+               String.equal actual_field expected_field -> (
             match same_base base_opt base with
             | Some base_opt ->
                 loop (Some base_opt) (unchanged_count + 1) changes (i + 1) rest
@@ -2126,7 +2311,7 @@ and rendered_lowering_rule_app state env r rule args =
 
 and rendered_record_field_rule_app state env rule args =
   match rule.lowering_emit, args with
-  | LoweringEmitAttribute field_name, self_arg :: _ ->
+  | LoweringEmitAttribute (_, field_name), self_arg :: _ ->
       Some (py_attr (pp_rendered_expr state env self_arg) field_name)
   | _, _ ->
       None
@@ -2137,6 +2322,21 @@ and py_list_prepend state env head tail =
     (py_rendered
        (str "[" ++ pp_py_rendered (pp_rendered_expr state env head) ++ str "]"))
     (pp_rendered_expr state env tail)
+
+and std_list_literal_items = function
+  | MLcons (_, r, []) when is_std_list_nil_ref r ->
+      Some []
+  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r -> (
+      match std_list_literal_items tail with
+      | Some tail_items -> Some (head :: tail_items)
+      | None -> None)
+  | _ ->
+      None
+
+and pp_std_list_literal state env items =
+  str "[" ++
+  prlist_with_sep (fun () -> str ", ") (pp_expr state env) items ++
+  str "]"
 
 and py_string_cons state env head tail =
   py_infix "+"
@@ -2215,7 +2415,7 @@ and pp_expr state env expr =
       let pp_method_call_expr =
         match head, all_args with
         | MLglob r, self_arg :: method_args -> (
-            match lookup_active_method_target (pp_global state Term r) with
+            match lookup_method_target state (pp_global state Term r) with
             | Some (_class_name, method_name) ->
                 Some
                   (py_method_call (rendered_expr self_arg) method_name
@@ -2231,7 +2431,7 @@ and pp_expr state env expr =
               | MLglob r -> pp_global state Term r
               | _ -> Pp.string_of_ppcmds (pp_expr state env head)
             in
-            match record_field_lowering_rule_of_source_name head_name with
+            match record_field_lowering_rule_of_source_name state head_name with
             | Some rule ->
                 rendered_record_field_rule_app state env rule [self_arg]
             | None -> None)
@@ -2437,8 +2637,10 @@ and pp_expr state env expr =
       pp_expr state env value
   | MLcons (_, r, []) when is_std_list_nil_ref r ->
       str "[]"
-  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r ->
-      pp_py_rendered (py_list_prepend state env head tail)
+  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r -> (
+      match std_list_literal_items expr with
+      | Some items -> pp_std_list_literal state env items
+      | None -> pp_py_rendered (py_list_prepend state env head tail))
   | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
       str "(" ++ pp_expr state env left ++ str ", " ++
       pp_expr state env right ++ str ")"
@@ -2510,7 +2712,7 @@ and pp_expr state env expr =
       str (string_of_int (Option.get (std_byte_constructor_value r)))
   | MLcons (_, r, args) ->
       let cons_name = str_cons state r in
-      if is_coinductive (State.get_table state) r then
+      if is_coinductive (PrinterState.get_table state) r then
         (* Coinductive values stay lazy via a packet wrapper.  The wrapper is
            callable for one-step forcing, and stream-shaped packets also expose
            [__iter__] so finite consumers can use [itertools.islice]. *)
@@ -2538,7 +2740,7 @@ and pp_expr state env expr =
               prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
               str ")" )
       else
-        let fds = get_record_fields (State.get_table state) r in
+        let fds = get_record_fields (PrinterState.get_table state) r in
         if not (List.is_empty fds) then
           (match record_replace_expr_parts state r args with
            | Some (base, changes) ->
@@ -3180,20 +3382,25 @@ let rec pp_statement_expr state env indent = function
           pp_statement_expr state env (indent + 4) right ]
   | MLcons (_, r, [((MLcons (_, head_r, _) as head)); tail])
     when is_std_list_cons_ref r &&
-         not (List.is_empty (get_record_fields (State.get_table state) head_r)) &&
+         not (List.is_empty (get_record_fields (PrinterState.get_table state) head_r)) &&
          not (is_std_Q_make_ref head_r) ->
-      pp_py_rendered
-        (py_infix "+"
-           py_prec_add
-           (py_rendered
-              ~precedence:py_prec_atom
-              (pp_multiline_enclosed indent (str "[") (str "]")
-                 [pp_statement_expr state env (indent + 4) head]))
-           (pp_rendered_expr state env tail))
+      let head_list =
+        pp_multiline_enclosed indent (str "[") (str "]")
+          [pp_statement_expr state env (indent + 4) head]
+      in
+      (match tail with
+       | MLcons (_, tail_r, []) when is_std_list_nil_ref tail_r ->
+           head_list
+       | _ ->
+           pp_py_rendered
+             (py_infix "+"
+                py_prec_add
+                (py_rendered ~precedence:py_prec_atom head_list)
+                (pp_rendered_expr state env tail)))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
-         not (List.is_empty (get_record_fields (State.get_table state) r)) ->
+         not (List.is_empty (get_record_fields (PrinterState.get_table state) r)) ->
       (match record_replace_expr_parts state r args with
        | Some (base, changes) ->
            pp_multiline_items indent (str "replace")
@@ -3205,7 +3412,7 @@ let rec pp_statement_expr state env indent = function
                 changes)
        | None ->
            let cons_name = str_cons state r in
-           let fds = get_record_fields (State.get_table state) r in
+           let fds = get_record_fields (PrinterState.get_table state) r in
            pp_multiline_items indent (str cons_name)
              (List.mapi
                 (fun i a ->
@@ -3215,7 +3422,7 @@ let rec pp_statement_expr state env indent = function
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
-         List.is_empty (get_record_fields (State.get_table state) r) &&
+         List.is_empty (get_record_fields (PrinterState.get_table state) r) &&
          not (is_std_list_cons_ref r) &&
          not (is_std_ascii_cons_ref r) &&
          List.length args >= 2 ->
@@ -4608,7 +4815,7 @@ let pp_io_term_decl state env name a typ ret_typ =
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
 
 let pp_top_level_record_value state env name typ r args =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
   let pp_field_arg (index, value) =
     str "    " ++ pp_field_name state r fields index ++ str "=" ++ pp_expr state env value
   in
@@ -4622,7 +4829,7 @@ let pp_top_level_record_value state env name typ r args =
   str ")" ++ fnl ()
 
 let uses_native_record_constructor state r =
-  let fields = get_record_fields (State.get_table state) r in
+  let fields = get_record_fields (PrinterState.get_table state) r in
   not (List.is_empty fields) && not (is_std_Q_make_ref r)
 
 let pp_term_decl state env name a typ =
@@ -4754,18 +4961,6 @@ let pp_method_term_decl state env method_name a typ =
            str "    " ++ pp_return_body state env' 4 body ++ fnl ())
   | _ -> extraction_diagnostic_error "PYEX040"
 
-let underscore_prefix name =
-  match String.index_opt name '_' with
-  | None -> None
-  | Some index when index > 0 -> Some (String.sub name 0 index)
-  | Some _ -> None
-
-let consistent_field_prefix field_names =
-  match List.filter_map underscore_prefix field_names with
-  | [] -> None
-  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
-  | _ -> None
-
 let method_target_of_term_decl state record_class_prefixes record_field_names = function
   | Dterm (r, _a, typ) -> (
       if is_custom r then None else
@@ -4817,17 +5012,25 @@ let record_field_targets_of_decl state = function
       | Record fields when Array.length ind.ind_packets > 0 ->
           let packet = ind.ind_packets.(0) in
           let ind_kn = kn_of_ind packet.ip_typename_ref in
+          let class_name = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+          let field_names = record_field_names state ind_kn fields in
           Some
             (List.filter_map
                (function
                  | Some r' ->
                      let source_name = pp_global state Term r' in
                      let field_name = pp_global_with_key state Term ind_kn r' in
+                     let display_name =
+                       record_field_display_name class_name field_names field_name
+                     in
                      Some
                        (if String.equal source_name field_name then
-                          [(source_name, field_name)]
+                          [(source_name, (class_name, display_name))]
                         else
-                          [(source_name, field_name); (field_name, field_name)])
+                          [
+                            (source_name, (class_name, display_name));
+                            (field_name, (class_name, display_name));
+                          ])
                  | None -> None)
                fields
             |> List.concat)
@@ -4836,7 +5039,9 @@ let record_field_targets_of_decl state = function
 
 let record_class_prefix_of_decl state decl =
   match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
-  | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
+  | Some class_name, Some field_names ->
+      Option.map (fun prefix -> (class_name, prefix))
+        (consistent_method_prefix field_names)
   | _ -> None
 
 (*s Inductive type emission as Python dataclasses.
@@ -4879,6 +5084,9 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
     | Some name -> name
     | None -> pp_global state Cons packet.ip_consnames_ref.(j)
   in
+  let record_class_name =
+    capitalize_first (pp_global state Term packet.ip_typename_ref)
+  in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
   let kernel_names =
@@ -4889,8 +5097,11 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
   let field_name i =
     match fields_opt with
     | Some fds ->
+        let field_names = record_field_names state ind_kn fds in
         ( match List.nth fds i with
-          | Some r' -> pp_global_with_key state Term ind_kn r'
+          | Some r' ->
+              let field_name = pp_global_with_key state Term ind_kn r' in
+              record_field_display_name record_class_name field_names field_name
           | None    -> Printf.sprintf "arg%d" i )
     | None ->
         ( match List.nth kernel_names i with
@@ -5323,11 +5534,11 @@ let pp_decl state decl =
   pp_classified_decl state (classify_decl state decl)
 
 (*s Module structure walker.
-    [State.with_visibility] must be called around each module so that
+    [PrinterState.with_visibility] must be called around each module so that
     [pp_global] can resolve names relative to the current module path. *)
 
 let module_binding_name state l =
-  pp_module state (MPdot (State.get_top_visible_mp state, l))
+  pp_module state (MPdot (PrinterState.get_top_visible_mp state, l))
 
 let rec module_type_annotation state = function
   | MTident mp ->
@@ -5395,7 +5606,7 @@ let pp_protocol_decl_from_sig state name msig =
 
 let rec pp_named_module_type_decl state name = function
   | MTsig (mp, msig) ->
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         pp_protocol_decl_from_sig state name msig)
   | MTident mp ->
       str name ++ str " = " ++ str (pp_module state mp) ++ fnl () ++ fnl ()
@@ -5410,7 +5621,7 @@ let rec ensure_module_type_name state fallback = function
   | MTident mp ->
       mt (), pp_module state mp
   | MTsig (mp, msig) ->
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         pp_protocol_decl_from_sig state fallback msig), fallback
   | MTwith (mt, _) ->
       ensure_module_type_name state fallback mt
@@ -5427,7 +5638,7 @@ let rec pp_module_expr_value state indent local_name = function
       str (indent_string indent) ++ str local_name ++ str " = " ++ str (pp_module state mp) ++ fnl ()
   | MEstruct (mp, sel) ->
       str (indent_string indent) ++ str local_name ++ str ": Any = __ModuleNamespace()" ++ fnl () ++
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         prlist (pp_module_structure_elem_into state (indent + 0) local_name) sel)
   | MEapply (me, me_arg) ->
       let pp_fun, fun_name = pp_module_expr_callable state indent (local_name ^ "_fun") me in
@@ -5441,7 +5652,7 @@ let rec pp_module_expr_value state indent local_name = function
       let ret_pp, ret_annot =
         ensure_module_type_name state ret_name (mtyp_of_mexpr me)
       in
-      let nested_state = State.with_visibility state (State.get_top_visible_mp state) [mbid] Fun.id in
+      let nested_state = PrinterState.with_visibility state (PrinterState.get_top_visible_mp state) [mbid] Fun.id in
       pp_arg_mt ++ ret_pp ++
       str (indent_string indent) ++ str "def " ++ str local_name ++ str "(" ++
       str param_name ++ str ": " ++ str arg_annot ++ str ") -> " ++ str ret_annot ++ str ":" ++ fnl () ++
@@ -5465,7 +5676,7 @@ and pp_module_expr_arg state indent local_name = function
 and pp_module_expr_return state indent local_name = function
   | MEstruct (mp, sel) ->
       str (indent_string indent) ++ str local_name ++ str ": Any = __ModuleNamespace()" ++ fnl () ++
-      State.with_visibility state mp [] (fun state ->
+      PrinterState.with_visibility state mp [] (fun state ->
         prlist (pp_module_structure_elem_into state indent local_name) sel)
   | me ->
       pp_module_expr_value state indent local_name me
@@ -5500,7 +5711,7 @@ and pp_named_module_binding state indent name m =
       str (indent_string indent) ++ str "def __" ++ str name ++ str "_impl(" ++
       str param_name ++ str ": " ++ str arg_annot ++ str ") -> " ++ str ret_annot ++ str ":" ++ fnl () ++
       pp_module_expr_return
-        (State.with_visibility state (State.get_top_visible_mp state) [mbid] Fun.id)
+        (PrinterState.with_visibility state (PrinterState.get_top_visible_mp state) [mbid] Fun.id)
         (indent + 4) "__result" body ++
       str (indent_string (indent + 4)) ++ str "return cast(" ++ str ret_annot ++ str ", __result)" ++ fnl () ++
       str (indent_string indent) ++ str "__" ++ str name ++ str "_cache: dict[int, " ++ str ret_annot ++ str "] = {}" ++ fnl () ++
@@ -5589,53 +5800,63 @@ let pp_structure_sel state sel =
                  | _ -> extraction_diagnostic_error "PYEX040")
               methods)
   in
-  let prior_method_targets = !active_method_targets in
-  active_method_targets := method_targets;
-  active_record_field_targets := record_field_targets @ !active_record_field_targets;
-  let rendered =
-  let pp_record_methods class_name =
-    match Hashtbl.find_opt methods_by_class class_name with
-    | None -> mt ()
-    | Some methods ->
-        fnl () ++
-        prlist_with_sep
-          (fun () -> fnl ())
-          (fun (method_name, decl) ->
-             match decl with
-             | Dterm (_r, a, typ) ->
-                 indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
-             | _ -> mt ())
-          (List.rev methods)
-  in
-  prlist
-    (function
-      | (_, SEdecl d) -> (
-          match method_target_of_term_decl state class_prefixes record_field_names d with
-          | Some (class_name, _method_name) when List.mem class_name class_names ->
-              mt ()
-          | _ ->
-              pp_decl state d ++
-              (match record_class_name_of_decl state d with
-               | Some class_name -> pp_record_methods class_name
-               | None -> mt ()))
-      | (l, SEmodule m) ->
-          let name = module_binding_name state l in
-          if is_std_remapped_module_name name then mt ()
-          else pp_named_module_binding state 0 name m ++ fnl ()
-      | (l, SEmodtype mt) ->
-          let name = module_binding_name state l in
-          pp_named_module_type_decl state name mt)
-    sel
-  in
-  active_method_targets := prior_method_targets;
-  rendered
+  with_extended_lowering_environment state ~method_targets ~record_field_targets
+    (fun () ->
+       let pp_record_methods class_name =
+         match Hashtbl.find_opt methods_by_class class_name with
+         | None -> mt ()
+         | Some methods ->
+             fnl () ++
+             prlist_with_sep
+               (fun () -> fnl ())
+               (fun (method_name, decl) ->
+                  match decl with
+                  | Dterm (_r, a, typ) ->
+                      indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
+                  | _ -> mt ())
+               (List.rev methods)
+       in
+       prlist
+         (function
+           | (_, SEdecl d) -> (
+               match method_target_of_term_decl state class_prefixes record_field_names d with
+               | Some (class_name, _method_name) when List.mem class_name class_names ->
+                   mt ()
+               | _ ->
+                   pp_decl state d ++
+                   (match record_class_name_of_decl state d with
+                    | Some class_name -> pp_record_methods class_name
+                    | None -> mt ()))
+           | (l, SEmodule m) ->
+               let name = module_binding_name state l in
+               if is_std_remapped_module_name name then mt ()
+               else pp_named_module_binding state 0 name m ++ fnl ()
+           | (l, SEmodtype mt) ->
+               let name = module_binding_name state l in
+               pp_named_module_type_decl state name mt)
+         sel)
 
 let pp_struct state struc =
+  let top_level_record_field_targets =
+    List.concat
+      (List.map
+         (fun (mp, sel) ->
+            PrinterState.with_visibility state mp [] (fun state ->
+              List.concat
+                (List.filter_map
+                   (function
+                     | (_, SEdecl d) -> record_field_targets_of_decl state d
+                     | (_, SEmodule _) | (_, SEmodtype _) -> None)
+                   sel)))
+         struc)
+  in
   let pp_mod (mp, sel) =
-    State.with_visibility state mp [] (fun state ->
+    PrinterState.with_visibility state mp [] (fun state ->
       pp_structure_sel state sel)
   in
-  prlist pp_mod struc
+  with_extended_lowering_environment state ~method_targets:[]
+    ~record_field_targets:top_level_record_field_targets
+    (fun () -> prlist pp_mod struc)
 
 (*s No interface file for Python. *)
 
@@ -5650,9 +5871,11 @@ let python_descr : Common.State.t language_descr = {
   file_suffix    = ".py";
   file_naming;
   preamble;
-  pp_struct;
+  pp_struct = (fun state struc ->
+    pp_struct (initial_printer_state state) struc);
   sig_suffix     = None;
   sig_preamble;
   pp_sig;
-  pp_decl;
+  pp_decl = (fun state decl ->
+    pp_decl (initial_printer_state state) decl);
 }
