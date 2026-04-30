@@ -5664,50 +5664,41 @@ let pp_structure_sel state sel =
                  | _ -> extraction_diagnostic_error "PYEX040")
               methods)
   in
-  let prior_lowering_environment =
-    install_lowering_environment_extension state ~method_targets
-      ~record_field_targets
-  in
-  let rendered =
-  let pp_record_methods class_name =
-    match Hashtbl.find_opt methods_by_class class_name with
-    | None -> mt ()
-    | Some methods ->
-        fnl () ++
-        prlist_with_sep
-          (fun () -> fnl ())
-          (fun (method_name, decl) ->
-             match decl with
-             | Dterm (_r, a, typ) ->
-                 indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
-             | _ -> mt ())
-          (List.rev methods)
-  in
-  prlist
-    (function
-      | (_, SEdecl d) -> (
-          match method_target_of_term_decl state class_prefixes record_field_names d with
-          | Some (class_name, _method_name) when List.mem class_name class_names ->
-              mt ()
-          | _ ->
-              pp_decl state d ++
-              (match record_class_name_of_decl state d with
-               | Some class_name -> pp_record_methods class_name
-               | None -> mt ()))
-      | (l, SEmodule m) ->
-          let name = module_binding_name state l in
-          if is_std_remapped_module_name name then mt ()
-          else pp_named_module_binding state 0 name m ++ fnl ()
-      | (l, SEmodtype mt) ->
-          let name = module_binding_name state l in
-          pp_named_module_type_decl state name mt)
-    sel
-  in
-  state.lowering_environment :=
-    { !(state.lowering_environment) with
-      lowering_method_targets =
-        prior_lowering_environment.lowering_method_targets };
-  rendered
+  with_extended_lowering_environment state ~method_targets ~record_field_targets
+    (fun () ->
+       let pp_record_methods class_name =
+         match Hashtbl.find_opt methods_by_class class_name with
+         | None -> mt ()
+         | Some methods ->
+             fnl () ++
+             prlist_with_sep
+               (fun () -> fnl ())
+               (fun (method_name, decl) ->
+                  match decl with
+                  | Dterm (_r, a, typ) ->
+                      indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
+                  | _ -> mt ())
+               (List.rev methods)
+       in
+       prlist
+         (function
+           | (_, SEdecl d) -> (
+               match method_target_of_term_decl state class_prefixes record_field_names d with
+               | Some (class_name, _method_name) when List.mem class_name class_names ->
+                   mt ()
+               | _ ->
+                   pp_decl state d ++
+                   (match record_class_name_of_decl state d with
+                    | Some class_name -> pp_record_methods class_name
+                    | None -> mt ()))
+           | (l, SEmodule m) ->
+               let name = module_binding_name state l in
+               if is_std_remapped_module_name name then mt ()
+               else pp_named_module_binding state 0 name m ++ fnl ()
+           | (l, SEmodtype mt) ->
+               let name = module_binding_name state l in
+               pp_named_module_type_decl state name mt)
+         sel)
 
 let pp_struct state struc =
   let pp_mod (mp, sel) =

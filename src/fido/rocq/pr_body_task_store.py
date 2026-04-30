@@ -572,15 +572,15 @@ def pending_projection(
     if __option is None:
         return []
     row = __option
-    match row.status:
+    match status(row):
         case StatusPending():
-            if task_kind_matches_ci_filter(include_ci, row.kind):
+            if task_kind_matches_ci_filter(include_ci, kind(row)):
                 return [
                     PRBodyRow(
                         pr_body_task=task,
-                        pr_body_title=row.title,
-                        pr_body_description=row.description,
-                        pr_body_kind=row.kind,
+                        pr_body_title=title(row),
+                        pr_body_description=description(row),
+                        pr_body_kind=kind(row),
                         pr_body_status=PRPending(),
                     ),
                 ] + []
@@ -601,16 +601,16 @@ def completed_projection(
     if __option is None:
         return []
     row = __option
-    match row.status:
+    match status(row):
         case StatusPending():
             return []
         case StatusCompleted():
             return [
                 PRBodyRow(
                     pr_body_task=task,
-                    pr_body_title=row.title,
-                    pr_body_description=row.description,
-                    pr_body_kind=row.kind,
+                    pr_body_title=title(row),
+                    pr_body_description=description(row),
+                    pr_body_kind=kind(row),
                     pr_body_status=PRCompleted(),
                 ),
             ] + []
