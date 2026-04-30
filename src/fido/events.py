@@ -20,6 +20,7 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
+from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
 from fido.rocq import webhook_ingress_dedupe as ingress_fsm
 from fido.state import State
@@ -1948,13 +1949,23 @@ def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
     comments = gh.fetch_comment_thread(thread["repo"], thread["pr"], int(comment_id))
     if not comments:
         return True
-    latest_human_id: int | None = None
-    for comment in comments:
-        author = str(comment.get("author", "")).lower()
-        if author in _FIDO_LOGINS:
-            continue
-        latest_human_id = int(comment["id"])
-    return latest_human_id != int(comment_id)
+    oracle_comments = [
+        thread_resolve_oracle.ThreadComment(
+            thread_comment_id=int(comment["id"]),
+            thread_comment_author=thread_resolve_oracle.CommentByFido()
+            if str(comment.get("author", "")).lower() in _FIDO_LOGINS
+            else thread_resolve_oracle.CommentByHuman(),
+        )
+        for comment in comments
+    ]
+    decision = thread_resolve_oracle.resolved_thread_queue_decision(
+        thread_resolve_oracle.ReviewThread(
+            review_thread_resolved=True,
+            review_thread_comments=oracle_comments,
+        ),
+        int(comment_id),
+    )
+    return isinstance(decision, thread_resolve_oracle.DismissStaleResolvedThread)
 
 
 def create_task(
