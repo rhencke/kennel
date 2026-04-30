@@ -17,7 +17,7 @@ PRCommentQueueState = Literal["pending", "in_progress", "completed", "retryable_
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -373,7 +373,10 @@ class FidoStore:
 
         ``delivery_id`` deduplicates GitHub redelivery.  The comment identity
         also stays unique so a safety-net enqueue with a distinct delivery id
-        cannot create duplicate triage work for the same GitHub comment.
+        cannot create duplicate triage work for the same GitHub comment.  When
+        a new delivery for an already-pending comment arrives, keep the
+        original FIFO position but replace the queued body/payload with the
+        latest GitHub content.
         """
         now = _utcnow()
         queue_id = str(uuid.uuid4())
@@ -385,7 +388,15 @@ class FidoStore:
                 conn, repo, pr_number, comment_type, comment_id
             )
             if existing is not None:
-                return self._pr_comment_record_from_row(existing)
+                return self._refresh_pr_comment_record(
+                    conn,
+                    existing,
+                    delivery_id=delivery_id,
+                    author=author,
+                    is_bot=is_bot,
+                    body=body,
+                    payload_json=payload_json,
+                )
             conn.execute(
                 """
                 INSERT INTO pr_comment_queue (
@@ -413,7 +424,66 @@ class FidoStore:
             )
             row = self._pr_comment_by_queue_id(conn, queue_id)
             assert row is not None
+            self._record_pr_comment_delivery(conn, delivery_id, queue_id)
             return self._pr_comment_record_from_row(row)
+
+    def _refresh_pr_comment_record(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        delivery_id: str,
+        author: str,
+        is_bot: bool,
+        body: str,
+        payload_json: str,
+    ) -> PRCommentQueueRecord:
+        """Update a duplicate queued comment with the latest editable fields."""
+        state = str(row["state"])
+        if state == "completed":
+            return self._pr_comment_record_from_row(row)
+        now = _utcnow()
+        if state == "in_progress":
+            conn.execute(
+                """
+                UPDATE pr_comment_queue
+                SET delivery_id = ?, author = ?, is_bot = ?, body = ?,
+                    payload_json = ?, updated_at = ?
+                WHERE queue_id = ?
+                """,
+                (
+                    delivery_id,
+                    author,
+                    1 if is_bot else 0,
+                    body,
+                    payload_json,
+                    now,
+                    row["queue_id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE pr_comment_queue
+                SET delivery_id = ?, author = ?, is_bot = ?, body = ?,
+                    state = 'pending', claim_owner = NULL, next_retry_after = NULL,
+                    failure_reason = NULL, payload_json = ?, updated_at = ?
+                WHERE queue_id = ?
+                """,
+                (
+                    delivery_id,
+                    author,
+                    1 if is_bot else 0,
+                    body,
+                    payload_json,
+                    now,
+                    row["queue_id"],
+                ),
+            )
+        updated = self._pr_comment_by_queue_id(conn, row["queue_id"])
+        assert updated is not None
+        self._record_pr_comment_delivery(conn, delivery_id, row["queue_id"])
+        return self._pr_comment_record_from_row(updated)
 
     def pending_pr_comments(
         self, *, repo: str | None = None, pr_number: int | None = None
@@ -768,10 +838,35 @@ class FidoStore:
     def _pr_comment_by_delivery(
         self, conn: sqlite3.Connection, delivery_id: str
     ) -> sqlite3.Row | None:
-        return conn.execute(
+        row = conn.execute(
             "SELECT * FROM pr_comment_queue WHERE delivery_id = ?",
             (delivery_id,),
         ).fetchone()
+        if row is not None:
+            return row
+        return conn.execute(
+            """
+            SELECT pr_comment_queue.*
+            FROM pr_comment_deliveries
+            JOIN pr_comment_queue USING (queue_id)
+            WHERE pr_comment_deliveries.delivery_id = ?
+            """,
+            (delivery_id,),
+        ).fetchone()
+
+    def _record_pr_comment_delivery(
+        self, conn: sqlite3.Connection, delivery_id: str, queue_id: str
+    ) -> None:
+        now = _utcnow()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO pr_comment_deliveries (
+                delivery_id, queue_id, created_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (delivery_id, queue_id, now),
+        )
 
     def _pr_comment_by_comment(
         self,
@@ -950,6 +1045,13 @@ CREATE TABLE IF NOT EXISTS pr_comment_queue (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(repo, pr_number, comment_type, comment_id)
+);
+
+CREATE TABLE IF NOT EXISTS pr_comment_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    queue_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(queue_id) REFERENCES pr_comment_queue(queue_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_pr_comment_queue_pending

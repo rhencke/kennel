@@ -928,7 +928,7 @@ def dispatch(
             else None,
         )
 
-    if event == "pull_request_review_comment" and action == "created":
+    if event == "pull_request_review_comment" and action in {"created", "edited"}:
         comment = payload.get("comment", {})
         pr = payload.get("pull_request", {})
         number = pr.get("number")
@@ -963,9 +963,14 @@ def dispatch(
                 delivery_id=delivery_id,
                 payload=payload,
             )
+            prefix = (
+                "Queued edited review comment"
+                if action == "edited"
+                else "Queued review comment"
+            )
             return _queued_pr_comment_action(
                 prompt=(
-                    f"Queued review comment on PR #{number} by {user}"
+                    f"{prefix} on PR #{number} by {user}"
                     f" ({'bot' if is_bot else 'human/owner'})"
                 ),
                 repo=repo,
@@ -986,7 +991,7 @@ def dispatch(
             )
         return None
 
-    if event == "issue_comment" and action == "created":
+    if event == "issue_comment" and action in {"created", "edited"}:
         comment = payload.get("comment", {})
         issue = payload.get("issue", {})
         user = comment.get("user", {}).get("login", "")
@@ -1023,8 +1028,13 @@ def dispatch(
                 delivery_id=delivery_id,
                 payload=payload,
             )
+            prefix = (
+                "Queued edited PR top-level comment"
+                if action == "edited"
+                else "Queued PR top-level comment"
+            )
             return _queued_pr_comment_action(
-                prompt=f"Queued PR top-level comment on #{number} by {user}",
+                prompt=f"{prefix} on #{number} by {user}",
                 repo=repo,
                 pr_number=number,
                 comment_type="issues",
@@ -1066,10 +1076,19 @@ def dispatch(
 
     if event == "pull_request" and action == "closed":
         pr = payload.get("pull_request", {})
-        if not pr.get("merged"):
-            log.debug("PR #%s closed without merge — ignoring", pr.get("number"))
-            return None
         number = pr.get("number")
+        if number is not None:
+            removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
+                repo=repo,
+                pr_number=int(number),
+            )
+            if removed:
+                log.info(
+                    "cleared %d queued comment(s) for closed PR #%s", removed, number
+                )
+        if not pr.get("merged"):
+            log.debug("PR #%s closed without merge — ignoring", number)
+            return None
         log.info("PR #%s merged", number)
         if number is not None:
             wev = wct_oracle.EvtPRMerged(1, number)

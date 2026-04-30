@@ -351,7 +351,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 4
+    assert version == 5
     assert {
         "comment_claims",
         "reply_promises",
@@ -360,6 +360,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "reply_artifact_promises",
         "deferred_issue_outbox",
         "command_queue",
+        "pr_comment_deliveries",
         "pr_comment_queue",
         "implementation_tasks",
         "fido_state",
@@ -451,8 +452,11 @@ def test_enqueue_pr_comment_deduplicates_delivery_id(tmp_path: Path) -> None:
         github_created_at="2026-04-30T10:01:00Z",
     )
 
-    assert second == first
-    assert store.pending_pr_comments(repo="owner/repo") == [first]
+    assert second.queue_id == first.queue_id
+    assert second.delivery_id == "delivery-2"
+    assert second.body == "safety-net duplicate"
+    assert second.github_created_at == "2026-04-30T10:00:00Z"
+    assert store.pending_pr_comments(repo="owner/repo") == [second]
 
 
 def test_enqueue_pr_comment_deduplicates_comment_identity(tmp_path: Path) -> None:
@@ -483,6 +487,119 @@ def test_enqueue_pr_comment_deduplicates_comment_identity(tmp_path: Path) -> Non
 
     assert second == first
     assert store.pending_pr_comments(repo="owner/repo") == [first]
+
+
+def test_enqueue_pr_comment_updates_pending_comment_edit(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    first = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"body":"original"}',
+    )
+
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-2",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="edited before worker saw it",
+        github_created_at="2026-04-30T10:05:00Z",
+        payload_json='{"body":"edited"}',
+    )
+
+    assert edited.queue_id == first.queue_id
+    assert edited.delivery_id == "delivery-2"
+    assert edited.body == "edited before worker saw it"
+    assert edited.payload_json == '{"body":"edited"}'
+    assert edited.github_created_at == "2026-04-30T10:00:00Z"
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
+
+
+def test_enqueue_pr_comment_redelivery_does_not_regress_edit(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.enqueue_pr_comment(
+        delivery_id="delivery-original",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-edit",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="edited",
+        github_created_at="2026-04-30T10:05:00Z",
+    )
+
+    redelivery = store.enqueue_pr_comment(
+        delivery_id="delivery-original",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="issues",
+        comment_id=201,
+        author="rob",
+        is_bot=False,
+        body="stale original redelivery",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+
+    assert redelivery == edited
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
+
+
+def test_enqueue_pr_comment_edit_releases_retry_backoff(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=202,
+        author="rob",
+        is_bot=False,
+        body="original",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is not None
+    retried = store.retry_pr_comment(queued.queue_id, failure_reason="network down")
+    assert retried is not None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+    edited = store.enqueue_pr_comment(
+        delivery_id="delivery-2",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=202,
+        author="rob",
+        is_bot=False,
+        body="edited",
+        github_created_at="2026-04-30T10:05:00Z",
+    )
+
+    assert edited.state == "pending"
+    assert edited.next_retry_after is None
+    assert edited.body == "edited"
+    assert store.pending_pr_comments(repo="owner/repo") == [edited]
 
 
 def test_pending_pr_comments_are_fifo_by_github_time_then_comment_id(
@@ -750,8 +867,16 @@ def test_schema_upgrades_v2_database_to_current_store(tmp_path: Path) -> None:
             WHERE type = 'table' AND name = 'deferred_issue_outbox'
             """
         ).fetchone()
-    assert version == 4
+        delivery_table = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'pr_comment_deliveries'
+            """
+        ).fetchone()
+    assert version == 5
     assert pr_comment_queue is not None
+    assert delivery_table is not None
     assert deferred_issue_outbox is not None
 
 

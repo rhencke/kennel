@@ -1512,6 +1512,56 @@ class TestDispatchReviewComment:
         records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
         assert [record.comment_id for record in records] == [126]
 
+    def test_review_comment_edit_updates_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 127,
+                "body": "original",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-127-a",
+        )
+        edited_payload = {
+            **payload,
+            "action": "edited",
+            "comment": {
+                **payload["comment"],
+                "body": "edited before drain",
+                "updated_at": "2026-04-30T12:05:00Z",
+            },
+        }
+        result = dispatch(
+            "pull_request_review_comment",
+            edited_payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-127-b",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        assert records[0].delivery_id == "delivery-review-127-b"
+        assert records[0].body == "edited before drain"
+        assert records[0].github_created_at == "2026-04-30T12:00:00Z"
+
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         payload = {
@@ -1570,6 +1620,17 @@ class TestDispatchCheckRun:
 class TestDispatchPullRequest:
     def test_merged(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-queued",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type="issues",
+            comment_id=900,
+            author="owner",
+            is_bot=False,
+            body="queued",
+            github_created_at="2026-04-30T12:00:00Z",
+        )
         payload = {
             **_payload(),
             "action": "closed",
@@ -1578,9 +1639,21 @@ class TestDispatchPullRequest:
         result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert "merged" in result.prompt
+        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
     def test_closed_not_merged(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-queued",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type="issues",
+            comment_id=900,
+            author="owner",
+            is_bot=False,
+            body="queued",
+            github_created_at="2026-04-30T12:00:00Z",
+        )
         payload = {
             **_payload(),
             "action": "closed",
@@ -1588,6 +1661,7 @@ class TestDispatchPullRequest:
         }
         result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
+        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
 
 class TestDispatchIssueComment:
@@ -1663,6 +1737,48 @@ class TestDispatchIssueComment:
         assert record.author == "owner"
         assert record.body == "top-level durability"
         assert record.github_created_at == "2026-04-30T12:01:00Z"
+
+    def test_pr_issue_comment_edit_updates_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 458,
+                "body": "original",
+                "created_at": "2026-04-30T12:01:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/10#issuecomment-458",
+            },
+            "issue": {
+                "number": 10,
+                "title": "test pr",
+                "body": "desc",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+
+        dispatch("issue_comment", payload, cfg, repo_cfg, delivery_id="delivery-a")
+        edited_payload = {
+            **payload,
+            "action": "edited",
+            "comment": {
+                **payload["comment"],
+                "body": "edited before drain",
+                "updated_at": "2026-04-30T12:05:00Z",
+            },
+        }
+        result = dispatch(
+            "issue_comment", edited_payload, cfg, repo_cfg, delivery_id="delivery-b"
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        assert records[0].delivery_id == "delivery-b"
+        assert records[0].body == "edited before drain"
+        assert records[0].github_created_at == "2026-04-30T12:01:00Z"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
