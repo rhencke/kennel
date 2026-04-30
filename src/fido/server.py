@@ -919,6 +919,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return "handling review thread"
         if action.comment_body:
             return "handling PR comment"
+        if action.thread and action.preempts_worker:
+            return "ingesting PR comment"
         return "handling webhook action"
 
     def _reply_promise(self, action: Action) -> tuple[str, int] | None:
@@ -1088,7 +1090,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
             # When a human comments on a PR, transition any BLOCKED tasks back
             # to PENDING so the worker can re-evaluate and resume.
-            if action.reply_to or action.comment_body:
+            if action.reply_to or action.comment_body or action.thread:
                 type(self)._fn_unblock_tasks(repo_cfg.work_dir)
             # Non-comment events just trigger fido worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)

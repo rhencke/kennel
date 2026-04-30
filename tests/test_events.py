@@ -1241,10 +1241,13 @@ class TestDispatchReviewComment:
             "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
         )
         assert result is not None
-        assert result.reply_to is not None
-        assert result.comment_body == "fix this"
-        assert result.reply_to["comment_id"] == 123
-        assert result.reply_to["url"] == "https://example.com"
+        assert result.reply_to is None
+        assert result.comment_body is None
+        assert result.preempts_worker is True
+        assert result.thread is not None
+        assert result.thread["comment_id"] == 123
+        assert result.thread["url"] == "https://example.com"
+        assert result.thread["comment_type"] == "pulls"
 
     def test_reply_to_includes_author(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -1266,9 +1269,9 @@ class TestDispatchReviewComment:
             "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
         )
         assert result is not None
-        assert result.reply_to is not None
-        assert result.reply_to["author"] == "owner"
-        assert result.reply_to["comment_type"] == "pulls"
+        assert result.thread is not None
+        assert result.thread["author"] == "owner"
+        assert result.thread["comment_type"] == "pulls"
 
     def test_review_comment_webhook_enqueues_fifo_record(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -1448,7 +1451,8 @@ class TestDispatchIssueComment:
         }
         result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
-        assert result.comment_body == "looks good"
+        assert result.comment_body is None
+        assert result.preempts_worker is True
         assert result.thread is not None
         assert (
             result.thread["url"]

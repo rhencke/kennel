@@ -2980,22 +2980,13 @@ class TestProcessAction:
         assert status == 200
         mock_unblock.assert_not_called()
 
-    def test_review_comment_handler_enters_hold_for_handler(
-        self, server: tuple
-    ) -> None:
-        """Regression for #950: review_comment webhook must enter
-        hold_for_handler so the subprocess is restricted to
-        HANDLER_ALLOWED_TOOLS during triage turns.
-
-        Bug #950: the handler used the full tool surface (Edit, Bash, git push)
-        and performed an entire ACT cycle inline instead of queueing a task.
-        hold_for_handler is the enforcement point — it calls switch_tools with
-        the triage-mode allowlist on entry and restores full tools on exit.
-        """
+    def test_review_comment_handler_stays_off_provider(self, server: tuple) -> None:
+        """Review-comment ingestion queues durably without entering provider."""
         url, cfg = server
         mock_session = MagicMock()
         WebhookHandler.registry.get_session.return_value = mock_session
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        mock_reply = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
@@ -3014,24 +3005,17 @@ class TestProcessAction:
         }
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        mock_session.hold_for_handler.assert_called_once_with(preempt_worker=True)
+        mock_session.hold_for_handler.assert_not_called()
+        mock_reply.assert_not_called()
+        WebhookHandler._fn_launch_worker.assert_called_once()
 
-    def test_issue_comment_handler_enters_hold_for_handler(self, server: tuple) -> None:
-        """Regression for #1007: issue_comment webhook on a PR must enter
-        hold_for_handler so the subprocess is restricted to
-        HANDLER_ALLOWED_TOOLS during triage turns.
-
-        Bug #1007: the handler ran read/write/commit/push operations inline
-        after triaging a top-level PR comment, starving the worker for ~5 min.
-        hold_for_handler is the enforcement point — it calls switch_tools with
-        the triage-mode allowlist on entry and restores full tools on exit.
-        """
+    def test_issue_comment_handler_stays_off_provider(self, server: tuple) -> None:
+        """Top-level PR comment ingestion queues durably without provider use."""
         url, cfg = server
         mock_session = MagicMock()
         WebhookHandler.registry.get_session.return_value = mock_session
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        mock_reply = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
@@ -3054,7 +3038,9 @@ class TestProcessAction:
         }
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
-        mock_session.hold_for_handler.assert_called_once_with(preempt_worker=True)
+        mock_session.hold_for_handler.assert_not_called()
+        mock_reply.assert_not_called()
+        WebhookHandler._fn_launch_worker.assert_called_once()
 
 
 class TestSynchronousPreemption:
@@ -3076,8 +3062,7 @@ class TestSynchronousPreemption:
         }
 
     def _issue_comment_payload(self, comment_id: int = 900) -> dict:
-        """An issue_comment on a PR — produces an Action with ``comment_body``
-        set, so ``_action_uses_model`` returns True."""
+        """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
             **self._payload(),
             "action": "created",
@@ -3099,7 +3084,7 @@ class TestSynchronousPreemption:
 
     def test_preempt_fires_before_background_spawn(self, server: tuple) -> None:
         """``session.preempt_worker()`` must be called before ``_fn_spawn_bg``
-        for a model-needing webhook action."""
+        for a webhook action that reports durable demand."""
         url, cfg = server
 
         call_order: list[str] = []
@@ -3205,7 +3190,7 @@ class TestSynchronousPreemption:
 
 class TestUntriagedInboxWiring:
     """Verify that _do_post_inner / _process_action correctly enter/exit the
-    per-repo untriaged inbox for model-needing webhook actions (#1067)."""
+    per-repo untriaged inbox for preempting webhook actions (#1067)."""
 
     def _payload(self, repo_owner: str = "owner") -> dict:
         return {
@@ -3216,7 +3201,7 @@ class TestUntriagedInboxWiring:
         }
 
     def _issue_comment_payload(self, comment_id: int = 950) -> dict:
-        """An issue_comment on a PR — ``_action_uses_model`` returns True."""
+        """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
             **self._payload(),
             "action": "created",
@@ -3247,8 +3232,8 @@ class TestUntriagedInboxWiring:
             },
         }
 
-    def test_enter_untriaged_called_for_model_action(self, server: tuple) -> None:
-        """enter_untriaged must be called synchronously for a model-needing action."""
+    def test_enter_untriaged_called_for_comment_demand(self, server: tuple) -> None:
+        """enter_untriaged must be called synchronously for durable demand."""
         url, cfg = server
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])

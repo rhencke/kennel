@@ -377,6 +377,35 @@ def _enqueue_pr_comment_webhook(
     )
 
 
+def _queued_pr_comment_action(
+    *,
+    prompt: str,
+    repo: str,
+    pr_number: int,
+    comment_type: str,
+    comment_id: int,
+    html_url: str,
+    author: str,
+    is_bot: bool,
+    context: dict[str, Any],
+) -> Action:
+    """Wake the worker for a durably queued PR comment without using provider."""
+    return Action(
+        prompt=prompt,
+        preempts_worker=True,
+        is_bot=is_bot,
+        context=context,
+        thread={
+            "repo": repo,
+            "pr": pr_number,
+            "comment_id": comment_id,
+            "url": html_url,
+            "author": author,
+            "comment_type": comment_type,
+        },
+    )
+
+
 def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
     return {
         "ACT": oracle.ReviewAct(),
@@ -801,6 +830,7 @@ def dispatch(
         log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
         is_bot = user.endswith("[bot]")
         if comment_id is not None:
+            comment_id = int(comment_id)
             wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
@@ -817,26 +847,28 @@ def dispatch(
                 delivery_id=delivery_id,
                 payload=payload,
             )
-        return Action(
-            prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
-            reply_to={
-                "repo": repo,
-                "pr": number,
-                "comment_id": comment_id,
-                "url": comment.get("html_url", ""),
-                "author": user,
-                "comment_type": "pulls",
-            },
-            comment_body=comment_body,
-            is_bot=is_bot,
-            context={
-                "pr_title": pr.get("title", ""),
-                "pr_body": pr.get("body", "") or "",
-                "file": comment.get("path", ""),
-                "line": comment.get("line"),
-                "diff_hunk": comment.get("diff_hunk", ""),
-            },
-        )
+            return _queued_pr_comment_action(
+                prompt=(
+                    f"Queued review comment on PR #{number} by {user}"
+                    f" ({'bot' if is_bot else 'human/owner'})"
+                ),
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "pr_title": pr.get("title", ""),
+                    "pr_body": pr.get("body", "") or "",
+                    "file": comment.get("path", ""),
+                    "line": comment.get("line"),
+                    "diff_hunk": comment.get("diff_hunk", ""),
+                },
+            )
+        return None
 
     if event == "issue_comment" and action == "created":
         comment = payload.get("comment", {})
@@ -858,6 +890,7 @@ def dispatch(
         is_bot = user.endswith("[bot]")
         log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
         if number is not None and comment_id is not None:
+            comment_id = int(comment_id)
             wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
@@ -874,27 +907,22 @@ def dispatch(
                 delivery_id=delivery_id,
                 payload=payload,
             )
-        return Action(
-            prompt=f"PR top-level comment on #{number} by {user}:\n\n{comment_body}",
-            reply_to=None,  # top-level comments use issues API, not pulls
-            comment_body=comment_body,
-            is_bot=is_bot,
-            context={
-                "pr_title": issue.get("title", ""),
-                "pr_body": issue.get("body", "") or "",
-                "comment_id": comment_id,
-            },
-            thread={
-                "repo": repo,
-                "pr": number,
-                "comment_id": comment_id,
-                "url": comment.get("html_url", ""),
-                "author": user,
-                "comment_type": "issues",
-            }
-            if number and comment_id
-            else None,
-        )
+            return _queued_pr_comment_action(
+                prompt=f"Queued PR top-level comment on #{number} by {user}",
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "pr_title": issue.get("title", ""),
+                    "pr_body": issue.get("body", "") or "",
+                },
+            )
+        return None
 
     if event == "check_run" and action == "completed":
         check = payload.get("check_run", {})
