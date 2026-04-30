@@ -159,6 +159,20 @@ class TestWorkerRegistry:
         reg.abort_task("unknown/repo")  # must not raise
         factory.return_value.abort_task.assert_not_called()
 
+    def test_recover_provider_calls_thread_recover_provider(
+        self, tmp_path: Path
+    ) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.recover_provider.return_value = True
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.recover_provider("foo/bar") is True
+        factory.return_value.recover_provider.assert_called_once_with()
+
+    def test_recover_provider_unknown_repo_returns_false(self) -> None:
+        reg, factory = self._make_registry()
+        assert reg.recover_provider("unknown/repo") is False
+        factory.return_value.recover_provider.assert_not_called()
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))
@@ -1041,6 +1055,30 @@ class TestPreemptionFsmOracle:
         reg = self._reg()
         reg.note_durable_demand("foo/bar")
         reg.note_durable_demand_drained("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+
+    def test_durable_demand_before_untriaged_handler_exits_cleanly(self) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        reg.enter_untriaged("foo/bar")
+
+        reg.exit_untriaged("foo/bar")
+
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.note_durable_demand_drained("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+
+    def test_durable_demand_drain_preserves_untriaged_blocker(self) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        reg.enter_untriaged("foo/bar")
+
+        reg.note_durable_demand_drained("foo/bar")
+
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.exit_untriaged("foo/bar")
         reg.assert_worker_turn_ok("foo/bar")
 
     # ── worker_turn_proceeds_when_empty ──────────────────────────────────

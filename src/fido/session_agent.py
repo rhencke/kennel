@@ -135,6 +135,15 @@ class SessionBackedAgent:
         if session is not None:
             session.stop()
 
+    def recover_session(self) -> bool:
+        """Recover the attached persistent session if one exists."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return False
+        session.recover()
+        return True
+
     def _can_spawn_owned_session(self) -> bool:
         return self._session_system_file is not None and self._work_dir is not None
 

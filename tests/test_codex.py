@@ -21,7 +21,7 @@ from fido.codex import (
     run_codex_exec,
     run_codex_exec_resume,
 )
-from fido.provider import ProviderID, ProviderModel
+from fido.provider import ProviderID, ProviderInterruptTimeout, ProviderModel
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
 
@@ -68,6 +68,7 @@ class _FakeAppServer:
         self.cwd = cwd
         self.pid = 456
         self.requests: list[tuple[str, dict]] = []
+        self.request_timeouts: list[float] = []
         self.notification_timeouts: list[float] = []
         self.notification_timeouts_before_match = 0
         self.on_notification_wait = lambda _timeout: None
@@ -79,7 +80,7 @@ class _FakeAppServer:
     def request(
         self, method: str, params: dict | None = None, *, timeout: float = 30.0
     ) -> object:
-        del timeout
+        self.request_timeouts.append(timeout)
         payload = params or {}
         self.requests.append((method, payload))
         response = self.responses.get(method)
@@ -542,6 +543,30 @@ class TestCodexSession:
             "turn/interrupt",
             {"threadId": "thread-new", "turnId": "turn-1"},
         )
+        assert fake.request_timeouts[-1] == 5
+
+    def test_interrupt_timeout_is_recoverable_provider_wedge(
+        self, tmp_path: Path
+    ) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        fake.responses["turn/interrupt"] = TimeoutError("turn/interrupt")
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+        )
+        session.send("work")
+
+        with pytest.raises(ProviderInterruptTimeout) as exc_info:
+            session._fire_worker_cancel()
+
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert "thread-new" in str(exc_info.value)
+        assert "turn-1" in str(exc_info.value)
+        assert fake.request_timeouts[-1] == 5
 
     def test_failed_turn_raises_provider_error(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
@@ -648,6 +673,30 @@ class TestCodexSession:
         assert fake.stopped
         assert replacement.requests[0][0] == "thread/resume"
         assert replacement.requests[0][1]["threadId"] == "thread-new"
+
+    def test_recover_clears_stale_cancelled_turn_state(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        replacement = _FakeAppServer()
+        clients = [fake, replacement]
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: clients.pop(0),
+        )
+
+        session.send("work")
+        with session._state_lock:
+            session._last_turn_cancelled = True
+
+        session.recover()
+        session._fire_worker_cancel()
+
+        assert fake.stopped
+        assert session.last_turn_cancelled is False
+        assert replacement.requests == [("thread/resume", {"threadId": "thread-new"})]
 
 
 class TestCodexClient:

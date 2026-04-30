@@ -117,6 +117,15 @@ class TestSessionBackedAgent:
         agent.ensure_session(agent.brief_model)
         attached.switch_model.assert_called_once_with(agent.brief_model)
 
+    def test_recover_session_returns_false_without_session(self) -> None:
+        assert _FakeAgent().recover_session() is False
+
+    def test_recover_session_delegates_to_attached_session(self) -> None:
+        session = MagicMock()
+        agent = _FakeAgent(session=session)
+        assert agent.recover_session() is True
+        session.recover.assert_called_once_with()
+
     def test_resolve_turn_prefers_live_session_over_owned_spawn(
         self, tmp_path: Path
     ) -> None:

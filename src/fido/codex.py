@@ -21,6 +21,7 @@ from fido.provider import (
     ProviderAgent,
     ProviderAPI,
     ProviderID,
+    ProviderInterruptTimeout,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
@@ -824,9 +825,12 @@ class CodexSession(OwnedSession):
         del tools
 
     def recover(self) -> None:
+        with self._turn_lock:
+            self._active_turn_id = None
         with self._state_lock:
             old_session_id = self._session_id
             old_client = self._client
+            self._last_turn_cancelled = False
         old_client.stop()
         new_client = self._client_factory(cwd=self._work_dir)
         with self._state_lock:
@@ -864,9 +868,16 @@ class CodexSession(OwnedSession):
             client = self._client
         if thread_id is None or turn_id is None or not client.is_alive():
             return
-        client.request(
-            "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=5
-        )
+        try:
+            client.request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout=5,
+            )
+        except TimeoutError as exc:
+            raise ProviderInterruptTimeout(
+                f"Codex turn/interrupt timed out for thread {thread_id} turn {turn_id}"
+            ) from exc
 
     def __enter__(self) -> "CodexSession":
         depth = getattr(self._reentry_tls, "depth", 0)

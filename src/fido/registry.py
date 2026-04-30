@@ -234,6 +234,13 @@ class WorkerRegistry:
         if thread:
             thread.abort_task()
 
+    def recover_provider(self, repo_name: str) -> bool:
+        """Recover the attached provider session for *repo_name*, if present."""
+        thread = self._threads.get(repo_name)
+        if thread is None:
+            return False
+        return thread.recover_provider()
+
     def report_activity(
         self,
         repo_name: str,
@@ -521,16 +528,20 @@ class WorkerRegistry:
                 return
             new = old - 1
             self._untriaged[repo_name] = new
-            # The FSM models {Empty, NonEmpty} — HandlerDone stays NonEmpty.
-            # When the count reaches 0, reset the FSM to Empty directly so
-            # WorkerTurnStart is accepted on the next worker turn.
+            # HandlerDone preserves the active demand state.  When legacy
+            # untriaged demand is the only blocker and the count reaches 0,
+            # reset to Empty; durable demand must remain until its store drains.
             self._preemption_fsm_transition(repo_name, preemption_fsm.HandlerDone())
             if new == 0:
-                self._preemption_fsm_states[repo_name] = preemption_fsm.Empty()
-                log.debug(
-                    "preemption[%s]: FSM NonEmpty →Empty (count reached 0)",
-                    repo_name,
+                current = self._preemption_fsm_states.get(
+                    repo_name, preemption_fsm.Empty()
                 )
+                if isinstance(current, preemption_fsm.NonEmpty):
+                    self._preemption_fsm_states[repo_name] = preemption_fsm.Empty()
+                    log.debug(
+                        "preemption[%s]: FSM NonEmpty →Empty (count reached 0)",
+                        repo_name,
+                    )
                 ev = self._untriaged_drained.get(repo_name)
                 if ev is not None:
                     ev.set()
@@ -564,9 +575,19 @@ class WorkerRegistry:
             current = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
             if isinstance(current, preemption_fsm.Empty):
                 return
-            self._preemption_fsm_transition(
+            new_state = self._preemption_fsm_transition(
                 repo_name, preemption_fsm.DurableDemandDrained()
             )
+            if self._untriaged.get(repo_name, 0) > 0 and not isinstance(
+                new_state, preemption_fsm.NonEmpty
+            ):
+                self._preemption_fsm_states[repo_name] = preemption_fsm.NonEmpty()
+                log.debug(
+                    "preemption[%s]: FSM %s →NonEmpty (durable drained; "
+                    "untriaged count remains)",
+                    repo_name,
+                    type(new_state).__name__,
+                )
 
     def wait_for_inbox_drain(
         self, repo_name: str, timeout: float | None = None

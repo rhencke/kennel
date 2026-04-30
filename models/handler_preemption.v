@@ -125,8 +125,11 @@ Inductive Event : Type :=
 
     [HandlerDone] from [NonEmpty] stays [NonEmpty] in the FSM; the
     runtime uses the actual counter to decide when to flip to [Empty].
-    This is safe because the invariant ([WorkerTurnStart] rejected
-    from [NonEmpty]) holds regardless of count. *)
+    [HandlerDone] is also accepted from durable-demand states because the
+    legacy untriaged inbox and durable queue can overlap: finishing the
+    handler must not clear the durable blocker.  This is safe because the
+    invariant ([WorkerTurnStart] rejected from all demand states) holds
+    regardless of count. *)
 Definition transition (current : State) (event : Event) : option State :=
   match current, event with
   | Empty,           WebhookArrives        => Some NonEmpty
@@ -136,16 +139,18 @@ Definition transition (current : State) (event : Event) : option State :=
   | NonEmpty,        WebhookArrives        => Some NonEmpty
   | NonEmpty,        DurableDemandRecorded => Some DurableDemand
   | NonEmpty,        HandlerDone           => Some NonEmpty
-  | NonEmpty,        DurableDemandDrained  => Some Empty
+  | NonEmpty,        DurableDemandDrained  => Some NonEmpty
 
   | DurableDemand,   WebhookArrives        => Some DurableDemand
   | DurableDemand,   DurableDemandRecorded => Some DurableDemand
   | DurableDemand,   InterruptRequested    => Some PreemptedDemand
+  | DurableDemand,   HandlerDone           => Some DurableDemand
   | DurableDemand,   DurableDemandDrained  => Some Empty
 
   | PreemptedDemand, WebhookArrives        => Some PreemptedDemand
   | PreemptedDemand, DurableDemandRecorded => Some PreemptedDemand
   | PreemptedDemand, InterruptRequested    => Some PreemptedDemand
+  | PreemptedDemand, HandlerDone           => Some PreemptedDemand
   | PreemptedDemand, DurableDemandDrained  => Some Empty
 
   | _,               _                     => None
@@ -208,6 +213,25 @@ Qed.
     check is correct: the FSM also rejects it. *)
 Lemma handler_done_rejected_from_empty :
   transition Empty HandlerDone = None.
+Proof.
+  reflexivity.
+Qed.
+
+(** [handler_done_preserves_durable_gate]: a handler may finish while durable
+    demand remains pending.  The legacy untriaged counter is count-aware at
+    runtime, but [HandlerDone] must not clear durable scheduler priority. *)
+Lemma handler_done_preserves_durable_gate :
+  transition DurableDemand   HandlerDone = Some DurableDemand /\
+  transition PreemptedDemand HandlerDone = Some PreemptedDemand.
+Proof.
+  split; reflexivity.
+Qed.
+
+(** [durable_drain_preserves_legacy_gate]: durable demand can drain while the
+    legacy untriaged inbox still has handlers in flight.  The durable drain
+    event must not unblock worker turns while legacy demand remains. *)
+Lemma durable_drain_preserves_legacy_gate :
+  transition NonEmpty DurableDemandDrained = Some NonEmpty.
 Proof.
   reflexivity.
 Qed.

@@ -267,6 +267,30 @@ def test_handler_done_from_nonempty_stays_nonempty() -> None:
     )
 
 
+def test_handler_done_from_durable_demand_preserves_durable_gate() -> None:
+    """HandlerDone from DurableDemand keeps durable scheduler priority."""
+    result = transition(DurableDemand(), HandlerDone())
+    assert isinstance(result, DurableDemand), (
+        f"HandlerDone from DurableDemand yielded {result!r}, expected DurableDemand"
+    )
+
+
+def test_handler_done_from_preempted_demand_preserves_preempted_gate() -> None:
+    """HandlerDone from PreemptedDemand keeps the preempted gate."""
+    result = transition(PreemptedDemand(), HandlerDone())
+    assert isinstance(result, PreemptedDemand), (
+        f"HandlerDone from PreemptedDemand yielded {result!r}, expected PreemptedDemand"
+    )
+
+
+def test_durable_demand_drain_from_nonempty_preserves_nonempty_gate() -> None:
+    """DurableDemandDrained from NonEmpty keeps legacy handler demand."""
+    result = transition(NonEmpty(), DurableDemandDrained())
+    assert isinstance(result, NonEmpty), (
+        f"DurableDemandDrained from NonEmpty yielded {result!r}, expected NonEmpty"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Full lifecycle sequences
 # ---------------------------------------------------------------------------

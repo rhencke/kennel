@@ -128,7 +128,7 @@ def transition(
                 case HandlerDone():
                     return NonEmpty()
                 case DurableDemandDrained():
-                    return Empty()
+                    return NonEmpty()
                 case WorkerTurnStart():
                     return None
                 case __impossible:
@@ -142,7 +142,7 @@ def transition(
                 case InterruptRequested():
                     return PreemptedDemand()
                 case HandlerDone():
-                    return None
+                    return DurableDemand()
                 case DurableDemandDrained():
                     return Empty()
                 case WorkerTurnStart():
@@ -158,7 +158,7 @@ def transition(
                 case InterruptRequested():
                     return PreemptedDemand()
                 case HandlerDone():
-                    return None
+                    return PreemptedDemand()
                 case DurableDemandDrained():
                     return Empty()
                 case WorkerTurnStart():

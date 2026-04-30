@@ -799,12 +799,31 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _preempt_worker_best_effort(self, repo_name: str) -> None:
         """Try to interrupt the current worker after durable demand is recorded."""
+        self.registry.note_durable_demand(repo_name)
         session = self.registry.get_session(repo_name)
         if session is None:
             return
         try:
             session.preempt_worker()
-        except Exception:
+        except Exception as exc:
+            if provider.is_recoverable_provider_wedge(exc):
+                log.exception(
+                    "provider preempt wedged for %s after durable webhook enqueue "
+                    "— recovering provider",
+                    repo_name,
+                )
+                recovered = self.registry.recover_provider(repo_name)
+                if recovered:
+                    log.warning(
+                        "provider recovery requested for %s after preempt wedge",
+                        repo_name,
+                    )
+                else:
+                    log.error(
+                        "provider recovery unavailable for %s after preempt wedge",
+                        repo_name,
+                    )
+                return
             log.exception(
                 "provider preempt failed for %s after durable webhook enqueue",
                 repo_name,
