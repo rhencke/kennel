@@ -2,12 +2,11 @@
 date: 2026-04-09
 date_range:
   from: 2026-04-09
-  to: 2026-04-10
-commits: 328
-prs: 39
-issues: 44
+  to: 2026-04-09
+commits: 131
+prs: 31
+issues: 27
 reviews: 0
 repos:
-  - FidoCanCode/fidocancode.github.io
+  - FidoCanCode/home
   - rhencke/confusio
-  - rhencke/kennel
