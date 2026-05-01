@@ -3,6 +3,7 @@ import logging
 import re
 import subprocess
 import threading
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,11 +23,12 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
+from fido.rocq import reply_outbox_protocol as reply_outbox_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
 from fido.rocq import webhook_ingress_dedupe as ingress_fsm
 from fido.state import State
-from fido.store import FidoStore, append_reply_promise_markers
+from fido.store import FidoStore, ReplyPromiseRecord, append_reply_promise_markers
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import TaskType
 
@@ -304,6 +306,11 @@ def _record_reply_artifact(
     if artifact_comment_id is None or not promise_ids:
         return
     store = FidoStore(repo_cfg.work_dir)
+    _assert_reply_outbox_posts_visible_artifact(
+        store,
+        artifact_comment_id=artifact_comment_id,
+        promise_ids=promise_ids,
+    )
     store.record_artifact(
         artifact_comment_id=artifact_comment_id,
         comment_type=comment_type,
@@ -330,9 +337,131 @@ def _existing_reply_artifact(
     artifact_ids = {artifact.artifact_comment_id for artifact in artifacts if artifact}
     if len(artifact_ids) != 1:
         return None
+    artifact_id = next(iter(artifact_ids))
+    _assert_reply_outbox_reuses_visible_artifact(
+        store,
+        artifact_comment_id=artifact_id,
+        promise_ids=normalized,
+    )
     for promise_id in normalized:
         store.mark_posted(promise_id)
-    return next(iter(artifact_ids))
+    return artifact_id
+
+
+def _reply_outbox_positive_id(value: str) -> int:
+    """Map a durable UUID row id into the positive domain used by D14."""
+    return uuid.UUID(value).int + 1
+
+
+def _reply_outbox_origin_kind(comment_type: str) -> reply_outbox_oracle.OriginKind:
+    origin_kinds = {
+        "issues": reply_outbox_oracle.IssueCommentOrigin,
+        "pulls": reply_outbox_oracle.ReviewThreadOrigin,
+    }
+    return origin_kinds[comment_type]()
+
+
+def _reply_outbox_prepared_state(
+    promise: ReplyPromiseRecord,
+) -> tuple[reply_outbox_oracle.ProtocolState, int, int]:
+    promise_key = _reply_outbox_positive_id(promise.promise_id)
+    origin = int(promise.anchor_comment_id)
+    state = reply_outbox_oracle.prepare_reply(
+        origin,
+        origin,
+        promise_key,
+        promise_key,
+        _reply_outbox_origin_kind(promise.comment_type),
+        reply_outbox_oracle.empty_protocol_state,
+    )
+    assert state is not None, (
+        "reply_outbox_protocol: prepare_reply rejected existing durable promise"
+    )
+    return state, origin, promise_key
+
+
+def _assert_reply_outbox_posts_visible_artifact(
+    store: FidoStore,
+    *,
+    artifact_comment_id: int,
+    promise_ids: Iterable[str],
+) -> None:
+    """Crash if Python records a visible reply outside the D14 protocol."""
+    for promise_id in promise_ids:
+        promise = store.promise(promise_id)
+        assert promise is not None, (
+            f"reply_outbox_protocol: missing promise {promise_id!r} for visible reply"
+        )
+        posted, origin, _effect_id = _reply_outbox_recorded_visible_state(
+            promise,
+            artifact_comment_id=artifact_comment_id,
+            label="visible reply",
+        )
+        assert (
+            reply_outbox_oracle.live_reply_for_origin(posted, origin)
+            == artifact_comment_id
+        ), "reply_outbox_protocol: reply_post_is_idempotent violated"
+
+
+def _assert_reply_outbox_reuses_visible_artifact(
+    store: FidoStore,
+    *,
+    artifact_comment_id: int,
+    promise_ids: Iterable[str],
+) -> None:
+    """Crash if Python reuses a visible reply not accepted by the D14 oracle."""
+    for promise_id in promise_ids:
+        promise = store.promise(promise_id)
+        artifact = store.artifact_for_promise(promise_id)
+        assert promise is not None and artifact is not None, (
+            f"reply_outbox_protocol: missing durable rows for promise {promise_id!r}"
+        )
+        assert artifact.artifact_comment_id == artifact_comment_id, (
+            "reply_outbox_protocol: visible reply artifact split across promises"
+        )
+        posted, _origin, effect_id = _reply_outbox_recorded_visible_state(
+            promise,
+            artifact_comment_id=artifact_comment_id,
+            label="artifact reuse",
+        )
+        replayed = reply_outbox_oracle.record_reply_posted(
+            effect_id,
+            int(artifact_comment_id) + 1,
+            posted,
+        )
+        assert replayed == posted and isinstance(
+            reply_outbox_oracle.outbox_decision(posted, effect_id),
+            reply_outbox_oracle.ReuseDeliveredEffect,
+        ), "reply_outbox_protocol: reply_post_is_idempotent violated"
+
+
+def _reply_outbox_recorded_visible_state(
+    promise: ReplyPromiseRecord,
+    *,
+    artifact_comment_id: int,
+    label: str,
+) -> tuple[reply_outbox_oracle.ProtocolState, int, int]:
+    state, origin, effect_id = _reply_outbox_prepared_state(promise)
+    assert reply_outbox_oracle.can_generate_reply(state, effect_id, origin), (
+        "reply_outbox_protocol: claim_before_generate violated"
+    )
+    assert isinstance(
+        reply_outbox_oracle.outbox_decision(state, effect_id),
+        reply_outbox_oracle.EmitEffect,
+    ), "reply_outbox_protocol: claim_before_post violated"
+    claimed = reply_outbox_oracle.claim_outbox_effect(effect_id, state)
+    assert claimed is not None, (
+        f"reply_outbox_protocol: claim_outbox_effect rejected {label}"
+    )
+    posted = reply_outbox_oracle.record_reply_posted(
+        effect_id,
+        int(artifact_comment_id),
+        claimed,
+    )
+    assert posted is not None, (
+        f"reply_outbox_protocol: record_reply_posted rejected {label}"
+    )
+    return posted, origin, effect_id
 
 
 def _deferred_issue_key(promise_ids: Iterable[str]) -> str | None:
