@@ -9752,6 +9752,86 @@ class TestExecuteTask:
         orig.side_effect = side_effect
         return orig
 
+    def test_preempt_pushes_committed_work_before_yielding(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1192: when the provider turn commits and is then
+        preempted (webhook arrives between `git commit` and `git push`),
+        the worker must push the committed work before yielding.  Without
+        this guard the local commit lives forever in the workspace clone
+        while the PR remote is unchanged — the symptom that produced the
+        empty PR #1191.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt"})
+        task = {"id": "t-preempt", "title": "Commit then preempt", "status": "pending"}
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            # Mock the preempt detector so the turn looks cancelled.
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            # Mock the leftover-commit helper to report HEAD moved during
+            # the turn (provider committed before the preempt fired).
+            patch.object(
+                worker,
+                "_commit_provider_leftovers_if_any",
+                return_value="sha-after-commit",
+            ),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
+        # Yielded (return True) because the turn was preempted.
+        assert result is True
+        # Push fired with the right remote and slug *before* yielding.
+        mock_push.assert_called_once_with("origin", "branch-slug")
+        # We yielded mid-task, not completed it.
+        mock_complete.assert_not_called()
+
+    def test_preempt_skips_push_when_no_commits_landed(self, tmp_path: Path) -> None:
+        """Companion to the push-before-yield test: when the provider was
+        preempted *before* it committed (HEAD didn't move), there's
+        nothing to push.  The push helper should be a no-op.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt-early"})
+        task = {
+            "id": "t-preempt-early",
+            "title": "Preempt before commit",
+            "status": "pending",
+        }
+        head_before = "sha-unchanged"
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            # HEAD did not move — _commit_provider_leftovers_if_any
+            # returns the same SHA, so _push_committed_work_before_yield
+            # short-circuits.
+            patch.object(
+                worker,
+                "_commit_provider_leftovers_if_any",
+                return_value=head_before,
+            ),
+            patch.object(
+                worker, "_git", MagicMock(return_value=MagicMock(stdout=head_before))
+            ),
+            patch.object(worker, "ensure_pushed") as mock_push,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
+        assert result is True
+        mock_push.assert_not_called()
+
     def test_stale_abort_targeting_removed_task_does_not_clobber_next_task(
         self, tmp_path: Path
     ) -> None:
