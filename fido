@@ -489,12 +489,12 @@ run_container() {
     --interactive
     --user "$(id -u):$(id -g)"
     --env "HOME=$HOME"
-    --env "PYTHONPATH=/workspace/src"
+    --env "PYTHONPATH=$repo_root/src"
     --network host
-    --volume "$repo_root:/workspace"
+    --volume "$repo_root:$repo_root"
     --volume "$HOME/workspace:$HOME/workspace"
     "${secret_args[@]}"
-    --workdir /workspace
+    --workdir "$repo_root"
   )
   if [ "$named_run" = "1" ]; then
     run_args=(--name "$container" "${run_args[@]}")
@@ -549,7 +549,7 @@ run_fido_test_python_image() {
 
 run_fido_pyproject_image() {
   build_image fido-test "$test_image"
-  container_entrypoint=/workspace/pyproject run_container "$@"
+  container_entrypoint="$repo_root/pyproject" run_container "$@"
 }
 
 run_fido_module_image() {
