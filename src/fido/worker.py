@@ -3602,7 +3602,13 @@ class Worker:
         A post-condition failure (``phase="post"``) is the scary case: it means
         something *during the iteration* mutated the config.  Either way the
         worker aborts and the watchdog restarts.
+
+        Refreshes the gh-CLI token before the comparison so a host-side
+        ``gh auth switch`` (rare, but happens during ops work) is picked
+        up automatically rather than crash-looping the worker until a
+        process restart (closes #1207).
         """
+        self.gh.refresh_token()
         expected = self.gh.get_authenticated_identity()
         actual = GitIdentity(
             name=self._git_config_get("user.name"),

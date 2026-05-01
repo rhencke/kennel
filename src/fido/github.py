@@ -99,16 +99,41 @@ class GitHub:
         token: str | None = None,
         session: _requests.Session | None = None,
         sleeper: Callable[[float], None] = time.sleep,
+        token_fetcher: Callable[[], str] = _gh_token,
     ) -> None:
         self._s = session if session is not None else _TimeoutSession()
+        self._token_fetcher = token_fetcher
+        self._token = token if token is not None else token_fetcher()
         self._s.headers.update(
             {
-                "Authorization": f"Bearer {token if token is not None else _gh_token()}",
+                "Authorization": f"Bearer {self._token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
         )
         self._sleep = sleeper
+
+    def refresh_token(self) -> bool:
+        """Re-resolve the gh-CLI token; update session headers if changed.
+
+        Catches the case where the host runs ``gh auth switch`` while
+        fido is running: without this, the GitHub client keeps using
+        the old token forever, the API's ``/user`` response stays
+        wrong, and :meth:`Worker.assert_git_identity` crash-loops the
+        worker until a process restart (closes #1207).
+
+        Called at every assertion boundary in the worker loop; the
+        per-call cost is one ``gh auth token`` subprocess invocation,
+        negligible at the natural iteration cadence.
+
+        Returns ``True`` when the token actually changed.
+        """
+        new_token = self._token_fetcher()
+        if new_token == self._token:
+            return False
+        self._token = new_token
+        self._s.headers["Authorization"] = f"Bearer {new_token}"
+        return True
 
     def _retryable_get(self, url: str) -> _requests.Response:
         """GET *url* with retry on transient upstream failures (#664).

@@ -2276,6 +2276,20 @@ class TestAssertGitIdentity:
     def test_git_identity_str_is_git_author_format(self) -> None:
         assert str(GitIdentity(name="A Dog", email="a@b.c")) == "A Dog <a@b.c>"
 
+    def test_refreshes_token_before_compare(self, tmp_path: Path) -> None:
+        """Regression for #1207: assert_git_identity must call
+        ``gh.refresh_token()`` so a host-side ``gh auth switch`` is
+        picked up automatically rather than crash-looping until a
+        process restart."""
+        self._init_repo(
+            tmp_path,
+            name="Fido Can Code",
+            email="190991155+FidoCanCode@users.noreply.github.com",
+        )
+        worker, gh = self._worker(tmp_path)
+        worker.assert_git_identity(phase="pre")
+        gh.refresh_token.assert_called_once_with()
+
 
 class TestNoCommitNudge:
     def test_early_attempt_is_gentle_and_includes_complete_command(self) -> None:

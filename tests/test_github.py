@@ -75,6 +75,28 @@ class TestGitHubClass:
         gh = GitHub("test-token")
         assert gh._s.headers["Authorization"] == "Bearer test-token"
 
+    def test_refresh_token_picks_up_new_value(self) -> None:
+        """Regression for #1207: re-resolve gh-CLI token mid-run.
+
+        When the host runs ``gh auth switch`` while fido is up, the
+        next ``refresh_token`` call must update the session header so
+        subsequent API requests use the new token.
+        """
+        tokens = iter(["old-token", "new-token"])
+        gh = GitHub(token=None, token_fetcher=lambda: next(tokens))
+        assert gh._s.headers["Authorization"] == "Bearer old-token"
+        changed = gh.refresh_token()
+        assert changed is True
+        assert gh._s.headers["Authorization"] == "Bearer new-token"
+
+    def test_refresh_token_noop_when_unchanged(self) -> None:
+        """When the token hasn't changed, refresh is a no-op and
+        returns False so callers can skip downstream work."""
+        gh = GitHub(token=None, token_fetcher=lambda: "same-token")
+        changed = gh.refresh_token()
+        assert changed is False
+        assert gh._s.headers["Authorization"] == "Bearer same-token"
+
     def test_sets_accept_header(self) -> None:
         gh = GitHub("test-token")
         assert gh._s.headers["Accept"] == "application/vnd.github+json"
