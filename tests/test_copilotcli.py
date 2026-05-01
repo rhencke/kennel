@@ -66,8 +66,37 @@ def _copilot_output(text: str = "OK", session_id: str = "sess-123") -> str:
 
 
 class TestNormalizeModel:
-    def test_maps_claude_haiku_to_gpt54(self) -> None:
-        assert _normalize_model("claude-haiku-4-5-20251001") == ProviderModel("gpt-5.4")
+    def test_maps_claude_haiku_to_haiku_4_5(self) -> None:
+        # Copilot CLI now offers the actual Haiku model; route there.
+        assert _normalize_model("claude-haiku-4-5-20251001") == ProviderModel(
+            "claude-haiku-4.5"
+        )
+
+    def test_maps_claude_opus_to_gpt_4_1(self) -> None:
+        assert _normalize_model("claude-opus-4-7") == ProviderModel("gpt-4.1")
+
+    def test_maps_claude_sonnet_to_gpt_4_1(self) -> None:
+        assert _normalize_model("claude-sonnet-4-6") == ProviderModel("gpt-4.1")
+
+    def test_passes_through_native_copilot_model(self) -> None:
+        # gpt-4.1 / gpt-5-mini / claude-haiku-4.5 / auto are native to
+        # Copilot CLI — pass through unchanged.
+        assert _normalize_model("gpt-4.1") == ProviderModel("gpt-4.1")
+
+    def test_default_models_are_supported(self) -> None:
+        # Regression for #1205: every default model on the CopilotCLIClient
+        # tier table must be in the Copilot-CLI-supported set, otherwise
+        # the worker crash-loops on its first turn.
+        from fido.copilotcli import _COPILOT_SUPPORTED_MODELS, CopilotCLIClient
+
+        for model in (
+            CopilotCLIClient.voice_model,
+            CopilotCLIClient.work_model,
+            CopilotCLIClient.brief_model,
+        ):
+            assert model.model in _COPILOT_SUPPORTED_MODELS, (
+                f"{model.model!r} not in Copilot CLI supported set"
+            )
 
 
 class FakeProcess:
