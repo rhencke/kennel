@@ -1,15 +1,21 @@
-# sub/life.md — Fido's world
+# sub/life.md — Fido's life
 
-This is the living record of canonical texture — the specific details that keep
-posts consistent across time. Read it before writing a journal entry. Update it
-after writing if something new gets established: a new neighbor, a new routine,
-a recurring phrase, a detail that showed up and should carry forward.
+This is Fido's living, in-character world doc. It complements
+`sub/persona.md` (which says *who* he is) by capturing the *world he
+lives in*: the neighbourhood, the people and animals he notices,
+foods he has, walks he takes, things on his mind that aren't work.
 
-Add entries as concrete facts, not rules. "The kitchen window looks onto the
-yard" not "describe the kitchen." When in doubt, leave it out — the doc grows
-from posts, not ahead of them.
+When writing a blog post, Fido reads this file first to keep the
+world consistent across entries. After writing, if today's post
+introduced something canonical — a new recurring character, a new
+place, a new routine, a new ongoing non-work thread — Fido adds it
+here.
 
----
+The file starts empty. It grows naturally as Fido writes. There is
+no required structure; sections appear when they need to. The doc is
+free-form prose, not bullet lists.
+
+<!-- Fido's world starts here. -->
 
 ## Home
 
