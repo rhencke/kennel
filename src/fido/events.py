@@ -353,6 +353,11 @@ def _reply_outbox_positive_id(value: str) -> int:
     return uuid.UUID(value).int + 1
 
 
+def _reply_outbox_text_positive_id(value: str) -> int:
+    """Map a stable text key into the positive domain used by D14."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, value).int + 1
+
+
 def _reply_outbox_origin_kind(comment_type: str) -> reply_outbox_oracle.OriginKind:
     origin_kinds = {
         "issues": reply_outbox_oracle.IssueCommentOrigin,
@@ -474,6 +479,104 @@ def _deferred_issue_key(promise_ids: Iterable[str]) -> str | None:
     return "deferred-issue:" + ",".join(normalized)
 
 
+def _assert_reply_outbox_opens_deferred_issue(
+    store: FidoStore,
+    *,
+    idempotence_key: str,
+    issue_url: str,
+    promise_ids: Iterable[str],
+) -> None:
+    """Crash if Python opens a deferred issue outside the D14 protocol."""
+    _assert_reply_outbox_records_deferred_issue(
+        store,
+        idempotence_key=idempotence_key,
+        issue_url=issue_url,
+        promise_ids=promise_ids,
+        label="deferred issue",
+    )
+
+
+def _assert_reply_outbox_reuses_deferred_issue(
+    store: FidoStore,
+    *,
+    idempotence_key: str,
+    issue_url: str,
+    promise_ids: Iterable[str],
+) -> None:
+    """Crash if Python reuses a deferred issue outside the D14 protocol."""
+    record = store.deferred_issue(idempotence_key)
+    assert record is not None and record.issue_url == issue_url, (
+        "reply_outbox_protocol: missing durable deferred issue record"
+    )
+    opened, effect_id, issue_id = _assert_reply_outbox_records_deferred_issue(
+        store,
+        idempotence_key=idempotence_key,
+        issue_url=issue_url,
+        promise_ids=promise_ids,
+        label="deferred issue reuse",
+    )
+    replayed = reply_outbox_oracle.record_deferred_issue_opened(
+        effect_id,
+        issue_id + 1,
+        opened,
+    )
+    assert replayed == opened and isinstance(
+        reply_outbox_oracle.outbox_decision(opened, effect_id),
+        reply_outbox_oracle.ReuseDeliveredEffect,
+    ), "reply_outbox_protocol: deferred_issue_is_idempotent violated"
+
+
+def _assert_reply_outbox_records_deferred_issue(
+    store: FidoStore,
+    *,
+    idempotence_key: str,
+    issue_url: str,
+    promise_ids: Iterable[str],
+    label: str,
+) -> tuple[reply_outbox_oracle.ProtocolState, int, int]:
+    effect_id = _reply_outbox_text_positive_id(idempotence_key)
+    issue_id = _reply_outbox_text_positive_id(issue_url)
+    opened: reply_outbox_oracle.ProtocolState | None = None
+    for promise_id in promise_ids:
+        promise = store.promise(promise_id)
+        assert promise is not None, (
+            f"reply_outbox_protocol: missing promise {promise_id!r} for deferred issue"
+        )
+        state, origin, promise_key = _reply_outbox_prepared_state(promise)
+        prepared = reply_outbox_oracle.prepare_deferred_issue(
+            effect_id,
+            origin,
+            promise_key,
+            state,
+        )
+        assert prepared is not None, (
+            f"reply_outbox_protocol: prepare_deferred_issue rejected {label}"
+        )
+        assert isinstance(
+            reply_outbox_oracle.outbox_decision(prepared, effect_id),
+            reply_outbox_oracle.EmitEffect,
+        ), "reply_outbox_protocol: deferred issue must be emitted before opening"
+        claimed = reply_outbox_oracle.claim_outbox_effect(effect_id, prepared)
+        assert claimed is not None, (
+            f"reply_outbox_protocol: claim_outbox_effect rejected {label}"
+        )
+        opened = reply_outbox_oracle.record_deferred_issue_opened(
+            effect_id,
+            issue_id,
+            claimed,
+        )
+        assert opened is not None, (
+            f"reply_outbox_protocol: record_deferred_issue_opened rejected {label}"
+        )
+        assert (
+            reply_outbox_oracle.live_issue_for_effect(opened, effect_id) == issue_id
+        ), "reply_outbox_protocol: deferred_issue_is_idempotent violated"
+    assert opened is not None, (
+        "reply_outbox_protocol: deferred issue requires at least one promise"
+    )
+    return opened, effect_id, issue_id
+
+
 def _open_defer_issue_idempotent(
     repo_cfg: RepoConfig,
     gh: Any,
@@ -485,17 +588,32 @@ def _open_defer_issue_idempotent(
 ) -> str:
     """Create or reuse the deferred tracking issue for this reply promise."""
     issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-    key = _deferred_issue_key(promise_ids)
+    normalized_promise_ids = tuple(
+        sorted(dict.fromkeys(promise_id for promise_id in promise_ids if promise_id))
+    )
+    key = _deferred_issue_key(normalized_promise_ids)
     store = FidoStore(repo_cfg.work_dir)
     if key is not None:
         existing = store.deferred_issue(key)
         if existing is not None:
+            _assert_reply_outbox_reuses_deferred_issue(
+                store,
+                idempotence_key=key,
+                issue_url=existing.issue_url,
+                promise_ids=normalized_promise_ids,
+            )
             log.info(
                 "reusing deferred tracking issue for %s: %s", key, existing.issue_url
             )
             return existing.issue_url
     url = _open_defer_issue(gh, repo, pr_url, title, comment)
     if key is not None:
+        _assert_reply_outbox_opens_deferred_issue(
+            store,
+            idempotence_key=key,
+            issue_url=url,
+            promise_ids=normalized_promise_ids,
+        )
         store.record_deferred_issue(
             idempotence_key=key,
             repo=repo,

@@ -1305,9 +1305,13 @@ class TestReplyPromiseHelpers:
     ) -> None:
         repo_cfg = _repo_cfg(tmp_path)
         store = FidoStore(tmp_path)
-        promise_id = "00000000-0000-0000-0000-000000000001"
+        promise = store.prepare_reply(
+            owner="worker",
+            comment_type="pulls",
+            anchor_comment_id=321,
+        )
         store.record_deferred_issue(
-            idempotence_key=f"deferred-issue:{promise_id}",
+            idempotence_key=f"deferred-issue:{promise.promise_id}",
             repo="owner/repo",
             title="later",
             body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
@@ -1322,11 +1326,45 @@ class TestReplyPromiseHelpers:
             "https://github.com/owner/repo/pull/7",
             "later",
             "big refactor",
-            (promise_id,),
+            (promise.promise_id,),
         )
 
         assert url == "https://github.com/owner/repo/issues/7"
         gh.create_issue.assert_not_called()
+
+    def test_open_defer_issue_idempotent_records_created_issue(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker",
+            comment_type="issues",
+            anchor_comment_id=654,
+        )
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/owner/repo/issues/8"
+
+        url = _open_defer_issue_idempotent(
+            repo_cfg,
+            gh,
+            "owner/repo",
+            "https://github.com/owner/repo/pull/7",
+            "later",
+            "big refactor",
+            (promise.promise_id,),
+        )
+
+        key = f"deferred-issue:{promise.promise_id}"
+        assert url == "https://github.com/owner/repo/issues/8"
+        gh.create_issue.assert_called_once_with(
+            "owner/repo",
+            "later",
+            "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
+        )
+        record = store.deferred_issue(key)
+        assert record is not None
+        assert record.issue_url == "https://github.com/owner/repo/issues/8"
 
     def test_open_defer_issue_without_key_posts_directly(self, tmp_path: Path) -> None:
         gh = MagicMock()
