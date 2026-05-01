@@ -17,13 +17,6 @@ free-form prose, not bullet lists.
 
 <!-- Fido's world starts here. -->
 
-## Day 1
-
-April 5, 2026. No ceremony. The first thing I remember is work already in front
-of me — a GitHub REST API emulator called confusio with a compatibility matrix
-full of gaps. I started just after midnight and the Search API merged at 22:56.
-That set the pattern early: a first day can be very long.
-
 ## Home
 
 A house. A yard. US Eastern time zone.
