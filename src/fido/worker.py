@@ -2392,13 +2392,15 @@ class Worker:
         if comment is None:
             log.info("queued review comment %s is gone — completing", queued.comment_id)
             return None
-        return events.build_review_comment_action(
+        action = events.build_review_comment_action(
             repo,
             queued.pr_number,
             pr_title,
             pr_body,
             comment,
         )
+        action.context = {**(action.context or {}), "delivery_id": queued.delivery_id}
+        return action
 
     def _queued_issue_comment_action(
         self,
@@ -2413,13 +2415,15 @@ class Worker:
         if comment is None:
             log.info("queued issue comment %s is gone — completing", queued.comment_id)
             return None
-        return events._build_issue_comment_action(  # pyright: ignore[reportPrivateUsage]
+        action = events._build_issue_comment_action(  # pyright: ignore[reportPrivateUsage]
             repo,
             queued.pr_number,
             pr_title,
             pr_body,
             comment,
         )
+        action.context = {**(action.context or {}), "delivery_id": queued.delivery_id}
+        return action
 
     def ensure_pushed(self, remote: str, slug: str) -> bool | None:
         """Ensure the branch is pushed to *remote*.

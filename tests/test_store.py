@@ -8,6 +8,7 @@ import pytest
 from fido.rocq import replied_comment_claims as oracle
 from fido.store import (
     FidoStore,
+    ReplyOutboxEffectRecord,
     ReplyOwner,
     ReplyPromiseRecord,
     append_reply_promise_marker,
@@ -351,13 +352,14 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 5
+    assert version == 6
     assert {
         "comment_claims",
         "reply_promises",
         "reply_promise_comments",
         "reply_artifacts",
         "reply_artifact_promises",
+        "reply_outbox_effects",
         "deferred_issue_outbox",
         "command_queue",
         "pr_comment_deliveries",
@@ -897,6 +899,58 @@ def test_record_artifact_tracks_many_promises(tmp_path: Path) -> None:
     assert artifact is not None
     assert artifact.artifact_comment_id == 9001
     assert artifact.promise_ids == tuple(sorted((first.promise_id, second.promise_id)))
+
+
+def test_claim_reply_outbox_effect_is_durable_and_idempotent(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    promise = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=501
+    )
+    assert promise is not None
+
+    first = store.claim_reply_outbox_effect(
+        promise_id=promise.promise_id,
+        delivery_id="delivery-501",
+        origin_id=501,
+    )
+    second = store.claim_reply_outbox_effect(
+        promise_id=promise.promise_id,
+        delivery_id="delivery-other",
+        origin_id=999,
+    )
+
+    assert isinstance(first, ReplyOutboxEffectRecord)
+    assert second == first
+    assert first.delivery_id == "delivery-501"
+    assert first.origin_id == 501
+    assert first.state == "claimed"
+    assert first.external_id is None
+
+
+def test_record_reply_delivery_delivers_outbox_effect(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    promise = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=502
+    )
+    assert promise is not None
+    store.claim_reply_outbox_effect(
+        promise_id=promise.promise_id,
+        delivery_id="delivery-502",
+        origin_id=502,
+    )
+
+    store.record_reply_delivery(
+        artifact_comment_id=9003,
+        comment_type="pulls",
+        lane_key="pulls:owner/repo:7:thread:502",
+        promise_ids=[promise.promise_id],
+    )
+
+    effect = store.reply_outbox_effect(promise.promise_id)
+    assert effect is not None
+    assert effect.state == "delivered"
+    assert effect.external_id == 9003
+    assert store.promise(promise.promise_id).state == "posted"
 
 
 def test_record_artifact_ignores_empty_promise_ids(tmp_path: Path) -> None:

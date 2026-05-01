@@ -205,6 +205,7 @@ class ProtocolState:
     protocol_origins: dict[int, OriginClaim]
     protocol_deliveries: dict[int, int]
     protocol_effects: dict[int, OutboxEffect]
+    protocol_deferred_effects: dict[int, int]
     protocol_live_replies: dict[int, int]
     protocol_live_issues: dict[int, int]
 
@@ -213,6 +214,7 @@ empty_protocol_state: ProtocolState = ProtocolState(
     protocol_origins={},
     protocol_deliveries={},
     protocol_effects={},
+    protocol_deferred_effects={},
     protocol_live_replies={},
     protocol_live_issues={},
 )
@@ -473,22 +475,33 @@ def prepare_deferred_issue(
         return None
     claim = __option
     if claim.origin_claim_promise == promise:
-        __option = state.protocol_effects.get(_rocq_positive_key(issue_effect))
+        __option = state.protocol_deferred_effects.get(_rocq_positive_key(origin))
         if __option is None:
-            return replace(
-                state,
-                protocol_effects=_rocq_map_add(
-                    _rocq_positive_key(issue_effect),
-                    prepared_effect(
-                        DeferredIssueEffect(),
-                        origin,
-                        promise,
+            __option = state.protocol_effects.get(_rocq_positive_key(issue_effect))
+            if __option is None:
+                return replace(
+                    state,
+                    protocol_effects=_rocq_map_add(
+                        _rocq_positive_key(issue_effect),
+                        prepared_effect(
+                            DeferredIssueEffect(),
+                            origin,
+                            promise,
+                        ),
+                        state.protocol_effects,
                     ),
-                    state.protocol_effects,
-                ),
-            )
-        o = __option
-        return state
+                    protocol_deferred_effects=_rocq_map_add(
+                        _rocq_positive_key(origin),
+                        issue_effect,
+                        state.protocol_deferred_effects,
+                    ),
+                )
+            o = __option
+            return state
+        existing_effect = __option
+        if existing_effect == issue_effect:
+            return state
+        return None
     return None
 
 

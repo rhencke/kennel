@@ -96,6 +96,16 @@ def test_deferred_issue_effect_is_idempotent() -> None:
     )
 
 
+def test_deferred_issue_rejects_second_effect_for_same_intent() -> None:
+    posted = _posted_reply()
+    with_issue = oracle.prepare_deferred_issue(60, 20, 30, posted)
+    assert with_issue is not None
+
+    duplicate = oracle.prepare_deferred_issue(61, 20, 30, with_issue)
+
+    assert duplicate is None
+
+
 def test_failed_reply_post_releases_origin_for_retry() -> None:
     claimed = _claimed_reply()
 

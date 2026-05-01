@@ -95,6 +95,7 @@ Record ProtocolState : Type := {
   protocol_origins : PositiveMap.t OriginClaim;
   protocol_deliveries : PositiveMap.t positive;
   protocol_effects : PositiveMap.t OutboxEffect;
+  protocol_deferred_effects : PositiveMap.t positive;
   protocol_live_replies : PositiveMap.t positive;
   protocol_live_issues : PositiveMap.t positive
 }.
@@ -103,6 +104,7 @@ Definition empty_protocol_state : ProtocolState := {|
   protocol_origins := PositiveMap.empty OriginClaim;
   protocol_deliveries := PositiveMap.empty positive;
   protocol_effects := PositiveMap.empty OutboxEffect;
+  protocol_deferred_effects := PositiveMap.empty positive;
   protocol_live_replies := PositiveMap.empty positive;
   protocol_live_issues := PositiveMap.empty positive
 |}.
@@ -189,6 +191,7 @@ Definition prepare_reply
       protocol_effects := PositiveMap.add reply_effect
         (prepared_effect ReplyPostEffect origin promise)
         (protocol_effects state);
+      protocol_deferred_effects := protocol_deferred_effects state;
       protocol_live_replies := protocol_live_replies state;
       protocol_live_issues := protocol_live_issues state
     |}
@@ -238,6 +241,7 @@ Definition claim_outbox_effect
           protocol_effects := PositiveMap.add effect_id
             (claimed_effect effect)
             (protocol_effects state);
+          protocol_deferred_effects := protocol_deferred_effects state;
           protocol_live_replies := protocol_live_replies state;
           protocol_live_issues := protocol_live_issues state
         |}
@@ -295,6 +299,7 @@ Definition record_reply_posted
                 protocol_effects := PositiveMap.add effect_id
                   (delivered_effect artifact_id effect)
                   (protocol_effects state);
+                protocol_deferred_effects := protocol_deferred_effects state;
                 protocol_live_replies := PositiveMap.add origin
                   artifact_id
                   (protocol_live_replies state);
@@ -316,18 +321,26 @@ Definition prepare_deferred_issue
   match PositiveMap.find origin (protocol_origins state) with
   | Some claim =>
       if Pos.eqb (origin_claim_promise claim) promise then
-        match PositiveMap.find issue_effect (protocol_effects state) with
+        match PositiveMap.find origin (protocol_deferred_effects state) with
+        | Some existing_effect =>
+            if Pos.eqb existing_effect issue_effect then Some state else None
         | None =>
-            Some {|
-              protocol_origins := protocol_origins state;
-              protocol_deliveries := protocol_deliveries state;
-              protocol_effects := PositiveMap.add issue_effect
-                (prepared_effect DeferredIssueEffect origin promise)
-                (protocol_effects state);
-              protocol_live_replies := protocol_live_replies state;
-              protocol_live_issues := protocol_live_issues state
-            |}
-        | Some _ => Some state
+            match PositiveMap.find issue_effect (protocol_effects state) with
+            | None =>
+                Some {|
+                  protocol_origins := protocol_origins state;
+                  protocol_deliveries := protocol_deliveries state;
+                  protocol_effects := PositiveMap.add issue_effect
+                    (prepared_effect DeferredIssueEffect origin promise)
+                    (protocol_effects state);
+                  protocol_deferred_effects := PositiveMap.add origin
+                    issue_effect
+                    (protocol_deferred_effects state);
+                  protocol_live_replies := protocol_live_replies state;
+                  protocol_live_issues := protocol_live_issues state
+                |}
+            | Some _ => Some state
+            end
         end
       else
         None
@@ -349,6 +362,7 @@ Definition record_deferred_issue_opened
             protocol_effects := PositiveMap.add effect_id
               (delivered_effect issue_id effect)
               (protocol_effects state);
+            protocol_deferred_effects := protocol_deferred_effects state;
             protocol_live_replies := protocol_live_replies state;
             protocol_live_issues := PositiveMap.add effect_id issue_id
               (protocol_live_issues state)
@@ -383,6 +397,7 @@ Definition record_outbox_failure
                       (protocol_origins state);
                     protocol_deliveries := protocol_deliveries state;
                     protocol_effects := effects';
+                    protocol_deferred_effects := protocol_deferred_effects state;
                     protocol_live_replies := protocol_live_replies state;
                     protocol_live_issues := protocol_live_issues state
                   |}
@@ -393,6 +408,7 @@ Definition record_outbox_failure
                 protocol_origins := protocol_origins state;
                 protocol_deliveries := protocol_deliveries state;
                 protocol_effects := effects';
+                protocol_deferred_effects := protocol_deferred_effects state;
                 protocol_live_replies := protocol_live_replies state;
                 protocol_live_issues := protocol_live_issues state
               |}
@@ -508,6 +524,14 @@ Lemma deferred_issue_creation_is_idempotent :
   outbox_decision sample_issue_opened 60 = ReuseDeliveredEffect.
 Proof.
   repeat split; reflexivity.
+Qed.
+
+(** [one_deferred_issue_effect_per_intent]: one origin/promise intent cannot
+    prepare a second tracking-issue effect under a different effect id. *)
+Lemma one_deferred_issue_effect_per_intent :
+  prepare_deferred_issue 61 20 30 sample_with_issue = None.
+Proof.
+  reflexivity.
 Qed.
 
 (** [failure_releases_origin]: a failed reply post releases its semantic

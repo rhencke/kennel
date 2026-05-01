@@ -14,10 +14,11 @@ ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
 PromiseState = Literal["prepared", "posted", "acked", "failed"]
 PRCommentQueueState = Literal["pending", "in_progress", "completed", "retryable_failed"]
+ReplyOutboxEffectState = Literal["prepared", "claimed", "delivered", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,18 @@ class ReplyArtifactRecord:
     comment_type: str
     lane_key: str
     promise_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReplyOutboxEffectRecord:
+    """One durable visible-reply outbox effect."""
+
+    effect_id: str
+    promise_id: str
+    delivery_id: str
+    origin_id: int
+    state: ReplyOutboxEffectState
+    external_id: int | None
 
 
 @dataclass(frozen=True)
@@ -218,6 +231,56 @@ class FidoStore:
         """Mark a prepared promise as having reached GitHub."""
         self._set_promise_state(promise_id, "posted")
 
+    def reply_outbox_effect(self, promise_id: str) -> ReplyOutboxEffectRecord | None:
+        """Return the visible-reply outbox effect for *promise_id*, if any."""
+        self.ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM reply_outbox_effects
+                WHERE promise_id = ?
+                """,
+                (promise_id,),
+            ).fetchone()
+        return self._reply_outbox_effect_from_row(row) if row is not None else None
+
+    def claim_reply_outbox_effect(
+        self,
+        *,
+        promise_id: str,
+        delivery_id: str,
+        origin_id: int,
+    ) -> ReplyOutboxEffectRecord:
+        """Durably claim the visible-reply outbox effect before posting."""
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO reply_outbox_effects (
+                    effect_id, promise_id, delivery_id, origin_id, effect_kind,
+                    state, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, 'reply_post', 'prepared', ?, ?)
+                ON CONFLICT(promise_id, effect_kind) DO NOTHING
+                """,
+                (str(uuid.uuid4()), promise_id, delivery_id, int(origin_id), now, now),
+            )
+            row = self._reply_outbox_effect_row(conn, promise_id)
+            assert row is not None
+            if row["state"] in {"prepared", "failed"}:
+                conn.execute(
+                    """
+                    UPDATE reply_outbox_effects
+                    SET state = 'claimed', updated_at = ?
+                    WHERE effect_id = ?
+                    """,
+                    (now, row["effect_id"]),
+                )
+                row = self._reply_outbox_effect_row(conn, promise_id)
+                assert row is not None
+            return self._reply_outbox_effect_from_row(row)
+
     def record_artifact(
         self,
         *,
@@ -255,6 +318,61 @@ class FidoStore:
                 VALUES (?, ?)
                 """,
                 ((artifact_comment_id, promise_id) for promise_id in covered),
+            )
+
+    def record_reply_delivery(
+        self,
+        *,
+        artifact_comment_id: int,
+        comment_type: str,
+        lane_key: str,
+        promise_ids: Iterable[str],
+    ) -> None:
+        """Record one visible reply artifact and deliver its outbox effects."""
+        covered = tuple(
+            dict.fromkeys(promise_id for promise_id in promise_ids if promise_id)
+        )
+        if not covered:
+            return
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO reply_artifacts (
+                    artifact_comment_id, comment_type, lane_key, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_comment_id) DO UPDATE SET
+                    comment_type = excluded.comment_type,
+                    lane_key = excluded.lane_key,
+                    updated_at = excluded.updated_at
+                """,
+                (artifact_comment_id, comment_type, lane_key, now, now),
+            )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO reply_artifact_promises (
+                    artifact_comment_id, promise_id
+                )
+                VALUES (?, ?)
+                """,
+                ((artifact_comment_id, promise_id) for promise_id in covered),
+            )
+            conn.executemany(
+                """
+                UPDATE reply_outbox_effects
+                SET state = 'delivered', external_id = ?, updated_at = ?
+                WHERE promise_id = ? AND effect_kind = 'reply_post'
+                """,
+                ((artifact_comment_id, now, promise_id) for promise_id in covered),
+            )
+            conn.executemany(
+                """
+                UPDATE reply_promises
+                SET state = 'posted', updated_at = ?
+                WHERE promise_id = ?
+                """,
+                ((now, promise_id) for promise_id in covered),
             )
 
     def artifact_for_promise(self, promise_id: str) -> ReplyArtifactRecord | None:
@@ -815,6 +933,31 @@ class FidoStore:
             "SELECT * FROM reply_promises WHERE promise_id = ?", (promise_id,)
         ).fetchone()
 
+    def _reply_outbox_effect_row(
+        self, conn: sqlite3.Connection, promise_id: str
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT *
+            FROM reply_outbox_effects
+            WHERE promise_id = ? AND effect_kind = 'reply_post'
+            """,
+            (promise_id,),
+        ).fetchone()
+
+    def _reply_outbox_effect_from_row(
+        self, row: sqlite3.Row
+    ) -> ReplyOutboxEffectRecord:
+        external_id = row["external_id"]
+        return ReplyOutboxEffectRecord(
+            effect_id=row["effect_id"],
+            promise_id=row["promise_id"],
+            delivery_id=row["delivery_id"],
+            origin_id=int(row["origin_id"]),
+            state=cast(ReplyOutboxEffectState, row["state"]),
+            external_id=None if external_id is None else int(external_id),
+        )
+
     def _covered_comments(
         self, conn: sqlite3.Connection, promise_id: str
     ) -> tuple[int, ...]:
@@ -1037,6 +1180,22 @@ CREATE TABLE IF NOT EXISTS reply_artifact_promises (
     PRIMARY KEY(artifact_comment_id, promise_id),
     FOREIGN KEY(artifact_comment_id) REFERENCES reply_artifacts(artifact_comment_id)
       ON DELETE CASCADE,
+    FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS reply_outbox_effects (
+    effect_id TEXT PRIMARY KEY,
+    promise_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    origin_id INTEGER NOT NULL,
+    effect_kind TEXT NOT NULL CHECK(effect_kind IN ('reply_post')),
+    state TEXT NOT NULL CHECK(state IN (
+        'prepared', 'claimed', 'delivered', 'failed'
+    )),
+    external_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(promise_id, effect_kind),
     FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
 );
 
