@@ -133,17 +133,24 @@ def extract_session_id(output: str) -> str:
     return result
 
 
+# Models Copilot CLI currently accepts.  Surfaces from the CLI as the
+# error message when an unknown name is requested ("Supported values:
+# auto, gpt-5-mini, gpt-4.1, claude-haiku-4.5").  Update this set when
+# the CLI's supported list changes (closes #1205).
+_COPILOT_SUPPORTED_MODELS: frozenset[str] = frozenset(
+    {"auto", "gpt-5-mini", "gpt-4.1", "claude-haiku-4.5"}
+)
+
+
 def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
     if model is None:
         return None
     normalized = coerce_provider_model(model)
     lowered = normalized.model.lower()
-    if lowered.startswith("claude-opus"):
-        return ProviderModel("gpt-5.4", normalized.effort)
-    if lowered.startswith("claude-sonnet"):
-        return ProviderModel("gpt-5.4", normalized.effort)
     if lowered.startswith("claude-haiku"):
-        return ProviderModel("gpt-5.4", normalized.effort)
+        return ProviderModel("claude-haiku-4.5", normalized.effort)
+    if lowered.startswith("claude-opus") or lowered.startswith("claude-sonnet"):
+        return ProviderModel("gpt-4.1", normalized.effort)
     return normalized
 
 
@@ -1148,9 +1155,9 @@ class CopilotCLIAPI(ProviderAPI):
 class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for Copilot CLI interactions."""
 
-    voice_model = ProviderModel("gpt-5.4", "high")
-    work_model = ProviderModel("gpt-5.4", "medium")
-    brief_model = ProviderModel("gpt-5.4", "low")
+    voice_model = ProviderModel("gpt-4.1", "high")
+    work_model = ProviderModel("gpt-4.1", "medium")
+    brief_model = ProviderModel("gpt-5-mini", "low")
 
     def __init__(
         self,
