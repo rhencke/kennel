@@ -2249,16 +2249,18 @@ class TestProcessAction:
         mock_ic.assert_called_once()
 
     def test_review_comments_handled(self, server: tuple) -> None:
-        # pull_request_review / submitted is collapsed by the ingress oracle
-        # (CollapseReview) so reply_to_review is never called — inline comments
-        # are handled individually by pull_request_review_comment events.
+        # pull_request_review / submitted with state="commented" is collapsed by
+        # the ingress oracle (CollapseReview) so reply_to_review is never called
+        # — inline comments are handled individually by pull_request_review_comment
+        # events.  Decisive states (approved, changes_requested, dismissed) are
+        # NOT collapsed and do wake the worker.
         url, cfg = server
         payload = {
             **self._payload(),
             "action": "submitted",
             "review": {
                 "id": 888,
-                "state": "changes_requested",
+                "state": "commented",
                 "user": {"login": "owner"},
             },
             "pull_request": {"number": 9},

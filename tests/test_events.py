@@ -8,6 +8,7 @@ from fido.config import Config, RepoMembership
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
+    WebhookIngressOracle,
     _apply_reply_result,
     _build_issue_comment_action,
     _configured_agent,
@@ -5770,6 +5771,95 @@ class TestDispatchPullRequestReview:
         }
         result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
+
+    def test_commented_review_collapsed_by_oracle(self, tmp_path: Path) -> None:
+        """Oracle collapses state=commented reviews — inline comments are handled
+        individually by pull_request_review_comment events, so the review-level
+        event must not also dispatch."""
+        cfg = _config(tmp_path)
+        oracle = WebhookIngressOracle()
+        payload = {
+            **_payload(),
+            "action": "submitted",
+            "review": {"id": 77, "state": "commented", "user": {"login": "owner"}},
+            "pull_request": {"number": 4},
+        }
+        result = dispatch(
+            "pull_request_review",
+            payload,
+            cfg,
+            _repo_cfg(tmp_path),
+            delivery_id="delivery-commented-1",
+            oracle=oracle,
+        )
+        assert result is None, "commented review should be collapsed (None)"
+
+    def test_approved_review_not_collapsed_by_oracle(self, tmp_path: Path) -> None:
+        """Oracle must NOT collapse approved reviews — the worker must wake
+        immediately rather than waiting for the next poll cycle (~60 s lag)."""
+        cfg = _config(tmp_path)
+        oracle = WebhookIngressOracle()
+        payload = {
+            **_payload(),
+            "action": "submitted",
+            "review": {"id": 78, "state": "approved", "user": {"login": "owner"}},
+            "pull_request": {"number": 5},
+        }
+        result = dispatch(
+            "pull_request_review",
+            payload,
+            cfg,
+            _repo_cfg(tmp_path),
+            delivery_id="delivery-approved-1",
+            oracle=oracle,
+        )
+        assert result is not None, "approved review must not be collapsed"
+
+    def test_changes_requested_not_collapsed_by_oracle(self, tmp_path: Path) -> None:
+        """changes_requested is a decisive review state — must dispatch so the
+        worker wakes up without waiting for the next poll cycle."""
+        cfg = _config(tmp_path)
+        oracle = WebhookIngressOracle()
+        payload = {
+            **_payload(),
+            "action": "submitted",
+            "review": {
+                "id": 79,
+                "state": "changes_requested",
+                "user": {"login": "owner"},
+            },
+            "pull_request": {"number": 6},
+        }
+        result = dispatch(
+            "pull_request_review",
+            payload,
+            cfg,
+            _repo_cfg(tmp_path),
+            delivery_id="delivery-changes-requested-1",
+            oracle=oracle,
+        )
+        assert result is not None, "changes_requested review must not be collapsed"
+
+    def test_dismissed_not_collapsed_by_oracle(self, tmp_path: Path) -> None:
+        """dismissed is a decisive review state — must dispatch so the worker
+        wakes up without waiting for the next poll cycle."""
+        cfg = _config(tmp_path)
+        oracle = WebhookIngressOracle()
+        payload = {
+            **_payload(),
+            "action": "submitted",
+            "review": {"id": 80, "state": "dismissed", "user": {"login": "owner"}},
+            "pull_request": {"number": 7},
+        }
+        result = dispatch(
+            "pull_request_review",
+            payload,
+            cfg,
+            _repo_cfg(tmp_path),
+            delivery_id="delivery-dismissed-1",
+            oracle=oracle,
+        )
+        assert result is not None, "dismissed review must not be collapsed"
 
 
 class TestDispatchCheckRunNoPrs:

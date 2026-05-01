@@ -115,9 +115,12 @@ class WebhookIngressOracle:
             The ``X-GitHub-Delivery`` header value identifying this delivery.
         collapse_review:
             When True, fire ``CollapseReview`` instead of ``Arrive``.
-            Used for ``pull_request_review / submitted`` events whose inline
-            comments are handled individually — the review-level event is
-            collapsed rather than dispatched.
+            Used for ``pull_request_review / submitted`` events with
+            ``review.state == "commented"`` — inline comments are handled
+            individually per ``pull_request_review_comment`` event, so the
+            review-level event is collapsed rather than dispatched.  Decisive
+            states (``approved``, ``changes_requested``, ``dismissed``) are
+            **not** collapsed so the worker wakes immediately.
 
         Returns
         -------
@@ -1201,15 +1204,23 @@ def dispatch(
     When *delivery_id* and *oracle* are provided the
     :class:`WebhookIngressOracle` is consulted before any routing logic runs.
     Duplicate deliveries (same delivery ID arriving a second time) and
-    collapsed ``pull_request_review / submitted`` events are suppressed by
-    returning ``None`` before any side effects execute.
+    ``pull_request_review / submitted`` events with ``review.state ==
+    "commented"`` are suppressed by returning ``None`` before any side
+    effects execute.  Decisive review states (``approved``,
+    ``changes_requested``, ``dismissed``) are dispatched normally so the
+    worker wakes up without waiting for the next poll cycle.
     """
     action = payload.get("action", "")
     repo = payload.get("repository", {}).get("full_name", "")
 
     # Oracle check — deduplicate at the ingress boundary.
     if delivery_id is not None and oracle is not None:
-        collapse_review = event == "pull_request_review" and action == "submitted"
+        review_state = payload.get("review", {}).get("state", "")
+        collapse_review = (
+            event == "pull_request_review"
+            and action == "submitted"
+            and review_state == "commented"
+        )
         ingress_result = oracle.check_dispatch(
             repo_cfg.name,
             delivery_id,
