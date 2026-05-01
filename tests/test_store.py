@@ -138,6 +138,62 @@ def test_failed_claim_becomes_retryable(tmp_path: Path) -> None:
     )
 
 
+def test_prepare_reply_allows_new_comment_in_thread_with_completed_ancestor(
+    tmp_path: Path,
+) -> None:
+    """Regression for #1188: a new review comment whose lineage includes a
+    *completed* ancestor (Fido already replied to an earlier comment in the
+    same thread) must still get its own promise — the prior reply must not
+    block the new one."""
+    store = FidoStore(tmp_path)
+
+    # First comment in the thread arrives, Fido replies, claim completes.
+    root = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=2001
+    )
+    assert root is not None
+    store.ack_promise(root.promise_id)
+    assert store.claim_state(2001) == "completed"
+
+    # New review comment arrives in the same thread. Lineage covers the
+    # completed root plus the new comment. prepare_reply must succeed.
+    new_reply = store.prepare_reply(
+        owner="webhook",
+        comment_type="pulls",
+        anchor_comment_id=2003,
+        covered_comment_ids=[2001, 2002, 2003],
+    )
+
+    assert new_reply is not None
+    assert new_reply.anchor_comment_id == 2003
+
+
+def test_prepare_reply_blocks_concurrent_in_progress_lineage_member(
+    tmp_path: Path,
+) -> None:
+    """A concurrent in_progress claim on any covered comment still blocks —
+    a sibling handler is currently coalescing this thread, so a second
+    handler must back off."""
+    store = FidoStore(tmp_path)
+
+    in_flight = store.prepare_reply(
+        owner="webhook", comment_type="pulls", anchor_comment_id=3001
+    )
+    assert in_flight is not None
+    # in_flight is left in_progress (no ack, no fail).
+
+    # A new comment lands in the same thread before the first reply
+    # finishes. Its lineage includes the still-in_progress 3001.
+    contended = store.prepare_reply(
+        owner="worker",
+        comment_type="pulls",
+        anchor_comment_id=3002,
+        covered_comment_ids=[3001, 3002],
+    )
+
+    assert contended is None
+
+
 def test_retryable_claim_without_backoff_is_claimable(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
     promise = store.prepare_reply(

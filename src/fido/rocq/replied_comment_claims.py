@@ -150,9 +150,13 @@ class ClaimRow:
     claim_state: ClaimState
     claim_promise: int
 
-    def is_blocking(self) -> bool:
+    def is_blocking_anchor(self) -> bool:
         row = self
         return not isinstance(row.claim_state, ClaimRetryableFailed)
+
+    def is_blocking_lineage(self) -> bool:
+        row = self
+        return isinstance(row.claim_state, ClaimInProgress)
 
 
 @final
@@ -259,6 +263,17 @@ def reset_attempt_retry(attempt0: Attempt) -> Attempt:
     )
 
 
+def anchor_claimable(
+    claims: dict[int, ClaimRow],
+    anchor: int,
+) -> bool:
+    __option = claims.get(_rocq_positive_key(anchor))
+    if __option is None:
+        return True
+    row = __option
+    return not row.is_blocking_anchor()
+
+
 def comment_claimable(
     claims: dict[int, ClaimRow],
     comment: int,
@@ -267,7 +282,7 @@ def comment_claimable(
     if __option is None:
         return True
     row = __option
-    return not row.is_blocking()
+    return not row.is_blocking_lineage()
 
 
 def all_claimable(
@@ -317,7 +332,7 @@ def prepare_claims(
     promises: dict[int, PromiseRow],
 ) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]] | None:
     comments = [anchor] + covered
-    if all_claimable(claims, comments):
+    if anchor_claimable(claims, anchor) and all_claimable(claims, covered):
         claims_ = claim_all(
             owner,
             promise,

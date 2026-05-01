@@ -114,26 +114,57 @@ Definition reset_attempt_retry (attempt : Attempt) : Attempt :=
      attempt_retry_count := attempt_retry_count attempt;
      attempt_next_retry_after := 0 |}.
 
-(** [claim_is_blocking] says whether an existing claim prevents a new owner
-    from preparing another reply for the same comment now. *)
-Definition claim_is_blocking (row : ClaimRow) : bool :=
+(** [claim_is_blocking_anchor] says whether an existing claim prevents the
+    *anchor* — the comment that triggered this reply — from being claimed
+    again.  An anchor is the comment whose own reply we are now generating;
+    its dedup must catch both "someone is currently replying" (in-progress)
+    and "we already replied to this exact comment" (completed, e.g. a
+    webhook redelivery). *)
+Definition claim_is_blocking_anchor (row : ClaimRow) : bool :=
   match claim_state row with
   | ClaimInProgress => true
   | ClaimCompleted => true
   | ClaimRetryableFailed => false
   end.
 
-(** [comment_claimable] checks one raw comment id against the durable claim
-    table.  Retryable failures are claimable; completed and in-progress rows
-    are not. *)
+(** [claim_is_blocking_lineage] says whether an existing claim prevents a
+    *non-anchor* lineage member from being co-covered by a new reply.  The
+    only blocking state for non-anchor members is [ClaimInProgress] — a
+    sibling handler is currently coalescing the same thread.  A
+    [ClaimCompleted] non-anchor is a *prior* comment with its own
+    already-delivered reply: it must not block a new comment in the same
+    thread from getting its own reply (closes the dropped-comment-on-replied-
+    thread bug). *)
+Definition claim_is_blocking_lineage (row : ClaimRow) : bool :=
+  match claim_state row with
+  | ClaimInProgress => true
+  | ClaimCompleted => false
+  | ClaimRetryableFailed => false
+  end.
+
+(** [anchor_claimable] checks the new reply's anchor comment id against the
+    durable claim table.  Stricter than [comment_claimable]: a completed
+    claim on the anchor itself is treated as "already replied". *)
+Definition anchor_claimable (claims : PositiveMap.t ClaimRow) (anchor : positive) : bool :=
+  match PositiveMap.find anchor claims with
+  | None => true
+  | Some row => negb (claim_is_blocking_anchor row)
+  end.
+
+(** [comment_claimable] checks one *non-anchor* raw comment id against the
+    durable claim table.  Retryable failures and completed prior replies
+    are claimable (they don't block a new sibling); in-progress rows are
+    not. *)
 Definition comment_claimable (claims : PositiveMap.t ClaimRow) (comment : positive) : bool :=
   match PositiveMap.find comment claims with
   | None => true
-  | Some row => negb (claim_is_blocking row)
+  | Some row => negb (claim_is_blocking_lineage row)
   end.
 
-(** [all_claimable] checks the aggregate-reply precondition: every covered
-    comment id must be claimable before one promise can cover the group. *)
+(** [all_claimable] checks the aggregate-reply precondition for the
+    *non-anchor* covered comment ids: every member must be claimable
+    (i.e. not currently in-progress on a sibling handler) before one
+    promise can co-cover them. *)
 Fixpoint all_claimable (claims : PositiveMap.t ClaimRow) (comments : list positive) : bool :=
   match comments with
   | [] => true
@@ -173,7 +204,7 @@ Definition prepare_claims
     (claims : PositiveMap.t ClaimRow)
     (promises : PositiveMap.t PromiseRow) : option (PositiveMap.t ClaimRow * PositiveMap.t PromiseRow) :=
   let comments := anchor :: covered in
-  if all_claimable claims comments then
+  if andb (anchor_claimable claims anchor) (all_claimable claims covered) then
     let claims' := claim_all owner promise comments claims in
     let promise_row := {|
       promise_attempt := new_attempt owner;
@@ -362,4 +393,4 @@ Definition claim_completed (claims : PositiveMap.t ClaimRow) (comment : positive
   end.
 
 Python File Extraction replied_comment_claims
-  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact review_outcome_creates_tasks review_outcome_resolves_thread claim_completed".
+  "promise_recoverable anchor_claimable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact review_outcome_creates_tasks review_outcome_resolves_thread claim_completed".

@@ -166,11 +166,24 @@ class FidoStore:
                 covered,
             ).fetchall()
             for row in existing:
-                if row["state"] in {"completed", "in_progress"}:
+                cid = row["comment_id"]
+                state = row["state"]
+                # Only the anchor itself dedups against `completed` or backoff:
+                # a redelivery of the *same* comment whose reply already
+                # landed should be a no-op.  Earlier lineage members with
+                # their own already-completed replies are *prior* comments
+                # in the thread — they must not block a new comment from
+                # getting its own reply.  Concurrent in_progress claims on
+                # any covered id still block (a sibling handler is currently
+                # coalescing this thread).
+                if state == "in_progress":
                     return None
-                next_retry_after = row["next_retry_after"]
-                if next_retry_after and next_retry_after > now:
-                    return None
+                if cid == anchor_comment_id:
+                    if state == "completed":
+                        return None
+                    next_retry_after = row["next_retry_after"]
+                    if next_retry_after and next_retry_after > now:
+                        return None
 
             conn.execute(
                 """
