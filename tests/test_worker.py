@@ -3339,6 +3339,68 @@ class TestBuildPrompt:
         assert content.startswith("Persona text\n\n")
         assert not content.startswith("Persona text\n\n\n\n")
 
+    def test_blog_label_injects_life_into_system_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "life.md").write_text("Rob is my person. I live in a cozy house.")
+        with patch("fido.worker._sub_dir", return_value=sub):
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        content = sys_file.read_text()
+        assert "I am Fido" in content
+        assert "Rob is my person." in content
+        assert "Implement the task carefully." in content
+        # life.md appears between persona and skill
+        persona_pos = content.index("I am Fido")
+        life_pos = content.index("Rob is my person.")
+        skill_pos = content.index("Implement the task carefully.")
+        assert persona_pos < life_pos < skill_pos
+
+    def test_blog_label_injects_life_into_skill_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "life.md").write_text("Rob is my person.")
+        with patch("fido.worker._sub_dir", return_value=sub):
+            _, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        skill_content = (fido_dir / "skill").read_text()
+        assert "Rob is my person." in skill_content
+        assert "Implement the task carefully." in skill_content
+        # life.md appears before skill in skill file
+        life_pos = skill_content.index("Rob is my person.")
+        skill_pos = skill_content.index("Implement the task carefully.")
+        assert life_pos < skill_pos
+
+    def test_no_blog_label_omits_life(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "life.md").write_text("This should not appear.")
+        with patch("fido.worker._sub_dir", return_value=sub):
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["enhancement"])
+        assert "This should not appear." not in sys_file.read_text()
+
+    def test_no_labels_omits_life(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        (sub / "life.md").write_text("This should not appear.")
+        with patch("fido.worker._sub_dir", return_value=sub):
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
+        assert "This should not appear." not in sys_file.read_text()
+
+    def test_blog_label_missing_life_file_does_not_crash(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        sub = self._setup_sub_dir(tmp_path)
+        # life.md intentionally absent
+        with patch("fido.worker._sub_dir", return_value=sub):
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        # Falls back to the normal persona + skill layout
+        content = sys_file.read_text()
+        assert "I am Fido" in content
+        assert "Implement the task carefully." in content
+
 
 class TestProviderStart:
     """Tests for provider_start."""
@@ -4486,7 +4548,7 @@ class TestFindOrCreatePr:
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        mock_build.assert_called_once_with(fido_dir, "setup", ANY)
+        mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
         mock_start.assert_called_once_with(
             fido_dir,
             model=mock_client.voice_model,
@@ -4745,7 +4807,7 @@ class TestFindOrCreatePr:
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        mock_build.assert_called_once_with(fido_dir, "setup", ANY)
+        mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
         mock_start.assert_called_once_with(
             fido_dir,
             model=mock_client.voice_model,

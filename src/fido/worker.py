@@ -259,7 +259,12 @@ def create_compact_script(fido_dir: Path) -> Path:
     return script_path
 
 
-def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
+def build_prompt(
+    fido_dir: Path,
+    subskill: str,
+    context: str,
+    labels: list[str] | None = None,
+) -> tuple[Path, Path]:
     """Write system and prompt files for a sub-agent session.
 
     The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
@@ -273,16 +278,32 @@ def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Pat
 
     The prompt file contains the context string.
 
+    When *labels* contains ``"Blog"``, ``sub/life.md`` is injected between
+    persona and skill in both files so the sub-agent has world context for
+    blog/journal work (closes #1164).  If ``life.md`` is absent the label is
+    silently ignored.
+
     Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
     """
     sub = _sub_dir()
     persona = (sub / "persona.md").read_text().rstrip()
     skill = (sub / f"{subskill}.md").read_text().rstrip()
+
+    life: str | None = None
+    if "Blog" in (labels or []):
+        life_path = sub / "life.md"
+        if life_path.exists():
+            life = life_path.read_text().rstrip()
+
     system_file = fido_dir / "system"
     skill_file = fido_dir / "skill"
     prompt_file = fido_dir / "prompt"
-    system_file.write_text(f"{persona}\n\n{skill}\n")
-    skill_file.write_text(f"{skill}\n")
+    if life:
+        system_file.write_text(f"{persona}\n\n{life}\n\n{skill}\n")
+        skill_file.write_text(f"{life}\n\n{skill}\n")
+    else:
+        system_file.write_text(f"{persona}\n\n{skill}\n")
+        skill_file.write_text(f"{skill}\n")
     prompt_file.write_text(f"{context}\n")
     return system_file, prompt_file
 
@@ -1757,6 +1778,7 @@ class Worker:
         issue: int,
         issue_title: str,
         issue_body: str = "",
+        issue_labels: list[str] | None = None,
     ) -> tuple[int, str, bool]:
         """Find or create the branch and draft PR for *issue*.
 
@@ -1808,7 +1830,7 @@ class Worker:
                     f"Upstream: {remote}/{repo_ctx.default_branch}\n"
                     f"Work dir: {self.work_dir}"
                 )
-                build_prompt(fido_dir, "setup", context)
+                build_prompt(fido_dir, "setup", context, labels=issue_labels)
                 provider_start(
                     fido_dir,
                     agent=self._provider_agent,
@@ -1876,7 +1898,7 @@ class Worker:
             f"Upstream: {remote}/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}"
         )
-        build_prompt(fido_dir, "setup", context)
+        build_prompt(fido_dir, "setup", context, labels=issue_labels)
         provider_start(
             fido_dir,
             agent=self._provider_agent,
@@ -1929,6 +1951,7 @@ class Worker:
         repo_ctx: RepoContext,
         pr_number: int,
         slug: str,
+        issue_labels: list[str] | None = None,
     ) -> bool:
         """Detect and remediate a merge conflict on the branch.
 
@@ -1956,7 +1979,7 @@ class Worker:
             f"Upstream: origin/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}\n"
         )
-        build_prompt(fido_dir, "merge", context)
+        build_prompt(fido_dir, "merge", context, labels=issue_labels)
         session_id, _ = provider_run(
             fido_dir,
             agent=self._provider_agent,
@@ -2026,6 +2049,7 @@ class Worker:
         repo_ctx: RepoContext,
         pr_number: int,
         slug: str,
+        issue_labels: list[str] | None = None,
     ) -> bool:
         """Check for failing CI checks and run the ci sub-agent to fix them.
 
@@ -2093,7 +2117,7 @@ class Worker:
             f"\nReview threads related to this CI failure"
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
-        build_prompt(fido_dir, "ci", context)
+        build_prompt(fido_dir, "ci", context, labels=issue_labels)
         if not self._admit_worker_turn(pr_number):
             return True
         session_id, _ = provider_run(
@@ -2905,6 +2929,7 @@ class Worker:
         repo_ctx: RepoContext,
         pr_number: int,
         slug: str,
+        issue_labels: list[str] | None = None,
     ) -> bool:
         """Pick and execute the next pending task via the task sub-agent.
 
@@ -2954,7 +2979,7 @@ class Worker:
                     + ", ".join(str(comment_id) for comment_id in lineage_ids)
                 )
         context = "\n".join(context_parts)
-        build_prompt(fido_dir, "task", context)
+        build_prompt(fido_dir, "task", context, labels=issue_labels)
         prompts = self._get_prompts()
         state_path = fido_dir / "state.json"
         state_data = State(fido_dir).load() if state_path.exists() else {}
@@ -3679,11 +3704,17 @@ class Worker:
             issue_data = self.gh.view_issue(repo_ctx.repo, issue)
             issue_title = issue_data["title"]
             issue_body = issue_data.get("body", "") or ""
+            issue_labels = issue_data.get("labels", [])
             self._ensure_pickup_comment(
                 ctx.fido_dir, repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
             )
             pr_number, slug, pr_is_fresh = self.find_or_create_pr(
-                ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
+                ctx.fido_dir,
+                repo_ctx,
+                issue,
+                issue_title,
+                issue_body,
+                issue_labels=issue_labels,
             )
             if self._first_iteration:
                 recovered_comments = FidoStore(
@@ -3745,15 +3776,33 @@ class Worker:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
             else:
                 self.rescope_before_pick()
-                if self.handle_merge_conflict(ctx.fido_dir, repo_ctx, pr_number, slug):
+                if self.handle_merge_conflict(
+                    ctx.fido_dir,
+                    repo_ctx,
+                    pr_number,
+                    slug,
+                    issue_labels=issue_labels,
+                ):
                     return 1
                 if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
-                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                if self.handle_ci(
+                    ctx.fido_dir,
+                    repo_ctx,
+                    pr_number,
+                    slug,
+                    issue_labels=issue_labels,
+                ):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
-            if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
+            if self.execute_task(
+                ctx.fido_dir,
+                repo_ctx,
+                pr_number,
+                slug,
+                issue_labels=issue_labels,
+            ):
                 self.resolve_addressed_threads(repo_ctx, pr_number)
                 return 1
             promote_result = self.handle_promote_merge(
