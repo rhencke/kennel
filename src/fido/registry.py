@@ -234,14 +234,19 @@ class WorkerRegistry:
         if thread:
             thread.wake()
 
-    def abort_task(self, repo_name: str) -> None:
-        """Signal the worker for *repo_name* to abort its current task.
+    def abort_task(self, repo_name: str, *, task_id: str | None = None) -> None:
+        """Signal the worker for *repo_name* to abort *task_id*.
+
+        ``task_id=None`` is the legacy untargeted form (matches whichever
+        task is running).  Real callers should pass the id of the task
+        they intend to abort so a leaked signal cannot clobber a
+        different task on the next loop iteration (closes #1193).
 
         No-op if no thread is registered for that repo.
         """
         thread = self._threads.get(repo_name)
         if thread:
-            thread.abort_task()
+            thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
         """Recover the attached provider session for *repo_name*, if present."""

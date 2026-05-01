@@ -1137,7 +1137,7 @@ class TestReorderTasks:
             tmp_path,
             "",
             agent=_client(raw),
-            _on_inprogress_affected=lambda: affected.append(1),
+            _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
         assert affected == [1]
         # in-progress task is marked completed
@@ -1157,7 +1157,7 @@ class TestReorderTasks:
             tmp_path,
             "",
             agent=_client(raw),
-            _on_inprogress_affected=lambda: affected.append(1),
+            _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
         assert affected == [1]
         # task reset to pending with preserved title and updated description
@@ -1179,7 +1179,7 @@ class TestReorderTasks:
             tmp_path,
             "",
             agent=_client(raw),
-            _on_inprogress_affected=lambda: affected.append(1),
+            _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
         assert affected == []
         # task still in_progress (unchanged by Opus)
@@ -1199,7 +1199,7 @@ class TestReorderTasks:
             tmp_path,
             "",
             agent=_client(raw),
-            _on_inprogress_affected=lambda: affected.append(1),
+            _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
         assert affected == []
 

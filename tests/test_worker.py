@@ -3671,7 +3671,7 @@ class TestProviderRun:
             retry_on_preempt=False,
         )
         client.run_turn.assert_called_once_with(
-            "skill text\n\n---\n\nprompt text",
+            "skill\n\n---\n\nprompt",
             model=client.work_model,
             retry_on_preempt=False,
             session_mode=TurnSessionMode.REUSE,
@@ -9119,6 +9119,7 @@ class TestExecuteTask:
             session=None,
             agent=ANY,
             session_mode=TurnSessionMode.REUSE,
+            retry_on_preempt=False,
         )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:

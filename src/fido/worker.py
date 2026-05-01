@@ -1019,6 +1019,71 @@ def _write_pr_description(
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
 
+class AbortHandle:
+    """Per-task abort signal.
+
+    Replaces a per-worker :class:`threading.Event` that previously leaked
+    across task boundaries (closes #1193): when a rescope marked an
+    in-progress task ``completed`` instead of letting :meth:`Worker._cleanup_aborted_task`
+    consume the abort signal, the still-set ``Event`` would clobber the
+    very next task to enter :meth:`Worker.execute_task`.
+
+    The handle binds an abort request to a specific ``task_id``.  Only
+    the cleanup path for the *targeted* task consumes it.  An untargeted
+    request (``task_id=None``) is the legacy "abort whatever is running"
+    semantic, kept available for the external
+    :meth:`WorkerThread.abort_task` entry point that fires before any
+    task is in flight.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._target_task_id: str | None = None
+        self._event = threading.Event()
+
+    def request(self, task_id: str | None) -> None:
+        """Request abort of *task_id*.
+
+        ``task_id=None`` is an untargeted request that matches whichever
+        task happens to be running.  Real callers (preempt, rescope)
+        always know the task they're aborting and should pass it.
+        """
+        with self._lock:
+            self._target_task_id = task_id
+            self._event.set()
+
+    def is_active_for(self, task_id: str) -> bool:
+        """Return ``True`` when an abort request matches *task_id*.
+
+        An untargeted (legacy) request matches any task.  A targeted
+        request matches only its named task — a leaked abort from a
+        prior, since-removed task no longer fires here.
+        """
+        with self._lock:
+            if not self._event.is_set():
+                return False
+            return self._target_task_id is None or self._target_task_id == task_id
+
+    def is_set(self) -> bool:
+        """Return whether *any* abort request is pending."""
+        return self._event.is_set()
+
+    def set(self) -> None:
+        """Untargeted shorthand for ``request(None)``.
+
+        Kept for back-compat with code that fired an abort signal
+        without a specific task in mind.  Real callers should prefer
+        :meth:`request` so the abort cannot leak to a different task.
+        """
+        self.request(None)
+
+    def clear(self) -> None:
+        """Consume the abort request (cleanup path)."""
+        with self._lock:
+            self._target_task_id = None
+            self._event.clear()
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -1031,7 +1096,7 @@ class Worker:
         self,
         work_dir: Path,
         gh: GitHub,
-        abort_task: threading.Event | None = None,
+        abort_task: AbortHandle | None = None,
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
@@ -1050,7 +1115,7 @@ class Worker:
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
-        self._abort_task = abort_task if abort_task is not None else threading.Event()
+        self._abort_task = abort_task if abort_task is not None else AbortHandle()
         self._repo_name = repo_name
         # Replay missed issue_comment webhooks exactly once per WorkerThread
         # lifetime (at startup).  Fix for #794 — without this, top-level PR
@@ -2845,7 +2910,7 @@ class Worker:
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             return True
-        if self._abort_task.is_set():
+        if self._abort_task.is_active_for(task["id"]):
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
         if not self._task_still_current(fido_dir, task["id"]):
@@ -2872,7 +2937,7 @@ class Worker:
             return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
-        if self._abort_task.is_set():
+        if self._abort_task.is_active_for(task["id"]):
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
 
@@ -2944,7 +3009,7 @@ class Worker:
             )
             if not self._admit_worker_turn(pr_number):
                 return True
-            if self._abort_task.is_set():
+            if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
             if not self._task_still_current(fido_dir, task["id"]):
@@ -2972,7 +3037,7 @@ class Worker:
                 return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
-            if self._abort_task.is_set():
+            if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
 
@@ -3664,7 +3729,7 @@ class WorkerThread(threading.Thread):
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._wake = threading.Event()
-        self._abort_task = threading.Event()
+        self._abort_task = AbortHandle()
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
@@ -3809,9 +3874,16 @@ class WorkerThread(threading.Thread):
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()
 
-    def abort_task(self) -> None:
-        """Signal the worker to abort the current task after provider_run returns."""
-        self._abort_task.set()
+    def abort_task(self, task_id: str | None = None) -> None:
+        """Signal the worker to abort *task_id* after provider_run returns.
+
+        ``task_id=None`` is the legacy untargeted form, used by external
+        entry points that want to abort whichever task is running.  Real
+        callers (preempt, rescope) always know the task they're aborting
+        and should pass it so a leaked abort cannot clobber a different,
+        unrelated task on the next loop iteration.
+        """
+        self._abort_task.request(task_id)
         self._wake.set()
 
     def stop(self) -> None:

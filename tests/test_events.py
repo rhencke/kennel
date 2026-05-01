@@ -4220,7 +4220,7 @@ class TestCreateTask:
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
             )
-        registry.abort_task.assert_called_once_with("owner/repo")
+        registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # ABORT_KEEP: current task stays in tasks.json
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -4251,7 +4251,7 @@ class TestCreateTask:
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
             )
-        registry.abort_task.assert_called_once_with("owner/repo")
+        registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # task should still be in tasks.json (ABORT_KEEP)
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -4300,7 +4300,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
             )
-        registry.abort_task.assert_called_once_with("owner/repo")
+        registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
 
@@ -4321,7 +4321,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
             )
-        registry.abort_task.assert_called_once_with("owner/repo")
+        registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
 
@@ -4655,8 +4655,8 @@ class TestReorderTasksBackground:
         )
         self._run_thread(started)
         on_inprogress_affected = calls[0][2]["_on_inprogress_affected"]
-        on_inprogress_affected()
-        registry.abort_task.assert_called_once_with("owner/repo")
+        on_inprogress_affected("t-current")
+        registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
 
     def test_releases_untriaged_hold_after_reorder_finishes(
         self, tmp_path: Path

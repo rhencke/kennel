@@ -2210,7 +2210,7 @@ def _maybe_abort_for_new_task(
             current_task.get("type", "?"),
             current_task.get("title", "")[:60],
         )
-        registry.abort_task(repo_cfg.name)
+        registry.abort_task(repo_cfg.name, task_id=current_task_id)
 
 
 def _get_commit_summary(work_dir: Path) -> str:
@@ -2458,12 +2458,12 @@ def _make_reorder_kwargs(
     }
     if registry is not None and repo_cfg is not None:
 
-        def on_inprogress_affected() -> None:
+        def on_inprogress_affected(task_id: str) -> None:
             log.info(
                 "reorder_tasks_background: in-progress task affected — aborting %s",
                 repo_cfg.name,
             )
-            registry.abort_task(repo_cfg.name)
+            registry.abort_task(repo_cfg.name, task_id=task_id)
 
         kwargs["_on_inprogress_affected"] = on_inprogress_affected
     return kwargs

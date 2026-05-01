@@ -837,7 +837,7 @@ def reorder_tasks(
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
-    _on_inprogress_affected: Callable[[], None] | None = None,
+    _on_inprogress_affected: Callable[[str], None] | None = None,
     _on_done: Callable[[], None] | None = None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
@@ -857,10 +857,11 @@ def reorder_tasks(
     it is called with a list of change records (see :func:`_compute_thread_changes`).
 
     If *_on_inprogress_affected* is provided and the currently in-progress task
-    is marked completed or modified by Opus, it is called with no arguments so
-    the caller can abort the running worker and restart on the new next task.
-    When the in-progress task is modified its status is reset to ``pending`` so
-    the worker loop picks it up again with the updated description.
+    is marked completed or modified by Opus, it is called with the affected
+    task's id so the caller can abort the running worker (targeted at that
+    task) and restart on the new next task.  When the in-progress task is
+    modified its status is reset to ``pending`` so the worker loop picks it
+    up again with the updated description.
 
     If *_on_done* is provided, it is called after a successful reorder write so
     callers can trigger follow-up work (e.g. rewriting the PR description).
@@ -966,7 +967,8 @@ def reorder_tasks(
             _on_changes(changes)
 
     if inprogress_affected and _on_inprogress_affected is not None:
-        _on_inprogress_affected()
+        assert inprogress is not None  # inprogress_affected is True
+        _on_inprogress_affected(str(inprogress["id"]))
 
     log.info("reorder_tasks: applied reorder — %d tasks", len(result))
 

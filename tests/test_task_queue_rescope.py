@@ -464,7 +464,7 @@ def test_abort_decision_matches_oracle(tmp_path: Path) -> None:
     )
 
     assert expected is True
-    registry.abort_task.assert_called_once_with("owner/repo")
+    registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
 
 
 def test_tasks_unblock_matches_oracle(tmp_path: Path) -> None:
