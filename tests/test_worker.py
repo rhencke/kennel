@@ -9956,13 +9956,13 @@ class TestAssertWorkerTurnOk:
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
 
-    def _enqueue_comment(self, tmp_path: Path) -> None:
+    def _enqueue_comment(self, tmp_path: Path, *, pr_number: int = 1) -> None:
         FidoStore(tmp_path).enqueue_pr_comment(
-            delivery_id="delivery-1",
+            delivery_id=f"delivery-{pr_number}",
             repo="owner/repo",
-            pr_number=1,
+            pr_number=pr_number,
             comment_type="issues",
-            comment_id=101,
+            comment_id=100 + pr_number,
             author="owner",
             is_bot=False,
             body="please triage first",
@@ -9977,7 +9977,7 @@ class TestAdmitWorkerTurn:
         registry.has_untriaged.return_value = True
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         registry.wait_for_inbox_drain.assert_called_once_with(
             "owner/repo", timeout=None
@@ -9991,7 +9991,7 @@ class TestAdmitWorkerTurn:
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         registry.wait_for_inbox_drain.assert_not_called()
         registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
@@ -10004,11 +10004,25 @@ class TestAdmitWorkerTurn:
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        admitted = worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        admitted = worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         assert admitted is False
         registry.note_durable_demand.assert_called_once_with("owner/repo")
         registry.assert_worker_turn_ok.assert_not_called()
+
+    def test_ignores_durable_webhook_demand_for_other_pr(self, tmp_path: Path) -> None:
+        self._enqueue_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        admitted = worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
+
+        assert admitted is True
+        registry.note_durable_demand.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
 
     def test_execute_task_defers_pickup_when_durable_webhook_demand_pending(
         self, tmp_path: Path
@@ -10016,6 +10030,7 @@ class TestAdmitWorkerTurn:
         self._enqueue_comment(tmp_path)
         gh = MagicMock()
         registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
         task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
@@ -10043,6 +10058,56 @@ class TestAdmitWorkerTurn:
         registry.note_durable_demand.assert_called_once_with("owner/repo")
         mock_status.assert_not_called()
         mock_provider_run.assert_not_called()
+
+    def test_execute_task_ignores_durable_webhook_demand_for_other_pr(
+        self, tmp_path: Path
+    ) -> None:
+        self._enqueue_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_git") as mock_git,
+            patch.object(
+                worker, "_snapshot_fido_issue_comment_ids", return_value=set()
+            ),
+            patch("fido.worker.build_prompt"),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch("fido.worker.provider_run", return_value=("session-1", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="new-head"
+            ),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch.object(worker, "_squash_wip_commit"),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            patch.object(worker, "_delete_leaked_task_comments"),
+        ):
+            mock_git.return_value.stdout = "head\n"
+            result = worker.execute_task(
+                tmp_path / ".git" / "fido",
+                RepoContext(
+                    repo="owner/repo",
+                    owner="owner",
+                    repo_name="repo",
+                    gh_user="fido-bot",
+                    default_branch="main",
+                    membership=RepoMembership(collaborators=frozenset({"owner"})),
+                ),
+                1,
+                "branch",
+            )
+
+        assert result is True
+        registry.note_durable_demand.assert_not_called()
 
 
 class TestRunExecuteTaskIntegration:

@@ -630,9 +630,9 @@ class FidoStore:
             ).fetchall()
         return [self._pr_comment_record_from_row(row) for row in rows]
 
-    def has_pending_pr_comments(self, repo: str) -> bool:
-        """Return whether *repo* has any currently retryable queued comments."""
-        return bool(self.pending_pr_comments(repo=repo))
+    def has_pending_pr_comments(self, repo: str, pr_number: int | None = None) -> bool:
+        """Return whether *repo* has currently retryable queued comments."""
+        return bool(self.pending_pr_comments(repo=repo, pr_number=pr_number))
 
     def claim_next_pr_comment(
         self, *, owner: str, repo: str | None = None, pr_number: int | None = None
