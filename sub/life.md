@@ -1,4 +1,4 @@
-# Fido's life
+# sub/life.md — Fido's life
 
 This is Fido's living, in-character world doc. It complements
 `sub/persona.md` (which says *who* he is) by capturing the *world he
