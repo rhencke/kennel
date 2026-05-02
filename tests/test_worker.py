@@ -9910,6 +9910,204 @@ class TestExecuteTask:
         assert result is True
         mock_push.assert_not_called()
 
+    def test_preempt_demotes_task_to_pending_at_initial_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1219: when the initial provider turn is preempted,
+        the task must be demoted from in_progress back to pending so that
+        _pick_next_task ranks higher-priority thread tasks above it on the
+        next iteration instead of re-selecting the same in_progress task and
+        creating a ~41s dead zone.
+        """
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt-demote"})
+        task = {
+            "id": "t-preempt-demote",
+            "title": "Spec task preempted at initial turn",
+            "status": "pending",
+        }
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch("fido.tasks.Tasks.update") as mock_update,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+
+        assert result is True
+        # IN_PROGRESS first (task pickup), then PENDING (preempt demotion).
+        mock_update.assert_any_call("t-preempt-demote", TaskStatus.PENDING)
+        # current_task_id must be cleared so the next task starts clean.
+        assert "current_task_id" not in State(fido_dir).load()
+
+    def test_preempt_demotes_task_to_pending_in_resume_loop(
+        self, tmp_path: Path
+    ) -> None:
+        """Same demotion invariant as the initial-turn test, but at the
+        resume-loop preempt site (second provider_run call, HEAD never moved).
+        """
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-resume-demote"})
+        task = {
+            "id": "t-resume-demote",
+            "title": "Spec task preempted in resume loop",
+            "status": "pending",
+        }
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            # First call (initial turn) → not preempted; second (resume) → preempted.
+            patch.object(
+                worker, "_provider_turn_was_preempted", side_effect=[False, True]
+            ),
+            # _git_same_sha: HEAD never moves → _commit_provider_leftovers_if_any
+            # returns head_before → head_before == head_after → enter resume loop.
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch("fido.tasks.Tasks.update") as mock_update,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+
+        assert result is True
+        mock_update.assert_any_call("t-resume-demote", TaskStatus.PENDING)
+        assert "current_task_id" not in State(fido_dir).load()
+
+    def test_preempt_consumes_paired_abort_signal_at_initial_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1219: when preempt and abort both fire for the
+        same task during the initial turn, the preempt path must consume the
+        abort signal after demoting the task.  Without this, the orphaned
+        abort signal causes _cleanup_aborted_task to fire on the very next
+        execute_task call — removing the still-valid pending task entirely
+        instead of resuming it.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt-abort"})
+        task = {
+            "id": "t-preempt-abort",
+            "title": "Spec task preempted with abort",
+            "status": "pending",
+        }
+
+        # The abort arrives during the provider turn (after the pre-run check).
+        def set_abort_mid_turn(*args: object, **kwargs: object) -> tuple[str, str]:
+            worker._abort_task.request(task["id"])
+            return ("sid", "")
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=set_abort_mid_turn),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.update"),
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+
+        assert result is True
+        # Abort signal consumed by the preempt path — not by _cleanup_aborted_task.
+        assert not worker._abort_task.is_set()
+        # Task must NOT have been removed (no cleanup ran).
+        mock_remove.assert_not_called()
+        mock_clean.assert_not_called()
+
+    def test_preempt_consumes_paired_abort_signal_in_resume_loop(
+        self, tmp_path: Path
+    ) -> None:
+        """Same abort-consumption invariant as the initial-turn test, but at
+        the resume-loop preempt site.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-resume-abort"})
+        task = {
+            "id": "t-resume-abort",
+            "title": "Spec task resume preempted with abort",
+            "status": "pending",
+        }
+        call_count = 0
+
+        def set_abort_on_second(*args: object, **kwargs: object) -> tuple[str, str]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                worker._abort_task.request(task["id"])
+            return ("sid", "")
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=set_abort_on_second),
+            patch.object(
+                worker, "_provider_turn_was_preempted", side_effect=[False, True]
+            ),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.update"),
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+
+        assert result is True
+        assert not worker._abort_task.is_set()
+        mock_remove.assert_not_called()
+        mock_clean.assert_not_called()
+
+    def test_preempt_does_not_consume_abort_for_different_task(
+        self, tmp_path: Path
+    ) -> None:
+        """When a preempt fires for the current task but the abort signal is
+        targeted at a *different* task ID, the preempt path must leave the
+        abort signal intact.  Consuming it would silently drop the pending
+        abort for the other task.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-current"})
+        task = {"id": "t-current", "title": "Current task", "status": "pending"}
+        # Abort is for a completely different task — not the one being preempted.
+        worker._abort_task.request("t-other-task")
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch("fido.tasks.Tasks.update"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+
+        # Abort for the other task must still be live.
+        assert worker._abort_task.is_set()
+        assert worker._abort_task.is_active_for("t-other-task")
+
     def test_stale_abort_targeting_removed_task_does_not_clobber_next_task(
         self, tmp_path: Path
     ) -> None:
