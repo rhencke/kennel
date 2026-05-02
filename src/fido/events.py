@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterable
@@ -1430,6 +1431,7 @@ def reply_to_comment(
 
     # Add eyes reaction immediately at pickup to signal work-in-progress.
     # Best-effort: never fail the reply if the reaction post fails.
+    _eyes_posted = False
     if info.get("repo") and info.get("comment_id"):
         try:
             gh.add_reaction(
@@ -1439,6 +1441,7 @@ def reply_to_comment(
                 "eyes",
             )
             log.info("added eyes reaction to comment %s", info["comment_id"])
+            _eyes_posted = True
         except Exception:
             log.exception(
                 "failed to add eyes reaction to comment %s — continuing",
@@ -1454,15 +1457,41 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    synthesis_response = call_synthesis(
-        comment,
-        is_bot=action.is_bot,
-        context=context or None,
-        issue=issue_ctx,
-        pr=pr_ctx,
-        agent=agent,
-        prompts=prompts,
-    )
+    try:
+        synthesis_response = call_synthesis(
+            comment,
+            is_bot=action.is_bot,
+            context=context or None,
+            issue=issue_ctx,
+            pr=pr_ctx,
+            agent=agent,
+            prompts=prompts,
+        )
+    finally:
+        # On failure, clean up the eyes reaction so it does not sit forever as
+        # a false "Fido is looking" signal.  Best-effort: never let cleanup
+        # suppress the original exception.  The success path (execute_effects_only
+        # below) handles eyes removal when synthesis succeeds.  Use
+        # sys.exc_info() to distinguish exception vs. normal exit.
+        if _eyes_posted and sys.exc_info()[1] is not None:
+            _cid_pulls = info.get("comment_id")
+            _repo_pulls = info.get("repo")
+            if _cid_pulls and _repo_pulls:
+                try:
+                    reactions = gh.list_reactions(_repo_pulls, "pulls", _cid_pulls)
+                    for _r in reactions:
+                        if _r.get("content") == "eyes":
+                            _rid = _r.get("id")
+                            if _rid is not None:
+                                gh.delete_reaction(
+                                    _repo_pulls, "pulls", _cid_pulls, _rid
+                                )
+                except Exception:
+                    log.exception(
+                        "failed to remove eyes reaction from comment %s on failure"
+                        " — continuing",
+                        _cid_pulls,
+                    )
     log.info(
         "synthesis: returned (emoji=%r change_request=%r preview=%r)",
         synthesis_response.emoji,
@@ -1718,11 +1747,13 @@ def reply_to_issue_comment(
 
     # Add eyes reaction immediately at pickup to signal work-in-progress.
     # Best-effort: never fail the reply if the reaction post fails.
+    _eyes_posted_issue = False
     _cid = context.get("comment_id")
     if _cid and repo_full:
         try:
             gh.add_reaction(repo_full, "issues", _cid, "eyes")
             log.info("added eyes reaction to issue comment %s on PR #%s", _cid, number)
+            _eyes_posted_issue = True
         except Exception:
             log.exception(
                 "failed to add eyes reaction to issue comment %s — continuing", _cid
@@ -1733,15 +1764,37 @@ def reply_to_issue_comment(
     )
 
     log.info("synthesis: calling for issue comment on PR #%s", number)
-    synthesis_response = call_synthesis(
-        comment,
-        is_bot=action.is_bot,
-        context=context or None,
-        issue=issue_ctx,
-        pr=pr_ctx,
-        agent=agent,
-        prompts=prompts,
-    )
+    try:
+        synthesis_response = call_synthesis(
+            comment,
+            is_bot=action.is_bot,
+            context=context or None,
+            issue=issue_ctx,
+            pr=pr_ctx,
+            agent=agent,
+            prompts=prompts,
+        )
+    finally:
+        # On failure, clean up the eyes reaction so it does not sit forever as
+        # a false "Fido is looking" signal.  Best-effort: never let cleanup
+        # suppress the original exception.  The success path (execute_effects_only
+        # below) handles eyes removal when synthesis succeeds.  Use
+        # sys.exc_info() to distinguish exception vs. normal exit.
+        if _eyes_posted_issue and sys.exc_info()[1] is not None:
+            if _cid and repo_full:
+                try:
+                    reactions = gh.list_reactions(repo_full, "issues", _cid)
+                    for _r in reactions:
+                        if _r.get("content") == "eyes":
+                            _rid = _r.get("id")
+                            if _rid is not None:
+                                gh.delete_reaction(repo_full, "issues", _cid, _rid)
+                except Exception:
+                    log.exception(
+                        "failed to remove eyes reaction from issue comment %s on"
+                        " failure — continuing",
+                        _cid,
+                    )
     log.info(
         "synthesis: returned for PR #%s (emoji=%r change_request=%r preview=%r)",
         number,
