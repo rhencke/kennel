@@ -3034,6 +3034,9 @@ class Worker:
                 repo_ctx.repo,
             )
             self._push_committed_work_before_yield(task_title, head_before, slug)
+            self._tasks.update(task["id"], TaskStatus.PENDING)
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
             return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
@@ -3134,6 +3137,9 @@ class Worker:
                     repo_ctx.repo,
                 )
                 self._push_committed_work_before_yield(task_title, head_before, slug)
+                self._tasks.update(task["id"], TaskStatus.PENDING)
+                with State(fido_dir).modify() as state:
+                    state.pop("current_task_id", None)
                 return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
