@@ -326,9 +326,11 @@ def test_rescope_identity_rejects_title_and_comment_drift() -> None:
     assert rows_after[1].title == "Thread follow-up"
     assert rows_after[1].source_comment == 55
     assert rows_after[1].description == "new"
-    assert not before.identity_changed(rows_after[1])
     assert oracle.rescope_preserves_task_identity([1], rows_before, rows_after)
 
+    # Independent identity-drift detection via the oracle predicate.
+    # ``identity_changed`` was a TaskRow method on an earlier version of
+    # the oracle; the predicate replaces it as the single source of truth.
     changed_title = oracle.TaskRow(
         title="Different title",
         description="new",
@@ -343,8 +345,6 @@ def test_rescope_identity_rejects_title_and_comment_drift() -> None:
         status=oracle.StatusPending(),
         source_comment=77,
     )
-    assert before.identity_changed(changed_title)
-    assert before.identity_changed(changed_comment)
     assert not oracle.rescope_preserves_task_identity(
         [1], rows_before, {1: changed_title}
     )
