@@ -1202,6 +1202,11 @@ class TestSynthesisPrompt:
         assert "Take a position" in result
         assert "Disagree" in result
 
+    def test_disagree_defers_after_one_pushback(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "already pushed back" in result
+        assert "defer" in result
+
     def test_change_request_description(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "plain-English" in result
