@@ -77,12 +77,37 @@ def test_main_delegates_to_pytest_with_repo_defaults() -> None:
 
     assert result == 0
     mock_ensure.assert_called_once_with()
+    # ``-n 2`` is injected when the caller doesn't specify parallelism
+    # (#1248 + PR #1254): caps xdist at 2 workers so total memory stays
+    # under the 4 GiB cgroup cap on the test container.
     mock_pytest_main.assert_called_once_with(
         [
             "--cov=fido",
             "--cov=rocq-python-extraction/test",
             "--cov-report=term-missing",
             "--cov-fail-under=100",
+            "-n",
+            "2",
             "-q",
         ]
     )
+
+
+def test_main_respects_explicit_n_flag() -> None:
+    """When the caller passes ``-n``, don't inject the default.
+
+    Lets ``./fido tests -n 1`` (single worker, max safety) and
+    ``./fido tests -n 4`` (full parallelism, when the box has headroom)
+    both work without fighting the default.
+    """
+    with (
+        patch("sys.argv", ["tests", "-n", "1", "-q"]),
+        patch("fido.tests_main.ensure_rocq_python_artifacts"),
+        patch("pytest.main", return_value=0) as mock_pytest_main,
+    ):
+        main()
+
+    args = mock_pytest_main.call_args[0][0]
+    # exactly one ``-n`` should be present — ours, not a duplicate
+    assert args.count("-n") == 1
+    assert "1" in args  # the caller's value, not 2

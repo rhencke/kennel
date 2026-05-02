@@ -584,7 +584,14 @@ run_fido_pyproject_image() {
 }
 
 run_fido_pyproject_image_capped() {
-  _container_cap_memory="${FIDO_TEST_MEMORY_CAP:-8g}" \
+  # 4 GiB is comfortable headroom for pytest + xdist on fido's test corpus
+  # while leaving room on a 16 GiB box for claude, buildkitd, the actions
+  # runner, and dockerd to coexist.  An xdist worker leak that pushes past
+  # 4 GiB hits the cgroup cap and OOM-kills cleanly inside the container
+  # instead of pressuring the host into a soft-lock.  The 8 GiB ceiling
+  # from PR #1251 was generous enough that CI runs with memory-leaky
+  # tests (#1248) still pressured the box.
+  _container_cap_memory="${FIDO_TEST_MEMORY_CAP:-4g}" \
     _container_cap_timeout="${FIDO_TEST_TIMEOUT:-300}" \
     run_fido_pyproject_image "$@"
 }
