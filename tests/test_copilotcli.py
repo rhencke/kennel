@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from fido import provider
 from fido.copilotcli import (
     _ACP_STREAM_LIMIT,
     _COPILOT_CANCEL_SENTINEL,
+    _COPILOT_QUOTA_PAUSE_SECONDS,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
@@ -26,6 +28,7 @@ from fido.copilotcli import (
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
+    _is_copilot_quota_error,
     _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
@@ -1253,11 +1256,120 @@ class TestCopilotCLISession:
         assert "copilot result >>>\ndone\n<<< copilot result" in caplog.text
 
 
+class TestIsCopilotQuotaError:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            # Exact messages from @github/copilot sdk/index.js ---------------
+            "You've reached your weekly rate limit.",  # user_weekly_rate_limited
+            "You've hit the rate limit for this model.",  # user_model_rate_limited
+            "You've hit your global rate limit.",  # user_global_rate_limited
+            "Rate limit reached, waiting 1 minute before retrying...",
+            "Rate limit exceeded",
+            "No remaining quota for premium requests",
+            "Quota is insufficient to finish this session.",
+            # Error codes that may surface in ACP exceptions -----------------
+            "user_weekly_rate_limited",
+            "user_model_rate_limited",
+            "user_global_rate_limited",
+            "integration_rate_limited",
+            "rate_limited",
+        ],
+    )
+    def test_quota_patterns_match(self, message: str) -> None:
+        assert _is_copilot_quota_error(RuntimeError(message))
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "session not found",
+            "BrokenPipeError",
+            "authentication failed",
+            "context window overflow",
+            "Too Many Requests",  # generic HTTP — not a Copilot CLI pattern
+            "429",  # raw HTTP status — not surfaced by Copilot CLI
+            "",
+        ],
+    )
+    def test_non_quota_errors_do_not_match(self, message: str) -> None:
+        assert not _is_copilot_quota_error(RuntimeError(message))
+
+
 class TestCopilotCLIAPI:
-    def test_limit_snapshot_is_unknown(self) -> None:
-        assert CopilotCLIAPI().get_limit_snapshot() == ProviderLimitSnapshot(
+    _FIXED_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _api(
+        self,
+        *,
+        monotonic_start: float = 0.0,
+        pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
+    ) -> tuple["CopilotCLIAPI", list[float]]:
+        """Return an API instance with injectable monotonic clock."""
+        clock = [monotonic_start]
+        now_clock = [self._FIXED_NOW]
+        api = CopilotCLIAPI(
+            monotonic=lambda: clock[0],
+            now=lambda: now_clock[0],
+            pause_seconds=pause_seconds,
+        )
+        return api, clock
+
+    def test_limit_snapshot_is_unknown_by_default(self) -> None:
+        api, _ = self._api()
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
             provider=ProviderID.COPILOT_CLI
         )
+
+    def test_record_quota_error_returns_true_for_quota_error(self) -> None:
+        api, _ = self._api()
+        assert api.record_quota_error(RuntimeError("rate limit exceeded")) is True
+
+    def test_record_quota_error_returns_false_for_non_quota_error(self) -> None:
+        api, _ = self._api()
+        assert api.record_quota_error(RuntimeError("session not found")) is False
+
+    def test_snapshot_shows_100_percent_after_quota_error(self) -> None:
+        api, clock = self._api(monotonic_start=0.0, pause_seconds=3600.0)
+        api.record_quota_error(RuntimeError("quota exhausted"))
+        clock[0] = 60.0  # 60 seconds into the pause window
+        snapshot = api.get_limit_snapshot()
+        assert len(snapshot.windows) == 1
+        window = snapshot.windows[0]
+        assert window.name == "quota"
+        assert window.used == 100
+        assert window.limit == 100
+        assert window.unit == "%"
+        assert window.pressure == 1.0
+
+    def test_snapshot_reset_time_is_recorded_at_plus_pause(self) -> None:
+        from datetime import timedelta
+
+        pause = 3600.0
+        api, _ = self._api(monotonic_start=0.0, pause_seconds=pause)
+        api.record_quota_error(RuntimeError("rate limit"))
+        snapshot = api.get_limit_snapshot()
+        assert snapshot.windows[0].resets_at == self._FIXED_NOW + timedelta(
+            seconds=pause
+        )
+
+    def test_snapshot_reverts_to_unknown_after_pause_expires(self) -> None:
+        pause = 3600.0
+        api, clock = self._api(monotonic_start=0.0, pause_seconds=pause)
+        api.record_quota_error(RuntimeError("quota exceeded"))
+        clock[0] = pause  # exactly at the boundary — expired
+        snapshot = api.get_limit_snapshot()
+        assert snapshot == ProviderLimitSnapshot(provider=ProviderID.COPILOT_CLI)
+
+    def test_non_quota_error_does_not_change_snapshot(self) -> None:
+        api, _ = self._api()
+        api.record_quota_error(RuntimeError("connection reset"))
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.COPILOT_CLI
+        )
+
+    def test_provider_id(self) -> None:
+        api = CopilotCLIAPI()
+        assert api.provider_id == ProviderID.COPILOT_CLI
 
 
 class TestCopilotCLIClient:
@@ -1485,6 +1597,40 @@ class TestCopilotCLIClient:
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_called_once_with()
 
+    def test_quota_error_records_on_api_and_is_not_retried(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = RuntimeError("rate limit exceeded")
+        api = CopilotCLIAPI()
+        client = CopilotCLIClient(session=session, api=api)
+        with pytest.raises(RuntimeError, match="rate limit exceeded"):
+            client.run_turn("fetch", model=client.voice_model)
+        # The error was recorded — snapshot now shows 100% pressure.
+        snapshot = api.get_limit_snapshot()
+        assert len(snapshot.windows) == 1
+        assert snapshot.windows[0].pressure == 1.0
+        # Session was NOT asked to recover — quota errors are not retryable.
+        session.recover.assert_not_called()
+
+    def test_quota_error_without_api_still_raises(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = RuntimeError("rate limit exceeded")
+        client = CopilotCLIClient(session=session)  # no api injected
+        with pytest.raises(RuntimeError, match="rate limit exceeded"):
+            client.run_turn("fetch", model=client.voice_model)
+
+    def test_non_quota_error_still_retried_with_api_wired(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [
+            ValueError("Separator is found, but chunk is longer than limit"),
+            "done",
+        ]
+        api = CopilotCLIAPI()
+        client = CopilotCLIClient(session=session, api=api)
+        assert client.run_turn("fetch", model=client.voice_model) == "done"
+        session.recover.assert_called_once_with()
+        # Non-quota error did not poison the snapshot.
+        assert api.get_limit_snapshot().windows == ()
+
     def test_json_and_one_shot_helpers(self, tmp_path: Path) -> None:
         runner = MagicMock(return_value=_completed(_copilot_output("line1\nline2")))
         system_file = tmp_path / "system"
@@ -1584,3 +1730,12 @@ class TestCopilotCLI:
         session = MagicMock()
         CopilotCLI(agent=agent, session=session)
         agent.attach_session.assert_called_once_with(session)
+
+    def test_default_construction_wires_api_to_default_agent(self) -> None:
+        # When neither api nor agent is injected, CopilotCLI must create a
+        # shared CopilotCLIAPI and wire it into the CopilotCLIClient so that
+        # quota errors recorded during prompts are visible via api.
+        copilot = CopilotCLI()
+        assert isinstance(copilot.api, CopilotCLIAPI)
+        assert isinstance(copilot.agent, CopilotCLIClient)
+        assert copilot.agent._quota_api is copilot.api

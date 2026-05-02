@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fido.config import RepoConfig
+from fido.copilotcli import CopilotCLIAPI, CopilotCLIClient
 from fido.provider import ProviderID
 from fido.provider_factory import DefaultProviderFactory
 
@@ -80,6 +81,30 @@ class TestDefaultProviderFactory:
         )
         assert provider.provider_id == ProviderID.COPILOT_CLI
         assert provider.agent.provider_id == ProviderID.COPILOT_CLI
+
+    def test_create_provider_shares_copilot_api_with_create_api(
+        self, tmp_path: Path
+    ) -> None:
+        # The same CopilotCLIAPI instance must back both the status check
+        # (create_api) and the prompt path (create_provider → CopilotCLIClient).
+        # If they differ, quota errors recorded on the client are invisible to
+        # the pressure-pause check.
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        repo = RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            provider=ProviderID.COPILOT_CLI,
+        )
+        api = factory.create_api(repo)
+        prov = factory.create_provider(
+            repo, work_dir=tmp_path, repo_name="owner/repo", session=None
+        )
+        assert isinstance(api, CopilotCLIAPI)
+        assert isinstance(prov.agent, CopilotCLIClient)
+        assert prov.agent._quota_api is api
+        assert prov.api is api
 
     def test_create_agent_uses_repo_provider(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"

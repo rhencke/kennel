@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ from fido.provider import (
     ProviderAPI,
     ProviderID,
     ProviderLimitSnapshot,
+    ProviderLimitWindow,
     ProviderModel,
     ReasoningEffort,
     coerce_provider_model,
@@ -140,6 +142,42 @@ def extract_session_id(output: str) -> str:
 _COPILOT_SUPPORTED_MODELS: frozenset[str] = frozenset(
     {"auto", "gpt-5-mini", "gpt-4.1", "claude-haiku-4.5"}
 )
+
+# How long to treat a recorded quota error as an active pause.  Copilot
+# does not expose a reset timestamp, so we use a conservative one-hour
+# window.  Update when real quota reset semantics are confirmed.
+_COPILOT_QUOTA_PAUSE_SECONDS = 3600.0
+
+# Substrings that identify a Copilot error as quota / rate-limit related.
+# Grounded in the actual strings emitted by @github/copilot (sdk/index.js):
+#
+#   "You've reached your weekly rate limit."    ← user_weekly_rate_limited
+#   "You've hit the rate limit for this model." ← user_model_rate_limited
+#                                                   / integration_rate_limited
+#   "You've hit your global rate limit."        ← user_global_rate_limited
+#                                                   / rate_limited (fallback)
+#   "Rate limit reached, waiting 1 minute before retrying..."
+#   "Rate limit exceeded"
+#   "No remaining quota for premium requests"
+#   "Quota is insufficient to finish this session."
+#
+# All of the above fold to either "rate limit", "rate_limit", or "quota"
+# when lowercased and substring-matched.
+_COPILOT_QUOTA_PATTERNS: tuple[str, ...] = (
+    "rate limit",  # covers all "You've … rate limit …" and "Rate limit …" messages
+    "rate_limit",  # covers error codes in ACP exceptions (e.g. user_weekly_rate_limited)
+    "quota",  # covers "No remaining quota" and "Quota is insufficient"
+)
+
+
+def _is_copilot_quota_error(exc: Exception) -> bool:
+    """Return True when *exc* looks like a Copilot quota or rate-limit error.
+
+    Matches against :data:`_COPILOT_QUOTA_PATTERNS`, which are grounded in the
+    actual error messages emitted by ``@github/copilot`` (sdk/index.js).
+    """
+    lowered = str(exc).lower()
+    return any(pat in lowered for pat in _COPILOT_QUOTA_PATTERNS)
 
 
 def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
@@ -1142,14 +1180,71 @@ class CopilotCLISession(OwnedSession):
 
 
 class CopilotCLIAPI(ProviderAPI):
-    """Read-only account API for Copilot CLI."""
+    """Read-only account API for Copilot CLI.
+
+    Copilot CLI exposes no native quota endpoint, so limit state is derived
+    from observed errors: when a caller records a quota-shaped error via
+    :meth:`record_quota_error`, :meth:`get_limit_snapshot` returns a 100%-
+    usage window that expires after :data:`_COPILOT_QUOTA_PAUSE_SECONDS`.
+    Once the pause window expires the snapshot reverts to "unknown".
+    """
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
+    ) -> None:
+        self._monotonic = monotonic
+        self._now = now
+        self._pause_seconds = pause_seconds
+        self._lock = threading.Lock()
+        self._quota_error_at_monotonic: float | None = None
+        self._quota_error_at_wall: datetime | None = None
 
     @property
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
 
+    def record_quota_error(self, exc: Exception) -> bool:
+        """Record *exc* as a quota error if it looks quota-shaped.
+
+        Returns ``True`` when the error was classified as quota-related and
+        the pause window was (re)started, ``False`` otherwise.
+        """
+        if not _is_copilot_quota_error(exc):
+            return False
+        with self._lock:
+            self._quota_error_at_monotonic = self._monotonic()
+            self._quota_error_at_wall = self._now()
+        log.warning(
+            "copilot-cli quota error recorded — pausing for %.0fs", self._pause_seconds
+        )
+        return True
+
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
-        return ProviderLimitSnapshot(provider=self.provider_id)
+        with self._lock:
+            recorded_at = self._quota_error_at_monotonic
+            wall = self._quota_error_at_wall
+        if recorded_at is None or wall is None:
+            return ProviderLimitSnapshot(provider=self.provider_id)
+        elapsed = self._monotonic() - recorded_at
+        if elapsed >= self._pause_seconds:
+            return ProviderLimitSnapshot(provider=self.provider_id)
+        resets_at = wall + timedelta(seconds=self._pause_seconds)
+        return ProviderLimitSnapshot(
+            provider=self.provider_id,
+            windows=(
+                ProviderLimitWindow(
+                    name="quota",
+                    used=100,
+                    limit=100,
+                    resets_at=resets_at,
+                    unit="%",
+                ),
+            ),
+        )
 
 
 class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
@@ -1169,9 +1264,11 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
+        api: CopilotCLIAPI | None = None,
     ) -> None:
         self._runner = runner
         self._sleep_fn = sleep_fn
+        self._quota_api = api
         self._session_factory = (
             CopilotCLISession if session_factory is None else session_factory
         )
@@ -1209,6 +1306,9 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         exc: Exception,
         session: PromptSession,
     ) -> bool:
+        # Quota errors are not recoverable via session restart — record and halt.
+        if self._quota_api is not None and self._quota_api.record_quota_error(exc):
+            return False
         message = str(exc)
         return (
             isinstance(exc, (BrokenPipeError, OSError))
@@ -1310,15 +1410,16 @@ class CopilotCLI(Provider):
     def __init__(
         self,
         *,
-        api: ProviderAPI | None = None,
+        api: CopilotCLIAPI | None = None,
         agent: ProviderAgent | None = None,
         session: PromptSession | None = None,
     ) -> None:
+        api_instance = api if api is not None else CopilotCLIAPI()
         if agent is None:
-            agent = CopilotCLIClient(session=session)
+            agent = CopilotCLIClient(session=session, api=api_instance)
         elif session is not None:
             agent.attach_session(session)
-        self._api = CopilotCLIAPI() if api is None else api
+        self._api = api_instance
         self._agent = agent
 
     @property

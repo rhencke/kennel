@@ -60,13 +60,17 @@ class DefaultProviderFactory:
                     )
                 )
             case ProviderID.COPILOT_CLI:
+                shared_api = self.create_api(repo_cfg)
+                assert isinstance(shared_api, CopilotCLIAPI)
                 return CopilotCLI(
+                    api=shared_api,
                     agent=CopilotCLIClient(
+                        api=shared_api,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
-                    )
+                    ),
                 )
             case ProviderID.CODEX:
                 return Codex(
