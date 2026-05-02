@@ -13,8 +13,6 @@ the type rather than buried as an optional list element — a
 
 from dataclasses import dataclass
 
-from fido.types import TaskType
-
 # Valid GitHub reaction shortcodes.
 VALID_REACTIONS: frozenset[str] = frozenset(
     {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
@@ -47,42 +45,22 @@ class AddReaction:
 
 
 @dataclass(frozen=True)
-class CreateTask:
-    """Create a new work-queue task.
+class RescopeIntent:
+    """A plain-English statement of scope-change intent.
 
-    *task_type* defaults to ``THREAD`` since synthesis responses handle
-    PR comment threads.  Use ``SPEC`` when the synthesis identifies broader
-    planned work not tied to a single comment lineage.
+    The synthesis call does not decide task mutations directly — it
+    describes what should change and the existing rescope machinery
+    (``reorder_tasks``) decides how to mutate the task list.
+
+    *description* is a single plain-English sentence describing the
+    requested scope change.
     """
 
-    title: str
-    task_type: TaskType = TaskType.THREAD
-    description: str = ""
-
-
-@dataclass(frozen=True)
-class CompleteTask:
-    """Mark an existing work-queue task completed by ID."""
-
-    task_id: str
-
-
-@dataclass(frozen=True)
-class ModifyTask:
-    """Update an existing task's title, description, or both.
-
-    At least one of *new_title* or *new_description* must be provided.
-    """
-
-    task_id: str
-    new_title: str | None = None
-    new_description: str | None = None
+    description: str
 
     def __post_init__(self) -> None:
-        if self.new_title is None and self.new_description is None:
-            raise ValueError(
-                "ModifyTask requires at least one of new_title or new_description"
-            )
+        if not self.description.strip():
+            raise ValueError("RescopeIntent.description must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -104,7 +82,7 @@ class NoOp:
 
 # The closed vocabulary of additional effects Fido may produce from a single
 # synthesis call.  Constraint A: no operations outside this set exist.
-SynthesisAction = AddReaction | CreateTask | CompleteTask | ModifyTask | Preempt | NoOp
+SynthesisAction = AddReaction | RescopeIntent | Preempt | NoOp
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +111,7 @@ class CommentResponse:
 
     reasoning: str
     reply_text: str
-    actions: tuple[SynthesisAction, ...]
+    actions: tuple[SynthesisAction, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reply_text.strip():

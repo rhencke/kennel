@@ -6,15 +6,12 @@ from fido.synthesis import (
     VALID_REACTIONS,
     AddReaction,
     CommentResponse,
-    CompleteTask,
-    CreateTask,
-    ModifyTask,
     NoOp,
     Preempt,
+    RescopeIntent,
     SynthesisAction,
     validate_reaction,
 )
-from fido.types import TaskType
 
 # ---------------------------------------------------------------------------
 # VALID_REACTIONS constant
@@ -86,92 +83,35 @@ class TestAddReaction:
 
 
 # ---------------------------------------------------------------------------
-# CreateTask
+# RescopeIntent
 # ---------------------------------------------------------------------------
 
 
-class TestCreateTask:
-    def test_construction_with_defaults(self) -> None:
-        t = CreateTask(title="Fix the thing")
-        assert t.title == "Fix the thing"
-        assert t.task_type == TaskType.THREAD
-        assert t.description == ""
-
-    def test_construction_with_all_fields(self) -> None:
-        t = CreateTask(
-            title="Plan refactor",
-            task_type=TaskType.SPEC,
-            description="Detailed plan here",
-        )
-        assert t.task_type == TaskType.SPEC
-        assert t.description == "Detailed plan here"
-
-    def test_frozen(self) -> None:
-        t = CreateTask(title="x")
-        with pytest.raises((AttributeError, TypeError)):
-            t.title = "y"  # type: ignore[misc]
-
-    def test_equality(self) -> None:
-        assert CreateTask("a") == CreateTask("a")
-        assert CreateTask("a") != CreateTask("b")
-
-
-# ---------------------------------------------------------------------------
-# CompleteTask
-# ---------------------------------------------------------------------------
-
-
-class TestCompleteTask:
+class TestRescopeIntent:
     def test_construction(self) -> None:
-        c = CompleteTask(task_id="abc-123")
-        assert c.task_id == "abc-123"
+        r = RescopeIntent(description="Add a logging task")
+        assert r.description == "Add a logging task"
 
     def test_frozen(self) -> None:
-        c = CompleteTask(task_id="x")
+        r = RescopeIntent(description="something")
         with pytest.raises((AttributeError, TypeError)):
-            c.task_id = "y"  # type: ignore[misc]
+            r.description = "other"  # type: ignore[misc]
 
     def test_equality(self) -> None:
-        assert CompleteTask("x") == CompleteTask("x")
-        assert CompleteTask("x") != CompleteTask("y")
+        assert RescopeIntent("a") == RescopeIntent("a")
+        assert RescopeIntent("a") != RescopeIntent("b")
 
+    def test_empty_description_raises(self) -> None:
+        with pytest.raises(ValueError, match="description must be non-empty"):
+            RescopeIntent(description="")
 
-# ---------------------------------------------------------------------------
-# ModifyTask
-# ---------------------------------------------------------------------------
+    def test_whitespace_only_description_raises(self) -> None:
+        with pytest.raises(ValueError, match="description must be non-empty"):
+            RescopeIntent(description="   ")
 
-
-class TestModifyTask:
-    def test_new_title_only(self) -> None:
-        m = ModifyTask(task_id="t1", new_title="Updated title")
-        assert m.task_id == "t1"
-        assert m.new_title == "Updated title"
-        assert m.new_description is None
-
-    def test_new_description_only(self) -> None:
-        m = ModifyTask(task_id="t1", new_description="New description")
-        assert m.new_title is None
-        assert m.new_description == "New description"
-
-    def test_both_fields(self) -> None:
-        m = ModifyTask(task_id="t1", new_title="A", new_description="B")
-        assert m.new_title == "A"
-        assert m.new_description == "B"
-
-    def test_neither_field_raises(self) -> None:
-        with pytest.raises(
-            ValueError, match="at least one of new_title or new_description"
-        ):
-            ModifyTask(task_id="t1")
-
-    def test_frozen(self) -> None:
-        m = ModifyTask(task_id="t1", new_title="x")
-        with pytest.raises((AttributeError, TypeError)):
-            m.new_title = "y"  # type: ignore[misc]
-
-    def test_equality(self) -> None:
-        assert ModifyTask("t1", new_title="x") == ModifyTask("t1", new_title="x")
-        assert ModifyTask("t1", new_title="x") != ModifyTask("t1", new_title="y")
+    def test_description_with_leading_trailing_whitespace_accepted(self) -> None:
+        r = RescopeIntent(description="  actual intent  ")
+        assert r.description == "  actual intent  "
 
 
 # ---------------------------------------------------------------------------
@@ -231,17 +171,9 @@ class TestSynthesisActionUnion:
         a: SynthesisAction = AddReaction("rocket")
         assert isinstance(a, AddReaction)
 
-    def test_create_task_is_synthesis_action(self) -> None:
-        a: SynthesisAction = CreateTask("do the thing")
-        assert isinstance(a, CreateTask)
-
-    def test_complete_task_is_synthesis_action(self) -> None:
-        a: SynthesisAction = CompleteTask("id-1")
-        assert isinstance(a, CompleteTask)
-
-    def test_modify_task_is_synthesis_action(self) -> None:
-        a: SynthesisAction = ModifyTask("id-1", new_title="x")
-        assert isinstance(a, ModifyTask)
+    def test_rescope_intent_is_synthesis_action(self) -> None:
+        a: SynthesisAction = RescopeIntent("Add logging")
+        assert isinstance(a, RescopeIntent)
 
     def test_preempt_is_synthesis_action(self) -> None:
         a: SynthesisAction = Preempt(True)
@@ -277,11 +209,11 @@ class TestCommentResponse:
         assert r.actions == ()
 
     def test_construction_with_actions(self) -> None:
-        actions = (AddReaction("rocket"), CreateTask("Fix foo"))
+        actions = (AddReaction("rocket"), RescopeIntent("Fix the parser"))
         r = self._make(actions=actions)
         assert len(r.actions) == 2
         assert isinstance(r.actions[0], AddReaction)
-        assert isinstance(r.actions[1], CreateTask)
+        assert isinstance(r.actions[1], RescopeIntent)
 
     def test_frozen(self) -> None:
         r = self._make()
@@ -337,11 +269,13 @@ class TestCommentResponse:
             reply_text="Reply.",
             actions=(
                 AddReaction("eyes"),
-                CreateTask("title", TaskType.SPEC, "desc"),
-                CompleteTask("old-id"),
-                ModifyTask("mid", new_title="new title"),
+                RescopeIntent("Reorder the parser tasks"),
                 Preempt(False),
                 NoOp(),
             ),
         )
-        assert len(r.actions) == 6
+        assert len(r.actions) == 4
+
+    def test_default_actions_empty_tuple(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.")
+        assert r.actions == ()
