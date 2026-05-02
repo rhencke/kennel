@@ -3144,7 +3144,9 @@ class Worker:
                 break
             attempt += 1
             use_fresh_session = (
-                attempt >= _FRESH_SESSION_NUDGE_ATTEMPT and not fresh_session_retry_used
+                self._provider_agent.supports_no_commit_reset
+                and attempt >= _FRESH_SESSION_NUDGE_ATTEMPT
+                and not fresh_session_retry_used
             )
             nudge = (
                 prompts.fresh_session_retry_prompt(
