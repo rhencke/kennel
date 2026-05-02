@@ -35,3 +35,7 @@ def main() -> int:
     return run_pytest(
         sys.argv[1:], paths=[], coverage=["fido", "rocq-python-extraction/test"]
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
