@@ -512,27 +512,32 @@ class Prompts:
         prior_attempts: list[ClosedPR] | None = None,
         intents: list[RescоpeIntent] | None = None,
     ) -> str:
-        """Build an Opus prompt for dependency-aware task reordering.
+        """Build an Opus prompt for full task-list synthesis from old tasks + intents.
 
         Presents the full task list and a summary of commits already made, then
-        asks Opus to return a JSON array of the reordered pending tasks.
+        asks Opus to synthesize a complete new task list that reflects the current
+        codebase state and all accumulated change requests.
+
+        Unlike a simple reorder, Opus may add entirely new tasks, merge, split,
+        rescope, delete, or wipe existing tasks — any transformation needed to
+        produce a coherent task list that describes how to reach the desired new
+        state.  Accumulated intents are listed in chronological order; newer ones
+        override older ones where they conflict.
 
         When *issue* is provided, the rendered active-context block (issue,
-        optional PR, prior attempts, task list) is prepended to the prompt so
-        Opus has full context about what is being worked on.
+        optional PR, prior attempts, task list) is prepended so Opus has full
+        context about what is being worked on.
 
         When *intents* is provided (comment-triggered rescope), the originating
         comment IDs, timestamps, and change request texts are shown so Opus can
-        reference the specific comments that triggered each requested change.
+        synthesize a coherent picture from all accumulated requests.
 
         Rules enforced in the prompt:
-        - CI tasks (type "ci") must remain first.
+        - CI tasks (type "ci") must come first.
+        - Existing task IDs must be preserved when kept or modified.
+        - New tasks (not in the current list) must have a null or absent id.
         - Completed tasks are excluded from the output.
-        - Task IDs must be preserved exactly.
-        - Tasks already covered by a commit should be omitted -- they will be
-          marked completed automatically by the caller.
-        - Thread-task requirements that conflict with a spec task should cause
-          the spec task title/description to be updated.
+        - Tasks already covered by a commit should be omitted.
 
         The caller is responsible for parsing the returned JSON and applying it.
         """
@@ -593,18 +598,27 @@ class Prompts:
             f"{intents_block}"
             "Pending tasks (current order):\n"
             f"{pending_json}\n\n"
-            "Reorder these tasks for the optimal implementation sequence based on "
-            "dependency analysis. Apply these rules:\n"
-            '1. Tasks with type "ci" must come first — do not move them.\n'
-            "2. Reorder remaining tasks so each task builds on what comes before it.\n"
-            "3. If a task is already covered by a recent commit, omit it from the output — it will be marked done.\n"
-            "4. If a thread task changes the requirements of an existing spec task, "
-            "rewrite that spec task's title and/or description to reflect the updated "
-            "requirements.\n"
-            "5. Preserve every task ID exactly — never change or drop IDs.\n"
-            "6. Include only pending and in_progress tasks in the output — omit completed.\n\n"
+            "Synthesize a complete new task list from the pending tasks above and "
+            "the accumulated change requests.  The result replaces the entire "
+            "pending task list.\n\n"
+            "Any transformation is valid — keep tasks unchanged, modify their scope, "
+            "merge multiple tasks into one, split one into several, delete tasks no "
+            "longer needed, add entirely new tasks, or wipe and start fresh.  "
+            "Integrate all change requests into a coherent picture: newer requests "
+            "override older ones where they conflict.\n\n"
+            "The task list must break down how to get from the current codebase "
+            "state to the desired new state.\n\n"
+            "Rules:\n"
+            '1. Tasks with type "ci" must come first.\n'
+            "2. For existing tasks you keep or modify, preserve the exact task ID.\n"
+            "3. For entirely new tasks (not in the current pending list), set "
+            '"id" to null or omit it — a fresh ID will be assigned.\n'
+            "4. If a task is already covered by a recent commit, omit it from the "
+            "output — it will be marked done.\n"
+            "5. Include only pending and in_progress tasks in the output — omit "
+            "completed.\n\n"
             'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
-            'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+            'Each element: {"id": "..." or null, "title": "...", "description": "..."}.\n'
             "No other text before or after the JSON."
         )
 

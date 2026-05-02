@@ -15,6 +15,7 @@ from fido.tasks import (
     _compute_thread_changes,
     _find_duplicate_titles,
     _format_work_queue,
+    _make_new_tasks_from_opus,
     _parse_reorder_response,
     _rescope_releases_for_oracle,
     _rescope_snapshot_order_for_oracle,
@@ -656,7 +657,7 @@ class TestParseReorderResponse:
         assert _parse_reorder_response('{"tasks": "not a list"}') is None
 
     def test_returns_none_for_json_non_dict(self) -> None:
-        # json.loads("null") → None → None.get("tasks") → AttributeError
+        # raw_decode on a bare "null" finds no "{", so returns None
         assert _parse_reorder_response("null") is None
 
     def test_returns_empty_list_when_tasks_is_empty(self) -> None:
@@ -866,6 +867,147 @@ class TestApplyReorder:
                 {"1"},
                 bad_result,
             )
+
+    def test_creates_new_task_from_opus_null_id(self) -> None:
+        current = [self._t("1", "Existing")]
+        items = [
+            self._item("1", "Existing"),
+            {"title": "Brand new", "description": "details"},
+        ]
+        result = _apply_reorder(current, items)
+        pending = [t for t in result if t.get("status") != "completed"]
+        assert len(pending) == 2
+        new_task = next(t for t in pending if t["id"] != "1")
+        assert new_task["title"] == "Brand new"
+        assert new_task["description"] == "details"
+        assert new_task["status"] == "pending"
+
+    def test_creates_new_task_from_opus_explicit_null_id(self) -> None:
+        current = [self._t("1", "Existing")]
+        items = [
+            self._item("1", "Existing"),
+            {"id": None, "title": "Null-id task", "description": ""},
+        ]
+        result = _apply_reorder(current, items)
+        pending = [t for t in result if t.get("status") != "completed"]
+        assert len(pending) == 2
+        new_task = next(t for t in pending if t["id"] != "1")
+        assert new_task["title"] == "Null-id task"
+
+    def test_new_task_receives_fresh_id(self) -> None:
+        current = [self._t("1", "Existing")]
+        items = [{"title": "Fresh task", "description": ""}]
+        result = _apply_reorder(current, items)
+        new_task = next(
+            t for t in result if t["id"] != "1" and t.get("status") != "completed"
+        )
+        assert new_task["id"] != "1"
+        assert len(new_task["id"]) > 0
+
+    def test_new_ci_task_sorted_before_non_ci(self) -> None:
+        current = [self._t("1", "Spec task")]
+        items = [
+            {"title": "New CI fix", "type": "ci", "description": ""},
+            self._item("1", "Spec task"),
+        ]
+        result = _apply_reorder(current, items)
+        pending = [t for t in result if t.get("status") != "completed"]
+        assert pending[0]["title"] == "New CI fix"
+        assert pending[0]["type"] == "ci"
+
+    def test_new_task_blank_title_ignored(self) -> None:
+        current = [self._t("1", "Existing")]
+        items = [
+            {"title": "", "description": "empty title"},
+            self._item("1", "Existing"),
+        ]
+        result = _apply_reorder(current, items)
+        pending = [t for t in result if t.get("status") != "completed"]
+        assert len(pending) == 1
+        assert pending[0]["id"] == "1"
+
+    def test_string_id_not_in_snapshot_still_ignored(self) -> None:
+        # Existing test: Opus returning a made-up string ID is still ignored.
+        current = [self._t("1", "Real task")]
+        items = [{"id": "made-up-id", "title": "Ghost"}, self._item("1", "Real task")]
+        result = _apply_reorder(current, items)
+        pending = [t for t in result if t.get("status") != "completed"]
+        assert len(pending) == 1
+        assert pending[0]["id"] == "1"
+
+
+# ── _make_new_tasks_from_opus ─────────────────────────────────────────────────
+
+
+class TestMakeNewTasksFromOpus:
+    def test_returns_empty_for_all_known_ids(self) -> None:
+        items = [{"id": "1", "title": "Existing"}]
+        result = _make_new_tasks_from_opus(items, frozenset({"1"}))
+        assert result == []
+
+    def test_returns_empty_for_unknown_string_id(self) -> None:
+        items = [{"id": "unknown", "title": "Ghost"}]
+        result = _make_new_tasks_from_opus(items, frozenset({"1"}))
+        assert result == []
+
+    def test_creates_task_for_absent_id(self) -> None:
+        items = [{"title": "New task", "description": "detail"}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert len(result) == 1
+        assert result[0]["title"] == "New task"
+        assert result[0]["description"] == "detail"
+        assert result[0]["status"] == "pending"
+
+    def test_creates_task_for_null_id(self) -> None:
+        items = [{"id": None, "title": "Null id task", "description": ""}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert len(result) == 1
+        assert result[0]["title"] == "Null id task"
+
+    def test_assigns_fresh_id(self) -> None:
+        items = [{"title": "Task A", "description": ""}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0]["id"]
+        assert result[0]["id"] not in ("", None)
+
+    def test_uses_spec_type_by_default(self) -> None:
+        items = [{"title": "Task", "description": ""}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0]["type"] == "spec"
+
+    def test_respects_specified_type(self) -> None:
+        items = [{"title": "CI task", "type": "ci", "description": ""}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0]["type"] == "ci"
+
+    def test_skips_blank_title(self) -> None:
+        items = [{"title": "", "description": "no title"}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result == []
+
+    def test_skips_whitespace_only_title(self) -> None:
+        items = [{"title": "   ", "description": "no title"}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result == []
+
+    def test_multiple_new_tasks(self) -> None:
+        items = [
+            {"title": "First new", "description": ""},
+            {"title": "Second new", "description": ""},
+        ]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert len(result) == 2
+        assert result[0]["title"] == "First new"
+        assert result[1]["title"] == "Second new"
+
+    def test_mixed_known_and_new(self) -> None:
+        items = [
+            {"id": "1", "title": "Known"},
+            {"title": "New", "description": ""},
+        ]
+        result = _make_new_tasks_from_opus(items, frozenset({"1"}))
+        assert len(result) == 1
+        assert result[0]["title"] == "New"
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────

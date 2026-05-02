@@ -4,7 +4,6 @@ import fcntl
 import json
 import logging
 import random
-import re
 import subprocess
 import threading
 import time
@@ -718,24 +717,63 @@ def sync_tasks(
 def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
     """Parse the Opus rescope response into a list of task items.
 
-    Scans *raw* for a JSON object containing a ``"tasks"`` list.  Tries the
-    full string first (happy path), then falls back to a greedy regex scan so
-    that minor Opus preamble does not break parsing.
-
-    Returns the ``tasks`` list, or ``None`` if no valid response is found.
+    Uses a :class:`json.JSONDecoder` consume loop — scans *raw* for ``{``,
+    attempts :meth:`~json.JSONDecoder.raw_decode` from that position, and
+    advances past the decoded span on success or skips the character on
+    failure.  Returns the first ``"tasks"`` list found in any decoded object,
+    or ``None`` if no valid response is found.
     """
-    candidates = [raw.strip()]
-    for m in re.finditer(r"\{.*\}", raw, re.DOTALL):
-        candidates.append(m.group())
-    for candidate in candidates:
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(raw):
+        brace = raw.find("{", pos)
+        if brace == -1:
+            break
         try:
-            obj = json.loads(candidate)
+            obj, end = decoder.raw_decode(raw, brace)
+        except json.JSONDecodeError:
+            pos = brace + 1
+            continue
+        if isinstance(obj, dict):
             tasks = obj.get("tasks")
             if isinstance(tasks, list):
                 return tasks
-        except json.JSONDecodeError, AttributeError:
-            continue
+        pos = end
     return None
+
+
+def _make_new_tasks_from_opus(
+    ordered_items: list[dict[str, Any]],
+    snapshot_ids: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Create fresh task dicts for items Opus returned with a null or absent id.
+
+    Items with a non-null id (whether in the snapshot or not) are not treated
+    as new — the caller handles snapshot ids via the oracle and ignores
+    unrecognised string ids (unchanged behaviour).  Only items where the
+    ``"id"`` key is absent or explicitly ``null`` are promoted to new tasks.
+
+    Each new task receives a fresh timestamp-random ID, ``status: "pending"``,
+    and ``type: "spec"`` unless Opus specified a different type.  Items with
+    blank titles are silently skipped.
+    """
+    new_tasks: list[dict[str, Any]] = []
+    for item in ordered_items:
+        if "id" in item and item["id"] is not None:
+            continue  # has an id — handled by oracle or ignored as unknown
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        task: dict[str, Any] = {
+            "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
+            "title": title,
+            "type": item.get("type") or "spec",
+            "description": item.get("description") or "",
+            "status": str(TaskStatus.PENDING),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        new_tasks.append(task)
+    return new_tasks
 
 
 def _find_duplicate_titles(ordered_items: list[dict[str, Any]]) -> list[str]:
@@ -761,11 +799,13 @@ def _apply_reorder(
     ordered_items: list[dict[str, Any]],
     original_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Apply Opus-ordered items to the current task list.
+    """Apply Opus-synthesised items to the current task list.
 
     Rules (in priority order):
     - CI tasks always come first.
-    - Non-CI pending tasks follow the snapped queue order.
+    - Non-CI pending tasks follow the snapped queue order for existing tasks;
+      new tasks (null/absent id in Opus output) are appended after existing
+      pending tasks, CI-first within the new batch.
     - Pending/in_progress tasks that Opus omits are marked completed; the caller
       detects affected in-progress tasks and signals an abort so the worker picks
       the new next task.
@@ -775,6 +815,8 @@ def _apply_reorder(
     - Description is updated from Opus's output; title and thread anchor are
       immutable task identity and are preserved.
     - Opus-returned IDs outside the snapshot or duplicated are ignored.
+    - Opus-returned items with a null or absent id are treated as new tasks
+      and inserted after existing pending tasks (before completed tasks).
     """
     snapshot_ids = (
         original_ids
@@ -783,9 +825,26 @@ def _apply_reorder(
             t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
         )
     )
-    result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
-    _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, result)
-    return result
+    oracle_result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
+    _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, oracle_result)
+
+    new_tasks = _make_new_tasks_from_opus(ordered_items, snapshot_ids)
+    if not new_tasks:
+        return oracle_result
+
+    # Merge new tasks into oracle result: CI tasks first (in both groups),
+    # then non-CI pending (oracle then new), then completed at end.
+    completed_status = str(TaskStatus.COMPLETED)
+    oracle_pending = [t for t in oracle_result if t.get("status") != completed_status]
+    oracle_completed = [t for t in oracle_result if t.get("status") == completed_status]
+
+    ci_new = [t for t in new_tasks if t.get("type") == "ci"]
+    non_ci_new = [t for t in new_tasks if t.get("type") != "ci"]
+
+    ci_oracle = [t for t in oracle_pending if t.get("type") == "ci"]
+    non_ci_oracle = [t for t in oracle_pending if t.get("type") != "ci"]
+
+    return ci_oracle + ci_new + non_ci_oracle + non_ci_new + oracle_completed
 
 
 def _compute_thread_changes(

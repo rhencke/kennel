@@ -615,6 +615,29 @@ class TestRescopePrompt:
         assert "Add logging" in result
         assert "Refactor tests" in result
 
+    def test_synthesize_framing_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "synthesize" in result.lower() or "synthesis" in result.lower()
+
+    def test_new_task_null_id_instruction_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "null" in result.lower()
+
+    def test_all_transformations_mentioned(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # prompt should mention the full set of valid transformations
+        assert "merge" in result.lower() or "split" in result.lower()
+        assert "delete" in result.lower() or "omit" in result.lower()
+        assert "add" in result.lower() or "new tasks" in result.lower()
+
+    def test_newer_overrides_older_instruction_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "newer" in result.lower() or "override" in result.lower()
+
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
 
