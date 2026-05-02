@@ -960,6 +960,54 @@ class TestCodexAppServerErrorPaths:
         lines.put(None)
 
 
+class TestCodexSessionLeafBranches:
+    """Property/method short-circuits and small branches in CodexSession."""
+
+    def _session(self, tmp_path: Path, **kwargs) -> object:
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = MagicMock()
+        fake.request.return_value = {
+            "thread": {"id": "thread-1"},
+            "threadId": "thread-1",
+        }
+        fake.is_alive.return_value = True
+        fake.pid = 1234
+        defaults: dict = dict(
+            client_factory=lambda **_: fake,
+            model=ProviderModel("gpt-5", "medium"),
+        )
+        defaults.update(kwargs)
+        return CodexSession(system_file, work_dir=tmp_path, **defaults)
+
+    def test_owner_returns_none_when_repo_name_is_none(
+        self, tmp_path: Path
+    ) -> None:
+        """codex.py:697 — short-circuit when no repo_name is configured."""
+        session = self._session(tmp_path, repo_name=None)
+        assert session.owner is None  # type: ignore[union-attr]
+
+    def test_switch_tools_is_a_noop(self, tmp_path: Path) -> None:
+        """codex.py:847 — Codex doesn't support per-session tool flags;
+        ``switch_tools`` accepts the call and discards the value."""
+        session = self._session(tmp_path)
+        # Should not raise; nothing observable to assert.
+        session.switch_tools("triage")  # type: ignore[union-attr]
+        session.switch_tools(None)  # type: ignore[union-attr]
+
+    def test_reset_with_explicit_model(self, tmp_path: Path) -> None:
+        """codex.py:863 — reset(model=...) coerces the new model."""
+        from fido.provider import ProviderModel
+
+        session = self._session(tmp_path)
+        session.reset(model=ProviderModel("gpt-5-pro", "high"))  # type: ignore[union-attr]
+        # The reset path coerces and stores the new model.
+        assert "gpt-5-pro" in str(session._model)  # type: ignore[union-attr]
+
+
 class TestClaudeDefensivePaths:
     def _session(self, tmp_path: Path, *, stdout_lines: list[str]) -> object:
         from fido.claude import ClaudeSession
