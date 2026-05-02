@@ -627,9 +627,10 @@ class WorkerRegistry:
         with self._untriaged_lock:
             if self._untriaged.get(repo_name, 0) == 0:
                 return True
-            ev = self._untriaged_drained.get(repo_name)
-            if ev is None:
-                return True
+            # ``enter_untriaged`` always creates the drained event before
+            # bumping the counter, so a non-zero count guarantees the
+            # event exists.
+            ev = self._untriaged_drained[repo_name]
         return ev.wait(timeout=timeout)
 
     def assert_worker_turn_ok(self, repo_name: str) -> None:

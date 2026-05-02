@@ -195,3 +195,65 @@ class TestProviderTryPreemptWorker:
             cancel.assert_not_called()
         finally:
             provider.set_thread_kind(None)
+
+
+# ---------------------------------------------------------------------------
+# provider.py — preempt_worker (the OwnedSession instance method)
+# ---------------------------------------------------------------------------
+
+
+class TestOwnedSessionPreemptWorker:
+    """Cover provider.py:832-848 — the body of OwnedSession.preempt_worker
+    used by the HTTP handler thread before the background dispatch (#955)."""
+
+    def _session(self) -> provider.OwnedSession:
+        # OwnedSession is abstract (preempt_worker uses _fire_worker_cancel
+        # which is a NotImplementedError hook).  Subclass with a stub
+        # so the method body can run end-to-end.
+        class _Stub(provider.OwnedSession):
+            def __init__(self, repo_name: str | None) -> None:
+                self._repo_name = repo_name
+                self.cancels: list[None] = []
+
+            def _fire_worker_cancel(self) -> None:
+                self.cancels.append(None)
+
+        return _Stub(repo_name="owner/repo")
+
+    def test_fires_cancel_when_worker_holds(self) -> None:
+        session = self._session()
+        worker_talker = provider.SessionTalker(
+            repo_name="owner/repo",
+            thread_id=1,
+            kind="worker",
+            description="x",
+            claude_pid=0,
+            started_at=provider.talker_now(),
+        )
+        with patch("fido.provider.get_talker", return_value=worker_talker):
+            assert session.preempt_worker() is True
+        assert len(session.cancels) == 1  # type: ignore[attr-defined]
+
+    def test_returns_false_when_holder_is_webhook(self) -> None:
+        session = self._session()
+        webhook_talker = provider.SessionTalker(
+            repo_name="owner/repo",
+            thread_id=1,
+            kind="webhook",
+            description="x",
+            claude_pid=0,
+            started_at=provider.talker_now(),
+        )
+        with patch("fido.provider.get_talker", return_value=webhook_talker):
+            assert session.preempt_worker() is False
+        assert session.cancels == []  # type: ignore[attr-defined]
+
+    def test_returns_false_when_repo_name_is_none(self) -> None:
+        class _Stub(provider.OwnedSession):
+            def __init__(self) -> None:
+                self._repo_name = None
+
+            def _fire_worker_cancel(self) -> None:
+                raise AssertionError("must not fire when repo_name is None")
+
+        assert _Stub().preempt_worker() is False

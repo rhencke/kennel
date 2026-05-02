@@ -49,7 +49,13 @@ def test_record_update_uses_dataclasses_replace(build_default) -> None:
 
     source = (build_default / "records.py").read_text()
     assert "from dataclasses import dataclass, replace" in source
-    assert "return replace(p, psnd_r=n)" in source
+    # Match either single-line or ruff-formatted multi-line replace() — the
+    # extraction emits ``return replace(p, psnd_r=n)`` and ruff format
+    # decides whether to reflow it.
+    collapsed = " ".join(source.split())
+    assert "return replace( p, psnd_r=n, )" in collapsed or (
+        "return replace(p, psnd_r=n)" in source
+    )
     assert "Pair_r(pfst_r=p.pfst_r, psnd_r=n)" not in source
 
 
