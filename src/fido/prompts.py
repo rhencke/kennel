@@ -704,7 +704,10 @@ class Prompts:
             '  "reasoning": "<string>",\n'
             '  "reply_text": "<string>",\n'
             '  "emoji": "<shortcode>" | null,\n'
-            '  "change_request": "<plain English>" | null\n'
+            '  "change_request": "<plain English>" | null,\n'
+            '  "insights": [\n'
+            '    {"title": "<string>", "hook": "<string>", "why": "<string>"}\n'
+            "  ]\n"
             "}\n\n"
             "Fields:\n"
             "  reasoning       — private chain-of-thought; logged for "
@@ -719,7 +722,15 @@ class Prompts:
             "  change_request  — optional plain-English sentence describing a "
             "requested change to the PR scope or task list.  The rescope "
             "machinery decides the actual task mutations — this field only "
-            "registers the intent.  Use null when no scope change is needed.\n\n"
+            "registers the intent.  Use null when no scope change is needed.\n"
+            "  insights        — list of noteworthy observations from this "
+            "interaction.  Populate when the comment teaches something worth "
+            "remembering about Rob, the work, or the collaboration pattern.  "
+            "The bar: if it felt worth pausing over, it belongs here.  Empty "
+            "array when nothing stood out.  Each entry:\n"
+            "    title — short label (used as a GitHub issue title).\n"
+            "    hook  — one sentence stating the observation.\n"
+            "    why   — two to three sentences on why it matters.\n\n"
             "Voice guidelines:\n"
             "- Take a position.  When you have enough context to form a view, "
             "share it — don't reflexively ask a clarifying question to avoid "

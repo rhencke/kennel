@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from fido.synthesis import Insight
 from fido.synthesis_call import (
     MAX_RETRIES,
     SynthesisExhaustedError,
@@ -25,6 +26,7 @@ def _make_raw(
     reply_text: str = "My reply.",
     emoji: str | None = None,
     change_request: str | None = None,
+    insights: list[dict[str, str]] | None = None,
 ) -> str:
     obj: dict[str, Any] = {
         "reasoning": reasoning,
@@ -34,6 +36,8 @@ def _make_raw(
         obj["emoji"] = emoji
     if change_request is not None:
         obj["change_request"] = change_request
+    if insights is not None:
+        obj["insights"] = insights
     return json.dumps(obj)
 
 
@@ -105,6 +109,7 @@ class TestParseCommentResponse:
         assert r.reasoning == "thinking"
         assert r.emoji is None
         assert r.change_request is None
+        assert r.insights == []
 
     def test_valid_with_emoji(self) -> None:
         raw = _make_raw(emoji="rocket")
@@ -194,6 +199,61 @@ class TestParseCommentResponse:
         raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "change_request": 42})
         r = _parse_comment_response(raw)
         assert r.change_request is None
+
+    def test_valid_insights_parsed(self) -> None:
+        raw = _make_raw(
+            insights=[{"title": "Good catch", "hook": "Rob prefers X.", "why": "Y."}]
+        )
+        r = _parse_comment_response(raw)
+        assert len(r.insights) == 1
+        assert r.insights[0] == Insight(
+            title="Good catch", hook="Rob prefers X.", why="Y."
+        )
+
+    def test_multiple_insights_parsed(self) -> None:
+        raw = _make_raw(
+            insights=[
+                {"title": "A", "hook": "H1", "why": "W1"},
+                {"title": "B", "hook": "H2", "why": "W2"},
+            ]
+        )
+        r = _parse_comment_response(raw)
+        assert len(r.insights) == 2
+        assert r.insights[0].title == "A"
+        assert r.insights[1].title == "B"
+
+    def test_missing_insights_defaults_to_empty(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK."})
+        r = _parse_comment_response(raw)
+        assert r.insights == []
+
+    def test_null_insights_defaults_to_empty(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "insights": None})
+        r = _parse_comment_response(raw)
+        assert r.insights == []
+
+    def test_non_list_insights_defaults_to_empty(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "insights": "bad"})
+        r = _parse_comment_response(raw)
+        assert r.insights == []
+
+    def test_malformed_insight_entry_dropped(self) -> None:
+        raw = _make_raw(
+            insights=[
+                {"title": "", "hook": "H", "why": "W"},  # empty title
+                {"title": "Good one", "hook": "H", "why": "W"},
+            ]
+        )
+        r = _parse_comment_response(raw)
+        assert len(r.insights) == 1
+        assert r.insights[0].title == "Good one"
+
+    def test_non_dict_insight_entry_dropped(self) -> None:
+        raw = json.dumps(
+            {"reasoning": "r", "reply_text": "OK.", "insights": ["not a dict"]}
+        )
+        r = _parse_comment_response(raw)
+        assert r.insights == []
 
 
 # ---------------------------------------------------------------------------

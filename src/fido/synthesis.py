@@ -13,7 +13,7 @@ the type rather than buried as an optional field — a
 ``CommentResponse`` without prose simply cannot be constructed.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fido.rocq.replied_comment_claims import (
     ReviewAct,
@@ -34,6 +34,36 @@ def validate_reaction(emoji: str) -> str:
             f"Invalid reaction {emoji!r}. Valid reactions: {sorted(VALID_REACTIONS)}"
         )
     return emoji
+
+
+# ---------------------------------------------------------------------------
+# Insight — noteworthy observation captured from a comment interaction
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Insight:
+    """A noteworthy observation from a comment interaction.
+
+    Populated by the synthesis LLM when the comment teaches something
+    worth remembering about Rob, the work, or the collaboration pattern.
+    The bar is the same as the persona: if it felt worth pausing over, it
+    belongs here.
+
+    Attributes
+    ----------
+    title:
+        Short label for the insight (used as a GitHub issue title).
+    hook:
+        One sentence stating the observation — the lede.
+    why:
+        Two to three sentences explaining why it matters or what broader
+        lesson it carries.
+    """
+
+    title: str
+    hook: str
+    why: str
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +92,18 @@ class CommentResponse:
         Optional plain-English description of a requested scope change.
         When present, the action executor preempts and the rescope
         machinery decides the actual task mutations.
+    insights:
+        Noteworthy observations from this comment interaction.  Populated
+        by the synthesis LLM when the comment teaches something worth
+        remembering about Rob, the work, or the collaboration pattern.
+        Empty list when nothing stood out.
     """
 
     reasoning: str
     reply_text: str
     emoji: str | None = None
     change_request: str | None = None
+    insights: list[Insight] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.reply_text.strip():

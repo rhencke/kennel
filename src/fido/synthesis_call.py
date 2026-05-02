@@ -17,6 +17,7 @@ from fido.provider import ProviderAgent
 from fido.synthesis import (
     VALID_REACTIONS,
     CommentResponse,
+    Insight,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -105,12 +106,35 @@ def _parse_comment_response(raw: str) -> CommentResponse:
         if isinstance(change_request_raw, str) and change_request_raw.strip():
             change_request = change_request_raw
 
+        # Parse optional insights list — each entry must have title, hook, why.
+        insights: list[Insight] = []
+        insights_raw = obj.get("insights")
+        if isinstance(insights_raw, list):
+            for entry in insights_raw:
+                if not isinstance(entry, dict):
+                    continue
+                title = entry.get("title", "")
+                hook = entry.get("hook", "")
+                why = entry.get("why", "")
+                if (
+                    isinstance(title, str)
+                    and title.strip()
+                    and isinstance(hook, str)
+                    and hook.strip()
+                    and isinstance(why, str)
+                    and why.strip()
+                ):
+                    insights.append(Insight(title=title, hook=hook, why=why))
+                else:
+                    log.warning("synthesis: dropping malformed insight entry %r", entry)
+
         try:
             return CommentResponse(
                 reasoning=str(reasoning),
                 reply_text=reply_text,
                 emoji=emoji,
                 change_request=change_request,
+                insights=insights,
             )
         except ValueError as exc:
             last_error = exc

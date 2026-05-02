@@ -6,6 +6,7 @@ from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
 from fido.synthesis import (
     VALID_REACTIONS,
     CommentResponse,
+    Insight,
     outcome_for_response,
     validate_reaction,
 )
@@ -64,6 +65,29 @@ class TestValidateReaction:
 # ---------------------------------------------------------------------------
 
 
+class TestInsight:
+    def test_construction(self) -> None:
+        i = Insight(title="Test insight", hook="A thing happened.", why="It matters.")
+        assert i.title == "Test insight"
+        assert i.hook == "A thing happened."
+        assert i.why == "It matters."
+
+    def test_frozen(self) -> None:
+        i = Insight(title="T", hook="H", why="W")
+        with pytest.raises((AttributeError, TypeError)):
+            i.title = "changed"  # type: ignore[misc]
+
+    def test_equality(self) -> None:
+        i1 = Insight(title="T", hook="H", why="W")
+        i2 = Insight(title="T", hook="H", why="W")
+        assert i1 == i2
+
+    def test_inequality(self) -> None:
+        i1 = Insight(title="T", hook="H", why="W")
+        i2 = Insight(title="T2", hook="H", why="W")
+        assert i1 != i2
+
+
 class TestCommentResponse:
     def _make(
         self,
@@ -71,12 +95,14 @@ class TestCommentResponse:
         reply_text: str = "Here is my reply.",
         emoji: str | None = None,
         change_request: str | None = None,
+        insights: list[Insight] | None = None,
     ) -> CommentResponse:
         return CommentResponse(
             reasoning=reasoning,
             reply_text=reply_text,
             emoji=emoji,
             change_request=change_request,
+            insights=insights if insights is not None else [],
         )
 
     def test_construction_minimal(self) -> None:
@@ -85,6 +111,7 @@ class TestCommentResponse:
         assert r.reply_text == "Here is my reply."
         assert r.emoji is None
         assert r.change_request is None
+        assert r.insights == []
 
     def test_construction_with_emoji(self) -> None:
         r = self._make(emoji="rocket")
@@ -161,6 +188,23 @@ class TestCommentResponse:
     def test_default_change_request_is_none(self) -> None:
         r = CommentResponse(reasoning="r", reply_text="Reply.")
         assert r.change_request is None
+
+    def test_default_insights_is_empty_list(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.")
+        assert r.insights == []
+
+    def test_construction_with_insights(self) -> None:
+        insight = Insight(title="Good point", hook="Rob favors X.", why="Because Y.")
+        r = self._make(insights=[insight])
+        assert r.insights == [insight]
+
+    def test_multiple_insights(self) -> None:
+        i1 = Insight(title="A", hook="H1", why="W1")
+        i2 = Insight(title="B", hook="H2", why="W2")
+        r = self._make(insights=[i1, i2])
+        assert len(r.insights) == 2
+        assert r.insights[0] == i1
+        assert r.insights[1] == i2
 
     def test_all_valid_emojis_accepted(self) -> None:
         for emoji in VALID_REACTIONS:

@@ -1191,6 +1191,7 @@ class TestSynthesisPrompt:
         assert "reply_text" in result
         assert "emoji" in result
         assert "change_request" in result
+        assert "insights" in result
 
     def test_no_actions_list_in_schema(self) -> None:
         # Flat schema — no actions array, no action type objects.
@@ -1247,3 +1248,17 @@ class TestSynthesisPrompt:
     def test_json_only_instruction(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "ONLY the JSON" in result
+
+    def test_insights_schema_includes_subfields(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "title" in result
+        assert "hook" in result
+        assert "why" in result
+
+    def test_insights_instructs_when_to_populate(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "worth pausing over" in result
+
+    def test_insights_empty_array_when_nothing_stood_out(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "Empty array" in result or "empty array" in result or "Empty" in result
