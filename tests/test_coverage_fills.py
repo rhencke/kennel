@@ -27,7 +27,6 @@ from fido.tasks import (
     review_thread_for_auto_resolve_oracle,
 )
 
-
 # ---------------------------------------------------------------------------
 # provider_factory.py — fallback ValueError branches
 # ---------------------------------------------------------------------------
@@ -38,25 +37,19 @@ class TestProviderFactoryUnsupported:
     ``DefaultProviderFactory.create_api`` and ``create_agent``.
     """
 
-    def test_create_api_raises_for_unsupported_provider(
-        self, tmp_path: Path
-    ) -> None:
+    def test_create_api_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = MagicMock()
         repo_cfg.provider = "no-such-provider"
         factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
             factory.create_api(repo_cfg)
 
-    def test_create_agent_raises_for_unsupported_provider(
-        self, tmp_path: Path
-    ) -> None:
+    def test_create_agent_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = MagicMock()
         repo_cfg.provider = "no-such-provider"
         factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
-            factory.create_agent(
-                repo_cfg, work_dir=tmp_path, repo_name="owner/repo"
-            )
+            factory.create_agent(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")
 
 
 # ---------------------------------------------------------------------------

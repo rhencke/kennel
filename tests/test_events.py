@@ -124,6 +124,7 @@ def _make_mock_gh() -> MagicMock:
     gh.create_issue.return_value = "https://github.com/owner/repo/issues/0"
     return gh
 
+
 def _oracle_owner(owner: str) -> object:
     match owner:
         case "webhook":
@@ -5888,7 +5889,9 @@ class TestLaunchSync:
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("fido.tasks.sync_tasks_background"):
-            launch_sync(cfg, self._repo_cfg(tmp_path), _make_mock_gh())  # should not raise
+            launch_sync(
+                cfg, self._repo_cfg(tmp_path), _make_mock_gh()
+            )  # should not raise
 
 
 class TestLaunchWorker:

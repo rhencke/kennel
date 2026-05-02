@@ -179,6 +179,8 @@ class RocqIndex:
         self._repo_root = repo_root.resolve()
         self._models_dir = self._repo_root / "models"
         self._generated_dir = self._repo_root / "src" / "fido" / "rocq"
+        self._runtime_path = self._repo_root / "src" / "fido" / "rocq_runtime.py"
+        self._symbols_list: list[Symbol] = []
         self._symbols: dict[str, Symbol] = {}
         self._python_symbols: dict[str, Symbol] = {}
         self._diagnostics: list[Diagnostic] = []
@@ -189,9 +191,10 @@ class RocqIndex:
 
     @property
     def symbols(self) -> tuple[Symbol, ...]:
-        return tuple(sorted(self._symbols.values(), key=lambda item: item.name))
+        return tuple(sorted(self._symbols_list, key=lambda item: item.name))
 
     def refresh(self) -> None:
+        self._symbols_list = []
         self._symbols = {}
         self._python_symbols = {}
         self._diagnostics = []
@@ -301,14 +304,24 @@ class RocqIndex:
             return
         python_path = map_path.with_suffix(".py")
         signatures = _python_signatures(python_path)
+        # Generated extraction modules (e.g. ``concurrency_primitives.py``)
+        # often re-export runtime helpers from ``fido.rocq_runtime`` via
+        # ``from fido.rocq_runtime import *``.  In that case the local
+        # signature lookup misses things like ``IO.pure``, but they're
+        # still resolvable through the runtime module — fall back to it
+        # so symbol_at can return a useful signature.
+        runtime_signatures = _python_signatures(self._runtime_path)
         for entry in source_map.entries:
-            self._load_entry(map_path, python_path, signatures, entry)
+            self._load_entry(
+                map_path, python_path, signatures, runtime_signatures, entry
+            )
 
     def _load_entry(
         self,
         map_path: Path,
         python_path: Path,
         signatures: dict[str, tuple[str, Range]],
+        runtime_signatures: dict[str, tuple[str, Range]],
         entry: PyMapEntry,
     ) -> None:
         name = entry.symbol
@@ -339,20 +352,52 @@ class RocqIndex:
                 python_path.resolve(),
                 _python_range_from_entry(entry, python_range),
             )
+        elif (runtime_info := runtime_signatures.get(python_name)) is not None:
+            # Marker entry into ``fido.rocq_runtime`` (e.g. ``IO.pure``)
+            # — keep python_location anchored at the marker file so
+            # navigation still goes to the local module, but borrow the
+            # actual signature from the runtime helper.
+            python_signature, python_range = runtime_info
+            python_location = Location(
+                python_path.resolve(),
+                _python_range_from_entry(entry, python_range),
+            )
         elif _entry_requires_python_declaration(entry):
             self._diagnostics.append(
                 Diagnostic(
                     f"generated Python declaration missing for {python_name}", source
                 )
             )
-        if name in self._symbols:
-            self._diagnostics.append(Diagnostic(f"duplicate extracted symbol: {name}"))
         symbol = Symbol(
             name=name,
             source=source_location,
             python=python_location,
             python_signature=python_signature,
         )
+        self._symbols_list.append(symbol)
+        # Same name from a different source file is a legitimate
+        # cross-module reuse (multiple .v files each define
+        # `transition`, `State`, etc. inside their own module).  Re-
+        # exports across pymaps are also legitimate — e.g.
+        # ``TaskKind`` is defined in ``task_queue_rescope.v`` and
+        # surfaced through both ``task_queue_rescope.pymap`` and
+        # ``ci_task_lifecycle.pymap`` (different python targets).
+        # Only flag the *true* dupe: two entries within the same
+        # pymap file (same generated python module) claiming the
+        # same name — that's the extraction backend emitting the
+        # declaration twice.
+        existing = self._symbols.get(name)
+        if (
+            existing is not None
+            and existing.python is not None
+            and python_location is not None
+            and existing.python.path == python_location.path
+        ):
+            self._diagnostics.append(Diagnostic(f"duplicate extracted symbol: {name}"))
+        # _symbols/_python_symbols keep last-wins semantics for the token
+        # fallback in symbol_at and _python_symbol_at — acceptable because
+        # those paths are best-effort, while symbols_for_file iterates the
+        # full list and so distinguishes per-source duplicates correctly.
         self._symbols[name] = symbol
         self._python_symbols.setdefault(python_name, symbol)
         if "." in python_name:
@@ -392,7 +437,7 @@ class RocqIndex:
     def _python_symbol_at(self, path: Path, line: int, character: int) -> Symbol | None:
         matches = [
             symbol
-            for symbol in self._symbols.values()
+            for symbol in self._symbols_list
             if symbol.python is not None
             and symbol.python.path == path
             and _contains(symbol.python.range, line, character)

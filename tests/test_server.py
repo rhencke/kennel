@@ -22,9 +22,6 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
     WebhookIngressOracle,
-    recover_reply_promises,
-    reply_to_comment,
-    reply_to_issue_comment,
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
@@ -1599,8 +1596,6 @@ class TestInvalidJson:
         assert exc_info.value.code == 400
 
 
-
-
 def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     body = json.dumps(payload).encode()
     sig = _sign(body, cfg.secret)
@@ -2521,9 +2516,7 @@ class TestProcessActionInner:
             "owner/repo", "issues", 500, "confused"
         )
 
-    def test_describe_action_handles_each_action_shape(
-        self, cfg: Config
-    ) -> None:
+    def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
         """Cover all branches of _describe_action."""
         handler = self._handler(cfg)
         thread = {
@@ -2554,9 +2547,7 @@ class TestProcessActionInner:
         )
         assert handler._describe_action(Action(prompt="x")) == "handling webhook action"
 
-    def test_signal_action_error_posts_confused_reaction(
-        self, cfg: Config
-    ) -> None:
+    def test_signal_action_error_posts_confused_reaction(self, cfg: Config) -> None:
         """_signal_action_error posts a 'confused' reaction on the
         triggering comment when one is present."""
         handler = self._handler(cfg)
@@ -2576,9 +2567,7 @@ class TestProcessActionInner:
             "owner/repo", "pulls", 99, "confused"
         )
 
-    def test_signal_action_error_swallows_reaction_failure(
-        self, cfg: Config
-    ) -> None:
+    def test_signal_action_error_swallows_reaction_failure(self, cfg: Config) -> None:
         """A failed add_reaction during _signal_action_error must not
         propagate — we don't want the error-signaling path to mask the
         original error or crash the handler."""

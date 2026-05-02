@@ -829,6 +829,12 @@ class ClaudeSession(OwnedSession):
         if kind == "worker":
             self._fsm_acquire_worker()
         else:
+            # preempt-always: a webhook entering while a worker holds the
+            # session fires the cancel before queueing on the FSM, so the
+            # worker's turn aborts and releases promptly rather than being
+            # waited out (#637).  Webhook-on-webhook still queues FIFO with
+            # no cancel.
+            provider.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
             self._fsm_acquire_handler()
         self._bump_entry_depth()
         if self._repo_name is not None:

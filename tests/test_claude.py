@@ -2034,7 +2034,7 @@ class TestClaudeSessionLock:
             with patch(
                 "fido.provider.try_preempt_worker", return_value=(False, "webhook")
             ):
-                with session.hold_for_handler(preempt_worker=True):
+                with session.hold_for_handler():
                     assert isinstance(session._fsm_state, OwnedByHandler)
         finally:
             provider.set_thread_kind(None)

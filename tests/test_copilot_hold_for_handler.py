@@ -85,7 +85,8 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Webhook caller + worker currently holding (per talker registry)
-    + ``preempt_worker=True`` → runtime cancel fires once."""
+    → runtime cancel fires once via preempt-always semantics in
+    ``__enter__`` (#637)."""
     session = _session(tmp_path)
     assert isinstance(session._runtime, FakeRuntime)
 
@@ -102,7 +103,7 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
     monkeypatch.setattr(provider, "get_talker", fake_talker)
     provider.set_thread_kind("webhook")
     try:
-        with session.hold_for_handler(preempt_worker=True):
+        with session.hold_for_handler():
             pass
     finally:
         provider.set_thread_kind(None)
