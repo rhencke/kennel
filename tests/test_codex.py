@@ -337,6 +337,41 @@ class TestCodexAppServerClient:
             )
         assert process.terminated
 
+    def test_pid_returns_process_pid(self) -> None:
+        process = _FakeProcess('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        assert client.pid == process.pid
+        client.stop()
+
+    def test_request_raises_provider_error_when_response_has_error(self) -> None:
+        process = _FakeProcess(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+            '{"id":2,"error":{"code":-32603,"message":"server is sad"}}\n'
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        with pytest.raises(Exception) as excinfo:
+            client.request("explode")
+        assert "server is sad" in str(excinfo.value)
+        client.stop()
+
+    def test_stop_kills_process_when_terminate_times_out(self) -> None:
+        class _Stubborn(_FakeProcess):
+            def wait(self, timeout: float | None = None) -> int:
+                if self._returncode is None:
+                    raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout or 0)
+                return self._returncode
+
+            def kill(self) -> None:
+                self._returncode = -9
+                self.terminated = True
+
+        process = _Stubborn(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client.stop()
+        assert process.terminated
+
 
 class TestCodexAPI:
     def test_maps_primary_secondary_and_reset_windows(self) -> None:
