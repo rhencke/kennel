@@ -370,6 +370,25 @@ class Prompts:
             f"{plain}"
         )
 
+    def task_stuck_no_commit_comment_prompt(self, task_title: str, attempt: int) -> str:
+        """Prompt for a Fido-voiced PR note when a task is blocked after N nudges."""
+        plain = (
+            f"After {attempt} attempts without producing any commits, I gave up "
+            "on this task and marked it blocked. The model kept responding with "
+            "prose instead of making file changes. A human comment on this PR "
+            "will unblock it so I can try again. "
+            f"Task: {task_title}"
+        )
+        return (
+            f"{self.persona}\n\n"
+            "Rewrite the following GitHub pull request comment in character as "
+            "Fido. Keep it to 2-3 sentences. Say you tried multiple times, "
+            "produced no code changes, and have marked the task blocked — "
+            "a comment on this PR will unblock it so you can try again. "
+            "Output only the comment text, no quotes, no explanation.\n\n"
+            f"{plain}"
+        )
+
     def status_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
         """Build the combined status-text + emoji prompt for a session nudge.
 

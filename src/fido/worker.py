@@ -863,6 +863,9 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 _FRESH_SESSION_NUDGE_ATTEMPT = 4
+# How many persistent nudge turns to allow for providers that cannot reset
+# (supports_no_commit_reset = False) before marking the task blocked.
+_PERSISTENT_NO_COMMIT_CAP = 6
 
 
 def _no_commit_nudge(  # pyright: ignore[reportUnusedFunction]
@@ -2962,6 +2965,42 @@ class Worker:
         body = f"{msg}\n\n<!-- fido:task-complete-no-commit -->"
         self.gh.comment_issue(repo, pr_number, body)
 
+    def _report_task_stuck_no_commits(
+        self,
+        fido_dir: Path,
+        repo: str,
+        pr_number: int,
+        task_id: str,
+        task_title: str,
+        attempt: int,
+    ) -> None:
+        """Mark task blocked and post a PR comment when persistent nudges fail.
+
+        Called when a non-resettable provider (supports_no_commit_reset = False)
+        exceeds _PERSISTENT_NO_COMMIT_CAP attempts without producing any commits.
+        Marks the task BLOCKED, clears current_task_id, and posts a comment so a
+        human knows the task is stuck.  unblock_tasks() transitions it back to
+        PENDING when a new PR comment arrives.
+        """
+        log.warning(
+            "task %s stuck after %d no-commit attempts — marking blocked",
+            task_id,
+            attempt,
+        )
+        self._tasks.update(task_id, TaskStatus.BLOCKED)
+        with State(fido_dir).modify() as state:
+            state.pop("current_task_id", None)
+        prompts = self._get_prompts()
+        prompt = prompts.task_stuck_no_commit_comment_prompt(task_title, attempt)
+        msg = self._provider_agent.generate_reply(
+            prompt, self._provider_agent.voice_model
+        )
+        if not msg:
+            raise ValueError("task stuck no-commit comment was empty")
+        body = f"{msg}\n\n<!-- fido:task-stuck-no-commit -->"
+        self.gh.comment_issue(repo, pr_number, body)
+        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -3143,6 +3182,22 @@ class Worker:
                 completed_without_commit = True
                 break
             attempt += 1
+            if (
+                not self._provider_agent.supports_no_commit_reset
+                and attempt > _PERSISTENT_NO_COMMIT_CAP
+            ):
+                self._report_task_stuck_no_commits(
+                    fido_dir,
+                    repo_ctx.repo,
+                    pr_number,
+                    task["id"],
+                    task_title,
+                    attempt,
+                )
+                self._delete_leaked_task_comments(
+                    repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+                )
+                return True
             use_fresh_session = (
                 self._provider_agent.supports_no_commit_reset
                 and attempt >= _FRESH_SESSION_NUDGE_ATTEMPT
