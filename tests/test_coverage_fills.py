@@ -717,6 +717,164 @@ class TestWorkerPureHelpers:
         assert snap.ci_run == 1
 
 
+# ---------------------------------------------------------------------------
+# store.py — small leaf branches
+# ---------------------------------------------------------------------------
+
+
+class TestStoreCompletedReturn:
+    def test_refresh_pr_comment_returns_completed_record_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """When the dedupe target row is already ``state='completed'``,
+        ``_refresh_pr_comment_record`` returns it unchanged rather than
+        updating (store.py:575)."""
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path / "store.db")
+        record = store.enqueue_pr_comment(
+            repo="o/r",
+            pr_number=1,
+            comment_id=10,
+            delivery_id="d-1",
+            author="alice",
+            is_bot=False,
+            body="initial",
+            payload_json="{}",
+            comment_type="issues",
+            github_created_at="2026-05-02T00:00:00Z",
+        )
+        with store._transaction() as conn:
+            conn.execute(
+                "UPDATE pr_comment_queue SET state = 'completed'"
+                " WHERE queue_id = ?",
+                (record.queue_id,),
+            )
+        # Re-enqueue with new delivery_id → routes through
+        # _refresh_pr_comment_record but takes the completed-state
+        # short-circuit.
+        record2 = store.enqueue_pr_comment(
+            repo="o/r",
+            pr_number=1,
+            comment_id=10,
+            delivery_id="d-2",
+            author="alice",
+            is_bot=False,
+            body="ignored",
+            payload_json="{}",
+            comment_type="issues",
+            github_created_at="2026-05-02T00:00:01Z",
+        )
+        assert record2.queue_id == record.queue_id
+        assert record2.body == "initial"
+
+
+# ---------------------------------------------------------------------------
+# rocq_lsp.py — small leaf branches
+# ---------------------------------------------------------------------------
+
+
+class TestRocqLspMoreBranches:
+    def test_symbol_at_token_fallback_for_models_dir(self, tmp_path: Path) -> None:
+        """When a token at (path, line, col) doesn't match any source
+        range but exists in the symbols dict, ``symbol_at`` falls back
+        to the dict lookup (rocq_lsp.py:222 — non-generated path)."""
+        from fido.rocq_lsp import RocqIndex
+
+        # Set up a fake repo with a models/foo.v file referencing
+        # ``transition`` and a stub pymap that registers transition.
+        models = tmp_path / "models"
+        models.mkdir()
+        (models / "session_lock.v").write_text("Definition transition := 1.\n")
+        generated = tmp_path / "src" / "fido" / "rocq"
+        generated.mkdir(parents=True)
+        (generated / "session_lock.py").write_text("def transition(): return 1\n")
+        (generated / "session_lock.pymap").write_text(
+            "stability,python_start_line,python_start_col,python_end_line,"
+            "python_end_col,source_file,source_start_line,source_start_col,"
+            "source_end_line,source_end_col,kind,symbol,python_symbol\n"
+            "open,1,0,1,17,session_lock.v,1,11,1,21,extraction,transition,transition\n"
+        )
+
+        index = RocqIndex(tmp_path)
+        index.refresh()
+        # Position outside the symbol's source.range (line 5) but the
+        # raw text at that line still contains the ``transition``
+        # token, triggering the dict fallback.
+        (models / "session_lock.v").write_text(
+            "Definition transition := 1.\n"
+            "(* something else *)\n"
+            "Definition unrelated := 0.\n"
+            "Definition transition_use := transition.\n"
+        )
+        symbol = index.symbol_at(models / "session_lock.v", 3, 30)
+        assert symbol is not None
+        assert symbol.name == "transition"
+        """``record_reply_delivery`` short-circuits when no promise ids
+        land in ``covered`` (store.py:349)."""
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path / "store.db")
+        # Empty / falsy promise ids dedup to nothing → early return.
+        store.record_reply_delivery(
+            artifact_comment_id=42,
+            comment_type="issue",
+            lane_key="key",
+            promise_ids=["", None],  # type: ignore[list-item]
+        )
+
+    def test_pr_comment_queue_in_progress_update_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A second enqueue with the same ``delivery_id`` while the row
+        is in_progress takes the UPDATE branch (store.py:575-578)."""
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path / "store.db")
+        record_initial = store.enqueue_pr_comment(
+            repo="o/r",
+            pr_number=1,
+            comment_id=10,
+            delivery_id="d-1",
+            author="alice",
+            is_bot=False,
+            body="initial",
+            payload_json="{}",
+            comment_type="issues",
+            github_created_at="2026-05-02T00:00:00Z",
+        )
+        assert record_initial.body == "initial"
+
+        # Mark the row in_progress to trigger the UPDATE branch on the
+        # next enqueue (otherwise the dedupe path hits the
+        # ``state == "completed"`` short-circuit).
+        with store._transaction() as conn:
+            conn.execute(
+                "UPDATE pr_comment_queue SET state = 'in_progress'"
+                " WHERE queue_id = ?",
+                (record_initial.queue_id,),
+            )
+
+        # Different delivery_id but same comment → routes through
+        # ``_refresh_pr_comment_record`` and (because state=in_progress)
+        # the UPDATE branch (store.py:577-594).
+        record_updated = store.enqueue_pr_comment(
+            repo="o/r",
+            pr_number=1,
+            comment_id=10,
+            delivery_id="d-2",
+            author="alice",
+            is_bot=False,
+            body="updated",
+            payload_json='{"v":2}',
+            comment_type="issues",
+            github_created_at="2026-05-02T00:00:01Z",
+        )
+        # Same queue id (FIFO position preserved) but body reflects UPDATE.
+        assert record_updated.queue_id == record_initial.queue_id
+        assert record_updated.body == "updated"
+
+
 class TestCopilotCLIOwner:
     def test_owner_returns_none_when_repo_name_is_unset(
         self, tmp_path: Path
