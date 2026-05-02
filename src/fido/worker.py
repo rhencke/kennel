@@ -2578,7 +2578,7 @@ class Worker:
         return True
 
     def _push_committed_work_before_yield(
-        self, task_title: str, head_before: str, slug: str
+        self, head_before: str, slug: str
     ) -> None:
         """Push any commits that landed during the turn before yielding.
 
@@ -2589,13 +2589,14 @@ class Worker:
         forget about the in-flight task and the local commit becomes a
         permanent orphan in the workspace clone (closes #1192).
 
-        Uses ``_commit_provider_leftovers_if_any`` first to absorb any
-        uncommitted worktree changes (so the wip-commit safety net still
-        runs on a preempt path), then ``ensure_pushed`` to send anything
-        new to ``origin``.  Both helpers are idempotent and safe to call
-        when nothing changed during the turn.
+        Pushes whatever the provider already committed during the turn.
+        Uncommitted worktree leftovers stay staged in the working tree —
+        the next worker turn picks them up or rolls them back deliberately
+        (closes #1244).  Auto-committing on the preempt path produced a
+        long tail of ``wip: ... (provider didn't commit)`` commits that
+        kept polluting branch history with .coverage binaries (#657 / #1244).
         """
-        head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
+        head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
         if head_after == head_before:
             return
         self.ensure_pushed("origin", slug)
@@ -2627,7 +2628,18 @@ class Worker:
             "provider's behalf: %s",
             task_title,
         )
-        self._git(["add", "-A"])
+        # Stage modified tracked files only (``git add -u``); never sweep
+        # untracked files like .coverage.<host>.<pid>.<rand>.<rand>, stray
+        # build artefacts, or editor scratch files into the wip commit
+        # (closes #657).
+        self._git(["add", "-u"])
+        # If staging produced nothing (only untracked files were dirty),
+        # don't create an empty commit — just return the unchanged HEAD.
+        diff_cached = self._git(
+            ["diff", "--cached", "--quiet"], check=False
+        )
+        if diff_cached.returncode == 0:
+            return head_after
         self._git(
             [
                 "commit",
@@ -3145,7 +3157,7 @@ class Worker:
                 "task provider turn preempted for %s — yielding to worker loop",
                 repo_ctx.repo,
             )
-            self._push_committed_work_before_yield(task_title, head_before, slug)
+            self._push_committed_work_before_yield(head_before, slug)
             self._tasks.update(task["id"], TaskStatus.PENDING)
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
@@ -3276,7 +3288,7 @@ class Worker:
                     "task provider resume preempted for %s — yielding to worker loop",
                     repo_ctx.repo,
                 )
-                self._push_committed_work_before_yield(task_title, head_before, slug)
+                self._push_committed_work_before_yield(head_before, slug)
                 self._tasks.update(task["id"], TaskStatus.PENDING)
                 with State(fido_dir).modify() as state:
                     state.pop("current_task_id", None)
