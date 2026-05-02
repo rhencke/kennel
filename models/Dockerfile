@@ -189,7 +189,14 @@ FROM rocq-plugin-source AS test-extract
 
 COPY --chown=opam:opam rocq-python-extraction/test rocq-python-extraction/test
 
-RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
+# Clobber any cached .vo / extraction artifacts so a fresh plugin
+# build (any change to ``rocq-python-extraction/python.ml`` /
+# ``g_python_extraction.mlg``) re-extracts the test fixtures.  Without
+# this, ``dune build test/python.vo`` happily reuses the previous
+# cycle's outputs even when the plugin's behaviour has changed,
+# silently masking backend regressions.
+RUN rm -rf /workspace/_build/default/rocq-python-extraction \
+    && opam exec -- dune build rocq-python-extraction/test/python.vo \
     && mkdir -p /tmp/pytest-artifacts /tmp/pyright-artifacts \
     && while IFS= read -r name; do \
         cp "/workspace/_build/default/$name" "/tmp/pytest-artifacts/$name"; \
