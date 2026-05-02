@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from fido.types import ActiveIssue, ActivePR, ClosedPR
+from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
 
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
@@ -51,11 +51,21 @@ READ_ONLY_CLAUSE = TRIAGE_CLAUSE
 # ── Active-work context renderer ─────────────────────────────────────────────
 
 
+def _task_snapshot_from_dict(t: dict[str, Any]) -> TaskSnapshot:
+    """Convert a raw task dict (from tasks.json) to a :class:`~fido.types.TaskSnapshot`."""
+    return TaskSnapshot(
+        title=t.get("title", ""),
+        type=t.get("type", "spec"),
+        status=t.get("status", "pending"),
+        description=t.get("description", ""),
+    )
+
+
 def render_active_context(
     issue: ActiveIssue,
     pr: ActivePR | None,
-    tasks: list[dict[str, Any]],
-    current_task: dict[str, Any] | None,
+    tasks: list[TaskSnapshot],
+    current_task: TaskSnapshot | None,
     prior_attempts: list[ClosedPR],
 ) -> str:
     """Render active-work context blocks for injection into any LLM system prompt.
@@ -112,18 +122,15 @@ def render_active_context(
 
     if tasks:
         task_lines = [
-            f"- {_STATUS_MARKER.get(t.get('status', 'pending'), '[ ]')} "
-            f"[{t.get('type', 'spec')}] {t.get('title', '')}"
+            f"- {_STATUS_MARKER.get(t.status, '[ ]')} [{t.type}] {t.title}"
             for t in tasks
         ]
         parts.append("## Tasks\n\n" + "\n".join(task_lines))
 
     if current_task is not None:
-        task_title = current_task.get("title", "")
-        task_desc = current_task.get("description", "")
-        now_text = f"## Right now\n\n{task_title}"
-        if task_desc:
-            now_text += f"\n\n{task_desc}"
+        now_text = f"## Right now\n\n{current_task.title}"
+        if current_task.description:
+            now_text += f"\n\n{current_task.description}"
         parts.append(now_text)
 
     return "\n\n".join(parts)
@@ -688,7 +695,7 @@ class Prompts:
                 render_active_context(
                     issue=issue,
                     pr=pr,
-                    tasks=task_list,
+                    tasks=[_task_snapshot_from_dict(t) for t in task_list],
                     current_task=None,
                     prior_attempts=prior_attempts or [],
                 )

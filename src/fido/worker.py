@@ -49,6 +49,7 @@ from fido.types import (
     ActivePR,
     ClosedPR,
     GitIdentity,
+    TaskSnapshot,
     TaskStatus,
     TaskType,
 )
@@ -3046,8 +3047,21 @@ class Worker:
                 url=pr_url,
                 body=pr_body,
             ),
-            tasks=task_list,
-            current_task=task,
+            tasks=[
+                TaskSnapshot(
+                    title=t.get("title", ""),
+                    type=t.get("type", "spec"),
+                    status=t.get("status", "pending"),
+                    description=t.get("description", ""),
+                )
+                for t in task_list
+            ],
+            current_task=TaskSnapshot(
+                title=task.get("title", ""),
+                type=task.get("type", "spec"),
+                status=task.get("status", "pending"),
+                description=task.get("description", ""),
+            ),
             prior_attempts=prior_attempts,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)

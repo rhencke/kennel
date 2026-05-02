@@ -55,6 +55,21 @@ class ClosedPR:
 
 
 @dataclass(frozen=True)
+class TaskSnapshot:
+    """Projection of a task dict for LLM context rendering.
+
+    Captures only the fields needed by :func:`~fido.prompts.render_active_context`
+    so the renderer does not depend on the full task dict shape from
+    ``tasks.json``.
+    """
+
+    title: str
+    type: str
+    status: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class GitIdentity:
     """GitHub-derived git commit identity.
 

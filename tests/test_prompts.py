@@ -11,7 +11,7 @@ from fido.prompts import (
     triage_categories,
     triage_context_block,
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR
+from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
 
 # ── triage_categories ─────────────────────────────────────────────────────────
 
@@ -1029,13 +1029,13 @@ class TestRenderActiveContext:
         status: str = "pending",
         task_type: str = "spec",
         description: str = "",
-    ) -> dict:
-        return {
-            "title": title,
-            "status": status,
-            "type": task_type,
-            "description": description,
-        }
+    ) -> TaskSnapshot:
+        return TaskSnapshot(
+            title=title,
+            status=status,
+            type=task_type,
+            description=description,
+        )
 
     def _closed_pr(
         self,
