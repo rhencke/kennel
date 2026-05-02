@@ -25,7 +25,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.types import TaskStatus, TaskType
+from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
 
@@ -836,6 +836,9 @@ def reorder_tasks(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    issue: ActiveIssue | None = None,
+    pr: ActivePR | None = None,
+    prior_attempts: list[ClosedPR] | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[str], None] | None = None,
     _on_done: Callable[[], None] | None = None,
@@ -877,7 +880,13 @@ def reorder_tasks(
         prompts = Prompts("")
 
     original_ids = frozenset(t["id"] for t in task_list)
-    prompt = prompts.rescope_prompt(task_list, commit_summary)
+    prompt = prompts.rescope_prompt(
+        task_list,
+        commit_summary,
+        issue=issue,
+        pr=pr,
+        prior_attempts=prior_attempts,
+    )
     raw = agent.run_turn(prompt, model=agent.voice_model)
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")

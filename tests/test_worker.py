@@ -4488,6 +4488,7 @@ class TestFindOrCreatePr:
         # an empty list so the fresh-retry path doesn't try to post a
         # retry-acknowledgement comment on every test.
         gh.find_closed_unmerged_prs_for_issue.return_value = []
+        gh.find_closed_prs_as_context.return_value = []
         return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
     def _make_repo_ctx(
@@ -5019,11 +5020,15 @@ class TestFindOrCreatePr:
     def test_no_pr_posts_retry_ack_when_closed_prs_exist(self, tmp_path: Path) -> None:
         """Fresh-retry path must post the retry-ack comment when prior
         closed-not-merged PRs exist for the issue (fix #802)."""
+        from fido.types import ClosedPR
+
         mock_client = _client()
         mock_client.generate_branch_name.return_value = "redo"
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
-        gh.find_closed_unmerged_prs_for_issue.return_value = [215]
+        gh.find_closed_prs_as_context.return_value = [
+            ClosedPR(number=215, title="Old attempt", body="", close_reason="")
+        ]
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/300"
         fido_dir = self._fido_dir(tmp_path)
         mock_retry = MagicMock()
@@ -5042,6 +5047,153 @@ class TestFindOrCreatePr:
         mock_retry.assert_called_once_with(
             "owner/proj", 206, "Migrate", "fido-bot", [215]
         )
+
+    def test_open_pr_setup_context_includes_issue_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(
+                fido_dir,
+                self._make_repo_ctx(),
+                5,
+                "Do the thing",
+                issue_body="Important requirement here.",
+            )
+        _, _, context = mock_build.call_args.args
+        assert "Important requirement here." in context
+        assert "#5: Do the thing" in context
+
+    def test_open_pr_setup_context_includes_pr_info(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = "PR description body"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
+        _, _, context = mock_build.call_args.args
+        assert "PR #20" in context
+        assert "https://github.com/owner/proj/pull/20" in context
+        assert "PR description body" in context
+
+    def test_no_pr_setup_context_includes_issue_body(self, tmp_path: Path) -> None:
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(
+                fido_dir,
+                self._make_repo_ctx(),
+                7,
+                "Fix the bug",
+                issue_body="Steps to reproduce here.",
+            )
+        _, _, context = mock_build.call_args.args
+        assert "Steps to reproduce here." in context
+        assert "#7: Fix the bug" in context
+
+    def test_no_pr_setup_context_excludes_pr_section(self, tmp_path: Path) -> None:
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Active PR" not in context
+
+    def test_no_pr_setup_context_includes_prior_attempts(self, tmp_path: Path) -> None:
+        """Prior closed PRs appear in the setup context for the fresh-PR path."""
+        from fido.types import ClosedPR
+
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "redo"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.find_closed_prs_as_context.return_value = [
+            ClosedPR(
+                number=99,
+                title="Prior attempt",
+                body="Old description.",
+                close_reason="",
+            )
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Prior attempts" in context
+        assert "PR #99" in context
+        assert "Prior attempt" in context
+
+    def test_open_pr_setup_context_includes_prior_attempts(
+        self, tmp_path: Path
+    ) -> None:
+        """Prior closed PRs appear in the setup context when an open PR has no tasks."""
+        from fido.types import ClosedPR
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        gh.find_closed_prs_as_context.return_value = [
+            ClosedPR(number=88, title="First attempt", body="", close_reason="")
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Prior attempts" in context
+        assert "PR #88" in context
+        assert "First attempt" in context
 
 
 class TestResetLocalWorkspaceAndRetryAck:
@@ -8961,6 +9113,7 @@ class TestExecuteTask:
 
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
         return Worker(tmp_path, gh), gh
 
     def _repo_ctx(self) -> RepoContext:
@@ -10350,6 +10503,123 @@ class TestExecuteTask:
 
         gh.resolve_thread.assert_called_once_with("thread-node-xyz")
 
+    def test_execute_task_context_includes_issue_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh.view_issue.return_value = {
+            "title": "Fix the bug",
+            "body": "Repro steps here.",
+            "state": "OPEN",
+        }
+        gh.get_pr.return_value = {"title": "Fix the bug (closes #7)", "body": ""}
+        task = self._pending_task("Write a test")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "Repro steps here." in context
+        assert "#7: Fix the bug" in context
+
+    def test_execute_task_context_includes_pr_info(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        gh.get_pr.return_value = {
+            "title": "My PR title",
+            "body": "PR description text",
+        }
+        task = self._pending_task("Write a test")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "PR #42" in context
+        assert "https://github.com/owner/repo/pull/42" in context
+        assert "PR description text" in context
+
+    def test_execute_task_context_includes_current_task(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        gh.get_pr.return_value = {"title": "", "body": ""}
+        task = {
+            "id": "t1",
+            "title": "Implement the feature",
+            "status": "pending",
+            "type": "spec",
+            "description": "Details about the feature.",
+        }
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "Implement the feature" in context
+        assert "Details about the feature." in context
+
+    def test_execute_task_context_includes_prior_attempts(self, tmp_path: Path) -> None:
+        """Prior closed PRs appear in the task-execution context when issue is set."""
+        from fido.types import ClosedPR
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh.view_issue.return_value = {
+            "title": "Fix the bug",
+            "body": "",
+            "state": "OPEN",
+        }
+        gh.get_pr.return_value = {"title": "", "body": ""}
+        gh.find_closed_prs_as_context.return_value = [
+            ClosedPR(
+                number=77, title="Previous fix", body="Attempted fix.", close_reason=""
+            )
+        ]
+        task = self._pending_task("Write a test")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "## Prior attempts" in context
+        assert "PR #77" in context
+        assert "Previous fix" in context
+
 
 class TestYieldForUntriaged:
     """Tests for Worker._yield_for_untriaged and its two call sites in
@@ -10359,6 +10629,7 @@ class TestYieldForUntriaged:
         self, tmp_path: Path
     ) -> tuple[Worker, MagicMock, MagicMock]:
         gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
         worker = Worker(

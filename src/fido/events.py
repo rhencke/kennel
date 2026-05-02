@@ -35,7 +35,7 @@ from fido.store import (
     append_reply_promise_markers,
 )
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
-from fido.types import TaskType
+from fido.types import ActiveIssue, ActivePR, TaskType
 
 log = logging.getLogger(__name__)
 
@@ -1625,6 +1625,10 @@ def reply_to_comment(
         category, comment, ", ".join(titles), context, issue_url=issue_url
     )
 
+    issue_ctx, pr_ctx = _load_active_context_for_rescope(
+        repo_cfg.work_dir, repo_cfg.name, gh
+    )
+
     log.info(
         "reply generator: requesting %s reply for PR #%s comment %s",
         category,
@@ -1635,7 +1639,7 @@ def reply_to_comment(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(),
+        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
         log_prefix="reply_to_comment",
     )
     log.info(
@@ -2102,12 +2106,16 @@ def reply_to_issue_comment(
         category, comment, ", ".join(titles), action.context, issue_url=issue_url
     )
 
+    issue_ctx, pr_ctx = _load_active_context_for_rescope(
+        repo_cfg.work_dir, repo_cfg.name, gh
+    )
+
     log.info("generating %s reply for issue comment on PR #%s", category, number)
     body = safe_voice_turn(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(),
+        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
         log_prefix="reply_to_issue_comment",
     )
     log.info(
@@ -2429,6 +2437,45 @@ def _rewrite_pr_description(
     )
 
 
+def _load_active_context_for_rescope(
+    work_dir: Path,
+    repo_name: str,
+    gh: Any,
+) -> tuple[ActiveIssue | None, ActivePR | None]:
+    """Read issue/PR snapshots from state and GitHub for the rescope prompt.
+
+    Returns ``(ActiveIssue, ActivePR)`` when both are resolvable, or
+    ``(ActiveIssue, None)`` / ``(None, None)`` on partial / missing data.
+    Silently returns ``(None, None)`` when state does not yet record an issue
+    (e.g. rescope fired before the worker set state.json).
+    """
+    fido_dir = work_dir / ".git" / "fido"
+    state_path = fido_dir / "state.json"
+    if not state_path.exists():
+        return None, None
+    state_data = State(fido_dir).load()
+    issue_number = state_data.get("issue")
+    pr_number = state_data.get("pr_number")
+    if not isinstance(issue_number, int):
+        return None, None
+    issue_data = gh.view_issue(repo_name, issue_number)
+    issue_ctx = ActiveIssue(
+        number=issue_number,
+        title=issue_data.get("title", ""),
+        body=issue_data.get("body", ""),
+    )
+    if not isinstance(pr_number, int):
+        return issue_ctx, None
+    pr_data = gh.get_pr(repo_name, pr_number)
+    pr_ctx = ActivePR(
+        number=pr_number,
+        title=pr_data.get("title", "") or "",
+        url=f"https://github.com/{repo_name}/pull/{pr_number}",
+        body=pr_data.get("body", "") or "",
+    )
+    return issue_ctx, pr_ctx
+
+
 def _make_reorder_kwargs(
     work_dir: Path,
     config: Config,
@@ -2477,6 +2524,14 @@ def _make_reorder_kwargs(
             registry.abort_task(repo_cfg.name, task_id=task_id)
 
         kwargs["_on_inprogress_affected"] = on_inprogress_affected
+    if repo_cfg is not None:
+        issue_ctx, pr_ctx = _load_active_context_for_rescope(
+            work_dir, repo_cfg.name, gh
+        )
+        if issue_ctx is not None:
+            kwargs["issue"] = issue_ctx
+        if pr_ctx is not None:
+            kwargs["pr"] = pr_ctx
     return kwargs
 
 

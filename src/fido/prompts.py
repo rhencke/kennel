@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
+
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
 # Every prompt that runs through ``session.prompt()`` must include one of the
@@ -44,6 +46,94 @@ TRIAGE_CLAUSE = (
 
 # Backward-compatible alias for call sites that predate the split.
 READ_ONLY_CLAUSE = TRIAGE_CLAUSE
+
+
+# ── Active-work context renderer ─────────────────────────────────────────────
+
+
+def _task_snapshot_from_dict(t: dict[str, Any]) -> TaskSnapshot:
+    """Convert a raw task dict (from tasks.json) to a :class:`~fido.types.TaskSnapshot`."""
+    return TaskSnapshot(
+        title=t.get("title", ""),
+        type=t.get("type", "spec"),
+        status=t.get("status", "pending"),
+        description=t.get("description", ""),
+    )
+
+
+def render_active_context(
+    issue: ActiveIssue,
+    pr: ActivePR | None,
+    tasks: list[TaskSnapshot],
+    current_task: TaskSnapshot | None,
+    prior_attempts: list[ClosedPR],
+) -> str:
+    """Render active-work context blocks for injection into any LLM system prompt.
+
+    Produces up to five markdown sections in this order:
+
+    1. ``## Active issue``  — stable; issue number, title, and body
+    2. ``## Active PR``     — stable; PR number, title, URL, and body
+    3. ``## Prior attempts``— stable; closed PRs that referenced this issue
+    4. ``## Tasks``         — dynamic; full task list with status and type markers
+    5. ``## Right now``     — dynamic; current task title and description
+
+    Sections 1–3 form the **stable prefix**: their content is byte-identical
+    across every prompt rebuild during a session, which keeps them warm in
+    provider prompt caches.  Sections 4–5 are the **dynamic suffix** that
+    changes when tasks are added, completed, or switched.
+
+    Any section whose data is absent is omitted entirely so the output stays
+    compact and does not confuse the agent with empty headers.
+    """
+    _STATUS_MARKER = {
+        "completed": "[x]",
+        "in_progress": "[~]",
+        "pending": "[ ]",
+        "blocked": "[!]",
+    }
+    parts: list[str] = []
+
+    # ── stable prefix ────────────────────────────────────────────────────────
+
+    issue_text = f"## Active issue\n\n#{issue.number}: {issue.title}"
+    if issue.body:
+        issue_text += f"\n\n{issue.body}"
+    parts.append(issue_text)
+
+    if pr is not None:
+        pr_text = f"## Active PR\n\nPR #{pr.number}: {pr.title}\n{pr.url}"
+        if pr.body:
+            pr_text += f"\n\n{pr.body}"
+        parts.append(pr_text)
+
+    if prior_attempts:
+        attempt_blocks: list[str] = []
+        for attempt in prior_attempts:
+            entry = f"### PR #{attempt.number}: {attempt.title}"
+            if attempt.close_reason:
+                entry += f"\n\nClose reason: {attempt.close_reason}"
+            if attempt.body:
+                entry += f"\n\n{attempt.body}"
+            attempt_blocks.append(entry)
+        parts.append("## Prior attempts\n\n" + "\n\n".join(attempt_blocks))
+
+    # ── dynamic suffix ────────────────────────────────────────────────────────
+
+    if tasks:
+        task_lines = [
+            f"- {_STATUS_MARKER.get(t.status, '[ ]')} [{t.type}] {t.title}"
+            for t in tasks
+        ]
+        parts.append("## Tasks\n\n" + "\n".join(task_lines))
+
+    if current_task is not None:
+        now_text = f"## Right now\n\n{current_task.title}"
+        if current_task.description:
+            now_text += f"\n\n{current_task.description}"
+        parts.append(now_text)
+
+    return "\n\n".join(parts)
 
 
 # ── Triage ────────────────────────────────────────────────────────────────────
@@ -167,7 +257,11 @@ class Prompts:
     def __init__(self, persona: str) -> None:
         self.persona = persona
 
-    def reply_system_prompt(self) -> str:
+    def reply_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
         """Return the system prompt for reply generation.
 
         Instils the Fido persona, strictly forbids preamble framing, and
@@ -176,9 +270,17 @@ class Prompts:
         launch Bash/Read/Edit calls to actually make the change — turning a
         ~5s reply into a multi-minute session turn that holds the lock and
         starves the worker.
+
+        When *issue* is provided, the rendered active-work context (issue, PR,
+        and tasks) is prepended so the reply model anchors on the same ground
+        truth as the task worker.
         """
+        active = ""
+        if issue is not None:
+            active = render_active_context(issue, pr, [], None, []) + "\n\n"
         return (
             f"{self.persona}\n\n"
+            f"{active}"
             "You are responding to a GitHub PR comment.  Reply composition "
             "is a TEXT-ONLY task: do NOT invoke any tools.  No Bash, no Read, "
             "no Edit, no Write, no Grep, no Glob, no Task sub-agents, no "
@@ -542,11 +644,19 @@ class Prompts:
         self,
         task_list: list[dict[str, Any]],
         commit_summary: str,
+        *,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+        prior_attempts: list[ClosedPR] | None = None,
     ) -> str:
         """Build an Opus prompt for dependency-aware task reordering.
 
         Presents the full task list and a summary of commits already made, then
         asks Opus to return a JSON array of the reordered pending tasks.
+
+        When *issue* is provided, the rendered active-context block (issue,
+        optional PR, prior attempts, task list) is prepended to the prompt so
+        Opus has full context about what is being worked on.
 
         Rules enforced in the prompt:
         - CI tasks (type "ci") must remain first.
@@ -579,8 +689,22 @@ class Prompts:
             else "(none)"
         )
 
+        active_ctx_prefix = ""
+        if issue is not None:
+            active_ctx_prefix = (
+                render_active_context(
+                    issue=issue,
+                    pr=pr,
+                    tasks=[_task_snapshot_from_dict(t) for t in task_list],
+                    current_task=None,
+                    prior_attempts=prior_attempts or [],
+                )
+                + "\n\n"
+            )
+
         return (
             f"{TRIAGE_CLAUSE}\n\n"
+            f"{active_ctx_prefix}"
             "You are reviewing the pending work queue for a pull request in progress.\n\n"
             "Already completed tasks:\n"
             f"{completed_block}\n\n"

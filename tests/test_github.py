@@ -1065,6 +1065,70 @@ class TestGitHubClass:
         }
         assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
 
+    # --- find_closed_prs_as_context ---
+
+    def test_find_closed_prs_as_context_returns_empty_when_no_closed_prs(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_timeline([])
+        result = gh.find_closed_prs_as_context("o/r", 206, "fido")
+        assert result == []
+        mock_s.get.assert_not_called()
+
+    def test_find_closed_prs_as_context_returns_closed_pr_with_title_and_body(
+        self,
+    ) -> None:
+        from fido.types import ClosedPR
+
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "fido", "closes #206", merged=False)
+        pr["title"] = "Fix the crash"
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"title": "Fix the crash", "body": "PR body text."}
+        mock_s.get.return_value = pr_resp
+        result = gh.find_closed_prs_as_context("o/r", 206, "fido")
+        assert len(result) == 1
+        assert result[0] == ClosedPR(
+            number=215,
+            title="Fix the crash",
+            body="PR body text.",
+            close_reason="",
+        )
+
+    def test_find_closed_prs_as_context_fetches_rest_pr_for_each_number(self) -> None:
+        gh, mock_s = self._gh()
+        pr1 = self._gql_pr_full(210, "CLOSED", "fido", "closes #206")
+        pr2 = self._gql_pr_full(215, "CLOSED", "fido", "closes #206")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr1), self._cross_ref_node(pr2)]
+        )
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"title": "t", "body": ""}
+        mock_s.get.return_value = pr_resp
+        result = gh.find_closed_prs_as_context("o/r", 206, "fido")
+        assert len(result) == 2
+        assert result[0].number == 210
+        assert result[1].number == 215
+        assert mock_s.get.call_count == 2
+
+    def test_find_closed_prs_as_context_handles_none_body(self) -> None:
+        from fido.types import ClosedPR
+
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(215, "CLOSED", "fido", "closes #206")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"title": "Old attempt", "body": None}
+        mock_s.get.return_value = pr_resp
+        result = gh.find_closed_prs_as_context("o/r", 206, "fido")
+        assert result == [
+            ClosedPR(number=215, title="Old attempt", body="", close_reason="")
+        ]
+
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

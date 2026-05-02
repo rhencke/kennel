@@ -11,7 +11,7 @@ from typing import Any
 
 import requests as _requests
 
-from fido.types import GitIdentity
+from fido.types import ClosedPR, GitIdentity
 
 log = logging.getLogger(__name__)
 
@@ -545,6 +545,32 @@ class GitHub:
             if pr.get("state") == "CLOSED" and not pr.get("merged"):
                 closed_unmerged.append(pr_num)
         return closed_unmerged
+
+    def find_closed_prs_as_context(
+        self, repo: str, issue_number: int | str, user: str
+    ) -> list[ClosedPR]:
+        """Return :class:`~fido.types.ClosedPR` snapshots for closed-not-merged
+        PRs linked to *issue_number* by *user*, oldest first.
+
+        Delegates the timeline scan to
+        :meth:`find_closed_unmerged_prs_for_issue` to get PR numbers, then
+        fetches title and body for each via the REST API.  Used to populate
+        the ``prior_attempts`` block in the active-work context so the agent
+        can learn from earlier failed attempts.
+        """
+        pr_numbers = self.find_closed_unmerged_prs_for_issue(repo, issue_number, user)
+        result: list[ClosedPR] = []
+        for pr_num in pr_numbers:
+            data = self._get(f"/repos/{repo}/pulls/{pr_num}")
+            result.append(
+                ClosedPR(
+                    number=int(pr_num),
+                    title=data.get("title") or "",
+                    body=data.get("body") or "",
+                    close_reason="",
+                )
+            )
+        return result
 
     def comment_issue(self, repo: str, number: int | str, body: str) -> dict[str, Any]:
         """Post a comment on an issue."""

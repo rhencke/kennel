@@ -6,10 +6,12 @@ from fido.prompts import (
     NO_TOOLS_CLAUSE,
     TRIAGE_CLAUSE,
     Prompts,
+    render_active_context,
     reply_context_block,
     triage_categories,
     triage_context_block,
 )
+from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
 
 # ── triage_categories ─────────────────────────────────────────────────────────
 
@@ -185,7 +187,7 @@ class TestTriagePrompt:
     def test_includes_bot_categories(self) -> None:
         result = Prompts("").triage_prompt("suggestion", is_bot=True)
         assert "DO" in result
-        assert "DEFER" in result
+        assert "DUMP" in result
 
     def test_includes_context(self) -> None:
         result = Prompts("").triage_prompt(
@@ -491,6 +493,34 @@ class TestPromptsReplySystemPrompt:
         result = Prompts("persona").reply_system_prompt()
         assert "meta-commentary" in result or "Here's the reply" in result
 
+    def test_active_context_included_when_issue_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("persona").reply_system_prompt(issue=issue)
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+        assert "It crashes." in result
+
+    def test_no_active_context_when_issue_is_none(self) -> None:
+        result = Prompts("persona").reply_system_prompt()
+        assert "## Active issue" not in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        pr = ActivePR(
+            number=42,
+            title="Fix crash PR",
+            url="https://github.com/a/b/pull/42",
+            body="",
+        )
+        result = Prompts("persona").reply_system_prompt(issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "Fix crash PR" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        result = Prompts("persona").reply_system_prompt(issue=issue, pr=None)
+        assert "## Active PR" not in result
+
 
 class TestPromptsPersonaWrap:
     def test_includes_persona(self) -> None:
@@ -770,6 +800,39 @@ class TestRescopePrompt:
         assert isinstance(result, str)
         assert "(none)" in result  # both completed and commit summary
 
+    def test_active_context_prefix_included_when_issue_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=42, title="Fix crash", body="It crashes on startup.")
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue)
+        assert "## Active issue" in result
+        assert "#42: Fix crash" in result
+        assert "It crashes on startup." in result
+
+    def test_no_active_context_prefix_when_issue_is_none(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "", issue=None)
+        assert "## Active issue" not in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=1, title="T", body="")
+        pr = ActivePR(
+            number=7,
+            title="Fix T (closes #1)",
+            url="https://github.com/o/r/pull/7",
+            body="",
+        )
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "PR #7" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=1, title="T", body="")
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=None)
+        assert "## Active issue" in result
+        assert "## Active PR" not in result
+
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
 
@@ -935,3 +998,348 @@ class TestRewriteDescriptionPrompt:
         result = Prompts("").rewrite_description_prompt(self._body(), [])
         assert isinstance(result, str)
         assert "(none)" in result
+
+
+# ── render_active_context ─────────────────────────────────────────────────────
+
+
+class TestRenderActiveContext:
+    """Tests for the render_active_context() module-level renderer."""
+
+    def _issue(
+        self,
+        number: int = 42,
+        title: str = "Fix the parser",
+        body: str = "It crashes on empty input.",
+    ) -> ActiveIssue:
+        return ActiveIssue(number=number, title=title, body=body)
+
+    def _pr(
+        self,
+        number: int = 10,
+        title: str = "Fix parser crash",
+        url: str = "https://github.com/owner/repo/pull/10",
+        body: str = "Implements the fix.",
+    ) -> ActivePR:
+        return ActivePR(number=number, title=title, url=url, body=body)
+
+    def _task(
+        self,
+        title: str = "Add tests",
+        status: str = "pending",
+        task_type: str = "spec",
+        description: str = "",
+    ) -> TaskSnapshot:
+        return TaskSnapshot(
+            title=title,
+            status=status,
+            type=task_type,
+            description=description,
+        )
+
+    def _closed_pr(
+        self,
+        number: int = 5,
+        title: str = "Prior attempt",
+        body: str = "Old description.",
+        close_reason: str = "scope creep",
+    ) -> ClosedPR:
+        return ClosedPR(
+            number=number, title=title, body=body, close_reason=close_reason
+        )
+
+    # ── Active issue block ────────────────────────────────────────────────────
+
+    def test_active_issue_number_and_title(self) -> None:
+        result = render_active_context(self._issue(42, "Fix crash"), None, [], None, [])
+        assert "## Active issue" in result
+        assert "#42: Fix crash" in result
+
+    def test_active_issue_body_included(self) -> None:
+        result = render_active_context(
+            self._issue(body="It panics on nil."), None, [], None, []
+        )
+        assert "It panics on nil." in result
+
+    def test_active_issue_empty_body_omitted(self) -> None:
+        result = render_active_context(
+            ActiveIssue(number=1, title="T", body=""), None, [], None, []
+        )
+        # Header still present, but no blank-line separator before missing body
+        assert "## Active issue" in result
+        lines = result.split("\n")
+        assert not any(
+            line.strip() == "" and i > 0 and lines[i - 1] == ""
+            for i, line in enumerate(lines)
+            if i > 0
+        )
+
+    # ── Active PR block ───────────────────────────────────────────────────────
+
+    def test_active_pr_number_and_title(self) -> None:
+        result = render_active_context(
+            self._issue(), self._pr(10, "Fix crash"), [], None, []
+        )
+        assert "## Active PR" in result
+        assert "PR #10: Fix crash" in result
+
+    def test_active_pr_url_included(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            self._pr(url="https://github.com/x/y/pull/10"),
+            [],
+            None,
+            [],
+        )
+        assert "https://github.com/x/y/pull/10" in result
+
+    def test_active_pr_body_included(self) -> None:
+        result = render_active_context(
+            self._issue(), self._pr(body="Adds the cache layer."), [], None, []
+        )
+        assert "Adds the cache layer." in result
+
+    def test_active_pr_empty_body_omitted(self) -> None:
+        pr = ActivePR(number=1, title="T", url="https://example.com", body="")
+        result = render_active_context(self._issue(), pr, [], None, [])
+        # URL still there; no spurious blank body
+        assert "https://example.com" in result
+
+    def test_active_pr_absent_when_none(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert "## Active PR" not in result
+
+    # ── Prior attempts block ──────────────────────────────────────────────────
+
+    def test_prior_attempts_header_present(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], None, [self._closed_pr()]
+        )
+        assert "## Prior attempts" in result
+
+    def test_prior_attempt_number_and_title(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], None, [self._closed_pr(5, "Old attempt")]
+        )
+        assert "### PR #5: Old attempt" in result
+
+    def test_prior_attempt_close_reason(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [self._closed_pr(close_reason="out of scope")],
+        )
+        assert "Close reason: out of scope" in result
+
+    def test_prior_attempt_body_included(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], None, [self._closed_pr(body="Had a bug.")]
+        )
+        assert "Had a bug." in result
+
+    def test_prior_attempts_absent_when_empty(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert "## Prior attempts" not in result
+
+    def test_multiple_prior_attempts(self) -> None:
+        attempts = [
+            self._closed_pr(1, "First try"),
+            self._closed_pr(2, "Second try"),
+        ]
+        result = render_active_context(self._issue(), None, [], None, attempts)
+        assert "### PR #1: First try" in result
+        assert "### PR #2: Second try" in result
+
+    def test_prior_attempt_empty_close_reason_omitted(self) -> None:
+        pr = ClosedPR(number=3, title="Old", body="body", close_reason="")
+        result = render_active_context(self._issue(), None, [], None, [pr])
+        assert "Close reason:" not in result
+
+    # ── Tasks block ───────────────────────────────────────────────────────────
+
+    def test_tasks_header_present(self) -> None:
+        result = render_active_context(self._issue(), None, [self._task()], None, [])
+        assert "## Tasks" in result
+
+    def test_task_title_included(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task("Add caching")], None, []
+        )
+        assert "Add caching" in result
+
+    def test_pending_task_marker(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task(status="pending")], None, []
+        )
+        assert "[ ]" in result
+
+    def test_completed_task_marker(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task(status="completed")], None, []
+        )
+        assert "[x]" in result
+
+    def test_in_progress_task_marker(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task(status="in_progress")], None, []
+        )
+        assert "[~]" in result
+
+    def test_blocked_task_marker(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task(status="blocked")], None, []
+        )
+        assert "[!]" in result
+
+    def test_task_type_included(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [self._task(task_type="ci")], None, []
+        )
+        assert "[ci]" in result
+
+    def test_tasks_absent_when_empty(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert "## Tasks" not in result
+
+    def test_multiple_tasks_all_present(self) -> None:
+        tasks = [
+            self._task("Add tests", status="completed", task_type="spec"),
+            self._task("Fix lint", status="in_progress", task_type="ci"),
+            self._task("Update docs", status="pending", task_type="spec"),
+        ]
+        result = render_active_context(self._issue(), None, tasks, None, [])
+        assert "Add tests" in result
+        assert "Fix lint" in result
+        assert "Update docs" in result
+
+    # ── Right now block ───────────────────────────────────────────────────────
+
+    def test_right_now_header_present(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], self._task("Write the test"), []
+        )
+        assert "## Right now" in result
+
+    def test_right_now_title_included(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], self._task("Write the test"), []
+        )
+        assert "Write the test" in result
+
+    def test_right_now_description_included(self) -> None:
+        task = self._task(description="Use pytest fixtures.")
+        result = render_active_context(self._issue(), None, [], task, [])
+        assert "Use pytest fixtures." in result
+
+    def test_right_now_empty_description_omitted(self) -> None:
+        task = self._task(description="")
+        result = render_active_context(self._issue(), None, [], task, [])
+        assert "## Right now" in result
+        # No trailing blank after header when no description
+        after_header = result.split("## Right now")[1]
+        assert after_header.strip() != ""
+
+    def test_right_now_absent_when_none(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert "## Right now" not in result
+
+    # ── Cache-stability: stable prefix is byte-identical across task changes ──
+
+    def test_stable_prefix_unchanged_after_task_add(self) -> None:
+        """Active issue + PR + prior attempts must be byte-identical before/after
+        a task is added to the list — so the provider's prompt cache stays warm."""
+        issue = self._issue()
+        pr = self._pr()
+        attempts = [self._closed_pr()]
+        current = self._task("Do something")
+
+        before = render_active_context(
+            issue, pr, [self._task("Task A")], current, attempts
+        )
+        after = render_active_context(
+            issue,
+            pr,
+            [self._task("Task A"), self._task("Task B")],
+            current,
+            attempts,
+        )
+
+        # Extract the stable prefix (everything before ## Tasks)
+        assert before.split("## Tasks")[0] == after.split("## Tasks")[0]
+
+    def test_stable_prefix_unchanged_after_task_complete(self) -> None:
+        issue = self._issue()
+        pr = self._pr()
+        attempts = [self._closed_pr()]
+        current = self._task("Remaining")
+
+        before = render_active_context(
+            issue,
+            pr,
+            [self._task("Done", status="pending"), self._task("Remaining")],
+            current,
+            attempts,
+        )
+        after = render_active_context(
+            issue,
+            pr,
+            [self._task("Done", status="completed"), self._task("Remaining")],
+            current,
+            attempts,
+        )
+
+        assert before.split("## Tasks")[0] == after.split("## Tasks")[0]
+
+    def test_tasks_section_changes_after_task_complete(self) -> None:
+        issue = self._issue()
+        before = render_active_context(
+            issue, None, [self._task("A", status="pending")], None, []
+        )
+        after = render_active_context(
+            issue, None, [self._task("A", status="completed")], None, []
+        )
+        assert "[ ]" in before
+        assert "[x]" in after
+
+    def test_right_now_changes_after_task_switch(self) -> None:
+        issue = self._issue()
+        before = render_active_context(issue, None, [], self._task("Old task"), [])
+        after = render_active_context(issue, None, [], self._task("New task"), [])
+        assert "Old task" in before
+        assert "New task" in after
+        assert "Old task" not in after
+
+    # ── Section order ─────────────────────────────────────────────────────────
+
+    def test_section_order_stable_prefix_before_dynamic(self) -> None:
+        """Stable prefix (issue, PR, attempts) must appear before Tasks / Right now."""
+        result = render_active_context(
+            self._issue(),
+            self._pr(),
+            [self._task()],
+            self._task("current"),
+            [self._closed_pr()],
+        )
+        issue_pos = result.index("## Active issue")
+        pr_pos = result.index("## Active PR")
+        attempts_pos = result.index("## Prior attempts")
+        tasks_pos = result.index("## Tasks")
+        now_pos = result.index("## Right now")
+
+        assert issue_pos < pr_pos < attempts_pos < tasks_pos < now_pos
+
+    # ── Returns a string ──────────────────────────────────────────────────────
+
+    def test_returns_string(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert isinstance(result, str)
+
+    def test_minimal_call_issue_only(self) -> None:
+        """Minimal valid call: only the required issue argument is meaningful."""
+        result = render_active_context(
+            ActiveIssue(number=1, title="T", body=""), None, [], None, []
+        )
+        assert "## Active issue" in result
+        assert "#1: T" in result

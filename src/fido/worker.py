@@ -22,7 +22,7 @@ from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import IssueNode, IssueTreeCache
-from fido.prompts import Prompts
+from fido.prompts import Prompts, render_active_context
 from fido.provider import (
     PromptSession,
     Provider,
@@ -44,7 +44,15 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
-from fido.types import GitIdentity, TaskStatus, TaskType
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    ClosedPR,
+    GitIdentity,
+    TaskSnapshot,
+    TaskStatus,
+    TaskType,
+)
 
 
 class GitIdentityError(Exception):
@@ -1821,7 +1829,25 @@ class Worker:
                 task_list = self._tasks.list()
             if not task_list:
                 log.info("PR #%s has no tasks — running setup", pr_number)
+                pr_body = self.gh.get_pr_body(repo_ctx.repo, pr_number)
+                pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
+                prior_attempts = self.gh.find_closed_prs_as_context(
+                    repo_ctx.repo, issue, repo_ctx.gh_user
+                )
+                active_ctx = render_active_context(
+                    issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
+                    pr=ActivePR(
+                        number=pr_number,
+                        title=pr_title,
+                        url=pr_url,
+                        body=pr_body,
+                    ),
+                    tasks=[],
+                    current_task=None,
+                    prior_attempts=prior_attempts,
+                )
                 context = (
+                    f"{active_ctx}\n\n"
                     f"Request: {request}\n"
                     f"Repo: {repo_ctx.repo}\n"
                     f"Branch: {slug}\n"
@@ -1859,12 +1885,16 @@ class Worker:
         # closed-not-merged PRs exist, post a Fido-voiced retry-ack
         # comment naming them — idempotent on a marker.
         self._reset_local_workspace(fido_dir, repo_ctx, remote)
-        closed_prs = self.gh.find_closed_unmerged_prs_for_issue(
+        prior_attempts = self.gh.find_closed_prs_as_context(
             repo_ctx.repo, issue, repo_ctx.gh_user
         )
-        if closed_prs:
+        if prior_attempts:
             self._post_retry_acknowledgement(
-                repo_ctx.repo, issue, issue_title, repo_ctx.gh_user, closed_prs
+                repo_ctx.repo,
+                issue,
+                issue_title,
+                repo_ctx.gh_user,
+                [pr.number for pr in prior_attempts],
             )
 
         # Generate branch slug via the provider brief model
@@ -1890,7 +1920,15 @@ class Worker:
 
         # Run setup sub-agent (plans tasks before PR is created)
         log.info("running setup (pre-PR)")
+        active_ctx = render_active_context(
+            issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
+            pr=None,
+            tasks=[],
+            current_task=None,
+            prior_attempts=prior_attempts,
+        )
         context = (
+            f"{active_ctx}\n\n"
             f"Request: {request}\n"
             f"Repo: {repo_ctx.repo}\n"
             f"Branch: {slug}\n"
@@ -2978,23 +3016,57 @@ class Worker:
                     "Related thread comment_ids: "
                     + ", ".join(str(comment_id) for comment_id in lineage_ids)
                 )
-        context = "\n".join(context_parts)
-        build_prompt(fido_dir, "task", context, labels=issue_labels)
-        prompts = self._get_prompts()
         state_path = fido_dir / "state.json"
         state_data = State(fido_dir).load() if state_path.exists() else {}
         issue_number = state_data.get("issue")
         issue_title = ""
         issue_body = ""
+        prior_attempts: list[ClosedPR] = []
         if isinstance(issue_number, int):
             issue_data = self.gh.view_issue(repo_ctx.repo, issue_number)
             issue_title = issue_data.get("title", "")
             issue_body = issue_data.get("body", "")
+            prior_attempts = self.gh.find_closed_prs_as_context(
+                repo_ctx.repo, issue_number, repo_ctx.gh_user
+            )
         else:
             issue_number = None
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
         pr_title = pr_data.get("title", "") or ""
         pr_body = pr_data.get("body", "") or ""
+        pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
+        active_ctx = render_active_context(
+            issue=ActiveIssue(
+                number=issue_number if isinstance(issue_number, int) else 0,
+                title=issue_title,
+                body=issue_body,
+            ),
+            pr=ActivePR(
+                number=pr_number,
+                title=pr_title,
+                url=pr_url,
+                body=pr_body,
+            ),
+            tasks=[
+                TaskSnapshot(
+                    title=t.get("title", ""),
+                    type=t.get("type", "spec"),
+                    status=t.get("status", "pending"),
+                    description=t.get("description", ""),
+                )
+                for t in task_list
+            ],
+            current_task=TaskSnapshot(
+                title=task.get("title", ""),
+                type=task.get("type", "spec"),
+                status=task.get("status", "pending"),
+                description=task.get("description", ""),
+            ),
+            prior_attempts=prior_attempts,
+        )
+        context = f"{active_ctx}\n\n" + "\n".join(context_parts)
+        build_prompt(fido_dir, "task", context, labels=issue_labels)
+        prompts = self._get_prompts()
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         # Snapshot fido-authored PR comments so we can detect and delete any
         # improvised top-level BLOCKED/leak comments this task turn posts

@@ -16,6 +16,8 @@ from fido.events import (
     _existing_reply_artifact,
     _get_commit_summary,
     _is_allowed,
+    _load_active_context_for_rescope,
+    _make_reorder_kwargs,
     _notify_thread_change,
     _open_defer_issue_idempotent,
     _posted_comment_id,
@@ -47,7 +49,9 @@ from fido.events import (
 )
 from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
+from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
+from fido.types import ActiveIssue, ActivePR
 
 
 class RepoConfig(_RepoConfig):
@@ -3055,6 +3059,80 @@ class TestReplyToComment:
         # the reply generation call, which must survive session preemption.
         assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
+    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
+        """reply_to_comment should inject active-issue context into reply_system_prompt."""
+        cfg = self._cfg(tmp_path)
+        # Set up state.json so _load_active_context_for_rescope finds active issue.
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        State(fido_dir).save({"issue": 7})
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            if "Convert this PR review comment" in prompt:
+                return "Add logging"
+            return "I will add logging."
+
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
+        mock_gh.fetch_comment_thread.return_value = []
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert any("## Active issue" in sp for sp in captured_system_prompts)
+        assert any("Fix crash" in sp for sp in captured_system_prompts)
+
+    def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
+        """reply_to_comment should not include active-issue header when no state.json."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            if "Convert this PR review comment" in prompt:
+                return "Add logging"
+            return "I will add logging."
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert all("## Active issue" not in sp for sp in captured_system_prompts)
+
 
 class TestReplyToReview:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -3625,6 +3703,60 @@ class TestReplyToIssueComment:
         assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
             "no claim files should be written when comment_id is absent"
         )
+
+    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
+        """reply_to_issue_comment should inject active-issue context into reply_system_prompt."""
+        cfg = self._cfg(tmp_path)
+        # Set up state.json so _load_active_context_for_rescope finds active issue.
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        State(fido_dir).save({"issue": 7})
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
+
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
+        mock_gh.get_repo_info.return_value = "owner/repo"
+
+        reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert any("## Active issue" in sp for sp in captured_system_prompts)
+        assert any("Fix crash" in sp for sp in captured_system_prompts)
+
+    def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
+        """reply_to_issue_comment should not include active-issue header when no state.json."""
+        cfg = self._cfg(tmp_path)
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+
+        reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert all("## Active issue" not in sp for sp in captured_system_prompts)
 
 
 class TestCreateTask:
@@ -6992,3 +7124,168 @@ class TestTaskSnapshot:
         result = _task_snapshot(tasks)
         assert result[0][0] == "z"
         assert result[1][0] == "a"
+
+
+# ── _load_active_context_for_rescope ─────────────────────────────────────────
+
+
+class TestLoadActiveContextForRescope:
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_returns_none_none_when_no_state_file(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        issue, pr = _load_active_context_for_rescope(tmp_path, "owner/repo", gh)
+        assert issue is None
+        assert pr is None
+        gh.view_issue.assert_not_called()
+
+    def test_returns_none_none_when_no_issue_in_state(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"pr_number": 5})
+        gh = MagicMock()
+        issue, pr = _load_active_context_for_rescope(tmp_path, "owner/repo", gh)
+        assert issue is None
+        assert pr is None
+        gh.view_issue.assert_not_called()
+
+    def test_returns_active_issue_when_issue_in_state(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
+        issue, _ = _load_active_context_for_rescope(tmp_path, "owner/repo", gh)
+        assert isinstance(issue, ActiveIssue)
+        assert issue.number == 7
+        assert issue.title == "Fix crash"
+        assert issue.body == "It crashes."
+        gh.view_issue.assert_called_once_with("owner/repo", 7)
+
+    def test_returns_none_pr_when_no_pr_in_state(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "Fix crash", "body": ""}
+        _, pr = _load_active_context_for_rescope(tmp_path, "owner/repo", gh)
+        assert pr is None
+        gh.get_pr.assert_not_called()
+
+    def test_returns_active_pr_when_pr_in_state(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7, "pr_number": 42})
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "Fix crash", "body": ""}
+        gh.get_pr.return_value = {"title": "Fix crash (closes #7)", "body": "PR body."}
+        _, pr = _load_active_context_for_rescope(tmp_path, "owner/repo", gh)
+        assert isinstance(pr, ActivePR)
+        assert pr.number == 42
+        assert pr.title == "Fix crash (closes #7)"
+        assert pr.body == "PR body."
+        assert pr.url == "https://github.com/owner/repo/pull/42"
+        gh.get_pr.assert_called_once_with("owner/repo", 42)
+
+
+# ── _make_reorder_kwargs active-context injection ────────────────────────────
+
+
+class TestMakeReorderKwargsActiveContext:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _repo_cfg(self, tmp_path: Path, name: str = "owner/repo") -> _RepoConfig:
+        return _RepoConfig(
+            name=name,
+            work_dir=tmp_path,
+            provider=ProviderID.CLAUDE_CODE,
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_no_issue_key_omitted_when_no_state(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        kwargs = _make_reorder_kwargs(
+            tmp_path,
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            None,
+            gh,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        assert "issue" not in kwargs
+        assert "pr" not in kwargs
+
+    def test_issue_included_when_state_has_issue(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 5})
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "Do the thing", "body": "Details."}
+        kwargs = _make_reorder_kwargs(
+            tmp_path,
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            None,
+            gh,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        assert "issue" in kwargs
+        issue = kwargs["issue"]
+        assert isinstance(issue, ActiveIssue)
+        assert issue.number == 5
+        assert issue.title == "Do the thing"
+        assert issue.body == "Details."
+
+    def test_pr_included_when_state_has_pr_number(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 5, "pr_number": 99})
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "t", "body": ""}
+        gh.get_pr.return_value = {"title": "Fix it (closes #5)", "body": ""}
+        kwargs = _make_reorder_kwargs(
+            tmp_path,
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            None,
+            gh,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        assert "pr" in kwargs
+        pr = kwargs["pr"]
+        assert isinstance(pr, ActivePR)
+        assert pr.number == 99
+        assert pr.url == "https://github.com/owner/repo/pull/99"
+
+    def test_no_issue_or_pr_when_repo_cfg_is_none(self, tmp_path: Path) -> None:
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 5, "pr_number": 10})
+        gh = MagicMock()
+        kwargs = _make_reorder_kwargs(
+            tmp_path,
+            self._cfg(tmp_path),
+            None,  # no repo_cfg
+            None,
+            gh,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        assert "issue" not in kwargs
+        assert "pr" not in kwargs
+        gh.view_issue.assert_not_called()
