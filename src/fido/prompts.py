@@ -441,6 +441,43 @@ class Prompts:
             "Do not respond with a plan — just act."
         )
 
+    def no_commit_persistent_nudge(
+        self,
+        *,
+        attempt: int,
+        task_title: str,
+        task_id: str,
+        work_dir: str,
+        pr_number: int | None,
+    ) -> str:
+        """Build a directive in-session nudge for providers that must not be reset.
+
+        Used when the provider produced no commits and a session reset would
+        destroy accumulated context (e.g. copilot-cli).  The nudge stays
+        in-session and explicitly demands a tool-use action — not prose.
+        """
+        complete_cmd = f"fido task complete {work_dir} {task_id}"
+        pr_comment_cmd = (
+            f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
+            if pr_number is not None
+            else "gh pr comment <pr> --body 'BLOCKED: ...'"
+        )
+        return (
+            f"You're working on: {task_title}\n\n"
+            f"Attempt {attempt}: your last turn produced no commits. "
+            "You must make at least one tool call that changes a file this "
+            "turn — an Edit, Write, or Bash call that modifies or creates a "
+            "file. Prose without tool calls does not count as progress.\n\n"
+            "Take exactly one of these actions right now:\n"
+            "1. Edit or write a file to make progress on the task.\n"
+            f"2. If the task is already complete: `{complete_cmd}`\n"
+            f"3. If something outside your control is blocking you: "
+            f"`{pr_comment_cmd}` — with a concrete explanation, not a "
+            "description of uncertainty. Do not describe the situation "
+            "internally; post the comment so a human can unblock you.\n\n"
+            "Do not reply with a plan or analysis. Act."
+        )
+
     def fresh_session_retry_prompt(
         self,
         *,

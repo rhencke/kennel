@@ -3148,8 +3148,8 @@ class Worker:
                 and attempt >= _FRESH_SESSION_NUDGE_ATTEMPT
                 and not fresh_session_retry_used
             )
-            nudge = (
-                prompts.fresh_session_retry_prompt(
+            if use_fresh_session:
+                nudge = prompts.fresh_session_retry_prompt(
                     task_title=task_title,
                     task_id=task["id"],
                     work_dir=str(self.work_dir),
@@ -3161,15 +3161,22 @@ class Worker:
                     pr_title=pr_title,
                     pr_body=pr_body,
                 )
-                if use_fresh_session
-                else prompts.task_resume_nudge(
+            elif not self._provider_agent.supports_no_commit_reset:
+                nudge = prompts.no_commit_persistent_nudge(
                     attempt=attempt,
                     task_title=task_title,
                     task_id=task["id"],
                     work_dir=str(self.work_dir),
                     pr_number=pr_number,
                 )
-            )
+            else:
+                nudge = prompts.task_resume_nudge(
+                    attempt=attempt,
+                    task_title=task_title,
+                    task_id=task["id"],
+                    work_dir=str(self.work_dir),
+                    pr_number=pr_number,
+                )
             (fido_dir / "prompt").write_text(nudge)
             if use_fresh_session:
                 fresh_session_retry_used = True
