@@ -107,9 +107,7 @@ def _parse_comment_response(raw: str) -> CommentResponse:
             continue
 
         if not isinstance(obj, dict):
-            last_error = ValueError(
-                f"expected JSON object, got {type(obj).__name__}"
-            )
+            last_error = ValueError(f"expected JSON object, got {type(obj).__name__}")
             continue
 
         reasoning = obj.get("reasoning", "")

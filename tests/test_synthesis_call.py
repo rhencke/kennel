@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.synthesis import AddReaction, CommentResponse, NoOp, RescopeIntent
+from fido.synthesis import AddReaction, NoOp, RescopeIntent
 from fido.synthesis_call import (
     MAX_RETRIES,
     SynthesisExhaustedError,
@@ -16,7 +16,6 @@ from fido.synthesis_call import (
     call_synthesis,
 )
 from fido.types import ActiveIssue, ActivePR
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,9 +110,7 @@ class TestParseAction:
         assert action is None
 
     def test_rescope_intent_valid(self) -> None:
-        action = _parse_action(
-            {"type": "rescope_intent", "description": "Add logging"}
-        )
+        action = _parse_action({"type": "rescope_intent", "description": "Add logging"})
         assert action == RescopeIntent("Add logging")
 
     def test_rescope_intent_empty_description_returns_none(self) -> None:
@@ -349,7 +346,9 @@ class TestCallSynthesis:
         prompts = _make_prompts()
         ctx = {"pr_title": "My PR"}
 
-        call_synthesis("comment", is_bot=False, context=ctx, agent=agent, prompts=prompts)
+        call_synthesis(
+            "comment", is_bot=False, context=ctx, agent=agent, prompts=prompts
+        )
 
         call_kwargs = prompts.synthesis_prompt.call_args
         assert call_kwargs[1]["context"] == ctx
