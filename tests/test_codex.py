@@ -21,7 +21,12 @@ from fido.codex import (
     run_codex_exec,
     run_codex_exec_resume,
 )
-from fido.provider import ProviderID, ProviderInterruptTimeout, ProviderModel
+from fido.provider import (
+    ContextOverflowError,
+    ProviderID,
+    ProviderInterruptTimeout,
+    ProviderModel,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
 
@@ -201,6 +206,11 @@ class TestCodexProviderErrors:
             raise_for_provider_error_output(_fixture("cancelled.jsonl"))
         assert exc_info.value.kind == "cancelled"
         assert "cancelled" in str(exc_info.value)
+
+    def test_context_window_exceeded_raises_context_overflow_error(self) -> None:
+        with pytest.raises(ContextOverflowError) as exc_info:
+            raise_for_provider_error_output(_fixture("context-window-exceeded.jsonl"))
+        assert "context window" in str(exc_info.value).lower()
 
     def test_ignores_successful_fixture(self) -> None:
         raise_for_provider_error_output(_fixture("normal.jsonl"))

@@ -17,6 +17,7 @@ from fido.config import Config, RepoConfig, RepoMembership
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts
 from fido.provider import (
+    ContextOverflowError,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -14452,6 +14453,37 @@ class TestWorkerThread:
         provider.agent.session_received_count = 38
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
         assert wt.session_received_count == 38
+
+    def test_context_overflow_calls_retire_and_loops(self, tmp_path: Path) -> None:
+        """ContextOverflowError from Worker.run() must not crash the thread.
+
+        The loop should call _retire_poisoned_session() and immediately retry
+        without waiting — the task stays in_progress so the fresh session picks
+        it right back up on the next iteration.
+        """
+        wt = self._make_thread(tmp_path)
+        wt._wake = MagicMock()
+        call_count = 0
+
+        def fake_worker_run(self_ignored=None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ContextOverflowError("context window exceeded")
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "run", fake_worker_run),
+            patch.object(WorkerThread, "_retire_poisoned_session") as mock_retire,
+        ):
+            self._run_thread(wt)
+
+        assert call_count == 2  # first raised, second ran normally
+        mock_retire.assert_called_once()  # retirement triggered exactly once
+        # No wait after the overflow — it loops immediately back to check _stop.
+        # Only the clean second iteration (result 0) triggers a wait.
+        wt._wake.wait.assert_called_once()
 
     def test_run_halts_on_claude_leak_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

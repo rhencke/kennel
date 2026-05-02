@@ -163,3 +163,101 @@ def test_persist_session_id_swallows_state_modify_oserror(
     with caplog.at_level(logging.WARNING, logger="fido"):
         thread._persist_session_id()
     assert "failed to persist session_id" in caplog.text
+
+
+# ── _retire_poisoned_session ──────────────────────────────────────────────────
+
+
+def test_retire_poisoned_session_clears_session_id_from_state(
+    tmp_path: Path,
+) -> None:
+    fido_dir = _init_git_repo(tmp_path)
+    (fido_dir / "state.json").write_text(json.dumps({"session_id": "poisoned-sid"}))
+    thread = _make_thread(tmp_path)
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    persisted = json.loads((fido_dir / "state.json").read_text())
+    assert "session_id" not in persisted
+
+
+def test_retire_poisoned_session_preserves_other_state_keys(tmp_path: Path) -> None:
+    fido_dir = _init_git_repo(tmp_path)
+    (fido_dir / "state.json").write_text(
+        json.dumps({"session_id": "poisoned-sid", "issue": 42})
+    )
+    thread = _make_thread(tmp_path)
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    persisted = json.loads((fido_dir / "state.json").read_text())
+    assert persisted == {"issue": 42}
+
+
+def test_retire_poisoned_session_calls_session_reset(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    session = MagicMock()
+    agent = MagicMock()
+    agent.session = session
+    provider = MagicMock()
+    provider.agent = agent
+    thread = _make_thread(tmp_path, provider=provider)
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    session.reset.assert_called_once()
+
+
+def test_retire_poisoned_session_clears_session_issue(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    thread = _make_thread(tmp_path)
+    thread._session_issue = 99  # pyright: ignore[reportPrivateUsage]
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    assert thread._session_issue is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_retire_poisoned_session_logs_warning(tmp_path: Path, caplog) -> None:
+    import logging
+
+    _init_git_repo(tmp_path)
+    thread = _make_thread(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="fido"):
+        thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    assert "context overflow" in caplog.text
+
+
+def test_retire_poisoned_session_noop_when_no_git_repo(tmp_path: Path) -> None:
+    """Not a git repo — no fido_dir — must not raise."""
+    thread = _make_thread(tmp_path)
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_retire_poisoned_session_noop_when_no_provider(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    thread = _make_thread(tmp_path)
+    thread._provider = None  # pyright: ignore[reportPrivateUsage]
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]  # must not raise
+
+
+def test_retire_poisoned_session_noop_when_no_session(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    provider = MagicMock()
+    provider.agent.session = None
+    thread = _make_thread(tmp_path, provider=provider)
+    thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]  # must not raise
+
+
+def test_retire_poisoned_session_swallows_state_modify_oserror(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    import logging
+    from contextlib import contextmanager
+
+    from fido import state as state_mod
+
+    _init_git_repo(tmp_path)
+    thread = _make_thread(tmp_path)
+
+    @contextmanager
+    def boom(self):
+        raise OSError("state.json locked")
+        yield  # unreachable
+
+    monkeypatch.setattr(state_mod.State, "modify", boom)
+    with caplog.at_level(logging.WARNING, logger="fido"):
+        thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
+    assert "failed to clear session_id after context overflow" in caplog.text

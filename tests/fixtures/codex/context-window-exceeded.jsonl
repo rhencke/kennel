@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"context-window-thread"}
+{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"contextWindowExceeded"}}

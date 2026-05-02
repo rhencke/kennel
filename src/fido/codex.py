@@ -15,6 +15,7 @@ from typing import IO, Any, NoReturn, Protocol
 import fido.provider as provider
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
+    ContextOverflowError,
     OwnedSession,
     PromptSession,
     Provider,
@@ -235,7 +236,7 @@ class CodexAppServerClient:
             response = self._responses.pop(request_id)
         if response.error is not None:
             message = response.error.get("message")
-            raise CodexProviderError(
+            _raise_provider_error(
                 message=message if isinstance(message, str) else str(response.error),
                 kind=_classify_provider_error(str(message or response.error)),
                 payload=response.error,
@@ -432,6 +433,8 @@ def extract_result_text(output: str) -> str:
 
 def _classify_provider_error(message: str) -> str:
     lowered = message.lower()
+    if "contextWindowExceeded" in message or "context window" in lowered:
+        return "context_overflow"
     if "rate limit" in lowered or "rate_limit" in lowered or "quota" in lowered:
         return "rate_limit"
     if "auth" in lowered or "login" in lowered or "unauthorized" in lowered:
@@ -439,6 +442,21 @@ def _classify_provider_error(message: str) -> str:
     if "cancel" in lowered or "interrupt" in lowered:
         return "cancelled"
     return "provider"
+
+
+def _raise_provider_error(
+    *, message: str, kind: str, payload: dict[str, Any]
+) -> "NoReturn":
+    """Build and raise the appropriate provider error for *kind*.
+
+    Raises :exc:`ContextOverflowError` when *kind* is ``"context_overflow"``
+    (chained from the underlying :exc:`CodexProviderError` for traceability),
+    and :exc:`CodexProviderError` for everything else.
+    """
+    error = CodexProviderError(message=message, kind=kind, payload=payload)
+    if kind == "context_overflow":
+        raise ContextOverflowError(message) from error
+    raise error
 
 
 def _provider_error_from_event(obj: dict[str, Any]) -> CodexProviderError | None:
@@ -469,7 +487,11 @@ def raise_for_provider_error_output(output: str) -> None:
     for obj in _iter_jsonl(output):
         provider_error = _provider_error_from_event(obj)
         if provider_error is not None:
-            raise provider_error
+            _raise_provider_error(
+                message=str(provider_error),
+                kind=provider_error.kind,
+                payload=provider_error.payload,
+            )
 
 
 def _normalize_limit_name(value: object, fallback: str) -> str:
@@ -782,7 +804,7 @@ class CodexSession(OwnedSession):
             params = notification["params"]
             if method == "error":
                 message = params.get("message")
-                raise CodexProviderError(
+                _raise_provider_error(
                     message=message if isinstance(message, str) else str(params),
                     kind=_classify_provider_error(str(message or params)),
                     payload=params,
@@ -979,7 +1001,7 @@ class CodexSession(OwnedSession):
         if isinstance(status, str) and status.lower() in {"failed", "error"}:
             error = params.get("error")
             message = error.get("message") if isinstance(error, dict) else str(params)
-            raise CodexProviderError(
+            _raise_provider_error(
                 message=message if isinstance(message, str) else str(error),
                 kind=_classify_provider_error(str(message)),
                 payload=params,

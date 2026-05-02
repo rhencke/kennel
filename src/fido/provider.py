@@ -38,6 +38,16 @@ def is_recoverable_provider_wedge(exc: BaseException) -> bool:
     return isinstance(exc, RecoverableProviderWedgeError)
 
 
+class ContextOverflowError(RuntimeError):
+    """Provider session hit the context-window limit — session must be retired.
+
+    This is not a transient error.  The session is poisoned: re-using the
+    same thread id will produce the same failure.  The worker must clear the
+    persisted session_id, reset the session to a fresh thread, and resume
+    the in-progress task.
+    """
+
+
 class ProviderID(StrEnum):
     """Supported LLM providers for fido."""
 
