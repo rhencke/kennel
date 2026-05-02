@@ -651,9 +651,10 @@ class Prompts:
 
         Instils the Fido persona, injects active-work context (issue, PR) so the
         model anchors on the same ground truth as the task worker, and sets up the
-        structured JSON output expectation.  A TEXT-ONLY constraint prevents the
-        model from firing tool calls during what should be a one-shot JSON
-        generation turn.
+        structured JSON output expectation.  A READ-ONLY constraint allows the
+        model to inspect the codebase (Read, Grep, Glob, triage git commands)
+        before responding, so it can write an informed reply *and* a meaningful
+        change_request intent, without being able to modify files or run mutations.
         """
         active = ""
         if issue is not None:
@@ -663,7 +664,7 @@ class Prompts:
             f"{active}"
             "You are responding to a GitHub PR comment with a single structured "
             "JSON response.  "
-            f"{NO_TOOLS_CLAUSE}  "
+            f"{TRIAGE_CLAUSE}  "
             "Output ONLY the JSON object — no preamble, no trailing text, "
             "no explanation outside the JSON fields."
         )

@@ -1,7 +1,7 @@
 """Unit tests for fido/prompts.py — prompt-building functions and Prompts class."""
 
 from fido.prompts import (
-    NO_TOOLS_CLAUSE,
+    TRIAGE_CLAUSE,
     Prompts,
     render_active_context,
     triage_context_block,
@@ -1135,9 +1135,9 @@ class TestSynthesisSystemPrompt:
         result = Prompts("I am Fido.").synthesis_system_prompt()
         assert "I am Fido." in result
 
-    def test_includes_no_tools_clause(self) -> None:
+    def test_includes_triage_clause(self) -> None:
         result = Prompts("persona").synthesis_system_prompt()
-        assert NO_TOOLS_CLAUSE in result
+        assert TRIAGE_CLAUSE in result
 
     def test_json_output_instruction(self) -> None:
         result = Prompts("persona").synthesis_system_prompt()
