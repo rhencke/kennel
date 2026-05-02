@@ -267,4 +267,10 @@ FROM python-test-base AS test
 COPY tests tests
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-RUN ./pyproject python -m fido.tests_main
+# Tests are NOT executed inside this buildkit-managed RUN — buildx bake
+# offers no per-target memory cap (unlike host ``docker run --memory=``)
+# so a leaky test could grow unbounded inside the buildkit cgroup and
+# soft-lock the host (#1248).  The bake target now only assembles the
+# image with tests + Rocq pytest artefacts; ``./fido ci`` invokes the
+# capped host-side runner ``./fido tests`` after bake completes.
+RUN echo "test image assembled — see ./fido tests for capped execution"

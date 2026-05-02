@@ -496,6 +496,22 @@ run_container() {
     "${secret_args[@]}"
     --workdir "$repo_root"
   )
+
+  # Forward FIDO_TEST_* env vars into the container so opt-in test
+  # diagnostics (FIDO_TEST_TRACEMALLOC, FIDO_TEST_PROCESS_RLIMIT_BYTES,
+  # FIDO_ROCQ_PYTEST_ARTIFACTS, …) reach pytest's conftest.  The
+  # ``-e VAR`` form (no ``=``) reads the host environment.  FIDO_TEST_*
+  # variables that the launcher itself consumes (FIDO_TEST_TIMEOUT,
+  # FIDO_TEST_MEMORY_CAP) are translated to docker flags upstream and
+  # don't need passthrough.
+  while IFS='=' read -r _name _; do
+    case "$_name" in
+      FIDO_TEST_TIMEOUT|FIDO_TEST_MEMORY_CAP) ;;  # consumed by launcher
+      FIDO_TEST_*|FIDO_ROCQ_PYTEST_ARTIFACTS)
+        run_args+=(--env "$_name")
+        ;;
+    esac
+  done < <(env)
   if [ "$named_run" = "1" ]; then
     run_args=(--name "$container" "${run_args[@]}")
   fi
@@ -1012,6 +1028,12 @@ case "$command" in
     ci_images "${@:2}"
     check_committed_model_mirrors
     check_generated_workflow_files
+    # Run pytest host-side via the capped run_container path (#1248) —
+    # the bake ``test`` target only assembles the image; per-target
+    # memory caps don't exist in buildx bake, so executing pytest inside
+    # the bake graph is unbounded.
+    log INFO "running tests via capped host runner"
+    "$repo_root/fido" tests
     ;;
   gen-workflows)
     ensure_buildx_builder
