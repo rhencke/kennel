@@ -24,6 +24,7 @@ from fido.github import GitHub
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts, render_active_context
 from fido.provider import (
+    ContextOverflowError,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -4209,6 +4210,39 @@ class WorkerThread(threading.Thread):
         except OSError as exc:
             log.warning("failed to persist session_id: %s", exc)
 
+    def _retire_poisoned_session(self) -> None:
+        """Discard the persisted and live session after a context-window overflow.
+
+        The session thread is full and cannot be used again — re-using the same
+        ``session_id`` would produce an immediate ``contextWindowExceeded`` crash.
+        This method:
+        - removes ``session_id`` from ``state.json`` (so a fido restart doesn't
+          reload the poisoned id),
+        - calls ``reset()`` on the live session (so the next iteration starts a
+          fresh provider thread),
+        - clears ``_session_issue`` (so the next iteration uses
+          ``TurnSessionMode.FRESH`` and fully re-establishes the system prompt).
+        """
+        log.warning(
+            "context overflow — retiring poisoned session for %s", self._repo_name
+        )
+        fido_dir = self._resolve_fido_dir()
+        if fido_dir is not None:
+            try:
+                with State(fido_dir).modify() as data:
+                    data.pop("session_id", None)
+            except OSError as exc:
+                log.warning(
+                    "failed to clear session_id after context overflow: %s", exc
+                )
+        with self._provider_lock:
+            provider = self._provider
+        if provider is not None:
+            session = provider.agent.session
+            if session is not None:
+                session.reset()
+        self._session_issue = None
+
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
@@ -4244,30 +4278,37 @@ class WorkerThread(threading.Thread):
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:
-                    result = worker.run()
-                finally:
-                    with self._provider_lock:
-                        self._provider = worker._provider  # pyright: ignore[reportPrivateUsage]
-                    self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
-                    self._persist_session_id()
-                    self._is_first_iteration = False
+                    try:
+                        result = worker.run()
+                    finally:
+                        with self._provider_lock:
+                            self._provider = worker._provider  # pyright: ignore[reportPrivateUsage]
+                        self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
+                        self._persist_session_id()
+                        self._is_first_iteration = False
 
-                if result == 1:
-                    # Did work — loop immediately without waiting.
-                    continue
+                    if result == 1:
+                        # Did work — loop immediately without waiting.
+                        continue
 
-                if self._registry is not None:
-                    waiting_what = (
-                        "waiting: lock held"
-                        if result == 2
-                        else "waiting: no issues found"
-                    )
-                    self._registry.report_activity(
-                        self._repo_name, waiting_what, busy=False
-                    )
-                timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
-                self._wake.wait(timeout=timeout)
-                self._wake.clear()
+                    if self._registry is not None:
+                        waiting_what = (
+                            "waiting: lock held"
+                            if result == 2
+                            else "waiting: no issues found"
+                        )
+                        self._registry.report_activity(
+                            self._repo_name, waiting_what, busy=False
+                        )
+                    timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
+                    self._wake.wait(timeout=timeout)
+                    self._wake.clear()
+                except ContextOverflowError:
+                    # The provider session hit its context-window limit.
+                    # Retire the poisoned session and immediately retry —
+                    # the task stays in_progress and the fresh session picks
+                    # it right back up.
+                    self._retire_poisoned_session()
         except SessionLeakError:
             # A worker and webhook tried to talk to the same repo's claude
             # at the same time — halt fido so the supervisor restarts fresh
