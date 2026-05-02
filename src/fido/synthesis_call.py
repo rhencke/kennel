@@ -42,44 +42,47 @@ class SynthesisExhaustedError(Exception):
     """
 
 
-def _extract_json_candidates(raw: str) -> tuple[str, ...]:
-    """Return candidate strings to attempt JSON parsing against.
+def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
+    """Return all JSON objects found in *raw* using a consume loop.
 
-    Tries the raw output (stripped) first, then the largest ``{…}``
-    span from the first ``{`` to the last ``}``.  This handles the two
-    most common model failure modes: leading/trailing whitespace and
-    preamble or trailing explanation text around the JSON object.
+    Scans *raw* for ``{``, attempts :meth:`json.JSONDecoder.raw_decode`
+    from that position, advances past the decoded span on success, or
+    skips the character and continues on failure.  Returns a list of
+    every successfully decoded dict in order of appearance.
+
+    This is more robust than a ``first-{-to-last-}`` span heuristic: it
+    handles preamble prose, trailing explanation text, stray braces, and
+    nested objects correctly because the decoder itself determines the
+    exact end of each JSON document.
     """
-    stripped = raw.strip()
-    candidates: list[str] = [stripped]
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end > start:
-        span = raw[start : end + 1]
-        if span != stripped:
-            candidates.append(span)
-    return tuple(candidates)
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    pos = 0
+    while pos < len(raw):
+        brace = raw.find("{", pos)
+        if brace == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(raw, brace)
+        except json.JSONDecodeError:
+            pos = brace + 1
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+        pos = end
+    return objects
 
 
 def _parse_comment_response(raw: str) -> CommentResponse:
     """Parse *raw* model output into a :class:`~fido.synthesis.CommentResponse`.
 
-    Tries each candidate from :func:`_extract_json_candidates` in order.
-    Raises :exc:`ValueError` if none yields a valid ``CommentResponse``;
-    the caller (:func:`call_synthesis`) catches this and retries.
+    Extracts all JSON objects from *raw* via :func:`_extract_json_objects`
+    and returns the first that validates as a ``CommentResponse``.
+    Raises :exc:`ValueError` if none does; the caller
+    (:func:`call_synthesis`) catches this and retries.
     """
-    last_error: Exception | None = None
-    for candidate in _extract_json_candidates(raw):
-        try:
-            obj = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            last_error = exc
-            continue
-
-        if not isinstance(obj, dict):
-            last_error = ValueError(f"expected JSON object, got {type(obj).__name__}")
-            continue
-
+    last_error: Exception = ValueError("no JSON objects found in model output")
+    for obj in _extract_json_objects(raw):
         reasoning = obj.get("reasoning", "")
         reply_text = obj.get("reply_text", "")
 
