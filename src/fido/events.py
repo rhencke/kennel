@@ -1480,12 +1480,14 @@ def reply_to_comment(
                 try:
                     reactions = gh.list_reactions(_repo_pulls, "pulls", _cid_pulls)
                     for _r in reactions:
-                        if _r.get("content") == "eyes":
-                            _rid = _r.get("id")
-                            if _rid is not None:
-                                gh.delete_reaction(
-                                    _repo_pulls, "pulls", _cid_pulls, _rid
-                                )
+                        if _r.get("content") != "eyes":
+                            continue
+                        _login = _r.get("user", {}).get("login", "")
+                        if _login.lower() not in _FIDO_LOGINS:
+                            continue
+                        _rid = _r.get("id")
+                        if _rid is not None:
+                            gh.delete_reaction(_repo_pulls, "pulls", _cid_pulls, _rid)
                 except Exception:
                     log.exception(
                         "failed to remove eyes reaction from comment %s on failure"
@@ -1600,6 +1602,7 @@ def reply_to_comment(
             gh,
             rescope=rescope_trigger,
             insight_filer=_GitHubInsightFiler(gh),
+            fido_logins=_FIDO_LOGINS,
         )
         target = CommentTarget(
             repo=str(info.get("repo", "")),
@@ -1785,10 +1788,14 @@ def reply_to_issue_comment(
                 try:
                     reactions = gh.list_reactions(repo_full, "issues", _cid)
                     for _r in reactions:
-                        if _r.get("content") == "eyes":
-                            _rid = _r.get("id")
-                            if _rid is not None:
-                                gh.delete_reaction(repo_full, "issues", _cid, _rid)
+                        if _r.get("content") != "eyes":
+                            continue
+                        _login = _r.get("user", {}).get("login", "")
+                        if _login.lower() not in _FIDO_LOGINS:
+                            continue
+                        _rid = _r.get("id")
+                        if _rid is not None:
+                            gh.delete_reaction(repo_full, "issues", _cid, _rid)
                 except Exception:
                     log.exception(
                         "failed to remove eyes reaction from issue comment %s on"
@@ -1859,6 +1866,7 @@ def reply_to_issue_comment(
             gh,
             rescope=rescope_trigger,
             insight_filer=_GitHubInsightFiler(gh),
+            fido_logins=_FIDO_LOGINS,
         )
         issue_target = CommentTarget(
             repo=repo_full,

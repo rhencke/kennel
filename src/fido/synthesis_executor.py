@@ -128,10 +128,13 @@ class SynthesisExecutor:
         gh: ReplyPoster,
         rescope: RescopeTrigger | None = None,
         insight_filer: InsightFiler | None = None,
+        *,
+        fido_logins: frozenset[str] = frozenset(),
     ) -> None:
         self._gh = gh
         self._rescope = rescope
         self._insight_filer = insight_filer
+        self._fido_logins = fido_logins
 
     def execute(
         self,
@@ -292,12 +295,13 @@ class SynthesisExecutor:
             self._insight_filer.file_insight(insight, target)
 
     def _remove_eyes_reaction(self, target: CommentTarget) -> None:
-        """Remove the ``eyes`` reaction from *target* (best-effort).
+        """Remove Fido's ``eyes`` reaction from *target* (best-effort).
 
         Lists all reactions on the comment and deletes any with
-        ``content == "eyes"``.  Errors are logged but never propagated —
-        a failed reaction cleanup must not abort an otherwise-successful
-        reply.
+        ``content == "eyes"`` whose author matches ``fido_logins``.
+        Other users' eyes reactions are left untouched.  Errors are
+        logged but never propagated — a failed reaction cleanup must not
+        abort an otherwise-successful reply.
         """
         try:
             reactions = self._gh.list_reactions(
@@ -306,20 +310,26 @@ class SynthesisExecutor:
                 target.comment_id,
             )
             for reaction in reactions:
-                if reaction.get("content") == "eyes":
-                    reaction_id = reaction.get("id")
-                    if reaction_id is not None:
-                        log.info(
-                            "removing eyes reaction %s from comment %s",
-                            reaction_id,
-                            target.comment_id,
-                        )
-                        self._gh.delete_reaction(
-                            target.repo,
-                            target.comment_type,
-                            target.comment_id,
-                            reaction_id,
-                        )
+                if reaction.get("content") != "eyes":
+                    continue
+                # Only delete Fido's own eyes reactions — other users' eyes
+                # belong to them and must not be removed.
+                login = reaction.get("user", {}).get("login", "")
+                if self._fido_logins and login.lower() not in self._fido_logins:
+                    continue
+                reaction_id = reaction.get("id")
+                if reaction_id is not None:
+                    log.info(
+                        "removing eyes reaction %s from comment %s",
+                        reaction_id,
+                        target.comment_id,
+                    )
+                    self._gh.delete_reaction(
+                        target.repo,
+                        target.comment_type,
+                        target.comment_id,
+                        reaction_id,
+                    )
         except Exception:
             log.exception(
                 "failed to remove eyes reaction from comment %s — continuing",

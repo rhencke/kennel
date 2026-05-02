@@ -325,14 +325,14 @@ class TestExecutorEffectsOnly:
     def test_removes_eyes_reaction_before_emoji(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = [
-            {"id": 42, "content": "eyes"},
+            {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
         ]
         call_order: list[str] = []
         gh.delete_reaction.side_effect = lambda *a, **kw: call_order.append(
             "remove_eyes"
         )
         gh.add_reaction.side_effect = lambda *a, **kw: call_order.append("add_emoji")
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
 
         executor.execute_effects_only(_make_response(emoji="rocket"), _make_target())
 
@@ -341,12 +341,25 @@ class TestExecutorEffectsOnly:
     def test_removes_eyes_reaction(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = [
-            {"id": 42, "content": "eyes"},
+            {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
         ]
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
 
         executor.execute_effects_only(_make_response(), _make_target())
 
+        gh.delete_reaction.assert_called_once_with("owner/repo", "pulls", 100, 42)
+
+    def test_preserves_other_users_eyes_reactions(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = [
+            {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
+            {"id": 99, "content": "eyes", "user": {"login": "rhencke"}},
+        ]
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
+
+        executor.execute_effects_only(_make_response(), _make_target())
+
+        # Only Fido's reaction (42) is deleted, not rhencke's (99).
         gh.delete_reaction.assert_called_once_with("owner/repo", "pulls", 100, 42)
 
     def test_ignores_non_eyes_reactions(self) -> None:
