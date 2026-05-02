@@ -1464,7 +1464,12 @@ class TestWorker:
         ):
             worker.run()
         mock_focp.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text", issue_labels=[]
+            mock_ctx.fido_dir,
+            repo_ctx,
+            8,
+            "My task",
+            "Issue body text",
+            issue_labels=[],
         )
 
     def test_run_skips_ci_thread_rescope_for_fresh_pr(self, tmp_path: Path) -> None:

@@ -2577,9 +2577,7 @@ class Worker:
             return False
         return True
 
-    def _push_committed_work_before_yield(
-        self, head_before: str, slug: str
-    ) -> None:
+    def _push_committed_work_before_yield(self, head_before: str, slug: str) -> None:
         """Push any commits that landed during the turn before yielding.
 
         On a preempt early-return the worker would otherwise leave a
@@ -2635,9 +2633,7 @@ class Worker:
         self._git(["add", "-u"])
         # If staging produced nothing (only untracked files were dirty),
         # don't create an empty commit — just return the unchanged HEAD.
-        diff_cached = self._git(
-            ["diff", "--cached", "--quiet"], check=False
-        )
+        diff_cached = self._git(["diff", "--cached", "--quiet"], check=False)
         if diff_cached.returncode == 0:
             return head_after
         self._git(
