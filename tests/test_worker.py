@@ -9880,6 +9880,110 @@ class TestExecuteTask:
         assert "Task title: Fix widget" in prompt_snapshots[4]
         assert "Branch: br-42" in prompt_snapshots[4]
 
+    def test_non_resettable_provider_never_uses_fresh_session(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-resettable provider (supports_no_commit_reset=False) stays REUSE
+        past attempt >= 4 and uses no_commit_persistent_nudge instead."""
+        mock_agent = _client()
+        mock_agent.supports_no_commit_reset = False
+        gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
+        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        fido_dir = self._fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("initial prompt")
+        task = self._pending_task("Port to Python 3")
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout="aaa" if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+        prompt_snapshots: list[str] = []
+        run_calls = 0
+
+        def fake_run(fd, *args, **kwargs):
+            nonlocal run_calls
+            run_calls += 1
+            prompt_snapshots.append((fd / "prompt").read_text())
+            if run_calls == 5:
+                worker._abort_task.request(task["id"])
+            return ("sess", "")
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=fake_run) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br-42")
+
+        session_modes = [
+            call.kwargs["session_mode"] for call in mock_run.call_args_list
+        ]
+        # All modes are REUSE — no FRESH even after attempt >= 4.
+        assert all(m == TurnSessionMode.REUSE for m in session_modes)
+        # The nudge prompt for attempt >= 1 uses no_commit_persistent_nudge format.
+        assert "Attempt 1" in prompt_snapshots[1]
+        assert "Port to Python 3" in prompt_snapshots[1]
+
+    def test_non_resettable_provider_marks_blocked_past_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-resettable provider marks task BLOCKED and posts a comment when
+        attempt exceeds _PERSISTENT_NO_COMMIT_CAP (6)."""
+        from fido.types import TaskStatus
+
+        mock_agent = _client()
+        mock_agent.supports_no_commit_reset = False
+        mock_agent.generate_reply.return_value = (
+            "Woof — I gave up after too many tries."
+        )
+        gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
+        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        fido_dir = self._fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("initial prompt")
+        task = self._pending_task("Add type hints")
+
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout="aaa" if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sess", ""),
+            ) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.update") as mock_update,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 55, "br-55")
+
+        assert result is True
+        # 1 initial turn + 6 nudge turns = 7 total calls (cap is 6, blocked at attempt 7)
+        assert mock_run.call_count == 7
+        mock_update.assert_any_call(task["id"], TaskStatus.BLOCKED)
+        gh.comment_issue.assert_called_once()
+        comment_args = gh.comment_issue.call_args.args
+        assert comment_args[0] == "owner/repo"
+        assert comment_args[1] == 55
+        assert "<!-- fido:task-stuck-no-commit -->" in comment_args[2]
+
     def test_saves_current_task_id_to_state_before_provider_run(
         self, tmp_path: Path
     ) -> None:

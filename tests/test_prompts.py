@@ -235,6 +235,65 @@ class TestFreshSessionRetryPrompt:
         assert "Issue description:\nIt blows up on empty input." in result
 
 
+class TestNoCommitPersistentNudge:
+    def test_includes_task_title_attempt_and_task_id(self) -> None:
+        result = Prompts("").no_commit_persistent_nudge(
+            attempt=3,
+            task_title="Refactor widget",
+            task_id="task-42",
+            work_dir="/repo/work",
+            pr_number=99,
+        )
+        assert "Refactor widget" in result
+        assert "Attempt 3" in result
+        assert "fido task complete /repo/work task-42" in result
+
+    def test_demands_tool_call_edit_or_write(self) -> None:
+        result = Prompts("").no_commit_persistent_nudge(
+            attempt=1,
+            task_title="Fix lint",
+            task_id="task-7",
+            work_dir="/repo",
+            pr_number=5,
+        )
+        assert "Edit" in result or "Write" in result
+        assert "tool call" in result.lower() or "tool" in result.lower()
+
+    def test_includes_blocked_command_with_pr(self) -> None:
+        result = Prompts("").no_commit_persistent_nudge(
+            attempt=2,
+            task_title="Add tests",
+            task_id="task-9",
+            work_dir="/repo",
+            pr_number=77,
+        )
+        assert "gh pr comment 77 --body 'BLOCKED:" in result
+
+    def test_includes_blocked_command_placeholder_when_no_pr(self) -> None:
+        result = Prompts("").no_commit_persistent_nudge(
+            attempt=2,
+            task_title="Add tests",
+            task_id="task-9",
+            work_dir="/repo",
+            pr_number=None,
+        )
+        assert "gh pr comment <pr> --body 'BLOCKED:" in result
+
+
+class TestTaskStuckNoCommitCommentPrompt:
+    def test_includes_task_title(self) -> None:
+        result = Prompts("persona").task_stuck_no_commit_comment_prompt(
+            "Fix the parser", 7
+        )
+        assert "Fix the parser" in result
+
+    def test_includes_attempt_count(self) -> None:
+        result = Prompts("persona").task_stuck_no_commit_comment_prompt(
+            "Fix the parser", 7
+        )
+        assert "7" in result
+
+
 # ── reply_context_block ───────────────────────────────────────────────────────
 
 
