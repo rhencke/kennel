@@ -706,7 +706,16 @@ class TestCodexSession:
 
         assert fake.stopped
         assert session.last_turn_cancelled is False
-        assert replacement.requests == [("thread/resume", {"threadId": "thread-new"})]
+        # ``thread/resume`` carries the full session context per #1077:
+        # model, cwd, approvalPolicy, sandbox, developerInstructions, plus
+        # threadId and excludeTurns.  Anchor on the threadId + excludeTurns
+        # rather than the full dict so future protocol enrichments don't
+        # break this test.
+        assert len(replacement.requests) == 1
+        method, params = replacement.requests[0]
+        assert method == "thread/resume"
+        assert params["threadId"] == "thread-new"
+        assert params["excludeTurns"] is True
 
 
 class TestCodexClient:
