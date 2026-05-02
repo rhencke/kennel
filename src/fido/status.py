@@ -1116,6 +1116,14 @@ def _should_show_worker_line(repo: RepoStatus) -> bool:
         return False
     if repo.current_task is not None:
         return True
+    if repo.task_number is not None and repo.task_total is not None:
+        # Task numbering means the worker is mid-task even when
+        # ``current_task`` hasn't been refreshed onto the snapshot yet
+        # (e.g. immediately after a rescope when the title is being
+        # re-derived).  ``_worker_thread_state`` already prefers the
+        # ``task n/m`` descriptor when set, so the line has meaningful
+        # content to render.
+        return True
     if _worker_is_agent_talker(repo):
         return True
     ps = repo.provider_status
