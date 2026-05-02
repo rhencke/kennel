@@ -36,7 +36,7 @@ from fido.store import (
 from fido.synthesis_call import call_synthesis
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
-from fido.types import ActiveIssue, ActivePR, TaskType
+from fido.types import ActiveIssue, ActivePR, RescоpeIntent, TaskType
 
 log = logging.getLogger(__name__)
 
@@ -69,25 +69,30 @@ class _BackgroundRescopeTrigger:
         self._agent = agent
         self._prompts = prompts
 
-    def trigger_rescope(self, change_request: str) -> None:
-        """Trigger :func:`_reorder_tasks_background` with the given change request.
+    def trigger_rescope(self, intent: RescоpeIntent) -> None:
+        """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
 
-        The *change_request* text is logged for traceability and used as the
-        commit summary passed to the reorder call so Opus can see what changed.
+        The intent's *change_request* text is logged for traceability and used
+        as the commit summary passed to the reorder call so Opus can see what
+        changed.  The full intent (including *comment_id* and *timestamp*) is
+        forwarded so the rescoper can reference the originating comment and
+        accumulate multiple concurrent intents correctly.
         """
         log.info(
-            "RescopeTrigger: triggering background rescope: %s",
-            change_request[:80],
+            "RescopeTrigger: triggering background rescope for comment %d: %s",
+            intent.comment_id,
+            intent.change_request[:80],
         )
         _reorder_tasks_background(
             self._work_dir,
-            change_request,
+            intent.change_request,
             self._config,
             self._gh,
             self._repo_cfg,
             self._registry,
             agent=self._agent,
             prompts=self._prompts,
+            intents=[intent],
         )
 
 
@@ -2112,6 +2117,7 @@ def _reorder_tasks_background(
     repo_cfg: RepoConfig | None = None,
     registry: WorkerRegistry | None = None,
     *,
+    intents: list[RescоpeIntent] | None = None,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -2128,6 +2134,12 @@ def _reorder_tasks_background(
     another thread.  When the running thread finishes it checks for a pending
     run and, if one exists, executes it before exiting — so at most one Opus
     call is in-flight plus one queued per repo.
+
+    When *intents* is provided (comment-triggered rescope), they accumulate in
+    the pending entry rather than being overwritten — so every originating
+    comment is tracked and the rescoper can reference all of them.  The commit
+    summary and kwargs from the latest call win (context should be fresh);
+    intents from all coalesced calls are preserved.
 
     Passes an ``_on_changes`` callback so that any thread tasks dropped or
     modified during rescoping trigger a notification reply to the original
@@ -2168,8 +2180,15 @@ def _reorder_tasks_background(
         if _release_untriaged_on_finish:
             entry["untriaged_holds"] = int(entry.get("untriaged_holds", 0)) + 1
         if entry["running"]:
-            # Coalesce: latest call wins; the running thread will do one more pass.
-            entry["pending"] = (commit_summary, kwargs)
+            # Coalesce: latest commit_summary and kwargs win; intents accumulate
+            # so every originating comment is tracked even when multiple
+            # comment-triggered rescopes arrive during the same Opus call.
+            existing = entry["pending"]
+            if existing is None:
+                entry["pending"] = (commit_summary, kwargs, list(intents or []))
+            else:
+                accumulated = list(existing[2]) + list(intents or [])
+                entry["pending"] = (commit_summary, kwargs, accumulated)
             return
         entry["running"] = True
         entry["pending"] = None
@@ -2177,6 +2196,7 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
+        current_intents: list[RescоpeIntent] = list(intents or [])
         release_untriaged = 0
         # Register as "webhook" so the session talker reflects the true nature of
         # this thread: it is triggered by webhooks and should not be treated as the
@@ -2190,13 +2210,13 @@ def _reorder_tasks_background(
             registry.set_rescoping(repo_cfg.name, True)
         try:
             while True:
-                reorder(work_dir, cs, **kw)
+                reorder(work_dir, cs, intents=current_intents or None, **kw)
                 with _reorder_coalesce_lock:
                     pending = state[key].get("pending")
                     if pending is None:
                         break
                     state[key]["pending"] = None
-                    cs, kw = pending
+                    cs, kw, current_intents = pending
         finally:
             with _reorder_coalesce_lock:
                 entry = state.get(key)

@@ -70,6 +70,31 @@ class TaskSnapshot:
 
 
 @dataclass(frozen=True)
+class RescоpeIntent:
+    """Origin metadata for a rescope trigger from comment synthesis.
+
+    Carries the plain-English change request alongside the originating
+    comment identity and a stable ordering timestamp so the rescoper can
+    process intents in arrival order and reply back to the right commenter.
+
+    Attributes
+    ----------
+    change_request:
+        Plain-English description of the requested scope change, as written
+        by the synthesis LLM from the comment's content.
+    comment_id:
+        GitHub ID of the comment that triggered the rescope.
+    timestamp:
+        ISO-8601 UTC timestamp of when the rescope was triggered — used for
+        ordering when multiple intents are coalesced into a single Opus call.
+    """
+
+    change_request: str
+    comment_id: int
+    timestamp: str
+
+
+@dataclass(frozen=True)
 class GitIdentity:
     """GitHub-derived git commit identity.
 

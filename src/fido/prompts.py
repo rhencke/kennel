@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescоpeIntent, TaskSnapshot
 
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
@@ -510,6 +510,7 @@ class Prompts:
         issue: ActiveIssue | None = None,
         pr: ActivePR | None = None,
         prior_attempts: list[ClosedPR] | None = None,
+        intents: list[RescоpeIntent] | None = None,
     ) -> str:
         """Build an Opus prompt for dependency-aware task reordering.
 
@@ -519,6 +520,10 @@ class Prompts:
         When *issue* is provided, the rendered active-context block (issue,
         optional PR, prior attempts, task list) is prepended to the prompt so
         Opus has full context about what is being worked on.
+
+        When *intents* is provided (comment-triggered rescope), the originating
+        comment IDs, timestamps, and change request texts are shown so Opus can
+        reference the specific comments that triggered each requested change.
 
         Rules enforced in the prompt:
         - CI tasks (type "ci") must remain first.
@@ -564,6 +569,19 @@ class Prompts:
                 + "\n\n"
             )
 
+        intents_block = ""
+        if intents:
+            lines = [
+                f"- comment #{intent.comment_id} ({intent.timestamp}): "
+                f"{intent.change_request}"
+                for intent in intents
+            ]
+            intents_block = (
+                "Pending change requests from PR comments:\n"
+                + "\n".join(lines)
+                + "\n\n"
+            )
+
         return (
             f"{TRIAGE_CLAUSE}\n\n"
             f"{active_ctx_prefix}"
@@ -572,6 +590,7 @@ class Prompts:
             f"{completed_block}\n\n"
             "Recent commits (already implemented):\n"
             f"{commit_summary or '(none)'}\n\n"
+            f"{intents_block}"
             "Pending tasks (current order):\n"
             f"{pending_json}\n\n"
             "Reorder these tasks for the optimal implementation sequence based on "

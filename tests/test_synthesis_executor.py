@@ -7,6 +7,7 @@ import pytest
 from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
 from fido.synthesis import CommentResponse
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
+from fido.types import RescоpeIntent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,7 +153,23 @@ class TestExecutorRescope:
 
         executor.execute(_make_response(change_request="Add logging"), _make_target())
 
-        rescope.trigger_rescope.assert_called_once_with("Add logging")
+        rescope.trigger_rescope.assert_called_once()
+        intent = rescope.trigger_rescope.call_args[0][0]
+        assert isinstance(intent, RescоpeIntent)
+        assert intent.change_request == "Add logging"
+        assert intent.comment_id == 100  # from _make_target()
+        assert intent.timestamp  # non-empty ISO timestamp
+
+    def test_rescope_intent_comment_id_matches_target(self) -> None:
+        gh = _make_gh()
+        rescope = _make_rescope()
+        executor = SynthesisExecutor(gh, rescope=rescope)
+        target = _make_target(comment_id=999)
+
+        executor.execute(_make_response(change_request="Refactor"), target)
+
+        intent = rescope.trigger_rescope.call_args[0][0]
+        assert intent.comment_id == 999
 
     def test_no_rescope_when_change_request_none(self) -> None:
         gh = _make_gh()
@@ -370,7 +387,12 @@ class TestExecutorEffectsOnly:
             _make_response(change_request="Add logging"), _make_target()
         )
 
-        rescope.trigger_rescope.assert_called_once_with("Add logging")
+        rescope.trigger_rescope.assert_called_once()
+        intent = rescope.trigger_rescope.call_args[0][0]
+        assert isinstance(intent, RescоpeIntent)
+        assert intent.change_request == "Add logging"
+        assert intent.comment_id == 100
+        assert intent.timestamp
 
     def test_no_rescope_when_change_request_none(self) -> None:
         gh = _make_gh()

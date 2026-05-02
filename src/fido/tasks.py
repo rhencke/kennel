@@ -25,7 +25,14 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskStatus, TaskType
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    ClosedPR,
+    RescоpeIntent,
+    TaskStatus,
+    TaskType,
+)
 
 log = logging.getLogger(__name__)
 
@@ -834,6 +841,7 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
+    intents: list[RescоpeIntent] | None = None,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     issue: ActiveIssue | None = None,
@@ -886,6 +894,7 @@ def reorder_tasks(
         issue=issue,
         pr=pr,
         prior_attempts=prior_attempts,
+        intents=intents,
     )
     raw = agent.run_turn(prompt, model=agent.voice_model)
     if not raw:

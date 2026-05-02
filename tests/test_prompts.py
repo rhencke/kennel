@@ -6,7 +6,7 @@ from fido.prompts import (
     render_active_context,
     triage_context_block,
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescоpeIntent, TaskSnapshot
 
 # ── triage_context_block ──────────────────────────────────────────────────────
 
@@ -582,6 +582,38 @@ class TestRescopePrompt:
         result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=None)
         assert "## Active issue" in result
         assert "## Active PR" not in result
+
+    def test_intents_block_included_when_intents_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescоpeIntent(
+                change_request="Add logging to the parser",
+                comment_id=123,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "Pending change requests from PR comments:" in result
+        assert "comment #123" in result
+        assert "Add logging to the parser" in result
+        assert "2024-01-15T10:00:00+00:00" in result
+
+    def test_intents_block_absent_when_no_intents(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "Pending change requests" not in result
+
+    def test_multiple_intents_all_included(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescоpeIntent("Add logging", 111, "2024-01-15T10:00:00+00:00"),
+            RescоpeIntent("Refactor tests", 222, "2024-01-15T10:01:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "comment #111" in result
+        assert "comment #222" in result
+        assert "Add logging" in result
+        assert "Refactor tests" in result
 
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────

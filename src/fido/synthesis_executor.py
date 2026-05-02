@@ -9,10 +9,12 @@ oracle.
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from fido.rocq.replied_comment_claims import ReviewReplyOutcome
 from fido.synthesis import CommentResponse, outcome_for_response
+from fido.types import RescоpeIntent
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +85,15 @@ class ReplyPoster(Protocol):
 
 
 class RescopeTrigger(Protocol):
-    """Triggers a background rescope with a plain-English change request."""
+    """Triggers a background rescope from a comment synthesis response.
 
-    def trigger_rescope(self, change_request: str) -> None: ...
+    Receives a :class:`~fido.types.RescоpeIntent` carrying the plain-English
+    change request alongside the originating comment identity and timestamp
+    so the rescope machinery can track which comment triggered each intent
+    and reply back on material outcomes.
+    """
+
+    def trigger_rescope(self, intent: RescоpeIntent) -> None: ...
 
 
 class SynthesisExecutor:
@@ -142,19 +150,7 @@ class SynthesisExecutor:
             )
 
         # 3. Trigger rescope if change_request present
-        if response.change_request is not None:
-            if self._rescope is not None:
-                log.info(
-                    "triggering rescope: %s",
-                    response.change_request[:80],
-                )
-                self._rescope.trigger_rescope(response.change_request)
-            else:
-                log.warning(
-                    "change_request present but no rescope trigger configured — "
-                    "skipping rescope for: %s",
-                    response.change_request[:80],
-                )
+        self._maybe_trigger_rescope(response, target)
 
         # 4. Return outcome for Rocq oracle
         return outcome_for_response(response)
@@ -201,19 +197,7 @@ class SynthesisExecutor:
             )
 
         # 3. Trigger rescope if change_request present
-        if response.change_request is not None:
-            if self._rescope is not None:
-                log.info(
-                    "triggering rescope: %s",
-                    response.change_request[:80],
-                )
-                self._rescope.trigger_rescope(response.change_request)
-            else:
-                log.warning(
-                    "change_request present but no rescope trigger configured — "
-                    "skipping rescope for: %s",
-                    response.change_request[:80],
-                )
+        self._maybe_trigger_rescope(response, target)
 
         # 4. Return outcome for Rocq oracle
         return outcome_for_response(response)
@@ -237,6 +221,35 @@ class SynthesisExecutor:
                 target.pr,
             )
             self._gh.comment_issue(target.repo, target.pr, body)
+
+    def _maybe_trigger_rescope(
+        self, response: CommentResponse, target: CommentTarget
+    ) -> None:
+        """Build a :class:`RescоpeIntent` and fire the rescope trigger if configured.
+
+        No-op when *response.change_request* is ``None``.  Logs a warning if a
+        change_request is present but no rescope trigger was injected.
+        """
+        if response.change_request is None:
+            return
+        if self._rescope is not None:
+            intent = RescоpeIntent(
+                change_request=response.change_request,
+                comment_id=target.comment_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            log.info(
+                "triggering rescope for comment %d: %s",
+                intent.comment_id,
+                intent.change_request[:80],
+            )
+            self._rescope.trigger_rescope(intent)
+        else:
+            log.warning(
+                "change_request present but no rescope trigger configured — "
+                "skipping rescope for: %s",
+                response.change_request[:80],
+            )
 
     def _remove_eyes_reaction(self, target: CommentTarget) -> None:
         """Remove the ``eyes`` reaction from *target* (best-effort).

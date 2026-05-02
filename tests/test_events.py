@@ -44,7 +44,7 @@ from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse
 from fido.synthesis_call import SynthesisExhaustedError
-from fido.types import ActiveIssue, ActivePR
+from fido.types import ActiveIssue, ActivePR, RescоpeIntent
 
 
 def _synthesis_response(
@@ -4218,6 +4218,62 @@ class TestReorderTasksBackground:
         assert calls[0][1] == "cs1"
         assert calls[1][1] == "cs4"
 
+    def test_intents_accumulate_across_coalesced_calls(self, tmp_path: Path) -> None:
+        """Intents from concurrent callers are all preserved, not overwritten."""
+        state: dict = {}
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        intent1 = RescоpeIntent("Add logging", 10, "2024-01-15T10:00:00+00:00")
+        intent2 = RescоpeIntent("Refactor tests", 20, "2024-01-15T10:01:00+00:00")
+        intent3 = RescоpeIntent("Fix typing", 30, "2024-01-15T10:02:00+00:00")
+
+        # First call — starts thread with intent1
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            MagicMock(),
+            intents=[intent1],
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Second call — coalesces, adds intent2
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            MagicMock(),
+            intents=[intent2],
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Third call — coalesces, adds intent3
+        _reorder_tasks_background(
+            tmp_path,
+            "cs3",
+            self._cfg(tmp_path),
+            MagicMock(),
+            intents=[intent3],
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Only one thread spawned; pending holds all three intents
+        assert len(started) == 1
+        pending = state[str(tmp_path)]["pending"]
+        assert pending[2] == [intent2, intent3]  # intent1 went with first call
+
+        # Run thread — cs1+intent1 then cs3+[intent2,intent3]
+        self._run_thread(started)
+        assert len(calls) == 2
+        # First call: intent1 only
+        assert calls[0][2].get("intents") == [intent1]
+        # Second call: intent2 and intent3 accumulated
+        assert calls[1][2].get("intents") == [intent2, intent3]
+
     def test_running_flag_cleared_after_no_pending(self, tmp_path: Path) -> None:
         """After a normal run with no pending call, running is set to False."""
         state: dict = {}
@@ -5243,12 +5299,25 @@ class TestBackgroundRescopeTrigger:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
+    def _make_intent(
+        self,
+        change_request: str = "Add logging",
+        comment_id: int = 42,
+        timestamp: str = "2024-01-15T10:00:00+00:00",
+    ) -> RescоpeIntent:
+        return RescоpeIntent(
+            change_request=change_request,
+            comment_id=comment_id,
+            timestamp=timestamp,
+        )
+
     def test_trigger_rescope_calls_reorder_tasks_background(
         self, tmp_path: Path
     ) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
         mock_gh = MagicMock()
+        intent = self._make_intent("Add logging to the handler")
 
         trigger = _BackgroundRescopeTrigger(
             tmp_path,
@@ -5258,11 +5327,33 @@ class TestBackgroundRescopeTrigger:
         )
 
         with patch("fido.events._reorder_tasks_background") as mock_reorder:
-            trigger.trigger_rescope("Add logging to the handler")
+            trigger.trigger_rescope(intent)
 
         mock_reorder.assert_called_once()
         call_kwargs = mock_reorder.call_args
         assert call_kwargs.args[1] == "Add logging to the handler"
+
+    def test_trigger_rescope_passes_intent_as_intents_list(
+        self, tmp_path: Path
+    ) -> None:
+        """_BackgroundRescopeTrigger wraps the intent in a single-item list."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        mock_gh = MagicMock()
+        intent = self._make_intent("Refactor tests", comment_id=77)
+
+        trigger = _BackgroundRescopeTrigger(
+            tmp_path,
+            cfg,
+            mock_gh,
+            repo_cfg=repo_cfg,
+        )
+
+        with patch("fido.events._reorder_tasks_background") as mock_reorder:
+            trigger.trigger_rescope(intent)
+
+        passed_intents = mock_reorder.call_args.kwargs["intents"]
+        assert passed_intents == [intent]
 
     def test_trigger_rescope_passes_collaborators(self, tmp_path: Path) -> None:
         """_BackgroundRescopeTrigger forwards work_dir, config, and gh to reorder."""
@@ -5278,7 +5369,7 @@ class TestBackgroundRescopeTrigger:
         )
 
         with patch("fido.events._reorder_tasks_background") as mock_reorder:
-            trigger.trigger_rescope("Refactor the parser")
+            trigger.trigger_rescope(self._make_intent("Refactor the parser"))
 
         args = mock_reorder.call_args.args
         assert args[0] == tmp_path
