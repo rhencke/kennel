@@ -88,7 +88,14 @@ def test_structured_diagnostic_output_from_failed_extraction() -> None:
         Definition bad_monad_marker : nat := bad_get 0.
         Python Extraction bad_monad_marker.
         EOF
-        sed -i "s/source_maps))/source_maps diagnostics_negative_tmp))/" test/dune
+        # Inject the new module before the closing ``))`` of the (modules ...)
+        # stanza.  Earlier this sed targeted the last-known module name
+        # (``source_maps``), which silently no-op'd whenever a later
+        # module was added — leaving dune unaware of the new file and
+        # the test failing without producing the extraction diagnostic
+        # it was meant to verify.  Anchoring on the closing ``))`` is
+        # robust to module additions.
+        sed -i '0,/))$/{s/))$/ diagnostics_negative_tmp))/}' test/dune
         opam exec -- dune build test/diagnostics_negative_tmp.vo
         """
     )
