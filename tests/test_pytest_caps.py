@@ -19,9 +19,7 @@ def test_faulthandler_is_registered_on_sigusr1() -> None:
     SIGUSR1 is the signal conftest hooks (#1248).
     """
     log_path = Path(f"/tmp/pyfh-{os.getpid()}.log")
-    assert log_path.exists(), (
-        f"conftest should have opened {log_path} at import time"
-    )
+    assert log_path.exists(), f"conftest should have opened {log_path} at import time"
     assert log_path.is_file()
     # Simply having the SIGUSR1 module attribute confirms our import path.
     assert hasattr(signal, "SIGUSR1")
