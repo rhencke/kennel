@@ -10,6 +10,7 @@ module.
 
 from __future__ import annotations
 
+import queue
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -838,6 +839,125 @@ class TestEventsLeaves:
 # ---------------------------------------------------------------------------
 # claude.py — defensive concurrency branches
 # ---------------------------------------------------------------------------
+
+
+class TestCodexSpawnAppServer:
+    def test_spawn_app_server_invokes_subprocess_popen_with_stdio(
+        self, tmp_path: Path
+    ) -> None:
+        """``_spawn_app_server`` shells out to ``codex app-server`` with
+        bidirectional pipes (codex.py:147)."""
+        from fido import codex as codex_mod
+
+        sentinel = MagicMock()
+        with patch.object(codex_mod.subprocess, "Popen", return_value=sentinel) as p:
+            result = codex_mod._spawn_app_server(cwd=tmp_path)
+        assert result is sentinel
+        cmd = p.call_args.args[0]
+        assert cmd[:3] == ["codex", "app-server", "--listen"]
+
+
+class TestCodexAppServerErrorPaths:
+    """Cover the protocol-error / loud-fail branches in
+    CodexAppServerClient that the happy-path tests miss."""
+
+    def _client(
+        self, prelude: str = '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+    ) -> tuple[object, object]:
+        # Reuse the streaming-stdout fake from the wait_notification
+        # tests so the reader thread doesn't EOF and flag protocol_error
+        # before the test exercises its case.
+        import io
+        from fido.codex import CodexAppServerClient
+
+        lines: queue.Queue[str | None] = queue.Queue()
+
+        class _StreamingStdout:
+            def __init__(self) -> None:
+                self._buf = io.StringIO(prelude)
+
+            def readline(self) -> str:
+                line = self._buf.readline()
+                if line:
+                    return line
+                next_line = lines.get()
+                return "" if next_line is None else next_line
+
+        process = MagicMock()
+        process.pid = 100
+        process.stdin = io.StringIO()
+        process.stdout = _StreamingStdout()
+        process.stderr = io.StringIO("")
+        process._returncode = None
+        process.poll = lambda: process._returncode
+        process.terminate = MagicMock()
+        process.wait = MagicMock(return_value=0)
+        process.kill = MagicMock()
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        return client, lines
+
+    def test_request_times_out(self) -> None:
+        """A request whose response never arrives raises TimeoutError
+        (codex.py:234)."""
+        client, lines = self._client()
+        try:
+            with pytest.raises(TimeoutError, match="request timed out"):
+                client.request("never-responds", timeout=0.05)  # type: ignore[attr-defined]
+        finally:
+            lines.put(None)
+            client.stop()  # type: ignore[attr-defined]
+
+    def test_stop_skips_terminate_when_process_already_exited(self) -> None:
+        """``stop`` early-returns the terminate path when ``poll()`` shows
+        the process already exited (codex.py:299)."""
+        client, lines = self._client()
+        # Force poll() to report exited.
+        client._process._returncode = 0  # type: ignore[attr-defined]
+        client.stop()  # type: ignore[attr-defined]
+        # terminate was not called because we short-circuited.
+        client._process.terminate.assert_not_called()  # type: ignore[attr-defined]
+        lines.put(None)
+
+    def test_handle_line_rejects_non_json_object(self) -> None:
+        """A JSON value that decodes to non-object → CodexProtocolError
+        (codex.py:359)."""
+        client, lines = self._client()
+        try:
+            lines.put('"just-a-string"\n')
+            # Reader picks it up and flags protocol_error; subsequent
+            # request raises.
+            import time
+
+            time.sleep(0.05)
+            with pytest.raises(Exception):
+                client.request("anything")  # type: ignore[attr-defined]
+        finally:
+            lines.put(None)
+            client.stop()  # type: ignore[attr-defined]
+
+    def test_handle_line_rejects_unknown_shape(self) -> None:
+        """Object lacking ``id`` and ``method`` → CodexProtocolError
+        (codex.py:377)."""
+        client, lines = self._client()
+        try:
+            lines.put('{"unknown":"shape"}\n')
+            import time
+
+            time.sleep(0.05)
+            with pytest.raises(Exception):
+                client.request("anything")  # type: ignore[attr-defined]
+        finally:
+            lines.put(None)
+            client.stop()  # type: ignore[attr-defined]
+
+    def test_request_after_stop_raises(self) -> None:
+        """``_raise_if_unavailable_locked`` fires when ``_stopped`` is
+        true (codex.py:389)."""
+        client, lines = self._client()
+        client.stop()  # type: ignore[attr-defined]
+        with pytest.raises(Exception, match="connection is stopped"):
+            client.request("anything", timeout=0.05)  # type: ignore[attr-defined]
+        lines.put(None)
 
 
 class TestClaudeDefensivePaths:
