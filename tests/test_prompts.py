@@ -1242,8 +1242,8 @@ class TestSynthesisPrompt:
 
     def test_change_request_description(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
-        assert "plain-English" in result
-        assert "scope change" in result
+        assert "collaborator" in result
+        assert "scope or tasks" in result
 
     def test_json_only_instruction(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
