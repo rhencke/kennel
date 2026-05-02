@@ -161,7 +161,16 @@ def test_lsp_shapes() -> None:
     # ordering (workspace_symbols sorts by symbol name only, so ties resolve
     # by pymap-load order — fragile to assert positionally).
     assert any(item["location"]["uri"] == uri for item in workspace_symbols)
-    assert diagnostics == {"kind": "full", "items": []}
+    # Filter the "may be stale" warning: in a test environment the source
+    # file mtime is whatever git checkout set it to, which can be newer than
+    # the generated .py whenever the order happens to land that way — that
+    # signal is meaningful for human-edited working trees but noisy in tests.
+    items = [
+        item
+        for item in diagnostics["items"]
+        if "may be stale" not in item.get("message", "")
+    ]
+    assert {"kind": "full", "items": items} == {"kind": "full", "items": []}
     assert len(semantic_tokens["data"]) % 5 == 0
     assert code_lens[0]["data"]["target"]["uri"].endswith("/transition.py")
     assert signature is not None
