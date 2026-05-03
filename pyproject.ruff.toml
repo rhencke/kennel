@@ -127,6 +127,11 @@ select = [
   "PERF101",
   "PERF102",
   "PERF402",
+  "PERF403",
+  # "PERF480", # manual-fromkeys: not recognised by this ruff version (no rule selector found).
+  "PGH004",
+  "PIE790",
+  "PIE794",
   "PLC2401",
   "W",
 ]
