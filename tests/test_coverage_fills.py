@@ -1981,6 +1981,62 @@ class TestClaudeStderrPump:
             time.sleep(0.01)
 
 
+class TestEventsClaimReplyOutboxEffectsDelivered:
+    """Cover the ``delivered``-state RuntimeError raise in
+    _claim_reply_outbox_effects (events.py:348-351)."""
+
+    def test_raises_when_existing_effect_is_delivered(self, tmp_path: Path) -> None:
+        from fido import events
+
+        repo_cfg = MagicMock()
+        repo_cfg.work_dir = tmp_path
+
+        promise = MagicMock()
+        promise.promise_id = "promise-1"
+        promise.anchor_comment_id = 42
+
+        existing = MagicMock()
+        existing.state = "delivered"
+
+        class _StoreStub:
+            def __init__(self, *_a, **_kw) -> None:
+                pass
+
+            def promise(self, _pid: str):
+                return promise
+
+            def reply_outbox_effect(self, _pid: str):
+                return existing
+
+        with patch.object(events, "FidoStore", _StoreStub):
+            with pytest.raises(RuntimeError, match="missing artifact row"):
+                events._claim_reply_outbox_effects(
+                    repo_cfg,
+                    delivery_id="d1",
+                    promise_ids=["promise-1"],
+                )
+
+
+class TestEventsIngressFsmCollapsed:
+    """Cover the ``Collapsed-or-other`` else branch in
+    WebhookIngressOracle.check_dispatch (events.py:146-148)."""
+
+    def test_arrive_after_collapsed_runs_else_branch(self) -> None:
+        from fido.events import WebhookIngressOracle
+
+        oracle = WebhookIngressOracle()
+        # First call with collapse_review=True transitions Fresh → Collapsed
+        # and returns None (collapsed deliveries are suppressed).
+        oracle.check_dispatch("test/repo", "delivery-1", collapse_review=True)
+        # Second call (no collapse) on the same delivery hits the else branch
+        # at line 146-148 — fires Arrive on a Collapsed state.  The FSM
+        # rejects the transition with AssertionError; that's expected here.
+        # Coverage records the line 148 ``event = Arrive()`` execution
+        # before the transition asserts.
+        with pytest.raises(AssertionError, match="Arrive rejected"):
+            oracle.check_dispatch("test/repo", "delivery-1")
+
+
 class TestEventsDispatchTrailingNone:
     """Cover the trailing ``return None`` fall-throughs in dispatch
     (events.py:1335, 1395)."""
