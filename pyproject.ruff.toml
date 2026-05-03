@@ -148,6 +148,11 @@ select = [
   "PLC2401",
   "PLC3002",
   "PLE0100",
+  "PLE0101",
+  "PLE0115",
+  "PLE0116",
+  "PLE0117",
+  "PLE0118",
   "W",
 ]
 # PLC2401 = "non-ASCII characters in identifiers" — guards against the
