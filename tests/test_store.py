@@ -338,9 +338,7 @@ def test_store_mark_failed_matches_oracle(tmp_path: Path) -> None:
         oracle_claims=claims,
         oracle_promises=promises,
     )
-    assert set(p.promise_id for p in store.recoverable_promises()) == {
-        promise.promise_id
-    }
+    assert {p.promise_id for p in store.recoverable_promises()} == {promise.promise_id}
 
 
 def test_reply_promise_marker_round_trips_and_recovers(tmp_path: Path) -> None:
