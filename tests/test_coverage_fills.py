@@ -1607,6 +1607,74 @@ class TestCodexCLIErrorBranch:
         assert "codex died" in exc_info.value.stderr
 
 
+class TestWorkerEmptyPrComment:
+    """Cover ``_post_empty_pr_comment_once`` defensive RequestException paths."""
+
+    def test_swallows_request_exception_when_fetching_comments(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:2735-2743 — gh.get_issue_comments raises → log+return.
+        import requests
+
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.get_issue_comments.side_effect = requests.RequestException("boom")
+        worker = Worker(tmp_path, gh)
+        # Should not raise — just log and return.
+        worker._post_empty_pr_comment_once("test/repo", 1)  # type: ignore[attr-defined]
+
+    def test_swallows_request_exception_when_posting_comment(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:2754-2762 — gh.comment_issue raises → log+continue.
+        import requests
+
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.comment_issue.side_effect = requests.RequestException("boom")
+        worker = Worker(tmp_path, gh)
+        worker._post_empty_pr_comment_once("test/repo", 1)  # type: ignore[attr-defined]
+
+
+class TestWorkerQueuedActions:
+    """Cover ``_queued_*_comment_action`` methods when the comment is gone."""
+
+    def test_queued_issue_comment_action_returns_none_when_comment_gone(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:2547-2549 — gh.get_issue_comment returns None → log+return.
+        from fido.store import PRCommentQueueRecord
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.get_issue_comment.return_value = None
+        worker = Worker(tmp_path, gh)
+        queued = PRCommentQueueRecord(
+            queue_id="q1",
+            delivery_id="d1",
+            repo="test/repo",
+            pr_number=1,
+            comment_type="issues",
+            comment_id=42,
+            author="alice",
+            is_bot=False,
+            body="hi",
+            github_created_at="2026-01-01T00:00:00Z",
+            state="pending",
+            claim_owner=None,
+            retry_count=0,
+            next_retry_after=None,
+            payload_json="{}",
+        )
+        result = worker._queued_issue_comment_action(  # type: ignore[attr-defined]
+            queued, "test/repo", "PR title", "body"
+        )
+        assert result is None
+
+
 class TestWorkerLeafBranches:
     """Cover small leaf branches in worker.py."""
 
@@ -1678,6 +1746,31 @@ class TestWorkerLeafBranches:
                 worker._report_task_stuck_no_commits(  # type: ignore[attr-defined]
                     fido_dir, "test/repo", 1, "task-id", "task-title", 5
                 )
+
+
+class TestEventsThreadResolved:
+    """Cover ``_thread_task_is_stale_resolved`` early-return branches."""
+
+    def test_returns_true_when_comment_id_missing(self) -> None:
+        # events.py:2703-2704 — None comment_id → return True (stale).
+        from fido.events import _thread_task_is_stale_resolved
+
+        gh = MagicMock()
+        result = _thread_task_is_stale_resolved(
+            gh, {"repo": "test/repo", "pr": 1}
+        )
+        assert result is True
+
+    def test_returns_true_when_no_comments_fetched(self) -> None:
+        # events.py:2706-2708 — empty comments list → return True (stale).
+        from fido.events import _thread_task_is_stale_resolved
+
+        gh = MagicMock()
+        gh.fetch_comment_thread.return_value = []
+        result = _thread_task_is_stale_resolved(
+            gh, {"repo": "test/repo", "pr": 1, "comment_id": 42}
+        )
+        assert result is True
 
 
 class TestEventsNotifyThreadChange:
