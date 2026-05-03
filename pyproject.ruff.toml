@@ -105,6 +105,7 @@ select = [
   "FURB110",
   "FURB116",
   "FURB129",
+  "FURB132",
   "I",
   "PLC2401",
   "W",
