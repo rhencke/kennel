@@ -2336,19 +2336,29 @@ def _reorder_tasks_background(
         kw = kwargs
         current_intents: list[RescopeIntent] = list(intents or [])
         release_untriaged = 0
+        iteration = 0
         # Register as "webhook" so the session talker reflects the true nature of
         # this thread: it is triggered by webhooks and should not be treated as the
         # worker for preemption purposes.  Without this, current_thread_kind()
         # defaults to "worker", causing real webhooks to fire _fire_worker_cancel
         # against the reorder thread and misidentify it as the running worker (#955).
-        set_thread_kind("webhook")
-        if repo_cfg is not None:
-            set_thread_repo(repo_cfg.name)
-        if registry is not None and repo_cfg is not None:
-            registry.set_rescoping(repo_cfg.name, True)
+        #
+        # IMPORTANT: every line from here through the end of the finally must be
+        # inside the try/finally — if a prelude line (set_thread_kind,
+        # set_rescoping, etc.) raises, the finally still has to release the
+        # inbox holds; otherwise the worker parks forever (#1280).
         try:
+            set_thread_kind("webhook")
+            if repo_cfg is not None:
+                set_thread_repo(repo_cfg.name)
+            if registry is not None and repo_cfg is not None:
+                registry.set_rescoping(repo_cfg.name, True)
+            log.info("rescope BG: starting (work_dir=%s)", work_dir)
             while True:
+                iteration += 1
+                log.info("rescope BG: iteration %d starting", iteration)
                 reorder(work_dir, cs, intents=current_intents or None, **kw)
+                log.info("rescope BG: iteration %d complete", iteration)
                 with _reorder_coalesce_lock:
                     pending = state[key].get("pending")
                     if pending is None:
@@ -2356,19 +2366,28 @@ def _reorder_tasks_background(
                     state[key]["pending"] = None
                     cs, kw, current_intents = pending
         finally:
+            log.info("rescope BG: entering finally (iterations=%d)", iteration)
             with _reorder_coalesce_lock:
                 entry = state.get(key)
                 if entry is not None:
                     release_untriaged += int(entry.get("untriaged_holds", 0))
                     entry["untriaged_holds"] = 0
                     entry["running"] = False
+            # Release the inbox holds FIRST. A failure in any subsequent
+            # cleanup step (set_rescoping, set_thread_repo, set_thread_kind)
+            # must not skip the exit_untriaged calls — losing them leaves the
+            # worker permanently blocked on a non-empty inbox counter (#1280).
             if registry is not None and repo_cfg is not None:
-                registry.set_rescoping(repo_cfg.name, False)
                 for _ in range(release_untriaged):
                     registry.exit_untriaged(repo_cfg.name)
+                registry.set_rescoping(repo_cfg.name, False)
             if repo_cfg is not None:
                 set_thread_repo(None)
             set_thread_kind(None)
+            log.info(
+                "rescope BG: finally complete (released %d untriaged hold(s))",
+                release_untriaged,
+            )
 
     t = threading.Thread(
         target=run_loop,
@@ -2386,10 +2405,11 @@ def _reorder_tasks_background(
                 entry["untriaged_holds"] = 0
                 entry["running"] = False
                 entry["pending"] = None
+        # Same ordering as run_loop's finally — release before set_rescoping.
         if registry is not None and repo_cfg is not None:
-            registry.set_rescoping(repo_cfg.name, False)
             for _ in range(release_untriaged):
                 registry.exit_untriaged(repo_cfg.name)
+            registry.set_rescoping(repo_cfg.name, False)
         raise
 
 

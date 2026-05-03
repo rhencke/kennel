@@ -4058,6 +4058,40 @@ class TestGetCommitSummary:
         assert result == ""
 
 
+class _FakeRescopeRegistry:
+    """Hand-rolled fake of the registry slice used by `_reorder_tasks_background`.
+
+    Records calls in order in ``self.calls`` so tests can assert on
+    sequencing — notably the #1280 ordering invariant: the inbox release
+    must run before the late-cleanup steps that could fail.
+
+    No MagicMock — see Rob's no-magicmock feedback (#1280 epic).
+    """
+
+    def __init__(
+        self,
+        *,
+        raise_on_set_rescoping_true: bool = False,
+        raise_on_set_rescoping_false: bool = False,
+    ) -> None:
+        self.calls: list[tuple] = []
+        self._raise_on_true = raise_on_set_rescoping_true
+        self._raise_on_false = raise_on_set_rescoping_false
+
+    def set_rescoping(self, repo_name: str, active: bool) -> None:
+        self.calls.append(("set_rescoping", repo_name, active))
+        if active and self._raise_on_true:
+            raise RuntimeError("rescoping flag broken (true)")
+        if not active and self._raise_on_false:
+            raise RuntimeError("rescoping flag broken (false)")
+
+    def exit_untriaged(self, repo_name: str) -> None:
+        self.calls.append(("exit_untriaged", repo_name))
+
+    def abort_task(self, repo_name: str, *, task_id: str | None = None) -> None:
+        self.calls.append(("abort_task", repo_name, task_id))
+
+
 class TestReorderTasksBackground:
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -4240,6 +4274,106 @@ class TestReorderTasksBackground:
 
         registry.set_rescoping.assert_called_once_with("owner/repo", False)
         registry.exit_untriaged.assert_called_once_with("owner/repo")
+
+    def test_release_runs_before_set_rescoping_in_finally(self, tmp_path: Path) -> None:
+        """Release must fire BEFORE set_rescoping so a failure in the latter
+        cannot leave the inbox stuck (#1280).
+        """
+        started: list = []
+        registry = _FakeRescopeRegistry()
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+            _release_untriaged_on_finish=True,
+        )
+        self._run_thread(started)
+
+        # set_rescoping(True) at thread start, then exit_untriaged in finally,
+        # then set_rescoping(False) — exit must precede the False call.
+        assert registry.calls == [
+            ("set_rescoping", "owner/repo", True),
+            ("exit_untriaged", "owner/repo"),
+            ("set_rescoping", "owner/repo", False),
+        ]
+
+    def test_release_runs_even_when_prelude_set_rescoping_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """If `set_rescoping(True)` in the BG prelude raises, the inbox hold
+        must still be released. The prelude is now inside the try/finally
+        for exactly this reason — without that move, any prelude failure
+        would skip the release and leak the count (#1280).
+
+        In production the BG thread is a daemon, so the propagated exception
+        is just printed and the thread dies. Here we run it synchronously,
+        so we catch the propagated exception and inspect the calls list.
+        """
+        started: list = []
+        registry = _FakeRescopeRegistry(raise_on_set_rescoping_true=True)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        _, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            MagicMock(),
+            repo_cfg=repo_cfg,
+            registry=registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
+            _release_untriaged_on_finish=True,
+        )
+        with pytest.raises(RuntimeError, match="rescoping flag broken"):
+            self._run_thread(started)
+
+        # The prelude raised, so reorder never ran — but the finally must
+        # still have released the inbox hold added synchronously.
+        assert ("exit_untriaged", "owner/repo") in registry.calls
+
+    def test_release_survives_set_rescoping_raising_on_thread_start_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """In the spawn-failure path, exit_untriaged must fire before
+        set_rescoping(False) so a raise in the latter cannot swallow the
+        release (#1280).
+        """
+        registry = _FakeRescopeRegistry(raise_on_set_rescoping_false=True)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+        def fail_start(_thread: object) -> Never:
+            raise RuntimeError("cannot start")
+
+        with pytest.raises(RuntimeError):
+            _reorder_tasks_background(
+                tmp_path,
+                "commits",
+                self._cfg(tmp_path),
+                MagicMock(),
+                repo_cfg=repo_cfg,
+                registry=registry,
+                _start=fail_start,
+                _reorder_fn=MagicMock(),
+                _coalesce_state={},
+                _release_untriaged_on_finish=True,
+            )
+
+        # exit_untriaged must come before the failing set_rescoping(False).
+        assert ("exit_untriaged", "owner/repo") in registry.calls
+        exit_idx = registry.calls.index(("exit_untriaged", "owner/repo"))
+        set_false_idx = registry.calls.index(("set_rescoping", "owner/repo", False))
+        assert exit_idx < set_false_idx
 
     def test_on_inprogress_affected_not_in_kwargs_when_no_registry(
         self, tmp_path: Path

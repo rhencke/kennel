@@ -95,6 +95,11 @@ _EMPTY_PR_COMMENT_MARKER = "<!-- fido:empty-pr-blocked -->"
 # review.  The marker keeps the comment idempotent across re-entry.
 _NO_TASKS_PR_COMMENT_MARKER = "<!-- fido:no-tasks-finalize -->"
 
+# Cap on ``wait_for_inbox_drain`` so a leaked ``enter_untriaged`` cannot park
+# the worker forever (#1280).  Five minutes is well past the longest
+# legitimate rescope path; a wait that exceeds it is the leak signature.
+_INBOX_DRAIN_TIMEOUT_SECONDS = 300.0
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -200,6 +205,8 @@ class ActivityReporter(Protocol):
     def note_durable_demand_drained(self, repo_name: str) -> None: ...
 
     def assert_worker_turn_ok(self, repo_name: str) -> None: ...
+
+    def force_clear_untriaged(self, repo_name: str) -> int: ...
 
 
 class LockHeld(Exception):
@@ -3011,7 +3018,16 @@ class Worker:
                 "inbox non-empty for %s before provider turn — waiting",
                 self._repo_name,
             )
-            self._registry.wait_for_inbox_drain(self._repo_name, timeout=None)
+            # Backstop the wait so a leaked enter_untriaged with no matching
+            # exit_untriaged cannot park the worker forever (#1280).  A real
+            # rescope settles in tens of seconds; a five-minute wait is well
+            # past the longest legitimate path and still small enough that
+            # surfacing the leak via a warning beats waiting silently.
+            drained = self._registry.wait_for_inbox_drain(
+                self._repo_name, timeout=_INBOX_DRAIN_TIMEOUT_SECONDS
+            )
+            if not drained:
+                self._registry.force_clear_untriaged(self._repo_name)
         if self._has_durable_webhook_demand(pr_number):
             log.info(
                 "durable webhook demand pending for %s — yielding worker turn",

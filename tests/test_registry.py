@@ -1,5 +1,6 @@
 """Tests for fido.registry — WorkerRegistry lifecycle management."""
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -1040,6 +1041,47 @@ class TestUntriagedInbox:
         assert not errors, f"concurrent errors: {errors}"
         # After equal enters and exits, count returns to the pre-filled value
         assert reg.has_untriaged("foo/bar") is True
+
+    # ── force_clear_untriaged (#1280) ─────────────────────────────────────
+
+    def test_force_clear_returns_zero_when_count_already_zero(self) -> None:
+        reg = self._reg()
+        assert reg.force_clear_untriaged("foo/bar") == 0
+
+    def test_force_clear_resets_leaked_count_and_returns_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+
+        with caplog.at_level(logging.WARNING):
+            cleared = reg.force_clear_untriaged("foo/bar")
+
+        assert cleared == 3
+        assert reg.has_untriaged("foo/bar") is False
+        assert any(
+            "force-cleared 3 leaked hold(s)" in rec.message for rec in caplog.records
+        )
+
+    def test_force_clear_signals_drained_event_so_waiter_unblocks(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        unblocked = threading.Event()
+
+        def waiter() -> None:
+            reg.wait_for_inbox_drain("foo/bar", timeout=2.0)
+            unblocked.set()
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.05)
+        assert not unblocked.is_set(), "waiter should still be blocked pre-clear"
+
+        reg.force_clear_untriaged("foo/bar")
+        t.join(timeout=2.0)
+        assert unblocked.is_set(), "force_clear should unblock waiter"
 
 
 class TestPreemptionFsmOracle:

@@ -651,6 +651,30 @@ class WorkerRegistry:
             ev = self._untriaged_drained[repo_name]
         return ev.wait(timeout=timeout)
 
+    def force_clear_untriaged(self, repo_name: str) -> int:
+        """Reset the untriaged inbox to zero, log loud, and signal drained.
+
+        Backstop for the case where some producer ``enter_untriaged`` call
+        leaks (no matching ``exit_untriaged`` ever fires) and the worker is
+        otherwise stuck waiting forever (#1280).  Returns the count that was
+        cleared.  No-op when the count is already zero.
+        """
+        with self._untriaged_lock:
+            cleared = self._untriaged.get(repo_name, 0)
+            if cleared <= 0:
+                return 0
+            self._untriaged[repo_name] = 0
+            ev = self._untriaged_drained.get(repo_name)
+            if ev is not None:
+                ev.set()
+        log.warning(
+            "untriaged inbox[%s]: force-cleared %d leaked hold(s) — "
+            "some enter_untriaged call had no matching exit_untriaged",
+            repo_name,
+            cleared,
+        )
+        return cleared
+
     def assert_worker_turn_ok(self, repo_name: str) -> None:
         """Assert that the worker may start a provider turn for *repo_name*.
 

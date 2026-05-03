@@ -1,9 +1,11 @@
 """Tests for fido.worker — WorkerContext, lock acquisition, git context."""
 
+import contextlib
 import logging
 import subprocess
 import threading
 import time
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
@@ -11119,22 +11121,87 @@ class TestAssertWorkerTurnOk:
             worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
 
 
+class _FakeActivityReporter:
+    """Hand-rolled fake satisfying ``ActivityReporter`` for inbox-flow tests.
+
+    No MagicMock — see Rob's no-magicmock feedback (#1280 epic).
+    """
+
+    def __init__(
+        self,
+        *,
+        has_untriaged: bool = False,
+        wait_returns: bool = True,
+    ) -> None:
+        self._has_untriaged = has_untriaged
+        self._wait_returns = wait_returns
+        self.wait_calls: list[tuple[str, float | None]] = []
+        self.force_clear_calls: list[str] = []
+        self.assert_calls: list[str] = []
+        self.note_demand_calls: list[str] = []
+        self.note_drained_calls: list[str] = []
+
+    def report_activity(
+        self, repo_name: str, what: str, busy: bool
+    ) -> None:  # pragma: no cover — unused in these tests
+        _ = (repo_name, what, busy)
+
+    def get_all_activities(self) -> list[object]:  # pragma: no cover — unused
+        return []
+
+    def status_update(
+        self,
+    ) -> AbstractContextManager[None]:  # pragma: no cover — unused
+        return contextlib.nullcontext()
+
+    def has_untriaged(self, repo_name: str) -> bool:
+        _ = repo_name
+        return self._has_untriaged
+
+    def wait_for_inbox_drain(
+        self, repo_name: str, timeout: float | None = None
+    ) -> bool:
+        self.wait_calls.append((repo_name, timeout))
+        return self._wait_returns
+
+    def force_clear_untriaged(self, repo_name: str) -> int:
+        self.force_clear_calls.append(repo_name)
+        return 0
+
+    def note_durable_demand(self, repo_name: str) -> None:
+        self.note_demand_calls.append(repo_name)
+
+    def note_durable_demand_drained(self, repo_name: str) -> None:
+        self.note_drained_calls.append(repo_name)
+
+    def assert_worker_turn_ok(self, repo_name: str) -> None:
+        self.assert_calls.append(repo_name)
+
+
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
 
     def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        registry = MagicMock()
-        registry.assert_worker_turn_ok = MagicMock()
-        registry.has_untriaged.return_value = True
+        registry = _FakeActivityReporter(has_untriaged=True, wait_returns=True)
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
         worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
-        registry.wait_for_inbox_drain.assert_called_once_with(
-            "owner/repo", timeout=None
-        )
-        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+        assert registry.wait_calls == [("owner/repo", 300.0)]
+        assert registry.force_clear_calls == []
+        assert registry.assert_calls == ["owner/repo"]
+
+    def test_force_clears_when_inbox_drain_times_out(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = _FakeActivityReporter(has_untriaged=True, wait_returns=False)
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
+
+        assert registry.wait_calls == [("owner/repo", 300.0)]
+        assert registry.force_clear_calls == ["owner/repo"]
+        assert registry.assert_calls == ["owner/repo"]
 
     def test_does_not_wait_when_inbox_empty(self, tmp_path: Path) -> None:
         gh = MagicMock()
