@@ -179,12 +179,12 @@ class TestWorkerRegistry:
         reg, factory = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
-        reg.abort_task("foo/bar")
-        factory.return_value.abort_task.assert_called_once()
+        reg.abort_task("foo/bar", task_id="t-1")
+        factory.return_value.abort_task.assert_called_once_with(task_id="t-1")
 
     def test_abort_task_unknown_repo_is_noop(self) -> None:
         reg, factory = self._make_registry()
-        reg.abort_task("unknown/repo")  # must not raise
+        reg.abort_task("unknown/repo", task_id="t-1")  # must not raise
         factory.return_value.abort_task.assert_not_called()
 
     def test_recover_provider_calls_thread_recover_provider(

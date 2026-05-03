@@ -1089,11 +1089,7 @@ class AbortHandle:
     very next task to enter :meth:`Worker.execute_task`.
 
     The handle binds an abort request to a specific ``task_id``.  Only
-    the cleanup path for the *targeted* task consumes it.  An untargeted
-    request (``task_id=None``) is the legacy "abort whatever is running"
-    semantic, kept available for the external
-    :meth:`WorkerThread.abort_task` entry point that fires before any
-    task is in flight.
+    the cleanup path for the *targeted* task consumes it.
     """
 
     def __init__(self) -> None:
@@ -1101,28 +1097,26 @@ class AbortHandle:
         self._target_task_id: str | None = None
         self._event = threading.Event()
 
-    def request(self, task_id: str | None) -> None:
+    def request(self, task_id: str) -> None:
         """Request abort of *task_id*.
 
-        ``task_id=None`` is an untargeted request that matches whichever
-        task happens to be running.  Real callers (preempt, rescope)
-        always know the task they're aborting and should pass it.
+        All callers (preempt, rescope) know the task they're aborting and
+        must pass it so a leaked signal cannot clobber a different task.
         """
         with self._lock:
             self._target_task_id = task_id
             self._event.set()
 
     def is_active_for(self, task_id: str) -> bool:
-        """Return ``True`` when an abort request matches *task_id*.
+        """Return ``True`` when an abort request targets *task_id*.
 
-        An untargeted (legacy) request matches any task.  A targeted
-        request matches only its named task — a leaked abort from a
+        A request matches only its named task — a leaked abort from a
         prior, since-removed task no longer fires here.
         """
         with self._lock:
             if not self._event.is_set():
                 return False
-            return self._target_task_id is None or self._target_task_id == task_id
+            return self._target_task_id == task_id
 
     def is_set(self) -> bool:
         """Return whether *any* abort request is pending."""
@@ -2943,7 +2937,7 @@ class Worker:
         """Discard uncommitted changes and remove task after an abort signal.
 
         Called when ``self._abort_task`` is *active for* this task —
-        i.e. an abort was requested with this ``task_id`` (or untargeted)
+        i.e. an abort was requested with this ``task_id``
         and ``execute_task`` observed it mid-execution.  Runs
         ``git_clean`` to restore the working tree, removes the task from
         the queue, clears ``current_task_id`` from state, clears the
@@ -4261,14 +4255,12 @@ class WorkerThread(threading.Thread):
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()
 
-    def abort_task(self, task_id: str | None = None) -> None:
+    def abort_task(self, task_id: str) -> None:
         """Signal the worker to abort *task_id* after provider_run returns.
 
-        ``task_id=None`` is the legacy untargeted form, used by external
-        entry points that want to abort whichever task is running.  Real
-        callers (preempt, rescope) always know the task they're aborting
-        and should pass it so a leaked abort cannot clobber a different,
-        unrelated task on the next loop iteration.
+        All callers must pass the id of the task they intend to abort so
+        a leaked signal cannot clobber a different, unrelated task on the
+        next loop iteration.
         """
         self._abort_task.request(task_id)
         self._wake.set()

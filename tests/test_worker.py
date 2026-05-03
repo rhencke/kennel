@@ -9252,17 +9252,6 @@ class TestAbortHandle:
         # The signal is still set — only its target is wrong for B.
         assert h.is_set() is True
 
-    def test_untargeted_request_matches_any_task(self) -> None:
-        """`request(None)` is the untargeted form, used only by the external
-        WorkerThread.abort_task() entry point that fires before any task
-        is in flight.  Real callers (preempt, rescope) always pass an id."""
-        h = AbortHandle()
-        h.request(None)
-        assert h.is_active_for("any-task") is True
-        h.clear()
-        h.request(None)
-        assert h.is_active_for("other-task") is True
-
     def test_clear_resets_signal_and_target(self) -> None:
         h = AbortHandle()
         h.request("task-A")
@@ -14373,13 +14362,13 @@ class TestWorkerThread:
     def test_abort_task_sets_abort_event(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         assert not wt._abort_task.is_set()
-        wt.abort_task()
+        wt.abort_task("task-1")
         assert wt._abort_task.is_set()
 
     def test_abort_task_also_wakes_thread(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         assert not wt._wake.is_set()
-        wt.abort_task()
+        wt.abort_task("task-1")
         assert wt._wake.is_set()
 
     def test_run_sets_thread_local_repo_name(self, tmp_path: Path) -> None:
