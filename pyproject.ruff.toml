@@ -3,16 +3,6 @@ target-version = "py314"
 extend-exclude = [".venv", "venv", "_build"]
 
 [tool.ruff.lint]
-# Considered and skipped (with reason):
-# - BLE001 (blind-except): 23 legitimate fallback / best-effort sites
-#   (codex reader, gh-status provider chain, LSP dispatch, auto-merge,
-#   thread-test exception-capture fixtures). Adopting it would force
-#   either narrowing each catch (per-site refactor work, separate PR)
-#   or noqa pollution. Defer to a focused audit pass.
-# - FURB101 / FURB103 / FURB113 / FURB118 (and many other FURB rules):
-#   preview-only in this ruff version. Adopting them produces a "no
-#   effect because preview is not enabled" warning on every run; revisit
-#   when we turn preview on globally.
 select = [
   "ANN001",
   "ANN002",
@@ -20,6 +10,7 @@ select = [
   "ANN201",
   "ANN202",
   "ANN204",
+  # "ANN205", # missing-return-type-static-method: skipped — value-only @staticmethod helpers, return type often obvious from one-line body
   "ANN206",
   "ANN401",
   "ASYNC100",
@@ -62,6 +53,7 @@ select = [
   "B032",
   "B033",
   "B034",
+  # "BLE001", # blind-except: 23 fallback / best-effort sites (codex reader, gh-status provider chain, LSP dispatch, auto-merge, thread-test exception-capture). Per-site audit, not a one-shot batch — defer.
   "C400",
   "C401",
   "C402",
@@ -103,11 +95,21 @@ select = [
   "FLY002",
   "FURB105",
   "FURB110",
+  # "FURB101", # read-whole-file: preview-only — produces "no effect, preview not enabled" warning every run.
+  # "FURB103", # write-whole-file: preview-only.
+  # "FURB113", # repeated-append: preview-only.
   "FURB116",
+  # "FURB118", # reimplemented-operator: preview-only.
   "FURB129",
+  # "FURB131", # delete-full-slice: preview-only.
   "FURB132",
+  # "FURB142", # for-loop-set-mutations: preview-only.
+  # "FURB145", # slice-copy: preview-only.
+  # "FURB148", # unnecessary-enumerate: preview-only.
+  # "FURB152", # math-constant: preview-only.
   "FURB161",
   "FURB163",
+  # "FURB164", # unnecessary-from-float: preview-only.
   "G001",
   "G002",
   "G003",
@@ -118,6 +120,7 @@ select = [
   "INT003",
   "LOG001",
   "LOG002",
+  # "LOG004", # log-exception-outside-except-handler: preview-only.
   "LOG007",
   "PLC2401",
   "W",
