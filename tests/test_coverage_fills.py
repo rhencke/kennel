@@ -1929,6 +1929,287 @@ class TestWorkerHandleQueuedCommentsDrain:
         )
 
 
+class TestWorkerExecuteTaskBranches:
+    """Cover several leaf branches inside Worker.execute_task that the
+    main test_worker.py suite doesn't exercise."""
+
+    @staticmethod
+    def _make_worker(tmp_path: Path):
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        gh.get_pr.return_value = {"title": "", "body": ""}
+        return Worker(tmp_path, gh), gh
+
+    @staticmethod
+    def _repo_ctx():
+        from fido.config import RepoMembership
+        from fido.worker import RepoContext
+
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    @staticmethod
+    def _fido_dir(tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _git_with_new_commits():
+        shas = iter(["aaa", "bbb"])
+
+        def side_effect(args, **_kw):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        m = MagicMock()
+        m.side_effect = side_effect
+        return m
+
+    def test_admit_worker_turn_false_resets_task_to_pending(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:3128-3132 — _admit_worker_turn returns False → reset
+        # task to PENDING + clear current_task_id + return True.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "feature",
+            "status": "pending",
+            "type": "spec",
+        }
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_admit_worker_turn", return_value=False),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_task_no_longer_current_after_admission(self, tmp_path: Path) -> None:
+        # worker.py:3136-3140 — _task_still_current False after admit returns True.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "feature",
+            "status": "pending",
+            "type": "spec",
+        }
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_admit_worker_turn", return_value=True),
+            patch.object(worker, "_task_still_current", return_value=False),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_abort_active_after_provider_run_cleans_up(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:3166-3168 — abort active for task → cleanup + return True.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "feature",
+            "status": "pending",
+            "type": "spec",
+        }
+        # First abort check (line 3133) returns False so we proceed past
+        # admission; second abort check (line 3166) returns True.
+        active_responses = iter([False, True])
+
+        class _AbortStub:
+            def is_active_for(self, _tid):
+                return next(active_responses)
+
+            def clear(self):
+                pass
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_admit_worker_turn", return_value=True),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="bbb"),
+            patch.object(worker, "_cleanup_aborted_task"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "_abort_task", _AbortStub()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    @staticmethod
+    def _git_no_new_commits():
+        """Mock _git so rev-parse HEAD always returns the SAME SHA — drives
+        the retry loop where head_before == head_after."""
+
+        def side_effect(args, **_kw):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        m = MagicMock()
+        m.side_effect = side_effect
+        return m
+
+    def _setup_retry_loop(self, tmp_path: Path):
+        """Common setup for tests that exercise the head_before == head_after
+        retry loop in execute_task."""
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "feature",
+            "status": "pending",
+            "type": "spec",
+        }
+        return worker, fido_dir, task
+
+    def test_retry_admit_worker_turn_false_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:3261-3262 — inside retry loop, _admit_worker_turn False → return True.
+        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
+        # admit returns True for the initial check, then False on retry.
+        admit_responses = iter([True, False])
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(
+                worker, "_admit_worker_turn", side_effect=lambda _pr: next(admit_responses)
+            ),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_retry_abort_active_cleans_and_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:3263-3265 — inside retry loop, abort active → cleanup + return True.
+        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
+        # initial abort check (line 3133 + 3166): False, then retry abort (line 3263): True.
+        abort_responses = iter([False, False, True])
+
+        class _AbortStub:
+            def is_active_for(self, _tid):
+                return next(abort_responses)
+
+            def clear(self):
+                pass
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_admit_worker_turn", return_value=True),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch.object(worker, "_cleanup_aborted_task"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+            patch.object(worker, "_abort_task", _AbortStub()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_retry_task_no_longer_current_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        # worker.py:3266-3271 — inside retry loop, _task_still_current False → return True.
+        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
+        # First _task_still_current call (line 3136): True.  Retry call (3266): False.
+        current_responses = iter([True, False])
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_admit_worker_turn", return_value=True),
+            patch.object(
+                worker,
+                "_task_still_current",
+                side_effect=lambda _fd, _tid: next(current_responses),
+            ),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_no_new_commits()),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_thread_lineage_appends_related_comment_ids(self, tmp_path: Path) -> None:
+        # worker.py:3061-3066 — lineage_comment_ids appends the
+        # "Related thread comment_ids:" context line.
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "Reply to comment",
+            "status": "pending",
+            "type": "thread",
+            "thread": {
+                "comment_id": 42,
+                "pr": 1,
+                "url": "https://example.com/c",
+                "lineage_comment_ids": [10, 20, 30],
+            },
+        }
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "Related thread comment_ids" in context
+        assert "10" in context and "20" in context and "30" in context
+
+
 class TestWorkerOracleAssertion:
     """Cover the AssertionError raise in _assert_ci_failure_matches_oracle
     (worker.py:849-852)."""
