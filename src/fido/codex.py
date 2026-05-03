@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn, Protocol
 
-import fido.provider as provider
+from fido import provider
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
