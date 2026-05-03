@@ -4584,9 +4584,10 @@ class TestFindOrCreatePr:
         assert "resuming" in caplog.text
 
     def test_open_pr_runs_setup_when_no_tasks(self, tmp_path: Path) -> None:
-        mock_client = _client()
+        mock_client = _client(return_value="No work needed.")
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
         mock_start = MagicMock(return_value="sess-1")
@@ -4594,9 +4595,9 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", mock_start),
-            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
@@ -4610,35 +4611,48 @@ class TestFindOrCreatePr:
         )
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+        mock_client = _client(return_value="No work needed.")
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="sess"),
-            pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert f"Work dir: {tmp_path}" in context
 
-    def test_open_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
+    def test_open_pr_setup_no_tasks_finalizes(self, tmp_path: Path) -> None:
+        """Closes #1275: setup with 0 tasks finalizes (comment + ready + reviewer)
+        instead of raising and crash-looping."""
+        mock_client = _client(return_value="Branch already covers the issue.")
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
             patch("fido.worker.provider_start", return_value="sess"),
-            pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Issue title"
+            )
+        assert result == (20, "my-br", False)
+        gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        assert "<!-- fido:no-tasks-finalize -->" in body
+        gh.pr_ready.assert_called_once_with("owner/proj", 20)
 
     def test_open_pr_setup_persists_session_id(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -4837,7 +4851,7 @@ class TestFindOrCreatePr:
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="fido"),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "new branch" in caplog.text
@@ -4857,7 +4871,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.provider_start", mock_start),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
@@ -4884,7 +4898,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.provider_start", return_value="s"),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -4939,7 +4953,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.provider_start", return_value=""),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         # _reset_local_workspace fires first: checkout default, fetch, reset
@@ -4979,7 +4993,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.provider_start", return_value=""),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["branch", "-D", "slug"] in git_calls
@@ -5015,22 +5029,33 @@ class TestFindOrCreatePr:
         assert "!" not in slug
         assert is_fresh is True
 
-    def test_no_pr_setup_no_tasks_raises(self, tmp_path: Path) -> None:
-        """New-PR path: setup produces no tasks → raises RuntimeError, skips PR creation."""
-        mock_client = _client()
+    def test_no_pr_setup_no_tasks_finalizes(self, tmp_path: Path) -> None:
+        """Closes #1275: fresh-PR path with 0 tasks creates the PR and finalizes
+        (comment + ready + reviewer) instead of raising and crash-looping."""
+        mock_client = _client(return_value="Nothing to plan — already done.")
         mock_client.generate_branch_name.return_value = "fix-bug"
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
+            patch.object(worker, "_reset_local_workspace"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
             patch("fido.worker.provider_start", return_value="sess"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
-        gh.create_pr.assert_not_called()
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Issue title"
+            )
+        assert result == (77, "fix-bug", True)
+        gh.create_pr.assert_called_once()
+        gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        assert "<!-- fido:no-tasks-finalize -->" in body
+        gh.pr_ready.assert_called_once_with("owner/proj", 77)
 
     def test_no_pr_logs_pr_number(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -5100,7 +5125,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="sess"),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5125,7 +5150,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="sess"),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
         _, _, context = mock_build.call_args.args
@@ -5145,7 +5170,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="s"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5170,7 +5195,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="s"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5199,7 +5224,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="s"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5227,13 +5252,118 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", return_value="sess"),
-            pytest.raises(RuntimeError),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
         assert "PR #88" in context
         assert "First attempt" in context
+
+
+class TestFinalizeSetupWithNoTasks:
+    """Tests for Worker._finalize_setup_with_no_tasks (closes #1275).
+
+    The helper handles the legitimate "setup turn produced zero tasks" case
+    by posting a Fido-voice explanation, marking the PR ready, and requesting
+    review — instead of the prior RuntimeError that crash-looped the worker.
+    """
+
+    def _make_worker(
+        self,
+        tmp_path: Path,
+        *,
+        comment_text: str = "Branch already covers the issue.",
+    ) -> tuple[Worker, MagicMock, MagicMock]:
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        agent = _client(return_value=comment_text)
+        return Worker(tmp_path, gh, provider_agent=agent), gh, agent
+
+    def _make_repo_ctx(
+        self, *, collaborators: frozenset[str] = frozenset({"rhencke"})
+    ) -> RepoContext:
+        return RepoContext(
+            repo="owner/proj",
+            owner="owner",
+            repo_name="proj",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=collaborators),
+        )
+
+    def test_posts_voice_comment_marks_ready_requests_review(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh, agent = self._make_worker(
+            tmp_path, comment_text="Looks like this PR is already cooked through."
+        )
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        agent.run_turn.assert_called_once()
+        gh.comment_issue.assert_called_once()
+        repo_arg, num_arg, body_arg = gh.comment_issue.call_args.args
+        assert repo_arg == "owner/proj"
+        assert num_arg == 42
+        assert "Looks like this PR is already cooked through." in body_arg
+        assert "<!-- fido:no-tasks-finalize -->" in body_arg
+        gh.pr_ready.assert_called_once_with("owner/proj", 42)
+        gh.add_pr_reviewers.assert_called_once_with("owner/proj", 42, ["rhencke"])
+
+    def test_skips_ready_when_branch_has_no_diff(self, tmp_path: Path) -> None:
+        """#1194 diff guard: comment still posted, but PR stays draft."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        gh.comment_issue.assert_called_once()
+        gh.pr_ready.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
+
+    def test_idempotent_on_marker(self, tmp_path: Path) -> None:
+        """Re-entry when finalize comment already exists — no-op."""
+        worker, gh, agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"body": "earlier finalize\n\n<!-- fido:no-tasks-finalize -->"},
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        agent.run_turn.assert_not_called()
+        gh.comment_issue.assert_not_called()
+        gh.pr_ready.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
+
+    def test_handles_none_body_in_existing_comments(self, tmp_path: Path) -> None:
+        """A None body field on an existing comment must not crash the marker check."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = [
+            {"body": None},
+            {"body": "unrelated comment"},
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        gh.comment_issue.assert_called_once()
+
+    def test_skips_reviewer_request_when_no_collaborators(self, tmp_path: Path) -> None:
+        worker, gh, _agent = self._make_worker(tmp_path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(collaborators=frozenset()),
+                5,
+                "Issue title",
+                42,
+                "fix-bug",
+            )
+        gh.comment_issue.assert_called_once()
+        gh.pr_ready.assert_called_once()
+        gh.add_pr_reviewers.assert_not_called()
 
 
 class TestResetLocalWorkspaceAndRetryAck:
