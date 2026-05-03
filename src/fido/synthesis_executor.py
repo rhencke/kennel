@@ -200,7 +200,7 @@ class SynthesisExecutor:
            :class:`ReviewReplyOutcome` for the Rocq oracle.
         """
         # 1. Remove eyes reaction (best-effort)
-        self._remove_eyes_reaction(target)
+        self.remove_eyes_reaction(target)
 
         # 2. Add emoji reaction if present
         if response.emoji is not None:
@@ -294,7 +294,7 @@ class SynthesisExecutor:
             )
             self._insight_filer.file_insight(insight, target)
 
-    def _remove_eyes_reaction(self, target: CommentTarget) -> None:
+    def remove_eyes_reaction(self, target: CommentTarget) -> None:
         """Remove Fido's ``eyes`` reaction from *target* (best-effort).
 
         Lists all reactions on the comment and deletes any with

@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
-.coverage
+.coverage*
 _build/
 .cache/
 pyproject.toml

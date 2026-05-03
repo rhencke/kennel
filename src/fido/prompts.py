@@ -761,6 +761,32 @@ class Prompts:
             "Respond with ONLY the JSON object.  No text before or after it."
         )
 
+    def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
+        """Build the fallback prompt for when synthesis exhausts retries.
+
+        Asks the model to acknowledge the failure to the commenter and ask
+        them to rephrase, in plain prose (no JSON).  Used by
+        :func:`fido.synthesis_call.call_failure_explanation` after the
+        structured synthesis turn has exhausted ``MAX_RETRIES``.
+
+        The reply will be posted verbatim to the PR comment thread, so the
+        prompt is tight on length and tone.
+        """
+        return (
+            "Your previous attempt to write a structured response to this PR "
+            "comment failed — the model output could not be parsed as the "
+            "required JSON schema after several retries.\n\n"
+            "Comment that triggered the failure:\n"
+            f"{comment_body}\n\n"
+            "Write ONE short reply for the commenter.  Acknowledge that you "
+            "saw the comment and tried to respond, explain briefly that the "
+            "structured response generation failed, and ask the commenter "
+            "to rephrase or try again.  Keep it under three sentences.\n\n"
+            "Output ONLY the reply text — no JSON, no markdown code fences, "
+            "no preamble.  Just the words you want posted to the PR comment "
+            "thread."
+        )
+
     def rewrite_description_prompt(
         self,
         pr_body: str,

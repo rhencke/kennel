@@ -2,7 +2,6 @@ import json
 import logging
 import re
 import subprocess
-import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterable
@@ -35,7 +34,11 @@ from fido.store import (
     append_reply_promise_markers,
 )
 from fido.synthesis import Insight
-from fido.synthesis_call import call_synthesis
+from fido.synthesis_call import (
+    SynthesisExhaustedError,
+    call_failure_explanation,
+    call_synthesis,
+)
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
@@ -1452,6 +1455,33 @@ def reply_to_comment(
         repo_cfg.work_dir, repo_cfg.name, gh
     )
 
+    # Build the executor + target up-front so the failure path can clean
+    # up the eyes reaction without duplicating the cleanup logic.  The
+    # success path uses the same instance below in execute_effects_only.
+    rescope_trigger = _BackgroundRescopeTrigger(
+        repo_cfg.work_dir,
+        config,
+        gh,
+        repo_cfg=repo_cfg,
+        registry=registry,
+        agent=agent,
+        prompts=prompts,
+    )
+    executor = SynthesisExecutor(
+        gh,
+        rescope=rescope_trigger,
+        insight_filer=_GitHubInsightFiler(gh),
+        fido_logins=_FIDO_LOGINS,
+    )
+    target: CommentTarget | None = None
+    if isinstance(info.get("comment_id"), int):
+        target = CommentTarget(
+            repo=str(info.get("repo", "")),
+            pr=int(info.get("pr", 0)),
+            comment_id=int(info["comment_id"]),
+            comment_type="pulls",
+        )
+
     log.info(
         "synthesis: calling for PR #%s comment %s",
         info["pr"],
@@ -1467,33 +1497,23 @@ def reply_to_comment(
             agent=agent,
             prompts=prompts,
         )
-    finally:
-        # On failure, clean up the eyes reaction so it does not sit forever as
-        # a false "Fido is looking" signal.  Best-effort: never let cleanup
-        # suppress the original exception.  The success path (execute_effects_only
-        # below) handles eyes removal when synthesis succeeds.  Use
-        # sys.exc_info() to distinguish exception vs. normal exit.
-        if _eyes_posted and sys.exc_info()[1] is not None:
-            _cid_pulls = info.get("comment_id")
-            _repo_pulls = info.get("repo")
-            if _cid_pulls and _repo_pulls:
-                try:
-                    reactions = gh.list_reactions(_repo_pulls, "pulls", _cid_pulls)
-                    for _r in reactions:
-                        if _r.get("content") != "eyes":
-                            continue
-                        _login = _r.get("user", {}).get("login", "")
-                        if _login.lower() not in _FIDO_LOGINS:
-                            continue
-                        _rid = _r.get("id")
-                        if _rid is not None:
-                            gh.delete_reaction(_repo_pulls, "pulls", _cid_pulls, _rid)
-                except Exception:
-                    log.exception(
-                        "failed to remove eyes reaction from comment %s on failure"
-                        " — continuing",
-                        _cid_pulls,
-                    )
+    except SynthesisExhaustedError:
+        log.warning(
+            "synthesis exhausted retries for comment %s — falling back to "
+            "LLM-generated failure explanation",
+            info.get("comment_id"),
+        )
+        try:
+            synthesis_response = call_failure_explanation(
+                comment, agent=agent, prompts=prompts
+            )
+        except SynthesisExhaustedError:
+            # Even the fallback explanation exhausted retries.  Best-effort
+            # clear the eyes reaction so it does not sit forever as a false
+            # "Fido is looking" signal, then re-raise.
+            if _eyes_posted and target is not None:
+                executor.remove_eyes_reaction(target)
+            raise
     log.info(
         "synthesis: returned (emoji=%r change_request=%r preview=%r)",
         synthesis_response.emoji,
@@ -1586,30 +1606,12 @@ def reply_to_comment(
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-    # Execute post-reply effects: remove eyes, add final emoji, trigger rescope.
-    # Only run if we have a real comment_id to react on.
-    if isinstance(info.get("comment_id"), int):
-        rescope_trigger = _BackgroundRescopeTrigger(
-            repo_cfg.work_dir,
-            config,
-            gh,
-            repo_cfg=repo_cfg,
-            registry=registry,
-            agent=agent,
-            prompts=prompts,
-        )
-        executor = SynthesisExecutor(
-            gh,
-            rescope=rescope_trigger,
-            insight_filer=_GitHubInsightFiler(gh),
-            fido_logins=_FIDO_LOGINS,
-        )
-        target = CommentTarget(
-            repo=str(info.get("repo", "")),
-            pr=int(info.get("pr", 0)),
-            comment_id=int(info["comment_id"]),
-            comment_type="pulls",
-        )
+    # Execute post-reply effects: remove eyes, add final emoji, trigger
+    # rescope.  Only runs if we have a real comment_id to react on (the
+    # ``target`` was constructed up-front for the same reason).  Reuses the
+    # ``executor`` instance built before the synthesis call so the failure
+    # path could share its eyes-removal helper.
+    if target is not None:
         executor.execute_effects_only(synthesis_response, target)
 
     return (category, titles)
@@ -1766,6 +1768,33 @@ def reply_to_issue_comment(
         repo_cfg.work_dir, repo_cfg.name, gh
     )
 
+    # Build the executor + target up-front so the failure path can clean
+    # up the eyes reaction without duplicating the cleanup logic.  The
+    # success path uses the same instance below in execute_effects_only.
+    rescope_trigger = _BackgroundRescopeTrigger(
+        repo_cfg.work_dir,
+        config,
+        gh,
+        repo_cfg=repo_cfg,
+        registry=registry,
+        agent=agent,
+        prompts=prompts,
+    )
+    executor = SynthesisExecutor(
+        gh,
+        rescope=rescope_trigger,
+        insight_filer=_GitHubInsightFiler(gh),
+        fido_logins=_FIDO_LOGINS,
+    )
+    issue_target: CommentTarget | None = None
+    if _cid and repo_full:
+        issue_target = CommentTarget(
+            repo=repo_full,
+            pr=int(number) if number else 0,
+            comment_id=int(_cid),
+            comment_type="issues",
+        )
+
     log.info("synthesis: calling for issue comment on PR #%s", number)
     try:
         synthesis_response = call_synthesis(
@@ -1777,31 +1806,24 @@ def reply_to_issue_comment(
             agent=agent,
             prompts=prompts,
         )
-    finally:
-        # On failure, clean up the eyes reaction so it does not sit forever as
-        # a false "Fido is looking" signal.  Best-effort: never let cleanup
-        # suppress the original exception.  The success path (execute_effects_only
-        # below) handles eyes removal when synthesis succeeds.  Use
-        # sys.exc_info() to distinguish exception vs. normal exit.
-        if _eyes_posted_issue and sys.exc_info()[1] is not None:
-            if _cid and repo_full:
-                try:
-                    reactions = gh.list_reactions(repo_full, "issues", _cid)
-                    for _r in reactions:
-                        if _r.get("content") != "eyes":
-                            continue
-                        _login = _r.get("user", {}).get("login", "")
-                        if _login.lower() not in _FIDO_LOGINS:
-                            continue
-                        _rid = _r.get("id")
-                        if _rid is not None:
-                            gh.delete_reaction(repo_full, "issues", _cid, _rid)
-                except Exception:
-                    log.exception(
-                        "failed to remove eyes reaction from issue comment %s on"
-                        " failure — continuing",
-                        _cid,
-                    )
+    except SynthesisExhaustedError:
+        log.warning(
+            "synthesis exhausted retries for issue comment %s on PR #%s — "
+            "falling back to LLM-generated failure explanation",
+            _cid,
+            number,
+        )
+        try:
+            synthesis_response = call_failure_explanation(
+                comment, agent=agent, prompts=prompts
+            )
+        except SynthesisExhaustedError:
+            # Even the fallback explanation exhausted retries.  Best-effort
+            # clear the eyes reaction so it does not sit forever as a false
+            # "Fido is looking" signal, then re-raise.
+            if _eyes_posted_issue and issue_target is not None:
+                executor.remove_eyes_reaction(issue_target)
+            raise
     log.info(
         "synthesis: returned for PR #%s (emoji=%r change_request=%r preview=%r)",
         number,
@@ -1851,29 +1873,11 @@ def reply_to_issue_comment(
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-    # Execute post-reply effects: remove eyes, add final emoji, trigger rescope.
-    if _cid and repo_full:
-        rescope_trigger = _BackgroundRescopeTrigger(
-            repo_cfg.work_dir,
-            config,
-            gh,
-            repo_cfg=repo_cfg,
-            registry=registry,
-            agent=agent,
-            prompts=prompts,
-        )
-        executor = SynthesisExecutor(
-            gh,
-            rescope=rescope_trigger,
-            insight_filer=_GitHubInsightFiler(gh),
-            fido_logins=_FIDO_LOGINS,
-        )
-        issue_target = CommentTarget(
-            repo=repo_full,
-            pr=int(number) if number else 0,
-            comment_id=int(_cid),
-            comment_type="issues",
-        )
+    # Execute post-reply effects: remove eyes, add final emoji, trigger
+    # rescope.  Reuses the ``executor`` and ``issue_target`` constructed
+    # before the synthesis call so the failure path could share its
+    # eyes-removal helper.
+    if issue_target is not None:
         executor.execute_effects_only(synthesis_response, issue_target)
 
     log.info(
