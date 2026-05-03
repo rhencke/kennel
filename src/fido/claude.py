@@ -551,6 +551,10 @@ class ClaudeSession(OwnedSession):
         # Cumulative message counters — they accumulate since boot and are NOT
         # reset on :meth:`_respawn`, so per-subprocess resets from model
         # switches or recoveries don't erase the history.
+        # _metrics_lock guards both counters: they are written by the worker
+        # thread (send / iter_events) and read from other threads (status,
+        # registry).  Python 3.14t has no GIL, so += is not atomic.
+        self._metrics_lock = threading.Lock()
         self._sent_count: int = 0
         self._received_count: int = 0
         self._proc = self._spawn()
@@ -734,7 +738,8 @@ class ClaudeSession(OwnedSession):
         Accumulates across subprocess respawns — model switches and recoveries
         do not reset the count.
         """
-        return self._sent_count
+        with self._metrics_lock:
+            return self._sent_count
 
     @property
     def received_count(self) -> int:
@@ -743,7 +748,8 @@ class ClaudeSession(OwnedSession):
         Accumulates across subprocess respawns — model switches and recoveries
         do not reset the count.
         """
-        return self._received_count
+        with self._metrics_lock:
+            return self._received_count
 
     def _respawn(self, *, clear_session_id: bool, reason: str) -> None:
         """Stop the current subprocess and spawn a replacement."""
@@ -894,7 +900,8 @@ class ClaudeSession(OwnedSession):
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
-        self._sent_count += 1
+        with self._metrics_lock:
+            self._sent_count += 1
 
     def _drain_to_boundary(self, deadline: float = 10.0) -> None:
         """Abort the in-flight turn and read events until ``type=result`` /
@@ -1322,7 +1329,8 @@ class ClaudeSession(OwnedSession):
                     continue
                 obj = json.loads(line)
                 self._log_event(obj)
-                self._received_count += 1
+                with self._metrics_lock:
+                    self._received_count += 1
                 idle_deadline.reset()
                 # First non-empty event after Send transitions Sending →
                 # AwaitingReply.  Other states (AwaitingReply, Draining,
