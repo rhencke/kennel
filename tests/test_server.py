@@ -2143,7 +2143,6 @@ class TestProcessAction:
 
         def fake_dispatch(*_args: object, **_kwargs: object) -> None:
             call_order.append("dispatch")
-            return None
 
         original_respond = WebhookHandler._respond
 
