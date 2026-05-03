@@ -180,13 +180,7 @@ class TestCodexJsonlParsing:
         assert extract_result_text(_fixture("normal.jsonl")) == "final reply"
 
     def test_extract_result_text_ignores_non_agent_items(self) -> None:
-        output = "\n".join(
-            [
-                "not-json",
-                '{"type":"item.completed","item":{"id":"x","type":"reasoning","text":"ignore"}}',
-                '{"type":"item.completed","item":{"id":"y","type":"agent_message","text":"ok"}}',
-            ]
-        )
+        output = 'not-json\n{"type":"item.completed","item":{"id":"x","type":"reasoning","text":"ignore"}}\n{"type":"item.completed","item":{"id":"y","type":"agent_message","text":"ok"}}'
         assert extract_result_text(output) == "ok"
 
 

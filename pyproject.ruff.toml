@@ -9,6 +9,10 @@ extend-exclude = [".venv", "venv", "_build"]
 #   thread-test exception-capture fixtures). Adopting it would force
 #   either narrowing each catch (per-site refactor work, separate PR)
 #   or noqa pollution. Defer to a focused audit pass.
+# - FURB101 / FURB103 (read-whole-file / write-whole-file): preview-only
+#   in this ruff version. Adopting them produces a "no effect because
+#   preview is not enabled" warning on every run; revisit when we turn
+#   preview on globally.
 select = [
   "ANN001",
   "ANN002",
@@ -93,8 +97,11 @@ select = [
   "EXE002",
   "EXE003",
   "EXE005",
-  "FA100",
   "F",
+  "FA100",
+  "FA102",
+  "FLY002",
+  "FURB105",
   "I",
   "PLC2401",
   "W",
