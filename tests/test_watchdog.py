@@ -4,6 +4,9 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+import requests
+
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.watchdog import (
@@ -254,19 +257,29 @@ class TestReconcileWatchdogRun:
         assert "snapshot_started_at" in kwargs
 
     def test_continues_to_next_repo_when_inventory_call_raises(self) -> None:
+        """Transient GitHub/network errors are swallowed — the next hourly
+        tick will retry.  The second repo still runs."""
         repo_a = _repo("org/a")
         repo_b = _repo("org/b")
         rw, _registry, cache, gh = _reconcile({"org/a": repo_a, "org/b": repo_b})
 
         def side_effect(owner: str, _name: str) -> list:
             if owner == "org" and _name == "a":
-                raise RuntimeError("rate limited")
+                raise requests.RequestException("rate limited")
             return [{"number": 9}]
 
         gh.find_all_open_issues.side_effect = side_effect
         rw.run()
         # b succeeded even though a raised
         cache.reconcile_with_inventory.assert_called_once()
+
+    def test_logic_bug_propagates_from_reconcile(self) -> None:
+        """Logic bugs (e.g. KeyError) are NOT swallowed — they propagate so
+        the watchdog thread crashes loudly rather than silently corrupting."""
+        rw, _registry, _cache, gh = _reconcile()
+        gh.find_all_open_issues.side_effect = KeyError("unexpected_key")
+        with pytest.raises(KeyError):
+            rw.run()
 
     def test_handles_multiple_repos_independently(self) -> None:
         repo_a = _repo("org/a")

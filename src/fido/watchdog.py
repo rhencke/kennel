@@ -1,12 +1,15 @@
 """Watchdog — check WorkerThread health and restart dead threads."""
 
 import logging
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 
+import requests
+
 from fido.config import RepoConfig
-from fido.github import GitHub
+from fido.github import GitHub, GraphQLError
 from fido.registry import WorkerRegistry
 from fido.rocq import watchdog_transitions as watchdog_fsm
 
@@ -156,9 +159,10 @@ class ReconcileWatchdog:
     bootstrapped yet — the worker thread does that on its first
     ``find_next_issue`` iteration.
 
-    A failed ``find_all_open_issues`` (rate limit, transient network
-    blip) logs the exception and continues to the next repo — the next
-    hourly tick will retry.
+    A failed ``find_all_open_issues`` due to a transient GitHub/network
+    error logs the exception and continues to the next repo — the next
+    hourly tick will retry.  Logic bugs propagate and crash the thread
+    loudly so they aren't silently swallowed by the last safety net.
     """
 
     def __init__(
@@ -188,7 +192,15 @@ class ReconcileWatchdog:
             snapshot_started_at = datetime.now(tz=timezone.utc)
             try:
                 inventory = self.gh.find_all_open_issues(owner, name)
-            except Exception:
+            except (
+                requests.RequestException,
+                GraphQLError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ):
+                # Transient GitHub/network failure — next hourly tick retries.
+                # Logic bugs (KeyError, TypeError, AttributeError, …) are NOT
+                # caught; they propagate and crash this thread loudly.
                 log.exception(
                     "reconcile-watchdog[%s]: find_all_open_issues failed — "
                     "next hourly tick will retry",
