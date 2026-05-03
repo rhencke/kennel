@@ -54,6 +54,13 @@ class _BackgroundRescopeTrigger:
     Constructed in :func:`reply_to_comment` and :func:`reply_to_issue_comment`
     so :class:`~fido.synthesis_executor.SynthesisExecutor` can trigger a
     background rescope without needing direct access to the reorder machinery.
+
+    Preempt-always semantics (#1230): a comment never directly preempts the
+    current task — it always registers its intent via the rescope trigger,
+    and the rescope decides whether the in-progress task needs to be
+    preempted, removed, modified, or left alone.  Triage is fast and
+    informed but not work-heavy; the worker thread owns the actual task
+    state mutations after the rescope reducer commits.
     """
 
     def __init__(

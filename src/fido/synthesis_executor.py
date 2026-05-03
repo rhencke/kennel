@@ -141,36 +141,18 @@ class SynthesisExecutor:
         response: CommentResponse,
         target: CommentTarget,
     ) -> ReviewReplyOutcome:
-        """Execute all effects for *response* against *target*.
+        """Post the reply and run all post-reply effects in one call.
 
-        Returns the :class:`ReviewReplyOutcome` so the caller can feed
-        it to the Rocq oracle for reply-claim bookkeeping.
+        Thin convenience wrapper: posts the reply via :meth:`_post_reply`,
+        then delegates to :meth:`execute_effects_only` for the eyes /
+        emoji / rescope / insights / outcome chain.  Production callers
+        in ``events.py`` use :meth:`execute_effects_only` directly because
+        they own the reply-posting step (so the outbox protocol can thread
+        through it).  This entry point is retained for callers that don't
+        need that control.
         """
-        # 1. Post reply
         self._post_reply(response.reply_text, target)
-
-        # 2. Add emoji reaction if present
-        if response.emoji is not None:
-            log.info(
-                "adding %s reaction to comment %s",
-                response.emoji,
-                target.comment_id,
-            )
-            self._gh.add_reaction(
-                target.repo,
-                target.comment_type,
-                target.comment_id,
-                response.emoji,
-            )
-
-        # 3. Trigger rescope if change_request present
-        self._maybe_trigger_rescope(response, target)
-
-        # 4. File insights if any
-        self._file_insights(response, target)
-
-        # 5. Return outcome for Rocq oracle
-        return outcome_for_response(response)
+        return self.execute_effects_only(response, target)
 
     def execute_effects_only(
         self,
@@ -331,6 +313,12 @@ class SynthesisExecutor:
                         reaction_id,
                     )
         except Exception:
+            # Best-effort UI cleanup — the eyes reaction is a cosmetic
+            # signal, not authoritative state.  GitHub's reaction API can
+            # raise requests.RequestException, KeyError on a malformed
+            # response, or various provider-side errors; catching broadly
+            # here is the right policy exception to CLAUDE.md's fail-closed
+            # rule, which targets authoritative runner paths.
             log.exception(
                 "failed to remove eyes reaction from comment %s — continuing",
                 target.comment_id,
