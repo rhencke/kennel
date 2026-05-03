@@ -9,6 +9,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Cancel an in-flight run when a newer commit lands on the same PR or
+# branch. Pushes to ``main`` are exempted: ``cancel-in-progress`` only
+# fires for non-main events, so a merge to main always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   pre-commit:
     runs-on: self-hosted

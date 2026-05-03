@@ -188,6 +188,11 @@ class TestModelsBuildScript:
         assert "schedule:" not in workflow
         assert "cron:" not in workflow
         assert "runs-on: self-hosted" in workflow
+        # Cancel-in-progress for non-main events so superseded PR runs don't
+        # waste runner cycles; pushes to main always finish.
+        assert "concurrency:" in workflow
+        assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow
+        assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
         assert "FIDO_BUILDX_CACHE_BACKEND" not in workflow
         assert "ubuntu-latest" not in workflow
         assert "docker/setup-buildx-action" not in workflow
