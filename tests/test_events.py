@@ -4020,6 +4020,7 @@ class TestGetCommitSummary:
             capture_output=True,
             text=True,
             timeout=10,
+            check=True,
         )
 
     def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
@@ -4038,23 +4039,14 @@ class TestGetCommitSummary:
         assert result == ""
 
     def test_returns_empty_on_nonzero_exit(self, tmp_path: Path) -> None:
+        # check=True turns a non-zero exit into CalledProcessError, which the
+        # ``except (SubprocessError, OSError)`` arm catches → "".
         import subprocess as sp
 
-        fake_result = sp.CompletedProcess(
-            args=[], returncode=128, stdout="", stderr="not a git repo"
-        )
-        with patch("fido.events.subprocess.run", return_value=fake_result):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
-
-    def test_nonzero_exit_ignored_even_with_stdout(self, tmp_path: Path) -> None:
-        import subprocess as sp
-
-        # Explicit guard: returncode wins over any stdout content.
-        fake_result = sp.CompletedProcess(
-            args=[], returncode=1, stdout="abc123 orphan output\n", stderr=""
-        )
-        with patch("fido.events.subprocess.run", return_value=fake_result):
+        with patch(
+            "fido.events.subprocess.run",
+            side_effect=sp.CalledProcessError(128, ["git"]),
+        ):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 

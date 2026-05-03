@@ -1960,9 +1960,8 @@ def _get_commit_summary(work_dir: Path) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            check=True,
         )
-        if result.returncode != 0:
-            return ""
         return result.stdout.strip()
     except subprocess.SubprocessError, OSError:
         return ""

@@ -3781,14 +3781,19 @@ class Worker:
             )
 
     def _git_config_get(self, key: str) -> str:
-        """Return ``git config --get <key>`` in the workspace, empty on unset."""
-        result = subprocess.run(
+        """Return ``git config --get <key>`` in the workspace.
+
+        Raises ``CalledProcessError`` when the key is unset — for the only
+        callers (``user.name``/``user.email`` for the git-identity invariant)
+        an unset key is a real config bug, not a graceful-degradation case.
+        """
+        return subprocess.run(
             ["git", "config", "--get", key],
             cwd=self.work_dir,
             capture_output=True,
             text=True,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
+            check=True,
+        ).stdout.strip()
 
     def run(self) -> int:
         """Run one iteration of the worker loop.

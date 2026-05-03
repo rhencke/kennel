@@ -35,7 +35,9 @@ class TestRealProcessRunner:
         mock_result = MagicMock()
         with patch("fido.infra.subprocess.run", return_value=mock_result) as mock_run:
             RealProcessRunner().run(["true"], env={"FOO": "bar"}, timeout=5)
-        mock_run.assert_called_once_with(["true"], env={"FOO": "bar"}, timeout=5)
+        mock_run.assert_called_once_with(
+            ["true"], check=True, env={"FOO": "bar"}, timeout=5
+        )
 
     def test_run_propagates_called_process_error(self) -> None:
         with (
