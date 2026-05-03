@@ -547,7 +547,14 @@ class WorkerRegistry:
         with self._untriaged_lock:
             old = self._untriaged.get(repo_name, 0)
             self._untriaged[repo_name] = old + 1
-            self._preemption_fsm_transition(repo_name, preemption_fsm.WebhookArrives())
+            if old == 0:
+                # Boolean abstraction in handler_preemption.v: legacy demand
+                # is NonEmpty iff *any* handler is in flight.  Fire the FSM
+                # transition only on the 0→1 edge so the FSM agrees with the
+                # Python count by construction.
+                self._preemption_fsm_transition(
+                    repo_name, preemption_fsm.WebhookArrives()
+                )
             ev = self._untriaged_drained.get(repo_name)
             if ev is None:
                 ev = threading.Event()
@@ -575,19 +582,11 @@ class WorkerRegistry:
                 return
             new = old - 1
             self._untriaged[repo_name] = new
-            new_state = self._preemption_fsm_transition(
-                repo_name, preemption_fsm.HandlerDone()
-            )
-            if new > 0:
-                self._preemption_fsm_states[repo_name] = preemption_fsm.with_legacy(
-                    new_state, preemption_fsm.LegacyNonEmpty()
-                )
-                log.debug(
-                    "preemption[%s]: FSM legacy remains non-empty (count is %d)",
-                    repo_name,
-                    new,
-                )
-            else:
+            if new == 0:
+                # Boolean abstraction: fire HandlerDone only on the 1→0 edge.
+                # The FSM agrees with the Python count by construction, so no
+                # post-transition with_legacy override is needed.
+                self._preemption_fsm_transition(repo_name, preemption_fsm.HandlerDone())
                 ev = self._untriaged_drained.get(repo_name)
                 if ev is not None:
                     ev.set()
@@ -663,6 +662,13 @@ class WorkerRegistry:
             if cleared <= 0:
                 return 0
             self._untriaged[repo_name] = 0
+            # The FSM is on the boolean abstraction: legacy is NonEmpty iff
+            # any handler is in flight.  When count > 0, FSM legacy is
+            # NonEmpty by construction (enter_untriaged fired WebhookArrives
+            # on the 0→1 edge), so HandlerDone is the valid drain event.
+            # Without this transition, the FSM stays at LegacyNonEmpty after
+            # force-clear and the next assert_worker_turn_ok crashes (#1330).
+            self._preemption_fsm_transition(repo_name, preemption_fsm.HandlerDone())
             ev = self._untriaged_drained.get(repo_name)
             if ev is not None:
                 ev.set()

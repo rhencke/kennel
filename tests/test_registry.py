@@ -1083,6 +1083,21 @@ class TestUntriagedInbox:
         t.join(timeout=2.0)
         assert unblocked.is_set(), "force_clear should unblock waiter"
 
+    def test_force_clear_drains_fsm_legacy_demand(self) -> None:
+        """Regression for #1330: force_clear must take the FSM through the
+        modeled HandlerDone transition, not just zero the Python count.
+
+        Before the fix, force_clear left ``legacy_demand=LegacyNonEmpty`` while
+        the count said 0, so the next ``assert_worker_turn_ok`` fired the FSM
+        oracle and crashed the worker — repeatedly, in a watchdog-restart loop.
+        """
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")  # count=2; FSM is LegacyNonEmpty
+        reg.force_clear_untriaged("foo/bar")
+        # FSM must be back at LegacyEmpty so the worker can take its next turn.
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
 
 class TestPreemptionFsmOracle:
     """Tests for the handler_preemption FSM oracle wired into WorkerRegistry.
@@ -1168,6 +1183,37 @@ class TestPreemptionFsmOracle:
         reg.enter_untriaged("foo/bar")
         reg.exit_untriaged("foo/bar")
         reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_partial_exit_keeps_fsm_blocked_until_count_drains(self) -> None:
+        """Boolean-abstraction contract: the FSM agrees with the Python count
+        by construction.  Two enters then one exit must leave the FSM at
+        ``LegacyNonEmpty`` (count is still 1) — no spurious HandlerDone fires
+        on the intermediate edge.
+        """
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")  # count=1; FSM still LegacyNonEmpty
+
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+        reg.exit_untriaged("foo/bar")  # count=0; FSM transitions to Empty
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_repeated_enter_is_fsm_idempotent(self) -> None:
+        """Multiple enters at the same repo must not crash the FSM oracle.
+
+        Under the boolean abstraction the FSM transition fires only on the
+        ``0 → 1`` count edge; subsequent enters are no-ops at the FSM level.
+        """
+        reg = self._reg()
+        for _ in range(5):
+            reg.enter_untriaged("foo/bar")
+        # Drain to zero — exactly one HandlerDone should fire on the 1→0 edge.
+        for _ in range(5):
+            reg.exit_untriaged("foo/bar")
         reg.assert_worker_turn_ok("foo/bar")  # must not raise
 
     # ── per-repo isolation ───────────────────────────────────────────────
