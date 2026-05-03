@@ -239,13 +239,12 @@ class WorkerRegistry:
         if thread:
             thread.wake()
 
-    def abort_task(self, repo_name: str, *, task_id: str | None = None) -> None:
+    def abort_task(self, repo_name: str, *, task_id: str) -> None:
         """Signal the worker for *repo_name* to abort *task_id*.
 
-        ``task_id=None`` is the legacy untargeted form (matches whichever
-        task is running).  Real callers should pass the id of the task
-        they intend to abort so a leaked signal cannot clobber a
-        different task on the next loop iteration (closes #1193).
+        Callers must pass the id of the task they intend to abort so a
+        leaked signal cannot clobber a different task on the next loop
+        iteration (closes #1193).
 
         No-op if no thread is registered for that repo.
         """
@@ -699,7 +698,10 @@ class WorkerRegistry:
         """
         with self._threads_lock:
             thread = self._threads.get(repo_name)
-        return thread._session if thread is not None else None  # pyright: ignore[reportPrivateUsage]
+        if thread is None:
+            return None
+        provider = thread.current_provider()
+        return provider.agent.session if provider is not None else None
 
     def get_issue_cache(self, repo_name: str) -> IssueTreeCache:
         """Return (lazily creating) the per-repo issue tree cache (#812).

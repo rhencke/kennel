@@ -454,53 +454,6 @@ class _TaskFileLock:
         fd.flush()
 
 
-# Compatibility shims — callers are migrated to Tasks in subsequent commits.
-
-
-def add_task(
-    work_dir: Path,
-    title: str,
-    task_type: TaskType,
-    description: str = "",
-    status: TaskStatus = TaskStatus.PENDING,
-    thread: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Add a task.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).add(
-        title, task_type, description=description, status=status, thread=thread
-    )
-
-
-def update_task(work_dir: Path, task_id: str, status: TaskStatus) -> bool:
-    """Update a task's status.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).update(task_id, status)
-
-
-def list_tasks(work_dir: Path) -> list[dict[str, Any]]:
-    """Read all tasks.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).list()
-
-
-def complete_by_id(work_dir: Path, task_id: str) -> dict[str, Any] | None:
-    """Mark a task completed.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).complete_by_id(task_id)
-
-
-def has_pending_tasks_for_comment(work_dir: Path, comment_id: int | str) -> bool:
-    """Check pending tasks for comment.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).has_pending_for_comment(comment_id)
-
-
-def remove_task(work_dir: Path, task_id: str) -> bool:
-    """Remove a task.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).remove(task_id)
-
-
-def unblock_tasks(work_dir: Path) -> int:
-    """Transition all BLOCKED tasks to PENDING.  Compatibility shim — prefer :class:`Tasks`."""
-    return Tasks(work_dir).unblock_tasks()
-
-
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     """Format a task list into work-queue markdown.
 

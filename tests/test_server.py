@@ -27,6 +27,8 @@ from fido.infra import Infra
 from fido.provider import ProviderID
 from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
 from fido.store import FidoStore
+from fido.tasks import Tasks
+from fido.types import TaskStatus, TaskType
 
 
 class RepoConfig(_RepoConfig):
@@ -116,7 +118,6 @@ def _restore_handler_fns() -> object:
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
         "_fn_create_task": WebhookHandler._fn_create_task,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
-        "_fn_unblock_tasks": WebhookHandler._fn_unblock_tasks,
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
@@ -2211,8 +2212,10 @@ class TestProcessAction:
         assert call_order == ["dispatch", "respond_200"]
 
     def test_review_comment_calls_unblock_tasks(self, server: tuple) -> None:
-        """A pull_request_review_comment triggers unblock_tasks so BLOCKED tasks resume."""
+        """A pull_request_review_comment transitions BLOCKED tasks to PENDING."""
         url, cfg = server
+        work_dir = cfg.repos["owner/repo"].work_dir
+        Tasks(work_dir).add("blocked task", TaskType.SPEC, status=TaskStatus.BLOCKED)
         payload = {
             **_payload(),
             "action": "created",
@@ -2227,17 +2230,18 @@ class TestProcessAction:
             },
             "pull_request": {"number": 71, "title": "My PR", "body": ""},
         }
-        mock_unblock = MagicMock(return_value=0)
         WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler._fn_unblock_tasks = mock_unblock
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        mock_unblock.assert_called_once_with(cfg.repos["owner/repo"].work_dir)
+        tasks = Tasks(work_dir).list()
+        assert all(t["status"] == str(TaskStatus.PENDING) for t in tasks)
 
     def test_issue_comment_calls_unblock_tasks(self, server: tuple) -> None:
-        """A top-level PR comment triggers unblock_tasks so BLOCKED tasks resume."""
+        """A top-level PR comment transitions BLOCKED tasks to PENDING."""
         url, cfg = server
+        work_dir = cfg.repos["owner/repo"].work_dir
+        Tasks(work_dir).add("blocked task", TaskType.SPEC, status=TaskStatus.BLOCKED)
         payload = {
             **_payload(),
             "action": "created",
@@ -2254,31 +2258,31 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        mock_unblock = MagicMock(return_value=0)
         WebhookHandler.gh = MagicMock()
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])
         )
         WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler._fn_unblock_tasks = mock_unblock
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
-        mock_unblock.assert_called_once_with(cfg.repos["owner/repo"].work_dir)
+        tasks = Tasks(work_dir).list()
+        assert all(t["status"] == str(TaskStatus.PENDING) for t in tasks)
 
     def test_non_comment_event_does_not_call_unblock_tasks(self, server: tuple) -> None:
-        """A PR merge event (no comment body) must NOT trigger unblock_tasks."""
+        """A PR merge event (no comment body) must NOT unblock BLOCKED tasks."""
         url, cfg = server
+        work_dir = cfg.repos["owner/repo"].work_dir
+        Tasks(work_dir).add("blocked task", TaskType.SPEC, status=TaskStatus.BLOCKED)
         payload = {
             **_payload(),
             "action": "closed",
             "pull_request": {"number": 72, "merged": True},
         }
-        mock_unblock = MagicMock(return_value=0)
         WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler._fn_unblock_tasks = mock_unblock
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
-        mock_unblock.assert_not_called()
+        tasks = Tasks(work_dir).list()
+        assert all(t["status"] == str(TaskStatus.BLOCKED) for t in tasks)
 
     def test_review_comment_handler_stays_off_provider(self, server: tuple) -> None:
         """Review-comment ingestion queues durably without entering provider."""
@@ -2409,7 +2413,6 @@ class TestProcessActionInner:
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2440,7 +2443,6 @@ class TestProcessActionInner:
         mock_reply = MagicMock()
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2470,7 +2472,6 @@ class TestProcessActionInner:
         )
         mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_comment = mock_reply
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         # _process_action_inner swallows the recoverable exception (logs + signal).
@@ -2499,7 +2500,6 @@ class TestProcessActionInner:
         )
         mock_reply = MagicMock(side_effect=KeyError("missing_key"))
         WebhookHandler._fn_reply_to_comment = mock_reply
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         with pytest.raises(KeyError):
@@ -2515,7 +2515,6 @@ class TestProcessActionInner:
         )
         mock_reply = MagicMock()
         WebhookHandler._fn_reply_to_review = mock_reply
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2540,7 +2539,6 @@ class TestProcessActionInner:
         mock_reply = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2568,7 +2566,6 @@ class TestProcessActionInner:
         )
         mock_reply = MagicMock()
         WebhookHandler._fn_reply_to_issue_comment = mock_reply
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2595,7 +2592,6 @@ class TestProcessActionInner:
         )
         mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_issue_comment = mock_reply
-        WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())

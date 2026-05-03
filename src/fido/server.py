@@ -53,7 +53,7 @@ from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
 from fido.store import FidoStore, ReplyPromiseRecord
-from fido.tasks import Tasks, unblock_tasks
+from fido.tasks import Tasks
 from fido.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     ReconcileWatchdog,
@@ -631,7 +631,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
     _fn_create_task = staticmethod(create_task)
     _fn_launch_worker = staticmethod(launch_worker)
-    _fn_unblock_tasks = staticmethod(unblock_tasks)
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
@@ -1141,7 +1140,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # When a human comments on a PR, transition any BLOCKED tasks back
             # to PENDING so the worker can re-evaluate and resume.
             if action.reply_to or action.comment_body or action.thread:
-                type(self)._fn_unblock_tasks(repo_cfg.work_dir)
+                Tasks(repo_cfg.work_dir).unblock_tasks()
             # Non-comment events just trigger fido worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)
         except provider.SessionLeakError:

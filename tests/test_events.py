@@ -4012,9 +4012,10 @@ class TestCreateTask:
         with patch("fido.events.launch_sync"):
             result = create_task("do a thing", cfg, repo_cfg, MagicMock())
         assert result["title"] == "do a thing"
-        from fido.tasks import list_tasks
 
-        assert any(t["title"] == "do a thing" for t in list_tasks(tmp_path))
+        from fido.tasks import Tasks
+
+        assert any(t["title"] == "do a thing" for t in Tasks(tmp_path).list())
 
 
 class TestGetCommitSummary:
