@@ -102,14 +102,22 @@ def test_commits_uncommitted_modifications(tmp_path: Path) -> None:
     assert msg == "wip: Fix seed (provider didn't commit)"
 
 
-def test_commits_untracked_files(tmp_path: Path) -> None:
-    """Untracked files → helper commits them via ``git add -A``."""
+def test_skips_untracked_only_files(tmp_path: Path) -> None:
+    """Untracked-only worktree → helper does NOT commit (closes #657).
+
+    Previously the helper used ``git add -A`` and swept untracked files into
+    a wip commit, which polluted branch history with stray ``.coverage.*``,
+    build artefacts, and editor scratch.  The helper now uses ``git add -u``
+    (modified tracked files only) and short-circuits when staging produces
+    an empty index.  Untracked files stay untracked; the next worker turn
+    picks them up or rolls them back deliberately.
+    """
     _init_repo(tmp_path)
     head_before = _head(tmp_path)
     (tmp_path / "new.txt").write_text("brand new\n")
     worker = _worker(tmp_path)
     new_head = worker._commit_provider_leftovers_if_any("Add new file", head_before)
-    assert new_head != head_before
+    assert new_head == head_before  # no commit was created
     tracked = subprocess.run(
         ["git", "ls-files"],
         cwd=tmp_path,
@@ -117,7 +125,9 @@ def test_commits_untracked_files(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     ).stdout
-    assert "new.txt" in tracked
+    assert "new.txt" not in tracked
+    # And the untracked file is still on disk, available for the next turn.
+    assert (tmp_path / "new.txt").read_text() == "brand new\n"
 
 
 def test_returns_unchanged_head_when_status_fails(tmp_path: Path, monkeypatch) -> None:

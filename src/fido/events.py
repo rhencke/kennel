@@ -1401,6 +1401,9 @@ def reply_to_comment(
     # Always fetch the full thread for this comment.
     thread_comments: list[dict[str, Any]] = []
     if info.get("repo") and info.get("pr") and info.get("comment_id"):
+        # Convert before the truthiness check — a generator or auto-mocked
+        # iterable is truthy regardless of whether iterating it yields any
+        # items, so ``if fetched:`` on the raw return is unsafe.
         thread_comments = list(
             gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
         )

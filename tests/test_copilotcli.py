@@ -612,7 +612,9 @@ class TestCopilotACPRuntime:
             session_id = runtime.ensure_session(None, "claude-opus-4-6")
             assert session_id == "sess-1"
             assert connection.new_session_calls == [str(tmp_path)]
-            assert connection.set_session_model_calls == [("gpt-5.4", "sess-1")]
+            # claude-opus-* normalizes to gpt-4.1 per #1206 (the "gpt-5.4"
+            # model copilot used to accept is no longer in the supported set).
+            assert connection.set_session_model_calls == [("gpt-4.1", "sess-1")]
             text, stop_reason, active_session = runtime.prompt(
                 session_id, "hello", None
             )
@@ -638,7 +640,8 @@ class TestCopilotACPRuntime:
                 runtime.recover_session("persisted", "claude-sonnet-4-6") == "persisted"
             )
             assert second.resume_session_calls == [(str(tmp_path), "persisted")]
-            assert second.set_session_model_calls == [("gpt-5.4", "persisted")]
+            # claude-sonnet-* normalizes to gpt-4.1 per #1206.
+            assert second.set_session_model_calls == [("gpt-4.1", "persisted")]
             assert runtime.reset_session(None) == "sess-1"
         finally:
             runtime.stop()
@@ -1652,7 +1655,8 @@ class TestCopilotCLIClient:
         assert client.resume_session("sess-1", prompt_file, client.brief_model)
         cmd = runner.call_args.args[0]
         assert "--model" in cmd
-        assert "gpt-5.4" in cmd
+        # brief_model is gpt-5-mini per #1206 (was gpt-5.4 before).
+        assert "gpt-5-mini" in cmd
 
     def test_shared_helpers_delegate_to_run_turn(self) -> None:
         session = MagicMock()

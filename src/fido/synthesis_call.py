@@ -139,7 +139,13 @@ def _parse_comment_response(raw: str) -> CommentResponse:
                 change_request=change_request,
                 insights=insights,
             )
-        except ValueError as exc:
+        except ValueError as exc:  # pragma: no cover - defensive
+            # All ``CommentResponse`` invariants (non-empty reply_text,
+            # valid emoji shortcode, non-empty change_request when set) are
+            # pre-checked above, so construction here cannot fail through
+            # the normal parser path.  Kept as a defensive catch in case
+            # the dataclass adds new validation that the parser hasn't
+            # learned about yet.
             last_error = exc
             continue
 

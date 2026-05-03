@@ -79,10 +79,16 @@ def test_transition_resyncs_after_add_complete_and_rescope() -> None:
     )
     assert after_rescope is not None
     assert oracle.pr_body_matches_store_bool(after_rescope)
+    # Title is immutable task identity per D11 — RewriteTask carries a
+    # ``new_title`` for legacy reasons but the modeled transition only
+    # revises ``description``.  Title stays "spec work".  Source:
+    # ``models/task_queue_rescope.v`` lines 68-71.
     assert [row.title for row in after_rescope.visible_pr_body] == [
-        "renamed spec",
+        "spec work",
         "ci fix",
     ]
+    # Description IS rewriteable.
+    assert after_rescope.visible_pr_body[0].description == "done"
 
 
 def test_transition_rejects_stale_pr_body_before_next_write() -> None:

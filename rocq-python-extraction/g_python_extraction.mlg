@@ -153,6 +153,49 @@ let normalize_top_level_spacing source =
   in
   String.concat "\n" (loop None 0 [] lines) ^ "\n"
 
+(** Drop duplicate ``_X = TypeVar("_X" ...)`` declarations.  The decl
+    blocks already dedupe within a single emission, but multiple
+    independent blocks can each produce the same TypeVar name (one per
+    top-level decl that mentions it).  TypeVars with identical bounds
+    are equivalent in Python, so keeping the first occurrence and
+    dropping later ones is safe and reads cleaner. *)
+let dedupe_typevar_declarations source =
+  let lines = String.split_on_char '\n' source in
+  let starts_typevar_decl line =
+    let trimmed = String.trim line in
+    let len = String.length trimmed in
+    if len = 0 then None
+    else
+      match String.index_opt trimmed '=' with
+      | None -> None
+      | Some eq_pos ->
+          let lhs = String.trim (String.sub trimmed 0 eq_pos) in
+          let rhs_start = eq_pos + 1 in
+          let rhs =
+            String.trim (String.sub trimmed rhs_start (len - rhs_start))
+          in
+          if String.length lhs > 0
+             && lhs.[0] = '_'
+             && (starts_with rhs "TypeVar(\""
+                 || starts_with rhs "TypeVarTuple(\"")
+          then Some lhs
+          else None
+  in
+  let seen = Hashtbl.create 8 in
+  let kept =
+    List.filter
+      (fun line ->
+        match starts_typevar_decl line with
+        | None -> true
+        | Some name ->
+            if Hashtbl.mem seen name then false
+            else (
+              Hashtbl.add seen name ();
+              true))
+      lines
+  in
+  String.concat "\n" kept
+
 let is_python_ident_char = function
   | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
   | _ -> false
@@ -331,6 +374,7 @@ let write_python_with_source_map ?(renames=[]) ~fname ~span pp =
     Pp.string_of_ppcmds pp
     |> normalize_top_level_spacing
     |> rename_python_identifiers renames
+    |> dedupe_typevar_declarations
   in
   let oc = open_out fname in
   output_string oc source;
@@ -357,6 +401,7 @@ let write_python_group_with_source_map ?(renames=[]) ~fname ~fallback_span:_ ~en
     Pp.string_of_ppcmds pp
     |> normalize_top_level_spacing
     |> rename_python_identifiers renames
+    |> dedupe_typevar_declarations
   in
   let oc = open_out fname in
   output_string oc source;
@@ -549,22 +594,30 @@ let source_map_entries_of_structure state struc =
     (fun (_mp, elems) -> List.concat_map entries_of_elem elems)
     struc
 
+let rec record_rename_of_decl = function
+  | Dind ind when Array.length ind.ind_packets > 0 -> (
+      match ind.ind_kind with
+      | Record _ ->
+          let packet = ind.ind_packets.(0) in
+          [ basename_of_global_string packet.ip_consnames_ref.(0),
+            capitalize_first_ascii
+              (basename_of_global_string packet.ip_typename_ref) ]
+      | _ -> [])
+  | _ -> []
+
+and record_renames_of_module_body = function
+  | MEstruct (_mp, sel) ->
+      List.concat_map record_renames_of_structure_elem sel
+  | MEident _ | MEapply _ | MEfunctor _ -> []
+
+and record_renames_of_structure_elem = function
+  | (_, SEdecl decl) -> record_rename_of_decl decl
+  | (_, SEmodule mb) -> record_renames_of_module_body mb.ml_mod_expr
+  | (_, SEmodtype _) -> []
+
 let record_renames_of_structure struc =
   List.concat_map
-    (fun (_mp, elems) ->
-      List.filter_map
-        (function
-          | (_, SEdecl (Dind ind)) -> (
-              match ind.ind_kind with
-              | Record _ when Array.length ind.ind_packets > 0 ->
-                  let packet = ind.ind_packets.(0) in
-                  Some
-                    ( basename_of_global_string packet.ip_consnames_ref.(0),
-                      capitalize_first_ascii
-                        (basename_of_global_string packet.ip_typename_ref) )
-              | _ -> None)
-          | (_, SEdecl _) | (_, SEmodule _) | (_, SEmodtype _) -> None)
-        elems)
+    (fun (_mp, elems) -> List.concat_map record_renames_of_structure_elem elems)
     struc
 
 let qualids_of_space_separated_names names =

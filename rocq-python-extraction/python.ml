@@ -174,6 +174,24 @@ let pp_lambda ids body =
     prlist_with_sep (fun () -> str ", ") pp_param params ++
     str ": " ++ body
 
+(** Like [pp_lambda] but renders dummy / underscored ids explicitly as
+    ``_``, ``__``, etc. so the resulting Python lambda preserves the
+    *original* arity instead of eliding unused leading params.  Useful
+    for callbacks where the runtime expects a specific arity (e.g.
+    Map.fold's ``(key, value, acc)`` callback). *)
+let pp_lambda_preserving_arity ids body =
+  let render_id i id =
+    if is_dummy_id id then str (String.make (i + 1) '_')
+    else pp_pyid id
+  in
+  if List.is_empty ids then str "lambda: " ++ body
+  else
+    str "lambda " ++
+    prlist_with_sep (fun () -> str ", ")
+      (fun (i, id) -> render_id i id)
+      (List.mapi (fun i id -> (i, id)) ids) ++
+    str ": " ++ body
+
 type tail_context = {
   tail_name : string;
   tail_params : Id.t list;
@@ -301,9 +319,16 @@ let lookup_lowering_method_target environment source_name =
 let lookup_lowering_record_field_target environment source_name =
   match List.assoc_opt source_name environment.lowering_record_field_targets with
   | Some _ as result -> result
-  | None ->
+  | None when not (String.contains source_name '.') ->
+      (* Fall back to the trailing identifier only for un-qualified
+         references.  When the caller wrote ``Mod.field x`` the dotted
+         path is an explicit "go through the module" — applying the
+         field-lowering would silently rewrite it to attribute access
+         on the receiver and lose the cross-module call.  Tracked: the
+         module-scoped lowering env work in #1096. *)
       List.assoc_opt (source_name_tail source_name)
         environment.lowering_record_field_targets
+  | None -> None
 
 let extend_lowering_environment ~method_targets ~record_field_targets environment = {
   lowering_method_targets = method_targets;
@@ -1103,6 +1128,13 @@ let std_ascii_expr_value = function
              (fun i bit -> if Option.get bit then 1 lsl i else 0)
              bits
            |> List.fold_left ( + ) 0)
+  | MLstring s when String.length (Pstring.to_string s) = 1 ->
+      (* Coq's extraction can fold ``Ascii.Ascii b0 ... b7`` literals into
+         primitive single-character strings (e.g. inside a ``"lf"`` cons-list).
+         Treat such a one-char primitive string as the equivalent ascii
+         code so [std_string_expr_value] can fold the surrounding
+         ``String c rest`` chain into a literal Python string. *)
+      Some (Char.code (Pstring.to_string s).[0])
   | _ -> None
 
 let std_string_expr_value expr =
@@ -1866,7 +1898,11 @@ let consistent_method_prefix field_names =
   | _ -> None
 
 (** Python keyword-argument name for record field at position [i].
-    Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
+    Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones.
+    Always strips any qualifier prefix from the field name — attribute
+    access on a Python instance is always unqualified, regardless of
+    whether the surrounding scope can name the record class directly
+    or only via a module path. *)
 let pp_field_name state r fds i =
   let ind_ref = get_ind r in
   let ind_kn = kn_of_ind ind_ref in
@@ -1875,7 +1911,8 @@ let pp_field_name state r fds i =
   match List.nth fds i with
   | Some r' ->
       let field_name = pp_global_with_key state Term ind_kn r' in
-      str (record_field_display_name class_name field_names field_name)
+      let display = record_field_display_name class_name field_names field_name in
+      str (source_name_tail display)
   | None    -> str (Printf.sprintf "arg%d" i)
 
 (** Raw constructor name for [r], accounting for inline-custom declarations. *)
@@ -2251,6 +2288,14 @@ and rendered_lowering_rule_app state env r rule args =
            Some rendered
        | None ->
            Some (py_prefix "not " py_prec_not (rendered_expr value)))
+  | LoweringBool, LoweringEmitInfix "==", [left; right] ->
+      (* ``Bool.eqb`` is a comparison operator at the same precedence as
+         ``<``, ``<=``, etc., so a comparison operand on the left would
+         otherwise chain (Python parses ``a < b == c`` as ``(a < b) and
+         (b == c)``).  Route through the primitive-comparison helper so
+         the associativity is :py:`PyAssocNone` and the inner comparison
+         gets parenthesized. *)
+      Some (rendered_primitive_comparison state env "==" left right)
   | LoweringBool, LoweringEmitInfix operator, [left; right] ->
       Some
         (py_infix operator
@@ -2274,6 +2319,32 @@ and rendered_lowering_rule_app state env r rule args =
   | family, LoweringEmitLiteral literal, []
     when lowering_family_is_map_or_set family ->
       Some (py_rendered (str literal))
+  | family, LoweringEmitCall name, callback :: rest
+    when lowering_family_is_map_or_set family
+         && (String.equal name "_rocq_map_fold"
+             || String.equal name "_rocq_set_fold") ->
+      (* ``fold`` takes ``(function, collection, initial)`` — the first
+         argument is a callback, not a collection key, so it must NOT
+         be wrapped in [_rocq_positive_key] / [_rocq_string_key].
+         Additionally, render the callback with [pp_lambda_preserving_arity]
+         so that ``fun _ _ acc => S acc`` extracts as ``lambda _, __, acc:
+         acc + 1`` instead of the eta-reduced ``lambda acc: acc + 1`` —
+         the runtime ``_rocq_map_fold`` and ``_rocq_set_fold`` invoke the
+         callback with the full ``(key, value, acc)`` / ``(elt, acc)``
+         arity. *)
+      let pp_callback =
+        match callback with
+        | MLlam _ ->
+            let ids, body = collect_lams callback in
+            let params = List.map id_of_mlid ids in
+            let params, env' = push_vars params env in
+            let params = List.rev params in
+            pp_lambda_preserving_arity params (pp_expr state env' body)
+        | _ -> pp_expr state env callback
+      in
+      let pp_rest = rendered_args state env rest in
+      Some
+        (py_call (py_rendered (str name)) (pp_callback ++ str ", " ++ pp_rest))
   | (LoweringPositiveMap | LoweringStringMap), LoweringEmitCall name,
     [key; value; mapping] ->
       keyed_collection_call name key [value; mapping]
@@ -3403,13 +3474,15 @@ let rec pp_statement_expr state env indent = function
          List.is_empty (get_record_fields (PrinterState.get_table state) r) &&
          not (is_std_list_cons_ref r) &&
          not (is_std_ascii_cons_ref r) &&
+         not (is_std_string_cons_ref r) &&
          List.length args >= 2 ->
       (* Non-record, non-coinductive sum constructor with two or more arguments.
          Using pp_multiline_items produces stable output (one arg per line with
          trailing comma) that ruff will not reformat regardless of indentation
          depth.  Single-argument constructors fall through to pp_expr since
-         they always fit on one line.  Cons and Ascii have their own lowerings
-         in pp_expr; the guards above prevent this case from shadowing them. *)
+         they always fit on one line.  Cons, Ascii, and the stdlib ``String``
+         (Coq's character cons) have their own lowerings in pp_expr; the guards
+         above prevent this case from shadowing them. *)
       let cons_name = str_cons state r in
       pp_multiline_items indent (str cons_name)
         (List.map (pp_statement_expr state env (indent + 4)) args)
@@ -3619,8 +3692,11 @@ let rec pp_return_body state env indent = function
         pp_std_option_return_body state env indent scrutinee branches
       else if is_std_prod_type ty then
         pp_std_prod_return_body state env indent scrutinee branches
+      else if is_std_nat_type ty then
+        pp_std_nat_return_body state env indent scrutinee branches
+      else if is_std_positive_type ty then
+        pp_std_positive_return_body state env indent scrutinee branches
       else if is_std_ascii_type ty ||
-              is_std_nat_type ty || is_std_positive_type ty ||
               is_std_Z_type ty || is_std_Q_type ty then
         str "return " ++ pp_expr state env expr
       else if is_std_bool_type ty then
@@ -4268,6 +4344,98 @@ and pp_std_string_return_body state env indent scrutinee branches =
   in
   pp_bound_if_followed_return_body state env indent "__s" scrutinee
     (str "__s == \"\"") pp_empty pp_cons
+
+and pp_std_nat_return_body state env indent scrutinee branches =
+  (* Statement form of [pp_std_nat_match_expr]: emit an if/else block
+     so each arm is a valid Python statement, which lets
+     [pp_return_arm] route through [pp_return_body] and trigger
+     tail-call rebinding for self-recursive fixpoints (e.g.
+     [nat_count_down], where the [(lambda __n: ...)(n)] expression form
+     hides the tail recursion behind lambda thunks and Python's
+     missing tail-call optimisation blows the stack at depth ~1000). *)
+  let zero_arm = ref None in
+  let succ_arm = ref None in
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported nat pattern shape"
+      [
+        (std_nullary_constructor is_std_nat_zero_ref, zero_arm);
+        (std_constructor is_std_nat_succ_ref, succ_arm);
+      ]
+      branches
+  in
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback branch_indent =
+    pp_return_or_impossible state env branch_indent wildcard_arm
+  in
+  let pp_zero =
+    match !zero_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_succ =
+    match !succ_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env (indent + 4) ids [str "__n - 1"] body
+    | None -> fallback (indent + 4)
+  in
+  str "__n = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __n == 0:" ++ fnl () ++
+  str body_pfx ++ pp_zero ++ fnl () ++
+  str pfx ++ str "if __n > 0:" ++ fnl () ++
+  str body_pfx ++ pp_succ ++ fnl () ++
+  str pfx ++ str "return _rocq_numeric_domain_error(\"nat\", __n)"
+
+and pp_std_positive_return_body state env indent scrutinee branches =
+  (* Statement form of [pp_std_positive_match_expr] — same motivation
+     as [pp_std_nat_return_body]: keep tail-call detection working for
+     positive-recursive fixpoints. *)
+  let xh_arm = ref None in
+  let xo_arm = ref None in
+  let xi_arm = ref None in
+  let wildcard_arm =
+    classify_std_match_branches
+      "unsupported positive pattern shape"
+      [
+        (std_nullary_constructor is_std_positive_xh_ref, xh_arm);
+        (std_constructor is_std_positive_xo_ref, xo_arm);
+        (std_constructor is_std_positive_xi_ref, xi_arm);
+      ]
+      branches
+  in
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback branch_indent =
+    pp_return_or_impossible state env branch_indent wildcard_arm
+  in
+  let pp_xh =
+    match !xh_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_xo =
+    match !xo_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env (indent + 4) ids [str "__p // 2"] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_xi =
+    match !xi_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env (indent + 4) ids [str "(__p - 1) // 2"] body
+    | None -> fallback (indent + 4)
+  in
+  str "__p = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __p <= 0:" ++ fnl () ++
+  str body_pfx ++ str "return _rocq_numeric_domain_error(\"positive\", __p)" ++
+  fnl () ++
+  str pfx ++ str "if __p == 1:" ++ fnl () ++
+  str body_pfx ++ pp_xh ++ fnl () ++
+  str pfx ++ str "if __p % 2 == 0:" ++ fnl () ++
+  str body_pfx ++ pp_xo ++ fnl () ++
+  str pfx ++ str "if __p > 0:" ++ fnl () ++
+  str body_pfx ++ pp_xi
 
 and pp_std_N_return_body state env indent scrutinee branches =
   let zero_arm = ref None in

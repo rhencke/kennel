@@ -1,5 +1,7 @@
 import io
+import queue
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -336,6 +338,149 @@ class TestCodexAppServerClient:
                 max_line_bytes=1,
             )
         assert process.terminated
+
+    def test_pid_returns_process_pid(self) -> None:
+        process = _FakeProcess('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        assert client.pid == process.pid
+        client.stop()
+
+    def test_request_raises_provider_error_when_response_has_error(self) -> None:
+        process = _FakeProcess(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+            '{"id":2,"error":{"code":-32603,"message":"server is sad"}}\n'
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        with pytest.raises(Exception) as excinfo:
+            client.request("explode")
+        assert "server is sad" in str(excinfo.value)
+        client.stop()
+
+    def _streaming_process(
+        self, prelude: str, lines: queue.Queue[str | None]
+    ) -> "_FakeProcess":
+        """Return a _FakeProcess whose stdout's readline pulls from
+        ``lines`` instead of EOF'ing immediately.  Use this when a test
+        needs to keep the reader thread alive past the initial setup
+        message so the client stays in a non-protocol-error state."""
+
+        class _StreamingStdout:
+            def __init__(self) -> None:
+                self._buf = io.StringIO(prelude)
+                self._closed = False
+
+            def readline(self) -> str:
+                line = self._buf.readline()
+                if line:
+                    return line
+                # Block until lines.put() pushes more content (or None
+                # to signal EOF).
+                next_line = lines.get()
+                if next_line is None:
+                    return ""
+                return next_line
+
+            def close(self) -> None:
+                self._closed = True
+
+            def __iter__(self):
+                while True:
+                    line = self.readline()
+                    if not line:
+                        return
+                    yield line
+
+        process = _FakeProcess()
+        process.stdout = _StreamingStdout()  # type: ignore[assignment]
+        return process
+
+    def test_wait_notification_returns_matching_method(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+
+        def feed() -> None:
+            lines.put('{"method":"unrelated/event","params":{"x":1}}\n')
+            lines.put('{"method":"target/event","params":{"value":42}}\n')
+
+        threading.Thread(target=feed, daemon=True).start()
+        notif = client.wait_notification("target/event", timeout=2.0)
+        assert notif["params"] == {"value": 42}
+        lines.put(None)  # EOF the reader
+        client.stop()
+
+    def test_wait_notification_predicate_filters(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        lines.put('{"method":"event","params":{"keep":false}}\n')
+        lines.put('{"method":"event","params":{"keep":true,"value":7}}\n')
+        notif = client.wait_notification(
+            "event", predicate=lambda p: p.get("keep") is True, timeout=2.0
+        )
+        assert notif["params"]["value"] == 7
+        lines.put(None)
+        client.stop()
+
+    def test_wait_notification_times_out(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        with pytest.raises(TimeoutError, match="Timed out waiting for Codex"):
+            client.wait_notification("never-arrives", timeout=0.1)
+        lines.put(None)
+        client.stop()
+
+    def test_wait_notification_rejects_non_object_params(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        lines.put('{"method":"event","params":"not-an-object"}\n')
+        with pytest.raises(CodexProtocolError, match="params must be an object"):
+            client.wait_notification("event", timeout=2.0)
+        lines.put(None)
+        client.stop()
+
+    def test_is_alive_reflects_process_state(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        assert client.is_alive()
+        client.stop()
+        assert not client.is_alive()
+        lines.put(None)
+
+    def test_stop_kills_process_when_terminate_times_out(self) -> None:
+        class _Stubborn(_FakeProcess):
+            def terminate(self) -> None:
+                # Override so terminate doesn't immediately set _returncode
+                # to 0; we need the subsequent wait() to time out and trigger
+                # the kill+wait fallback (codex.py:303-305).
+                self.terminated = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self._returncode is None:
+                    raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout or 0)
+                return self._returncode
+
+            def kill(self) -> None:
+                self._returncode = -9
+
+        process = _Stubborn('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client.stop()
+        assert process.terminated
+        assert process._returncode == -9  # kill() ran via the timeout path
 
 
 class TestCodexAPI:
@@ -706,7 +851,16 @@ class TestCodexSession:
 
         assert fake.stopped
         assert session.last_turn_cancelled is False
-        assert replacement.requests == [("thread/resume", {"threadId": "thread-new"})]
+        # ``thread/resume`` carries the full session context per #1077:
+        # model, cwd, approvalPolicy, sandbox, developerInstructions, plus
+        # threadId and excludeTurns.  Anchor on the threadId + excludeTurns
+        # rather than the full dict so future protocol enrichments don't
+        # break this test.
+        assert len(replacement.requests) == 1
+        method, params = replacement.requests[0]
+        assert method == "thread/resume"
+        assert params["threadId"] == "thread-new"
+        assert params["excludeTurns"] is True
 
 
 class TestCodexClient:

@@ -356,12 +356,12 @@ class PromptSession(Protocol):
         """Exit the session's turn-serialization context."""
         ...
 
-    def hold_for_handler(
-        self, *, preempt_worker: bool = False
-    ) -> "contextmanager[PromptSession]":  # type: ignore[type-arg]
+    def hold_for_handler(self) -> "contextmanager[PromptSession]":  # type: ignore[type-arg]
         """Hold the session lock across multiple prompt calls for webhook
         handlers.  Implemented by :class:`OwnedSession` (fix for
-        #658)."""
+        #658).  Webhooks always preempt the current worker holder via
+        :meth:`__enter__`'s preempt-always semantics — there is no
+        opt-in flag (#637)."""
         ...
 
     def preempt_worker(self) -> bool:
@@ -848,9 +848,7 @@ class OwnedSession:
         return False
 
     @contextmanager
-    def hold_for_handler(
-        self, *, preempt_worker: bool = False
-    ) -> Iterator["OwnedSession"]:
+    def hold_for_handler(self) -> Iterator["OwnedSession"]:
         """Hold the session lock across multiple prompt calls.
 
         Webhook handlers wrap their entire body in this so the worker
@@ -859,35 +857,15 @@ class OwnedSession:
         Inner ``with session:`` / ``session.prompt`` calls re-enter via the
         reentrance counter and skip the FSM acquire.
 
-        When *preempt_worker* is true, fires the caller's
-        :meth:`_fire_worker_cancel` once upfront (via
-        :func:`try_preempt_worker`) so a currently-running worker turn
-        aborts immediately rather than being waited out.  Logs the
-        outcome — preempted vs. queuing — so webhook latency spikes
-        are visible in the log without needing to trace ``session.prompt``
-        calls (fixes the missing diagnostic from #955).
+        Preemption is now handled inside ``__enter__`` (preempt-always —
+        every webhook acquire fires :meth:`_fire_worker_cancel` if a
+        worker currently holds the session, see #637).  No opt-in flag
+        is needed here.
 
         Switches the session to triage handler mode (via
         :meth:`switch_tools` with :attr:`_handler_tools`) on entry, then
         restores the unrestricted worker tool set on exit (#1042).
         """
-        if preempt_worker:
-            preempted, current_kind = try_preempt_worker(
-                self._repo_name, self._fire_worker_cancel
-            )
-            if preempted:
-                log.info(
-                    "hold_for_handler: preempting worker (tid=%d, repo=%s)",
-                    threading.get_ident(),
-                    self._repo_name,
-                )
-            else:
-                log.info(
-                    "hold_for_handler: queuing behind %s holder (tid=%d, repo=%s)",
-                    current_kind or "none",
-                    threading.get_ident(),
-                    self._repo_name,
-                )
         with self:  # type: ignore[attr-defined]
             self.switch_tools(self._handler_tools)
             try:

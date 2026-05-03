@@ -189,7 +189,14 @@ FROM rocq-plugin-source AS test-extract
 
 COPY --chown=opam:opam rocq-python-extraction/test rocq-python-extraction/test
 
-RUN opam exec -- dune build rocq-python-extraction/test/python.vo \
+# Clobber any cached .vo / extraction artifacts so a fresh plugin
+# build (any change to ``rocq-python-extraction/python.ml`` /
+# ``g_python_extraction.mlg``) re-extracts the test fixtures.  Without
+# this, ``dune build test/python.vo`` happily reuses the previous
+# cycle's outputs even when the plugin's behaviour has changed,
+# silently masking backend regressions.
+RUN rm -rf /workspace/_build/default/rocq-python-extraction \
+    && opam exec -- dune build rocq-python-extraction/test/python.vo \
     && mkdir -p /tmp/pytest-artifacts /tmp/pyright-artifacts \
     && while IFS= read -r name; do \
         cp "/workspace/_build/default/$name" "/tmp/pytest-artifacts/$name"; \
@@ -267,4 +274,10 @@ FROM python-test-base AS test
 COPY tests tests
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-RUN ./pyproject python -m fido.tests_main
+# Tests are NOT executed inside this buildkit-managed RUN — buildx bake
+# offers no per-target memory cap (unlike host ``docker run --memory=``)
+# so a leaky test could grow unbounded inside the buildkit cgroup and
+# soft-lock the host (#1248).  The bake target now only assembles the
+# image with tests + Rocq pytest artefacts; ``./fido ci`` invokes the
+# capped host-side runner ``./fido tests`` after bake completes.
+RUN echo "test image assembled — see ./fido tests for capped execution"

@@ -889,7 +889,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     # handler's individual turns — that stalled webhook replies
                     # behind long worker turns.  Both ClaudeSession and
                     # CopilotCLISession implement ``hold_for_handler``.
-                    with session.hold_for_handler(preempt_worker=True):
+                    with session.hold_for_handler():
                         self._process_action_inner(action, repo_cfg, activity)
                 else:
                     self._process_action_inner(action, repo_cfg, activity)

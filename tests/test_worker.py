@@ -331,9 +331,8 @@ class TestWorkerContextManager:
         ctx = WorkerContext(
             work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
         )
-        with pytest.raises(RuntimeError):
-            with ctx:
-                raise RuntimeError("boom")
+        with pytest.raises(RuntimeError), ctx:
+            raise RuntimeError("boom")
         assert fd.closed
 
 
@@ -1464,7 +1463,12 @@ class TestWorker:
         ):
             worker.run()
         mock_focp.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text"
+            mock_ctx.fido_dir,
+            repo_ctx,
+            8,
+            "My task",
+            "Issue body text",
+            issue_labels=[],
         )
 
     def test_run_skips_ci_thread_rescope_for_fresh_pr(self, tmp_path: Path) -> None:
@@ -6325,7 +6329,7 @@ class TestRunHandleMergeConflictIntegration:
         ):
             worker.run()
         mock_handle_mc.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
         )
 
     def test_returns_1_when_merge_conflict_handled(self, tmp_path: Path) -> None:
@@ -6581,7 +6585,9 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch(
                 "fido.worker.build_prompt",
-                side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
+                side_effect=lambda fd, sk, ctx, **_: captured_context.update(
+                    {"ctx": ctx}
+                ),
             ),
             patch("fido.worker.provider_run", return_value=("", "")),
             patch("fido.tasks.Tasks.complete_with_resolve"),
@@ -6883,7 +6889,7 @@ class TestRunHandleCiIntegration:
         ):
             worker.run()
         mock_handle_ci.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
         )
 
     def test_returns_1_when_ci_handled(self, tmp_path: Path) -> None:
@@ -7940,7 +7946,7 @@ class TestHandleThreads:
         }
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -8088,7 +8094,7 @@ class TestHandleQueuedComments:
 
         with (
             patch(
-                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+                "fido.events.reply_to_issue_comment", return_value=("ACT", ["do thing"])
             ) as mock_reply,
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background") as mock_sync,
@@ -8125,7 +8131,7 @@ class TestHandleQueuedComments:
 
         with (
             patch(
-                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+                "fido.events.reply_to_issue_comment", return_value=("ACT", ["do thing"])
             ),
             patch("fido.events.create_task", side_effect=assert_promise_unacked),
             patch("fido.tasks.sync_tasks_background"),
@@ -8151,7 +8157,7 @@ class TestHandleQueuedComments:
         }
 
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -8179,7 +8185,7 @@ class TestHandleQueuedComments:
         }
 
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -9183,7 +9189,11 @@ class TestExecuteTask:
         task = self._pending_task("Implement feature")
         session = MagicMock()
         session.last_turn_cancelled = False
-        worker._provider_agent.session = session
+        # ``session`` is now a read-only property on SessionBackedAgent
+        # (session_agent.py:37); write to the underlying attribute so the
+        # property returns our mock when ``provider_turn_was_preempted``
+        # consults ``_provider_agent.session``.
+        worker._provider_agent._session = session
 
         def preempt_provider_turn(*_args: object, **_kwargs: object) -> tuple[str, str]:
             session.last_turn_cancelled = True
@@ -11119,7 +11129,9 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "execute_task", mock_execute),
         ):
             worker.run()
-        mock_execute.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug")
+        mock_execute.assert_called_once_with(
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
+        )
 
     def test_returns_1_when_execute_task_done(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)

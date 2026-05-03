@@ -90,7 +90,7 @@ def test_nested_with_inside_hold_does_not_double_register(
 def test_hold_preempt_fires_cancel_when_worker_holds(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """hold_for_handler(preempt_worker=True) fires _fire_worker_cancel iff
+    """hold_for_handler() fires _fire_worker_cancel iff
     the current lock holder is a worker and the caller is a webhook."""
     session = _setup_session(tmp_path)
 
@@ -109,7 +109,7 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
     monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
     provider.set_thread_kind("webhook")
     try:
-        with session.hold_for_handler(preempt_worker=True):
+        with session.hold_for_handler():
             pass
     finally:
         provider.set_thread_kind(None)
@@ -130,7 +130,7 @@ def test_hold_preempt_no_fire_when_no_worker_holder(
     monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
     provider.set_thread_kind("webhook")
     try:
-        with session.hold_for_handler(preempt_worker=True):
+        with session.hold_for_handler():
             pass
     finally:
         provider.set_thread_kind(None)
@@ -159,7 +159,7 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(
     cancel_calls = []
     monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
     try:
-        with session.hold_for_handler():  # preempt_worker default False
+        with session.hold_for_handler():  # preempt-always now lives in __enter__
             pass
     finally:
         session.stop()
@@ -210,7 +210,7 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
 
 
 def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
-    """End-to-end: webhook calling hold_for_handler(preempt_worker=True)
+    """End-to-end: webhook calling hold_for_handler()
     wakes a worker that is blocked inside iter_events, causing the worker to
     exit its turn and release the lock so the webhook can acquire it (#955)."""
     import time
@@ -278,7 +278,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 
             session._fire_worker_cancel = fire_and_unblock  # type: ignore[method-assign]
             t_start = time.monotonic()
-            with session.hold_for_handler(preempt_worker=True):
+            with session.hold_for_handler():
                 webhook_acquired.set()
                 elapsed = time.monotonic() - t_start
                 assert elapsed < 2.0, (
@@ -306,7 +306,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Post-#979: after hold_for_handler(preempt_worker=True) fires the
+    """Post-#979: after hold_for_handler() fires the
     cancel signal, the handler's own prompt() must run to completion.  In
     the new design the prior turn's boundary is drained inside iter_events
     itself (cancel no longer breaks early), so by the time the handler
@@ -333,13 +333,19 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     proc = _make_session_proc(['{"type":"result","result":"triage-reply"}\n'])
     proc.pid = 55555
     monkeypatch.setattr(session, "_proc", proc)
+    # hold_for_handler triggers switch_tools → _respawn, which calls
+    # self._popen_fn(...) to spawn a "new" subprocess.  Point _popen_fn
+    # at the same mocked proc so the respawn doesn't revert to the
+    # _setup_session default proc (whose stdout would no longer match
+    # _selector, leaving iter_events to spin until OOM).
+    monkeypatch.setattr(session, "_popen_fn", MagicMock(return_value=proc))
     monkeypatch.setattr(
         session, "_selector", MagicMock(return_value=([proc.stdout], [], []))
     )
 
     provider.set_thread_kind("webhook")
     try:
-        with session.hold_for_handler(preempt_worker=True):
+        with session.hold_for_handler():
             # _fire_worker_cancel set _cancel.  Handler's first prompt() must
             # actually send and read its own response.
             result = session.prompt("triage this please")
@@ -374,7 +380,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     def webhook_a() -> None:
         provider.set_thread_kind("webhook")
         try:
-            with session.hold_for_handler(preempt_worker=False):
+            with session.hold_for_handler():
                 webhook_a_holding.set()
                 assert webhook_b_queuing.wait(timeout=2.0), (
                     "webhook_b_queuing timed out"

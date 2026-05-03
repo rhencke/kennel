@@ -12,6 +12,7 @@ from fido.synthesis_call import (
     SynthesisExhaustedError,
     _extract_json_objects,
     _parse_comment_response,
+    call_failure_explanation,
     call_synthesis,
 )
 from fido.types import ActiveIssue, ActivePR
@@ -428,3 +429,79 @@ class TestCallSynthesis:
 
     def test_max_retries_constant_is_three(self) -> None:
         assert MAX_RETRIES == 3
+
+
+# ---------------------------------------------------------------------------
+# call_failure_explanation
+# ---------------------------------------------------------------------------
+
+
+def _make_failure_prompts(failure_text: str = "fallback prompt") -> MagicMock:
+    prompts = MagicMock()
+    prompts.synthesis_failure_explanation_prompt.return_value = failure_text
+    return prompts
+
+
+class TestCallFailureExplanation:
+    def test_success_on_first_attempt(self) -> None:
+        agent = _make_agent("Sorry, I couldn't reply — please rephrase.")
+        prompts = _make_failure_prompts("explain failure")
+
+        result = call_failure_explanation(
+            "please fix this", agent=agent, prompts=prompts
+        )
+
+        assert result.reply_text == "Sorry, I couldn't reply — please rephrase."
+        assert result.emoji is None
+        assert result.change_request is None
+        assert result.insights == []
+        # Prompt builder was given the original comment so the LLM can
+        # reference it in the explanation.
+        prompts.synthesis_failure_explanation_prompt.assert_called_once_with(
+            "please fix this"
+        )
+        assert agent.run_turn.call_count == 1
+
+    def test_strips_whitespace_from_reply(self) -> None:
+        agent = _make_agent("   Plain reply.\n\n")
+        prompts = _make_failure_prompts()
+
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Plain reply."
+
+    def test_retries_with_nudge_on_empty_response(self) -> None:
+        # First attempt empty, second succeeds — exercises the retry-with-nudge
+        # loop AND the ``if attempt > 0`` success-after-retry log branch.
+        agent = _make_agent(["", "Eventually a real reply."])
+        prompts = _make_failure_prompts("base")
+
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Eventually a real reply."
+        assert agent.run_turn.call_count == 2
+        # The retry attempt's prompt has the nudge suffix appended.
+        first_call_arg = agent.run_turn.call_args_list[0][0][0]
+        second_call_arg = agent.run_turn.call_args_list[1][0][0]
+        assert first_call_arg == "base"
+        assert second_call_arg.startswith("base")
+        assert second_call_arg != first_call_arg  # nudge was appended
+
+    def test_raises_synthesis_exhausted_when_all_attempts_empty(self) -> None:
+        agent = _make_agent([""] * MAX_RETRIES)
+        prompts = _make_failure_prompts()
+
+        with pytest.raises(SynthesisExhaustedError, match="failure-explanation"):
+            call_failure_explanation("comment", agent=agent, prompts=prompts)
+
+        assert agent.run_turn.call_count == MAX_RETRIES
+
+    def test_handles_none_response_as_empty(self) -> None:
+        # Defensive: agent.run_turn returning None should be treated as empty,
+        # not crash on .strip().
+        agent = _make_agent([None, "real reply"])  # type: ignore[list-item]
+        prompts = _make_failure_prompts()
+
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+
+        assert result.reply_text == "real reply"

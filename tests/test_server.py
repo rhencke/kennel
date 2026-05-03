@@ -22,9 +22,6 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
     WebhookIngressOracle,
-    recover_reply_promises,
-    reply_to_comment,
-    reply_to_issue_comment,
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
@@ -1768,58 +1765,6 @@ class TestProcessAction:
         assert status == 200
         mock_worker.assert_called()
 
-    def test_reply_to_comment_creates_task_for_act(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 200,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 5,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 3, "title": "My PR", "body": "desc"},
-        }
-        mock_reply = MagicMock(return_value=("ACT", ["add logging"]))
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = mock_reply
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        mock_reply.assert_called()
-        mock_task.assert_called()
-
-    def test_reply_to_comment_no_task_for_dump(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 201,
-                "body": "use erlang instead",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 4, "title": "My PR", "body": ""},
-        }
-        mock_reply = MagicMock(return_value=("DUMP", ["nope"]))
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = mock_reply
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        mock_reply.assert_called()
-        mock_task.assert_not_called()
-
     def test_reply_to_comment_defer_skips_task(self, server: tuple) -> None:
         """DEFER files a GitHub issue instead — no tasks.json entry."""
         url, cfg = server
@@ -1846,279 +1791,6 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
-
-    def test_reply_to_comment_failure_skips_task(self, server: tuple) -> None:
-        """If reply posting raises, queue recovery and skip task creation."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 205,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=RuntimeError("network down")
-        )
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        mock_task.assert_not_called()
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        promises = store.recoverable_promises()
-        assert len(promises) == 1
-        assert promises[0].anchor_comment_id == 205
-        assert promises[0].state == "failed"
-        assert store.claim_state(205) == "retryable_failed"
-
-    def test_review_comment_promise_written_before_attempt(self, server: tuple) -> None:
-        """Promise is durable before the reply attempt, not just on exception."""
-        url, cfg = server
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 207,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        promise_existed_during_call = []
-
-        def check_promise_during_call(*args, **kwargs):
-            promise_existed_during_call.append(store.claim_state(207))
-            return ("ACT", ["do the thing"])
-
-        WebhookHandler._fn_reply_to_comment = check_promise_during_call
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        assert promise_existed_during_call == ["in_progress"], (
-            "promise must exist before attempt"
-        )
-        assert store.claim_state(207) == "completed"
-        assert store.recoverable_promises() == []
-
-    def test_review_comment_success_records_reply_artifact(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 208,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/5#discussion_r208",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = [
-            {"id": 208, "body": "please add logging", "author": "owner"}
-        ]
-        mock_gh.reply_to_review_comment.return_value = {"id": 9208}
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_comment = reply_to_comment
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: looks good"
-            return "One review reply."
-
-        with patch(
-            "fido.events._configured_agent",
-            return_value=_client(side_effect=fake_pp),
-        ):
-            status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-
-        assert status == 200
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        with store._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT a.artifact_comment_id, a.lane_key, COUNT(ap.promise_id) AS covered
-                  FROM reply_artifacts AS a
-                  JOIN reply_artifact_promises AS ap
-                    ON ap.artifact_comment_id = a.artifact_comment_id
-              GROUP BY a.artifact_comment_id, a.lane_key
-                """,
-            ).fetchone()
-        assert row is not None
-        assert int(row["artifact_comment_id"]) == 9208
-        assert row["lane_key"] == "pulls:owner/repo:5:thread:208"
-        assert int(row["covered"]) == 1
-        assert store.claim_state(208) == "completed"
-
-    def test_successful_redelivery_clears_stale_review_promise(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 206,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=[RuntimeError("network down"), ("DO", ["from redelivery"])]
-        )
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
-        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        assert store.claim_state(206) == "retryable_failed"
-        assert WebhookHandler._fn_reply_to_comment.call_count == 1
-        mock_task.assert_not_called()
-
-    def test_failed_review_comment_webhook_recovers_once_from_live_state(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 205,
-                "body": "please add logging",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=RuntimeError("network down")
-        )
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
-        assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
-
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        assert [p.anchor_comment_id for p in store.recoverable_promises()] == [205]
-
-        recovery_gh = MagicMock()
-        recovery_gh.view_issue.return_value = {"title": "My PR", "body": "body"}
-        recovery_gh.get_pull_comment.return_value = {
-            "id": 205,
-            "body": "edited after webhook",
-            "path": "foo.py",
-            "line": 2,
-            "diff_hunk": "@@ @@",
-            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/5",
-            "html_url": "https://github.com/owner/repo/pull/5#discussion_r205",
-            "user": {"login": "owner"},
-        }
-
-        def fake_reply(action, *args, **kwargs):
-            assert action.comment_body == "edited after webhook"
-            return ("DO", ["task from recovery"])
-
-        with (
-            patch("fido.events.reply_to_comment", side_effect=fake_reply) as mock_reply,
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            assert recover_reply_promises(
-                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
-                cfg,
-                cfg.repos["owner/repo"],
-                recovery_gh,
-                5,
-            )
-            assert not recover_reply_promises(
-                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
-                cfg,
-                cfg.repos["owner/repo"],
-                recovery_gh,
-                5,
-            )
-        assert mock_reply.call_count == 1
-        mock_create_task.assert_called_once_with(
-            "task from recovery",
-            cfg,
-            cfg.repos["owner/repo"],
-            recovery_gh,
-            thread={
-                "repo": "owner/repo",
-                "pr": 5,
-                "comment_id": 205,
-                "url": "https://github.com/owner/repo/pull/5#discussion_r205",
-                "author": "owner",
-                "comment_type": "pulls",
-            },
-            registry=None,
-        )
-        assert store.recoverable_promises() == []
-
-    def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
-        """DO adds to tasks.json."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 204,
-                "body": "cache the results",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "foo.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 5, "title": "My PR", "body": ""},
-        }
-        task_titles = []
-
-        def capture_task(title, *args, **kwargs):
-            task_titles.append(title)
-
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            return_value=("DO", ["add result caching"])
-        )
-        WebhookHandler._fn_create_task = capture_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        assert task_titles == ["add result caching"]
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
         url, cfg = server
@@ -2215,36 +1887,6 @@ class TestProcessAction:
         assert status == 200
         assert "action outcome:" in caplog.text
 
-    def test_duplicate_issue_comment_delivery_skips_second_reply(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 303,
-                "body": "looks good",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/11#issuecomment-303",
-            },
-            "issue": {
-                "number": 11,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_gh = MagicMock()
-        mock_ic = MagicMock(return_value=("ANSWER", ["because"]))
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_issue_comment = mock_ic
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        mock_ic.assert_called_once()
-
     def test_review_comments_handled(self, server: tuple) -> None:
         # pull_request_review / submitted with state="commented" is collapsed by
         # the ingress oracle (CollapseReview) so reply_to_review is never called
@@ -2268,313 +1910,6 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request_review", payload)
         assert status == 200
         mock_review.assert_not_called()
-
-    def test_issue_comment_handled(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 300,
-                "body": "looks good",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/11#issuecomment-300",
-            },
-            "issue": {
-                "number": 11,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_gh = MagicMock()
-        mock_ic = MagicMock(return_value=("ACT", ["do it"]))
-        mock_task = MagicMock()
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_issue_comment = mock_ic
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        mock_ic.assert_called()
-        mock_task.assert_called_once_with(
-            "do it",
-            cfg,
-            cfg.repos["owner/repo"],
-            mock_gh,
-            thread={
-                "repo": "owner/repo",
-                "pr": 11,
-                "comment_id": 300,
-                "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
-                "author": "owner",
-                "comment_type": "issues",
-            },
-            registry=WebhookHandler.registry,
-        )
-
-    def test_issue_comment_no_task_for_answer(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {"id": 301, "body": "why?", "user": {"login": "owner"}},
-            "issue": {
-                "number": 12,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_ic = MagicMock(return_value=("ANSWER", ["because"]))
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_issue_comment = mock_ic
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        mock_ic.assert_called()
-        mock_task.assert_not_called()
-
-    def test_reply_to_issue_comment_failure_skips_task(self, server: tuple) -> None:
-        """If issue comment reply raises, queue recovery and skip task creation."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {"id": 302, "body": "please fix", "user": {"login": "owner"}},
-            "issue": {
-                "number": 13,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            side_effect=RuntimeError("network down")
-        )
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        mock_task.assert_not_called()
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        promises = store.recoverable_promises()
-        assert len(promises) == 1
-        assert promises[0].anchor_comment_id == 302
-        assert promises[0].state == "failed"
-        assert store.claim_state(302) == "retryable_failed"
-
-    def test_issue_comment_promise_written_before_attempt(self, server: tuple) -> None:
-        """Promise is durable before the issue-comment reply attempt, not just on exception."""
-        url, cfg = server
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 305,
-                "body": "please fix this",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/14#issuecomment-305",
-            },
-            "issue": {
-                "number": 14,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        promise_existed_during_call = []
-
-        def check_promise_during_call(*args, **kwargs):
-            promise_existed_during_call.append(store.claim_state(305))
-            return ("ACT", ["fix the thing"])
-
-        WebhookHandler._fn_reply_to_issue_comment = check_promise_during_call
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        assert promise_existed_during_call == ["in_progress"], (
-            "promise must exist before attempt"
-        )
-        assert store.claim_state(305) == "completed"
-        assert store.recoverable_promises() == []
-
-    def test_issue_comment_success_records_reply_artifact(self, server: tuple) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 306,
-                "body": "please fix this",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/14#issuecomment-306",
-            },
-            "issue": {
-                "number": 14,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        mock_gh.comment_issue.return_value = {"id": 9306}
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_issue_comment = reply_to_issue_comment
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: looks good"
-            return "One issue reply."
-
-        with patch(
-            "fido.events._configured_agent",
-            return_value=_client(side_effect=fake_pp),
-        ):
-            status = _post_webhook(url, cfg, "issue_comment", payload)
-
-        assert status == 200
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        with store._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT a.artifact_comment_id, a.lane_key, COUNT(ap.promise_id) AS covered
-                  FROM reply_artifacts AS a
-                  JOIN reply_artifact_promises AS ap
-                    ON ap.artifact_comment_id = a.artifact_comment_id
-              GROUP BY a.artifact_comment_id, a.lane_key
-                """,
-            ).fetchone()
-        assert row is not None
-        assert int(row["artifact_comment_id"]) == 9306
-        assert row["lane_key"] == "issues:owner/repo:14"
-        assert int(row["covered"]) == 1
-        assert store.claim_state(306) == "completed"
-
-    def test_successful_redelivery_clears_stale_issue_promise(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 304,
-                "body": "please fix",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/13#issuecomment-304",
-            },
-            "issue": {
-                "number": 13,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            side_effect=[
-                RuntimeError("network down"),
-                ("ACT", ["from issue redelivery"]),
-            ]
-        )
-        WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        assert store.claim_state(304) == "retryable_failed"
-        assert WebhookHandler._fn_reply_to_issue_comment.call_count == 1
-        mock_task.assert_not_called()
-
-    def test_failed_issue_comment_webhook_recovers_once_from_live_state(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {"id": 302, "body": "please fix", "user": {"login": "owner"}},
-            "issue": {
-                "number": 13,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            side_effect=RuntimeError("network down")
-        )
-        WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler.gh = MagicMock()
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-
-        store = FidoStore(cfg.repos["owner/repo"].work_dir)
-        assert [p.anchor_comment_id for p in store.recoverable_promises()] == [302]
-
-        recovery_gh = MagicMock()
-        recovery_gh.view_issue.return_value = {"title": "my pr", "body": "body"}
-        recovery_gh.get_issue_comment.return_value = {
-            "id": 302,
-            "body": "edited top-level comment",
-            "html_url": "https://github.com/owner/repo/pull/13#issuecomment-302",
-            "issue_url": "https://api.github.com/repos/owner/repo/issues/13",
-            "user": {"login": "owner"},
-        }
-
-        def fake_reply(action, *args, **kwargs):
-            assert action.comment_body == "edited top-level comment"
-            return ("ACT", ["task from issue recovery"])
-
-        with (
-            patch(
-                "fido.events.reply_to_issue_comment", side_effect=fake_reply
-            ) as mock_reply,
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            assert recover_reply_promises(
-                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
-                cfg,
-                cfg.repos["owner/repo"],
-                recovery_gh,
-                13,
-            )
-            assert not recover_reply_promises(
-                cfg.repos["owner/repo"].work_dir / ".git" / "fido",
-                cfg,
-                cfg.repos["owner/repo"],
-                recovery_gh,
-                13,
-            )
-        assert mock_reply.call_count == 1
-        mock_create_task.assert_called_once_with(
-            "task from issue recovery",
-            cfg,
-            cfg.repos["owner/repo"],
-            recovery_gh,
-            thread={
-                "repo": "owner/repo",
-                "pr": 13,
-                "comment_id": 302,
-                "url": "https://github.com/owner/repo/pull/13#issuecomment-302",
-                "author": "owner",
-                "comment_type": "issues",
-            },
-            registry=None,
-        )
-        assert store.recoverable_promises() == []
 
     def test_process_action_does_not_overwrite_worker_what(self, server: tuple) -> None:
         """_process_action must not call report_activity — the webhook runs on
@@ -2672,64 +2007,6 @@ class TestProcessAction:
         assert status == 200
         # server still alive — no crash
 
-    def test_process_action_error_reacts_on_reply_to(self, server: tuple) -> None:
-        """On exception with a reply_to comment, adds a confused reaction."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 500,
-                "body": "looks bad",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "x.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 20, "title": "T", "body": ""},
-        }
-        mock_gh = MagicMock()
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
-        WebhookHandler._fn_launch_worker = MagicMock()
-        _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        mock_gh.add_reaction.assert_called_once_with(
-            "owner/repo", "pulls", 500, "confused"
-        )
-
-    def test_process_action_error_reacts_on_thread(self, server: tuple) -> None:
-        """On exception with a thread comment (issue_comment), adds a confused reaction."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 501,
-                "body": "question?",
-                "user": {"login": "owner"},
-                "html_url": "https://github.com/owner/repo/pull/21#issuecomment-501",
-            },
-            "issue": {
-                "number": 21,
-                "title": "my pr",
-                "body": "",
-                "pull_request": {"url": "https://api.github.com/..."},
-            },
-        }
-        mock_gh = MagicMock()
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
-        WebhookHandler._fn_launch_worker = MagicMock()
-        _post_webhook(url, cfg, "issue_comment", payload)
-        mock_gh.add_reaction.assert_called_once_with(
-            "owner/repo", "issues", 501, "confused"
-        )
-
     def test_process_action_error_no_reaction_without_comment(
         self, server: tuple
     ) -> None:
@@ -2785,36 +2062,6 @@ class TestProcessAction:
         )
         handler._signal_action_error(action)
         mock_gh.add_reaction.assert_not_called()
-
-    def test_process_action_error_reaction_failure_doesnt_crash(
-        self, server: tuple
-    ) -> None:
-        """add_reaction failure is caught — server stays alive."""
-        url, cfg = server
-        payload = {
-            **self._payload(),
-            "action": "created",
-            "comment": {
-                "id": 502,
-                "body": "yo",
-                "user": {"login": "owner"},
-                "html_url": "https://example.com",
-                "path": "x.py",
-                "line": 1,
-                "diff_hunk": "@@ @@",
-            },
-            "pull_request": {"number": 23, "title": "T", "body": ""},
-        }
-        mock_gh = MagicMock()
-        mock_gh.add_reaction.side_effect = RuntimeError("reaction failed")
-        WebhookHandler.gh = mock_gh
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=RuntimeError("process boom")
-        )
-        WebhookHandler._fn_launch_worker = MagicMock()
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        mock_gh.add_reaction.assert_called_once()
 
     def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
         from fido.events import Action
@@ -3038,6 +2285,306 @@ class TestProcessAction:
         mock_session.hold_for_handler.assert_not_called()
         mock_reply.assert_not_called()
         WebhookHandler._fn_launch_worker.assert_called_once()
+
+
+class TestProcessActionInner:
+    """Direct unit tests for ``_process_action_inner`` — covers the
+    reply-to / review-comments / comment-body / signal-action-error
+    branches that the deleted webhook-driven TestProcessAction tests
+    used to cover.
+
+    Tests construct synthetic Actions with the relevant fields
+    populated and call ``_process_action_inner`` directly, without going
+    through the HTTP webhook path.  This decouples the coverage of
+    server.py's dispatch logic from the webhook → queue architecture.
+    """
+
+    @pytest.fixture
+    def repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        from fido.config import RepoMembership
+
+        return RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=frozenset({"owner"})),
+        )
+
+    @pytest.fixture
+    def cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _handler(self, cfg: Config) -> WebhookHandler:
+        handler = object.__new__(WebhookHandler)
+        handler.config = cfg
+        handler.gh = MagicMock()
+        handler.registry = MagicMock()
+        return handler
+
+    def _activity(self) -> MagicMock:
+        # The activity handle is just a "set_description" sink — easy
+        # to mock without depending on the concrete class.
+        return MagicMock()
+
+    def test_action_with_reply_to_calls_reply_to_comment_and_creates_tasks(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Action.reply_to set → reply_to_comment + create_task fire."""
+        action = Action(
+            prompt="comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 100,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        mock_reply = MagicMock(return_value=("ACT", ["add logging"]))
+        mock_task = MagicMock()
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_create_task = mock_task
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_reply.assert_called_once()
+
+    def test_action_with_reply_to_skips_when_promise_is_none(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Action.reply_to set but already-claimed → skip the reply call."""
+        # Pre-claim the comment so prepare_reply returns None.
+        store = FidoStore(tmp_path)
+        store.prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=100
+        )
+        action = Action(
+            prompt="comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 100,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        mock_reply = MagicMock()
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_reply.assert_not_called()  # already-claimed → skipped
+
+    def test_action_with_reply_to_failure_marks_promise_retryable(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """When reply_to_comment raises, _fail_reply marks the promise
+        retryable and the outer try/except swallows the exception
+        (signaling a 'confused' reaction via _signal_action_error)."""
+        action = Action(
+            prompt="comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 200,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="boom",
+        )
+        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        # _process_action_inner swallows the exception (logs + signal).
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        # _signal_action_error fired → confused reaction posted.
+        handler.gh.add_reaction.assert_called_with(
+            "owner/repo", "pulls", 200, "confused"
+        )
+
+    def test_action_with_review_comments_calls_reply_to_review(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Action.review_comments set → reply_to_review fires."""
+        action = Action(
+            prompt="review",
+            review_comments=[{"id": 9, "body": "lgtm"}],
+        )
+        mock_reply = MagicMock()
+        WebhookHandler._fn_reply_to_review = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_reply.assert_called_once()
+
+    def test_action_with_comment_body_only_calls_reply_to_issue_comment(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Action.comment_body set without reply_to → reply_to_issue_comment fires."""
+        action = Action(
+            prompt="issue comment",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 300,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            comment_body="any thoughts?",
+        )
+        mock_reply = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_reply_to_issue_comment = mock_reply
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_reply.assert_called_once()
+
+    def test_action_with_comment_body_skips_when_promise_is_none(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Issue-comment path: already-claimed → skip the reply call."""
+        store = FidoStore(tmp_path)
+        store.prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=400
+        )
+        action = Action(
+            prompt="issue comment",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 400,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            comment_body="dup",
+        )
+        mock_reply = MagicMock()
+        WebhookHandler._fn_reply_to_issue_comment = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_reply.assert_not_called()
+
+    def test_action_with_comment_body_failure_marks_promise_retryable(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Issue-comment path: handler raises → _fail_reply marks
+        retryable, outer try/except swallows + signals."""
+        action = Action(
+            prompt="issue comment",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 500,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            comment_body="boom",
+        )
+        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        WebhookHandler._fn_reply_to_issue_comment = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_called_with(
+            "owner/repo", "issues", 500, "confused"
+        )
+
+    def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
+        """Cover all branches of _describe_action."""
+        handler = self._handler(cfg)
+        thread = {
+            "repo": "owner/repo",
+            "pr": 1,
+            "comment_id": 1,
+            "url": "",
+            "author": "owner",
+            "comment_type": "pulls",
+        }
+        assert (
+            handler._describe_action(Action(prompt="x", reply_to=thread))
+            == "handling review comment"
+        )
+        assert (
+            handler._describe_action(Action(prompt="x", review_comments=[{}]))
+            == "handling review thread"
+        )
+        assert (
+            handler._describe_action(Action(prompt="x", comment_body="hi"))
+            == "handling PR comment"
+        )
+        assert (
+            handler._describe_action(
+                Action(prompt="x", thread=thread, preempts_worker=True)
+            )
+            == "ingesting PR comment"
+        )
+        assert handler._describe_action(Action(prompt="x")) == "handling webhook action"
+
+    def test_signal_action_error_posts_confused_reaction(self, cfg: Config) -> None:
+        """_signal_action_error posts a 'confused' reaction on the
+        triggering comment when one is present."""
+        handler = self._handler(cfg)
+        action = Action(
+            prompt="x",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 99,
+                "url": "",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+        )
+        handler._signal_action_error(action)
+        handler.gh.add_reaction.assert_called_once_with(
+            "owner/repo", "pulls", 99, "confused"
+        )
+
+    def test_signal_action_error_swallows_reaction_failure(self, cfg: Config) -> None:
+        """A failed add_reaction during _signal_action_error must not
+        propagate — we don't want the error-signaling path to mask the
+        original error or crash the handler."""
+        handler = self._handler(cfg)
+        handler.gh.add_reaction.side_effect = RuntimeError("network down")
+        action = Action(
+            prompt="x",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 88,
+                "url": "",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+        )
+        handler._signal_action_error(action)  # should not raise
 
 
 class TestSynchronousPreemption:

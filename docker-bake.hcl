@@ -139,19 +139,11 @@ target "generated-typecheck" {
   }
 }
 
-target "test" {
-  context = "."
-  dockerfile = "models/Dockerfile"
-  target = "test"
-  args = {
-    ROCQ_IMAGE = "rocq_image"
-  }
-  contexts = {
-    rocq_image = "target:rocq-image"
-    rocq_models_cache = ".cache/rocq-models/context"
-  }
-}
-
+// The "test" Dockerfile stage is no longer in the ci bake group: buildx
+// bake offers no per-target memory cap so a leaky test could grow
+// unbounded inside the buildkit cgroup and soft-lock the host (#1248).
+// ``./fido ci`` invokes ``./fido tests`` after bake — the tests run via
+// the host-side capped runner (``run_container --memory=4g``).
 group "ci" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido", "rocq-repl"]
+  targets = ["format", "lint", "typecheck", "generated-typecheck", "fido", "rocq-repl"]
 }

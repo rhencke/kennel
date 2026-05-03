@@ -33,24 +33,40 @@ def test_future_done_after_set_observes_completion() -> None:
 def test_generated_concurrency_source_documents_runtime_assumptions(
     build_default: Path,
 ) -> None:
-    source = (build_default / "concurrency_primitives.py").read_text()
+    """Concurrency wrappers (Mutex, Channel, Future, ownership context
+    manager) live in ``fido.rocq_runtime`` now and the extracted
+    ``concurrency_primitives.py`` re-exports them via ``import *``.
+    Assert both sides:
 
-    assert "import threading" in source
-    assert "import queue" in source
-    assert "from concurrent.futures import Future as _ConcurrentFuture" in source
-    assert "class Mutex" in source
-    assert "class Channel" in source
-    assert "class Future" in source
-    assert "does not prove fairness" in source
-    assert "does not model scheduler fairness" in source
-    assert "double completion raises" in source
-    assert "from contextlib import asynccontextmanager" in source
-    assert "async def ownership(" in source
-    assert "async with cls.ownership(acquire, release) as owner:" in source
-    assert "finally:" in source
-    assert "IO.bracket(" in source
-    assert "async def lock_channel_future_demo" in source
-    assert "return await _io_lock_channel_future_demo.run()" in source
+    1. The generated file imports from the runtime module and uses the
+       runtime types (so the marker calls actually lower to those types).
+    2. The runtime file documents the assumptions (no fairness proof,
+       double completion behavior, etc.) that this test originally
+       asserted on the generated file before the runtime moved.
+    """
+    generated = (build_default / "concurrency_primitives.py").read_text()
+    assert "from fido.rocq_runtime import *" in generated
+    assert "async def lock_channel_future_demo" in generated
+    assert "return await _io_lock_channel_future_demo.run()" in generated
+    assert "IO.bracket(" in generated
+
+    runtime_path = (
+        Path(__file__).resolve().parents[2] / "src" / "fido" / "rocq_runtime.py"
+    )
+    runtime = runtime_path.read_text()
+    assert "import threading" in runtime
+    assert "import queue" in runtime
+    assert "from concurrent.futures import Future as _ConcurrentFuture" in runtime
+    assert "class Mutex" in runtime
+    assert "class Channel" in runtime
+    assert "class Future" in runtime
+    assert "does not prove fairness" in runtime
+    assert "does not model scheduler fairness" in runtime
+    assert "double completion raises" in runtime
+    assert "from contextlib import asynccontextmanager" in runtime
+    assert "async def ownership(" in runtime
+    assert "async with cls.ownership(acquire, release) as owner:" in runtime
+    assert "finally:" in runtime
 
 
 def test_concurrency_marker_calls_lower_to_runtime_methods(build_default: Path) -> None:

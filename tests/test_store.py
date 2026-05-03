@@ -17,15 +17,19 @@ from fido.store import (
 )
 
 
-def _oracle_promise_state(promises: object, promise_id: int) -> object:
-    return promises[promise_id].promise_state  # type: ignore[index]
+def _oracle_promise_state(
+    promises: dict[int, oracle.PromiseRow], promise_id: int
+) -> oracle.PromiseState:
+    return promises[promise_id].promise_state
 
 
-def _oracle_claim_state(claims: object, comment_id: int) -> object:
-    return claims[comment_id].claim_state  # type: ignore[index]
+def _oracle_claim_state(
+    claims: dict[int, oracle.ClaimRow], comment_id: int
+) -> oracle.ClaimState:
+    return claims[comment_id].claim_state
 
 
-def _oracle_owner(owner: ReplyOwner) -> object:
+def _oracle_owner(owner: ReplyOwner) -> oracle.ClaimOwner:
     match owner:
         case "webhook":
             return oracle.OwnerWebhook()
@@ -53,8 +57,8 @@ def _assert_store_matches_oracle(
     store: FidoStore,
     store_promise: ReplyPromiseRecord,
     *,
-    oracle_claims: dict[int, object],
-    oracle_promises: dict[int, object],
+    oracle_claims: dict[int, oracle.ClaimRow],
+    oracle_promises: dict[int, oracle.PromiseRow],
     oracle_promise_id: int = 1,
 ) -> None:
     persisted = store.promise(store_promise.promise_id)
@@ -455,6 +459,13 @@ def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:
     assert stored.issue_url == first.issue_url
 
 
+def test_deferred_issue_returns_none_for_unknown_key(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    # Lookup against a key that was never enqueued — exercises the
+    # ``row is None → return None`` branch.
+    assert store.deferred_issue("deferred-issue:never-created") is None
+
+
 def test_enqueue_pr_comment_persists_normalized_comment(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
 
@@ -485,6 +496,10 @@ def test_enqueue_pr_comment_persists_normalized_comment(tmp_path: Path) -> None:
 
 
 def test_enqueue_pr_comment_deduplicates_delivery_id(tmp_path: Path) -> None:
+    """Same ``delivery_id`` twice (GitHub redelivery) → return the existing
+    record unchanged.  No body/comment-id update because GitHub guarantees
+    the same delivery_id carries the same payload.
+    """
     store = FidoStore(tmp_path)
     first = store.enqueue_pr_comment(
         delivery_id="delivery-1",
@@ -511,13 +526,19 @@ def test_enqueue_pr_comment_deduplicates_delivery_id(tmp_path: Path) -> None:
     )
 
     assert second.queue_id == first.queue_id
-    assert second.delivery_id == "delivery-2"
-    assert second.body == "safety-net duplicate"
+    assert second.delivery_id == "delivery-1"
+    assert second.body == "original"
+    assert second.comment_id == 101
     assert second.github_created_at == "2026-04-30T10:00:00Z"
-    assert store.pending_pr_comments(repo="owner/repo") == [second]
+    assert store.pending_pr_comments(repo="owner/repo") == [first]
 
 
 def test_enqueue_pr_comment_deduplicates_comment_identity(tmp_path: Path) -> None:
+    """Different ``delivery_id`` but same comment identity (a safety-net
+    re-enqueue or an edited comment) → keep the original FIFO position
+    (queue_id) but refresh the queued body / payload / delivery_id with
+    the latest content (per the docstring on ``enqueue_pr_comment``).
+    """
     store = FidoStore(tmp_path)
     first = store.enqueue_pr_comment(
         delivery_id="delivery-1",
@@ -543,8 +564,17 @@ def test_enqueue_pr_comment_deduplicates_comment_identity(tmp_path: Path) -> Non
         github_created_at="2026-04-30T10:01:00Z",
     )
 
-    assert second == first
-    assert store.pending_pr_comments(repo="owner/repo") == [first]
+    # FIFO position preserved, but body/delivery_id refreshed.
+    assert second.queue_id == first.queue_id
+    assert second.delivery_id == "delivery-2"
+    assert second.body == "safety-net duplicate"
+    # github_created_at stays at the original — first.github_created_at
+    # is what determines FIFO order, refreshing it would reorder the queue.
+    assert second.github_created_at == first.github_created_at
+    pending = store.pending_pr_comments(repo="owner/repo")
+    assert len(pending) == 1
+    assert pending[0].queue_id == first.queue_id
+    assert pending[0].body == "safety-net duplicate"
 
 
 def test_enqueue_pr_comment_updates_pending_comment_edit(tmp_path: Path) -> None:
@@ -1006,7 +1036,9 @@ def test_record_reply_delivery_delivers_outbox_effect(tmp_path: Path) -> None:
     assert effect is not None
     assert effect.state == "delivered"
     assert effect.external_id == 9003
-    assert store.promise(promise.promise_id).state == "posted"
+    persisted = store.promise(promise.promise_id)
+    assert persisted is not None
+    assert persisted.state == "posted"
 
 
 def test_record_artifact_ignores_empty_promise_ids(tmp_path: Path) -> None:
@@ -1072,7 +1104,12 @@ def test_schema_upgrades_v2_database_to_current_store(tmp_path: Path) -> None:
             WHERE type = 'table' AND name = 'pr_comment_deliveries'
             """
         ).fetchone()
-    assert version == 5
+    # Schema is bumped on every additive migration; the test is anchored
+    # on the production constant so a future migration doesn't require
+    # touching it.
+    from fido.store import _SCHEMA_VERSION  # pyright: ignore[reportPrivateUsage]
+
+    assert version == _SCHEMA_VERSION
     assert pr_comment_queue is not None
     assert delivery_table is not None
     assert deferred_issue_outbox is not None

@@ -631,9 +631,11 @@ class TestFidoLauncher:
 
         assert "--network host" in script
         assert "--interactive" in script
-        assert '--env "PYTHONPATH=/workspace/src"' in script
+        # Container path mirrors the host path so prompts referencing
+        # /home/rhencke/home-runner Just Work in-container (PR #1212).
+        assert '--env "PYTHONPATH=$repo_root/src"' in script
         assert '--volume "$HOME:$HOME"' not in script
-        assert '--volume "$repo_root:/workspace"' in script
+        assert '--volume "$repo_root:$repo_root"' in script
         assert '--volume "$HOME/workspace:$HOME/workspace"' in script
         assert '--volume "$HOME/log:$HOME/log"' not in script
         assert '--volume "$secret:/run/secrets/fido-secret:ro"' in script
@@ -658,8 +660,13 @@ class TestFidoLauncher:
         assert "ruff)" in script
         assert 'run_fido_pyproject_image ruff "${@:2}"' in script
         assert 'run_fido_pyproject_image pyright "${@:2}"' in script
-        assert 'run_fido_pyproject_image pytest "${@:2}"' in script
-        assert 'run_fido_pyproject_image python3 -m fido.tests_main "${@:2}"' in script
+        # pytest and tests run through the capped runner so a leaky test
+        # cannot soft-lock the box (#1248 / PR #1251).
+        assert 'run_fido_pyproject_image_capped pytest "${@:2}"' in script
+        assert (
+            'run_fido_pyproject_image_capped python3 -m fido.tests_main "${@:2}"'
+            in script
+        )
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
         assert "rocq-lsp" in help_text
@@ -699,7 +706,12 @@ class TestModelDockerfile:
         assert 'target "lint"' in bake
         assert 'target "typecheck"' in bake
         assert 'target "generated-typecheck"' in bake
-        assert 'target "test"' in bake
+        # The ``test`` target was removed from the ci bake group (#1248):
+        # buildx bake offers no per-target memory cap, so tests now run
+        # host-side via ``./fido tests`` after bake completes.  The
+        # ``test`` Dockerfile stage still exists for legacy
+        # compatibility but the bake target definition is gone.
+        assert 'target "test"' not in bake
         assert 'group "ci"' in bake
         assert 'dockerfile = "models/Dockerfile"' in bake
         assert 'dockerfile = "Dockerfile"' in bake
@@ -707,13 +719,13 @@ class TestModelDockerfile:
         assert 'target = "fido-test"' in bake
         assert 'target = "export"' in bake
         assert 'target = "format"' in bake
-        assert 'target = "test"' in bake
+        assert 'target = "test"' not in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
         assert ".lsp.json" in dockerfile
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"test", "fido", "rocq-repl"]' in bake
+            '"fido", "rocq-repl"]' in bake
         )
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
@@ -839,13 +851,20 @@ class TestModelDockerfile:
 
     def test_ci_is_parallel_meta_target(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
+        launcher = FIDO.read_text()
 
         assert "FROM python-check-base AS format" in dockerfile
         assert "FROM python-check-base AS lint" in dockerfile
         assert "FROM python-check-base AS typecheck" in dockerfile
         assert "FROM python-test-base AS generated-typecheck" in dockerfile
         assert "FROM python-test-base AS test" in dockerfile
-        assert "RUN ./pyproject python -m fido.tests_main" in dockerfile
+        # Tests are NOT executed inside the buildkit-managed `test` stage
+        # — buildx bake has no per-target memory cap so a leaky test
+        # could grow unbounded inside the buildkit cgroup and soft-lock
+        # the host (#1248).  ``./fido ci`` runs ``./fido tests`` after
+        # bake; that path goes through ``run_container --memory=4g``.
+        assert "RUN ./pyproject python -m fido.tests_main" not in dockerfile
+        assert '"$repo_root/fido" tests' in launcher
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

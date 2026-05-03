@@ -1983,14 +1983,19 @@ class TestFormatStatus:
         assert any(line.startswith("a/b:") for line in lines)
         assert any(line.startswith("c/d:") for line in lines)
 
-    def test_worker_what_included_when_no_task_or_pr(self) -> None:
-        """worker_what shows up in body when nothing more specific applies."""
+    def test_worker_line_hidden_when_only_worker_what_set(self) -> None:
+        """Per #1029: the Worker line hides when ``worker_what`` is the
+        only signal — "waiting for work" is the default state and not
+        worth a line.  The visibility gate (``_should_show_worker_line``)
+        now requires an active state: current_task, task numbering, the
+        agent talker, or a paused provider.
+        """
         repo = self._repo(
             fido_running=True, issue=1, worker_what="Working on: #3 add widget"
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Working on: #3 add widget" in output
+        assert "Worker:" not in output, output
 
     def test_worker_what_hidden_when_task_present(self) -> None:
         """worker_what is redundant when there's a specific Task line."""
@@ -2290,13 +2295,20 @@ class TestFormatStatusColor:
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
         assert _CODES["bold"] in header
 
-    def test_repo_idle_dim(self) -> None:
+    def test_repo_idle_when_fido_down(self) -> None:
+        """When fido itself is down (``fido_running=False``), the repo
+        header is rendered with a brown-background highlight rather
+        than the plain dim styling — the dim styling has been
+        repurposed for inactive providers, brown signals "fido itself
+        isn't running so this repo can't make progress".
+        """
         repo = self._repo(fido_running=False)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
-        assert _CODES["dim"] in header
+        # 24-bit brown background (60, 30, 5) — the "fido is down" highlight.
+        assert "\x1b[48;2;60;30;5m" in header
 
     def test_issue_number_cyan(self) -> None:
         repo = self._repo(issue=42)
@@ -2413,13 +2425,25 @@ class TestFormatStatusColor:
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
-    def test_worker_label_plain_when_not_talker(self) -> None:
-        repo = self._repo(issue=1, worker_what="waiting")
+    def test_worker_label_green_bg_during_python_only_gap(self) -> None:
+        """Per #1029: ``current_task`` alone keeps the green_bg on so
+        the worker label doesn't flicker off during the Python-only
+        gaps between ``session.prompt`` calls (where talker briefly
+        unregisters).  Anti-regression for the previous "highlight iff
+        talker" semantics.
+        """
+        repo = self._repo(
+            issue=1,
+            current_task="Refactor",
+            session_alive=True,
+            session_owner="webhook-handler",  # someone else holds the lock
+            worker_what="waiting",
+        )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
-        assert _CODES["green_bg"] not in worker_line
+        assert _CODES["green_bg"] in worker_line
 
     def test_worker_label_green_bg_when_session_owner_is_worker(self) -> None:
         repo = self._repo(
@@ -2452,9 +2476,12 @@ class TestFormatStatusColor:
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
-    def test_worker_label_plain_when_napping_with_no_task(self) -> None:
-        """Highlight turns off when the worker has no task and no talker —
-        genuinely idle (napping / waiting for work)."""
+    def test_worker_line_hidden_when_napping_with_no_task(self) -> None:
+        """Per #1029: napping (no task, no talker) → no Worker line at
+        all.  The previous behaviour of emitting a plain "waiting for
+        work" line was repurposed to use the line's absence as the
+        idle signal.
+        """
         repo = self._repo(
             issue=1,
             current_task=None,
@@ -2465,8 +2492,7 @@ class TestFormatStatusColor:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
-        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
-        assert _CODES["green_bg"] not in worker_line
+        assert "Worker:" not in output, output
 
     def test_webhook_label_yellow_when_talker(self) -> None:
         repo = self._repo(
@@ -2604,15 +2630,26 @@ class TestProviderColoredStatus:
         )
         assert plain.startswith("  "), f"expected two-space indent: {plain!r}"
 
-    def test_inactive_worker_line_keeps_alignment_without_marker(self) -> None:
+    def test_active_worker_line_has_marker_in_no_color_mode(self) -> None:
+        """In NO_COLOR mode the active Worker line is prefixed with
+        ``* `` so the active state is still distinguishable when the
+        green_bg highlight is suppressed.  Per #1029 the inactive form
+        no longer renders, so this is the only Worker-line shape.
+        """
         with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
-            repo = self._repo(fido_running=True, issue=7, worker_what="waiting")
+            repo = self._repo(
+                fido_running=True,
+                issue=7,
+                current_task="Refactor",
+                session_alive=True,
+                session_owner="webhook-handler",
+                worker_what="waiting",
+            )
             status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
             output = format_status(status)
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
-        # Two-space indent preserves column alignment with the active form.
-        assert worker_lines[0].startswith("  Worker:"), worker_lines[0]
+        assert worker_lines[0].startswith("* Worker:"), worker_lines[0]
 
     def test_limits_line_colors_claude_code_token_when_color_enabled(self) -> None:
         from fido.color import rgb_fg

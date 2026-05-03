@@ -650,6 +650,13 @@ class TestParseReorderResponse:
     def test_returns_none_for_invalid_json(self) -> None:
         assert _parse_reorder_response("not json at all") is None
 
+    def test_skips_invalid_brace_and_continues(self) -> None:
+        # First ``{`` cannot be parsed as JSON — exercises the
+        # JSONDecodeError-skip-and-advance branch — but a later ``{``
+        # contains the real response and is returned.
+        raw = '{ this is { junk } before {"tasks": [{"id": "1"}]}'
+        assert _parse_reorder_response(raw) == [{"id": "1"}]
+
     def test_returns_none_when_no_tasks_key(self) -> None:
         assert _parse_reorder_response('{"other": []}') is None
 

@@ -27,7 +27,11 @@ def test_positive_sets_are_native_persistent_frozensets() -> None:
     assert fixtures.positive_claim_union_expr == frozenset({2, 5, 7})
     assert fixtures.positive_claim_inter_expr == frozenset({2, 5})
     assert fixtures.positive_claim_diff_expr == frozenset({7})
-    assert fixtures.positive_claim_nested_expr == frozenset({2, 5})
+    # ``positive_claim_nested_expr = inter (union set diff) union`` —
+    # ({2,5} ∪ {7}) ∩ {2,5,7} = {2,5,7}.  The earlier expectation of
+    # {2,5} was a stale fixture (likely from when ``positive_claim_union``
+    # didn't include p7).
+    assert fixtures.positive_claim_nested_expr == frozenset({2, 5, 7})
     assert fixtures.positive_claim_union_inter_expr == frozenset({2, 5, 7})
     assert fixtures.positive_claim_diff_union_expr == frozenset({2})
     assert fixtures.positive_claim_inter_diff_expr == frozenset({2, 5})
@@ -56,37 +60,57 @@ def test_set_infix_lowerings_preserve_precedence(
 ) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
+    # Each ``positive_claim_*`` binding is now emitted with a
+    # ``: frozenset[int]`` type annotation between the name and the
+    # ``=``, so loosen the substring match to accept either form.
     assert_rendered_source(
         source,
-        "positive_claim_union_expr = positive_claim_set | positive_claim_diff",
+        "positive_claim_union_expr: frozenset[int] = "
+        "positive_claim_set | positive_claim_diff",
     )
     assert_rendered_source(
         source,
-        "positive_claim_inter_expr = positive_claim_set & positive_claim_union",
+        "positive_claim_inter_expr: frozenset[int] = "
+        "positive_claim_set & positive_claim_union",
     )
     assert_rendered_source(
         source,
-        "positive_claim_diff_expr = positive_claim_union - positive_claim_set",
+        "positive_claim_diff_expr: frozenset[int] = "
+        "positive_claim_union - positive_claim_set",
     )
     assert_rendered_source(
         source,
-        "positive_claim_nested_expr = "
+        "positive_claim_nested_expr: frozenset[int] = "
         "(positive_claim_set | positive_claim_diff) & positive_claim_union",
     )
     assert_rendered_source(
         source,
-        "positive_claim_union_inter_expr = "
+        "positive_claim_union_inter_expr: frozenset[int] = "
         "positive_claim_diff | positive_claim_set & positive_claim_union",
     )
     assert_rendered_source(
         source,
-        "positive_claim_diff_union_expr = "
+        "positive_claim_diff_union_expr: frozenset[int] = "
         "positive_claim_union - (positive_claim_diff | positive_claim_inter)",
     )
-    assert_rendered_source(
-        source,
-        "positive_claim_inter_diff_expr = "
-        "(positive_claim_union - positive_claim_diff) & positive_claim_set",
+    # Python's ``-`` binds tighter than ``&`` for frozensets, so the
+    # precedence-aware extraction can omit the parens around
+    # ``(union - diff)``.  Both forms compute the same value; accept
+    # the parenthesized or unparenthesized rendering as long as the
+    # forbidden ``union - (diff & set)`` regrouping doesn't appear.
+    has_parens = (
+        "positive_claim_inter_diff_expr: frozenset[int] = "
+        "(positive_claim_union - positive_claim_diff) & positive_claim_set" in source
+    )
+    no_parens = (
+        "positive_claim_inter_diff_expr: frozenset[int] = "
+        "positive_claim_union - positive_claim_diff & positive_claim_set" in source
+    )
+    assert has_parens or no_parens
+    assert (
+        "positive_claim_inter_diff_expr: frozenset[int] = "
+        "positive_claim_union - (positive_claim_diff & positive_claim_set)"
+        not in source
     )
 
 
@@ -97,17 +121,17 @@ def test_finite_collection_rule_shapes_are_characterized(
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
     expected_snippets = (
-        'positive_task_map = _rocq_map_add(3, b"ci", _rocq_map_add(1, b"plan", {}))',
-        "positive_task_removed = _rocq_map_remove(1, positive_task_map)",
-        "positive_task_find_expr = positive_task_map.get(1)",
-        "positive_task_mem_expr = 3 in positive_task_map",
-        "positive_task_cardinal_expr = len(positive_task_map)",
-        "positive_task_elements_expr = _rocq_map_elements(positive_task_map)",
-        "positive_claim_set = _rocq_set_add(5, _rocq_set_add(2, frozenset()))",
-        "positive_claim_removed = _rocq_set_remove(2, positive_claim_set)",
-        "positive_claim_mem_expr = 2 in positive_claim_set",
-        "positive_claim_cardinal_expr = len(positive_claim_set)",
-        "positive_claim_elements_expr = _rocq_set_elements(positive_claim_set)",
+        'positive_task_map: dict[int, str] = _rocq_map_add(_rocq_positive_key(p3), "ci", _rocq_map_add(_rocq_positive_key(p1), "plan", {}))',
+        "positive_task_removed: dict[int, str] = _rocq_map_remove(_rocq_positive_key(p1), positive_task_map)",
+        "positive_task_find_expr: str | None = positive_task_map.get(_rocq_positive_key(p1))",
+        "positive_task_mem_expr: bool = _rocq_positive_key(p3) in positive_task_map",
+        "positive_task_cardinal_expr: int = len(positive_task_map)",
+        "positive_task_elements_expr: list[tuple[int, str]] = _rocq_map_elements(positive_task_map)",
+        "positive_claim_set: frozenset[int] = _rocq_set_add(_rocq_positive_key(p5), _rocq_set_add(_rocq_positive_key(p2), frozenset()))",
+        "positive_claim_removed: frozenset[int] = _rocq_set_remove(_rocq_positive_key(p2), positive_claim_set)",
+        "positive_claim_mem_expr: bool = _rocq_positive_key(p2) in positive_claim_set",
+        "positive_claim_cardinal_expr: int = len(positive_claim_set)",
+        "positive_claim_elements_expr: list[int] = _rocq_set_elements(positive_claim_set)",
     )
 
     for snippet in expected_snippets:
@@ -125,19 +149,22 @@ def test_finite_collection_stdlib_refs_are_filtered_from_module_exports(
 ) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
+    # The module-export form is now ``__Foo_value.x = x`` plus a Protocol
+    # cast at the bottom (#1095) — no more direct ``Foo.x = x`` on the
+    # Protocol-typed alias.  Same content, different surface.
     assert_rendered_source(
         source,
-        "FiniteCollectionFixtures.positive_task_map = positive_task_map",
+        "__FiniteCollectionFixtures_value.positive_task_map = positive_task_map",
         (
-            "FiniteCollectionFixtures.PositiveMap = PositiveMap",
-            "FiniteCollectionFixtures.PositiveSet = PositiveSet",
+            "__FiniteCollectionFixtures_value.PositiveMap = PositiveMap",
+            "__FiniteCollectionFixtures_value.PositiveSet = PositiveSet",
             "class PositiveMap",
             "class PositiveSet",
         ),
     )
     assert_rendered_source(
         source,
-        "positive_task_find_expr = positive_task_map.get(1)",
+        "positive_task_find_expr: str | None = positive_task_map.get(_rocq_positive_key(p1))",
         (
             "def find(",
             "def mem(",

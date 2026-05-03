@@ -1,13 +1,52 @@
 """Shared pytest fixtures for fido tests."""
 
+import atexit
 import faulthandler
+import gc
 import os
 import signal
+import tracemalloc
 from typing import TextIO
 
 import pytest
 
 from fido import provider
+
+# Set FIDO_TEST_TRACEMALLOC=1 to capture per-pid allocation snapshots and
+# dump the top 30 allocators at process exit.  Used to investigate the
+# pytest-xdist memory leak (#1248).  Off by default — tracemalloc adds
+# allocation-tracking overhead.
+#
+# The dump goes to ``$FIDO_TEST_TRACEMALLOC_DIR/pytrace-<pid>.log``
+# (default: the repo root, which is host-mounted into the test container
+# so the file survives container exit).
+if os.environ.get("FIDO_TEST_TRACEMALLOC") == "1":
+    tracemalloc.start(25)  # frames per traceback
+
+    def _dump_tracemalloc_top(*_args: object) -> None:
+        gc.collect()
+        snapshot = tracemalloc.take_snapshot()
+        all_stats = snapshot.statistics("lineno")
+        top_stats = all_stats[:30]
+        out_dir = os.environ.get("FIDO_TEST_TRACEMALLOC_DIR") or os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"pytrace-{os.getpid()}.log")
+        total = sum(s.size for s in all_stats)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                f"=== tracemalloc top 30 (pid={os.getpid()}, "
+                f"total_allocated={total / 1024 / 1024:.1f} MiB, "
+                f"site_count={len(all_stats)}) ===\n"
+            )
+            for stat in top_stats:
+                f.write(f"{stat}\n")
+
+    atexit.register(_dump_tracemalloc_top)
+    # Also dump on SIGUSR2 for live capture (SIGUSR1 is reserved for
+    # faulthandler stack dumps).
+    signal.signal(signal.SIGUSR2, _dump_tracemalloc_top)
 
 
 def _open_faulthandler_log() -> TextIO:

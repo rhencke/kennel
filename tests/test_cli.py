@@ -213,11 +213,20 @@ class TestCmdComplete:
                 "created_at": "2024-01-02T00:00:00Z",
             },
         ]
+        # The auto-resolve oracle reads thread.comments.nodes (not the
+        # flat get_pull_comments list) to decide who was last in the
+        # thread.  Include fido's reply (id=99) so the decision is
+        # ResolveReviewThread (we posted last).
         mock_github.get_review_threads.return_value = [
             {
                 "id": "thread_node_abc",
                 "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 42}]},
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "reviewer"}},
+                        {"databaseId": 99, "author": {"login": "fido-bot"}},
+                    ],
+                },
             }
         ]
 
@@ -250,9 +259,29 @@ class TestCmdComplete:
             {
                 "id": 99,
                 "in_reply_to_id": 42,
-                "user": {"login": "reviewer"},
+                "user": {"login": "copilot[bot]"},
                 "created_at": "2024-01-02T00:00:00Z",
             },
+        ]
+        # Bot reviewer was last in the thread.  ``[bot]``-suffixed authors
+        # are classified as ``CommentByBot`` by the auto-resolve oracle,
+        # which excludes them from being "last fido comment", so the
+        # oracle decides DON'T resolve.  (Plain "reviewer" without bot
+        # suffix or collaborator membership is classified as
+        # ``CommentIgnored`` and skipped, which would let fido be
+        # considered last — that's a genuine CLI gap when collaborator
+        # metadata isn't available, tested elsewhere.)
+        mock_github.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"databaseId": 42, "author": {"login": "fido-bot"}},
+                        {"databaseId": 99, "author": {"login": "copilot[bot]"}},
+                    ],
+                },
+            }
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):

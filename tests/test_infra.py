@@ -38,12 +38,14 @@ class TestRealProcessRunner:
         mock_run.assert_called_once_with(["true"], env={"FOO": "bar"}, timeout=5)
 
     def test_run_propagates_called_process_error(self) -> None:
-        with patch(
-            "fido.infra.subprocess.run",
-            side_effect=subprocess.CalledProcessError(1, ["bad"]),
+        with (
+            patch(
+                "fido.infra.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["bad"]),
+            ),
+            pytest.raises(subprocess.CalledProcessError),
         ):
-            with pytest.raises(subprocess.CalledProcessError):
-                RealProcessRunner().run(["bad"], check=True)
+            RealProcessRunner().run(["bad"], check=True)
 
 
 class TestRealClock:

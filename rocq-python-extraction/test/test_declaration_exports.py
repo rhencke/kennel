@@ -2,8 +2,12 @@ from pathlib import Path
 
 
 def assert_module_exports(source: str, target: str, names: tuple[str, ...]) -> None:
+    # Modules are now extracted as a private value object plus a Protocol
+    # cast (``__Foo_value.x = x`` ... ``Foo = cast(Foo_Module, __Foo_value)``)
+    # so attribute assignments land on the underscore-prefixed value, not
+    # the Protocol-typed alias.
     for name in names:
-        assert f"{target}.{name} = {name}" in source
+        assert f"__{target}_value.{name} = {name}" in source
 
 
 def assert_module_does_not_export(
@@ -12,7 +16,7 @@ def assert_module_does_not_export(
     names: tuple[str, ...],
 ) -> None:
     for name in names:
-        assert f"{target}.{name} = {name}" not in source
+        assert f"__{target}_value.{name} = {name}" not in source
 
 
 def test_finite_collection_fixture_exports_stay_stable(build_default: Path) -> None:

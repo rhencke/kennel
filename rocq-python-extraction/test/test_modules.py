@@ -23,8 +23,13 @@ def test_nested_record_field_lowering_scope_round_trip() -> None:
 def test_nested_record_field_lowering_scope_source(build_default) -> None:
     source = (build_default / "ModuleLookupFixture.py").read_text()
 
-    assert "def inside_left(p):\n        return p.scoped_left" in source
+    # Both inside_left (rendered while ScopedLowering's record field
+    # lowering env is in scope) and outside_left (rendered after the
+    # nested module returns) lower [scoped_left p] to direct attribute
+    # access — the field name itself is always unqualified, so the
+    # output reads identically regardless of the surrounding scope.
+    assert "def inside_left(p: Scoped_pair) -> int:\n    return p.scoped_left" in source
     assert (
-        "def outside_left(p):\n    return ModuleLookupFixture.ScopedLowering.scoped_left(p)"
-        in source
-    )
+        "def outside_left(p: ScopedLowering.scoped_pair) -> int:\n"
+        "    return p.scoped_left"
+    ) in source
