@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.worker import Worker
@@ -130,7 +132,9 @@ def test_skips_untracked_only_files(tmp_path: Path) -> None:
     assert (tmp_path / "new.txt").read_text() == "brand new\n"
 
 
-def test_returns_unchanged_head_when_status_fails(tmp_path: Path, monkeypatch) -> None:
+def test_returns_unchanged_head_when_status_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """If ``git status --porcelain`` itself fails (transient VFS issue etc.),
     helper returns head_after without attempting a commit — don't crash on
     a filesystem hiccup; the resume loop's next iteration tries again."""
@@ -140,7 +144,7 @@ def test_returns_unchanged_head_when_status_fails(tmp_path: Path, monkeypatch) -
 
     real_git = worker._git
 
-    def fake_git(args, check=True, **kwargs):
+    def fake_git(args: object, check: bool = True, **kwargs: object) -> object:
         if args[:2] == ["status", "--porcelain"]:
             result = subprocess.CompletedProcess(args, 1, "", "vfs down")
             return result

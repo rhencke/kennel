@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import ModuleLookupFixture
 
 
@@ -20,7 +22,7 @@ def test_nested_record_field_lowering_scope_round_trip() -> None:
     assert module_fixture.outside_left(scoped.sample) == 3
 
 
-def test_nested_record_field_lowering_scope_source(build_default) -> None:
+def test_nested_record_field_lowering_scope_source(build_default: Path) -> None:
     source = (build_default / "ModuleLookupFixture.py").read_text()
 
     # Both inside_left (rendered while ScopedLowering's record field

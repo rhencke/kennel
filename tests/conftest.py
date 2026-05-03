@@ -73,7 +73,7 @@ faulthandler.register(
 
 
 @pytest.fixture(autouse=True)
-def _reset_claude_talker_registry():
+def _reset_claude_talker_registry() -> object:
     """Clear the global :class:`~fido.provider.SessionTalker` registry between
     tests so entries from one test can't leak into the next and cause a
     spurious :class:`~fido.provider.SessionLeakError`.  Also clears any

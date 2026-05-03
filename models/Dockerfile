@@ -33,7 +33,9 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/fido-venv
 ENV UV_PYTHON_CACHE_DIR=/tmp/uv-cache/python
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 
-COPY .python-version pyproject pyproject.*.toml uv.lock ./
+# Only the fragments uv needs — pyproject.ruff.toml / pyproject.tools.toml are
+# excluded so editing ruff or pytest config does not invalidate ``uv sync``.
+COPY .python-version pyproject pyproject.project.toml pyproject.build.toml uv.lock ./
 COPY tools/compose_pyproject.py tools/compose_pyproject.py
 
 RUN --mount=type=cache,id=fido-uv-prod,target=/tmp/uv-cache \
@@ -173,8 +175,6 @@ RUN targets="" \
 FROM python-base AS model-format
 
 WORKDIR /workspace
-COPY .python-version pyproject pyproject.*.toml uv.lock ./
-COPY tools/compose_pyproject.py tools/compose_pyproject.py
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
 RUN cd /workspace/src/fido/rocq \
@@ -229,49 +229,86 @@ RUN rm -rf /workspace/_build/default/rocq-python-extraction \
 FROM fido-python-dev AS python-workspace-base
 
 WORKDIR /workspace
-COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject pyproject.*.toml pyrightconfig.json uv.lock ./
-COPY .githooks/pre-commit .githooks/pre-commit
-COPY .github/workflows/ci.yml .github/workflows/
-COPY tools/build_graph.sh tools/compose_pyproject.py tools/gen_workflows.py tools/measure_build_graph.py tools/
-COPY models/Dockerfile models/dune-project models/dune models/*.v models/
-COPY src src
-COPY rocq-python-extraction rocq-python-extraction
-COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
+
+# Bare-minimum common base: only the wrapper script + composer + the
+# ``[project]`` / ``[build-system]`` fragments compose needs to render a valid
+# pyproject.toml. Everything else is pushed down into the per-tool sub-bases so
+# a stage's cache only invalidates on inputs the stage actually reads.
+COPY pyproject ./
+COPY tools/compose_pyproject.py tools/
+COPY pyproject.project.toml pyproject.build.toml ./
 
 ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
 ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
 ENV PYTHONPATH=/workspace/src
 
-FROM python-workspace-base AS python-check-base
+# Ruff stages: scan every Python file in the repo. Source trees come first
+# (large, stable). pyproject.ruff.toml is the LAST COPY in the chain so editing
+# a ruff rule invalidates only that one tiny layer + the lint/format RUN —
+# src/ tests/ etc. stay cached.
+FROM python-workspace-base AS python-ruff-base
 
+COPY src src
 COPY tests tests
+COPY rocq-python-extraction rocq-python-extraction
+COPY tools/gen_workflows.py tools/measure_build_graph.py tools/
+COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
+COPY pyproject.ruff.toml ./
 
-FROM python-check-base AS format
+FROM python-ruff-base AS format
 
 RUN ./pyproject ruff format --check .
 
-FROM python-check-base AS lint
+FROM python-ruff-base AS lint
 
 RUN ./pyproject ruff check .
 
-FROM python-check-base AS typecheck
+# Pyright stages: pyrightconfig.json sets ``include: ["src/fido"]`` so we only
+# need src + the extracted rocq stub directory. pyrightconfig.json is the
+# LAST COPY so editing it invalidates only that layer + the pyright RUN.
+FROM python-workspace-base AS python-pyright-base
+
+COPY src src
+COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
+COPY pyrightconfig.json ./
+
+FROM python-pyright-base AS typecheck
 
 RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     ./pyproject pyright
 
-FROM python-workspace-base AS python-test-base
+# generated-typecheck: pyright over the rocq extraction artifacts. Needs the
+# pyright_*_check.py fixtures from rocq-python-extraction/test/.
+FROM python-pyright-base AS generated-typecheck
 
-FROM python-test-base AS generated-typecheck
-
+COPY rocq-python-extraction/test rocq-python-extraction/test
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
 
 RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright
 
+# Test image: NOT in the ci bake group (#1248). ``./fido tests`` runs against
+# the bind-mounted fido-test image with a host-side memory cap, so this stage
+# exists only as a legacy assembly target. Editing ruff rules / pyright config
+# does NOT invalidate it — those configs are only seen at runtime via the
+# bind mount.
+FROM python-workspace-base AS python-test-base
+
+COPY pyproject.tools.toml ./
+COPY .python-version uv.lock ./
+COPY src src
+COPY tests tests
+COPY rocq-python-extraction rocq-python-extraction
+COPY tools/build_graph.sh tools/gen_workflows.py tools/measure_build_graph.py tools/
+COPY models/Dockerfile models/dune-project models/dune models/*.v models/
+COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
+COPY .dockerignore .lsp.json docker-bake.hcl dune-workspace fido package.json package-lock.json ./
+COPY .githooks/pre-commit .githooks/pre-commit
+COPY .github/workflows/ci.yml .github/workflows/
+
 FROM python-test-base AS test
 
-COPY tests tests
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
 # Tests are NOT executed inside this buildkit-managed RUN — buildx bake

@@ -14,7 +14,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -33,9 +33,16 @@ class ProcessRunner(Protocol):
     def run(
         self,
         cmd: Sequence[str],
-        **kwargs: Any,
+        *,
+        check: bool = True,
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.run
     ) -> subprocess.CompletedProcess[str]:
-        """Execute *cmd*, forwarding all keyword arguments to :func:`subprocess.run`."""
+        """Execute *cmd*, forwarding kwargs to :func:`subprocess.run`.
+
+        Defaults to ``check=True`` so non-zero exits raise; callers that want
+        to handle a non-zero returncode themselves must pass ``check=False``
+        explicitly.
+        """
         ...
 
 
@@ -45,9 +52,15 @@ class RealProcessRunner:
     def run(
         self,
         cmd: Sequence[str],
-        **kwargs: Any,
+        *,
+        check: bool = True,
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.run
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(cmd, **kwargs)
+        # Default check=True per the fail-fast subprocess policy in CLAUDE.md
+        # (silent non-zero exits are the subprocess equivalent of catch-log-continue).
+        # Callers that legitimately want to handle a non-zero returncode
+        # themselves must pass check=False explicitly.
+        return subprocess.run(cmd, check=check, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +151,7 @@ class OsProcess(Protocol):
         """Change the process working directory — equivalent to :func:`os.chdir`."""
         ...
 
-    def install_signal(self, signum: int, handler: Any) -> Any:
+    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
         """Install a signal handler — equivalent to :func:`signal.signal`.
 
         Returns the previous handler.
@@ -158,7 +171,7 @@ class RealOsProcess:
     def chdir(self, path: Path | str) -> None:
         os.chdir(path)
 
-    def install_signal(self, signum: int, handler: Any) -> Any:
+    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
         return signal.signal(signum, handler)
 
 

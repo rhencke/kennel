@@ -6,7 +6,7 @@ import re
 import subprocess
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +30,10 @@ class _TimeoutSession(_requests.Session):
     """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
 
     def request(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, method: str | bytes, url: str | bytes, **kwargs: Any
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to requests.Session.request
     ) -> _requests.Response:  # type: ignore[override]
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
         return super().request(method, url, **kwargs)
@@ -65,8 +68,8 @@ def _auto_merge_unavailable(exc: GraphQLError) -> bool:
 
 
 def _gh_token(
-    runner: Any = subprocess.run,
-    environ: Any = os.environ,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    environ: Mapping[str, str] = os.environ,
 ) -> str:
     """Return a GitHub token from env or the gh CLI.
 
@@ -169,29 +172,29 @@ class GitHub:
         assert last_exc is not None
         raise last_exc
 
-    def _get(self, path: str) -> Any:
+    def _get(self, path: str) -> Any:  # noqa: ANN401  # JSON dict
         return self._retryable_get(f"{self.BASE}{path}").json()
 
-    def _post(self, path: str, **payload: Any) -> None:
+    def _post(self, path: str, **payload: Any) -> None:  # noqa: ANN401  # JSON pass-through
         resp = self._s.post(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
 
-    def _post_json(self, path: str, **payload: Any) -> Any:
+    def _post_json(self, path: str, **payload: Any) -> Any:  # noqa: ANN401  # JSON dict
         resp = self._s.post(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
-    def _patch(self, path: str, **payload: Any) -> Any:
+    def _patch(self, path: str, **payload: Any) -> Any:  # noqa: ANN401  # JSON dict
         resp = self._s.patch(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
-    def _put(self, path: str, **payload: Any) -> Any:
+    def _put(self, path: str, **payload: Any) -> Any:  # noqa: ANN401  # JSON dict
         resp = self._s.put(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
-    def _graphql(self, query: str, **variables: Any) -> Any:
+    def _graphql(self, query: str, **variables: Any) -> Any:  # noqa: ANN401  # JSON dict
         """Execute a GraphQL query/mutation against the GitHub API."""
         resp = self._s.post(
             f"{self.BASE}/graphql",
@@ -207,7 +210,7 @@ class GitHub:
         self,
         query: str,
         connection_path: tuple[str, ...],
-        **variables: Any,
+        **variables: Any,  # noqa: ANN401  # GraphQL JSON pass-through
     ) -> Iterator[Any]:
         """Yield every node from a paginated GraphQL connection.
 
@@ -659,7 +662,7 @@ class GitHub:
     def get_repo_info(
         self,
         cwd: Path | str | None = None,
-        runner: Any = subprocess.run,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> str:
         """Return 'owner/repo' for the repo at cwd, parsed from the git remote.
 
@@ -686,7 +689,7 @@ class GitHub:
     def get_default_branch(
         self,
         cwd: Path | str | None = None,
-        runner: Any = subprocess.run,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> str:
         """Return the default branch for the repo at cwd."""
         repo = self.get_repo_info(cwd=cwd, runner=runner)
@@ -734,15 +737,14 @@ class GitHub:
             "pageInfo{endCursor hasNextPage}"
             "}}}"
         )
-        issues: list[dict[str, Any]] = []
-        for node in self._graphql_paginate(
-            query,
-            ("repository", "issues"),
-            owner=owner,
-            repo=repo,
-        ):
-            issues.append(node)
-        return issues
+        return list(
+            self._graphql_paginate(
+                query,
+                ("repository", "issues"),
+                owner=owner,
+                repo=repo,
+            )
+        )
 
     def add_assignee(self, repo: str, number: int | str, login: str) -> None:
         """Assign *login* to issue *number* in *repo*.

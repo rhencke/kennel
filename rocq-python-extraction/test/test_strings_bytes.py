@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from conftest import RenderedSourceAssert
 from strings_bytes import (
     ascii_A,
     ascii_roundtrip,
@@ -42,8 +45,8 @@ def test_string_neq_round_trip() -> None:
 
 
 def test_string_neq_lowers_to_direct_comparison(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "strings_bytes.py").read_text()
 

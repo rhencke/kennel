@@ -1,12 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from fido.provider import ProviderID
 from fido.status import _repos_from_pid
 
 
 class TestReposFromPid:
     def test_parses_repo_provider_from_cmdline(
-        self, tmp_path: Path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pid = 1234
         cmdline = f"uv\x00run\x00fido\x00owner/repo:{tmp_path}:copilot-cli\x00".encode()
@@ -21,7 +23,7 @@ class TestReposFromPid:
         assert repos[0].provider == ProviderID.COPILOT_CLI
 
     def test_skips_invalid_provider_in_cmdline(
-        self, tmp_path: Path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pid = 1234
         cmdline = (
@@ -35,7 +37,7 @@ class TestReposFromPid:
         assert _repos_from_pid(pid) == []
 
     def test_skips_repo_without_provider_in_cmdline(
-        self, tmp_path: Path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pid = 1234
         cmdline = f"uv\x00run\x00fido\x00owner/repo:{tmp_path}\x00".encode()

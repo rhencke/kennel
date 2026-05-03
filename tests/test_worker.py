@@ -104,7 +104,9 @@ def _default_repo_cfg(
 
 
 class Worker(_WorkerBase):
-    def __init__(self, work_dir: Path, gh, *args, **kwargs) -> None:
+    def __init__(
+        self, work_dir: Path, gh: MagicMock, *args: object, **kwargs: object
+    ) -> None:
         repo_cfg = kwargs.get("repo_cfg", _MISSING)
         if (
             repo_cfg is _MISSING
@@ -127,7 +129,14 @@ class Worker(_WorkerBase):
 
 
 class WorkerThread(_WorkerThreadBase):
-    def __init__(self, work_dir: Path, repo_name: str, gh, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        repo_name: str,
+        gh: MagicMock,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         repo_cfg = kwargs.get("repo_cfg", _MISSING)
         if repo_cfg is _MISSING and kwargs.get("provider") is None:
             kwargs["repo_cfg"] = _default_repo_cfg(
@@ -147,7 +156,7 @@ def _patch_worker_classes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_claude_session_spawn(monkeypatch):
+def _no_claude_session_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch ClaudeSession for every test in this module.
 
     Worker.run() now creates a ClaudeSession on entry.  Without this fixture
@@ -160,7 +169,7 @@ def _no_claude_session_spawn(monkeypatch):
     monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
 
 
-def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+def _client(return_value: str = "", *, side_effect: object = None) -> MagicMock:
     """Build a mock ClaudeClient with run_turn configured."""
     client = MagicMock(spec=ClaudeClient)
     client.provider_id = ProviderID.CLAUDE_CODE
@@ -605,7 +614,9 @@ class TestWorker:
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
-    def test_set_status_skipped_when_no_session(self, tmp_path: Path, caplog) -> None:
+    def test_set_status_skipped_when_no_session(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         gh = self._make_gh()
@@ -618,7 +629,7 @@ class TestWorker:
         assert "no session available" in caplog.text
 
     def test_set_status_logs_warning_on_empty_status(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -630,7 +641,9 @@ class TestWorker:
             ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         assert "falling back" in caplog.text
 
-    def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
+    def test_set_status_logs_info_on_success(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         gh = self._make_gh()
@@ -732,7 +745,7 @@ class TestWorker:
         max_concurrent = 0
         counter_lock = threading.Lock()
 
-        def slow_prompt(*args, **kwargs) -> str:
+        def slow_prompt(*args: object, **kwargs: object) -> str:
             nonlocal inside_count, max_concurrent
             with counter_lock:
                 inside_count += 1
@@ -832,7 +845,9 @@ class TestWorker:
         Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
         gh.view_issue.assert_called_once_with("alice/proj", 12)
 
-    def test_get_issue_logs_info_when_closed(self, tmp_path: Path, caplog) -> None:
+    def test_get_issue_logs_info_when_closed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         fido_dir = tmp_path / "fido"
@@ -990,15 +1005,15 @@ class TestWorker:
         worker = Worker(tmp_path, gh)
         order: list[str] = []
 
-        def mark_recover(*args, **kwargs):
+        def mark_recover(*args: object, **kwargs: object) -> bool:
             order.append("recover")
             return True
 
-        def mark_ci(*args, **kwargs):
+        def mark_ci(*args: object, **kwargs: object) -> bool:
             order.append("ci")
             return False
 
-        def mark_queued_comments(*args, **kwargs):
+        def mark_queued_comments(*args: object, **kwargs: object) -> bool:
             order.append("queued_comments")
             return False
 
@@ -1181,7 +1196,9 @@ class TestWorker:
         ):
             assert worker.run() == 0
 
-    def test_run_logs_warning_on_lock_held(self, tmp_path: Path, caplog) -> None:
+    def test_run_logs_warning_on_lock_held(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         gh = self._make_gh()
@@ -1191,7 +1208,9 @@ class TestWorker:
                 worker.run()
         assert "another fido" in caplog.text
 
-    def test_run_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
+    def test_run_logs_info_on_success(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -1213,7 +1232,9 @@ class TestWorker:
                 worker.run()
         assert "worker started" in caplog.text
 
-    def test_run_logs_repo_info(self, tmp_path: Path, caplog) -> None:
+    def test_run_logs_repo_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         mock_ctx = self._make_mock_ctx(tmp_path)
@@ -1920,7 +1941,9 @@ class TestWorkerFindNextIssue:
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("All done — no issues to fetch", busy=False)
 
-    def test_logs_info_when_starting_issue(self, tmp_path: Path, caplog) -> None:
+    def test_logs_info_when_starting_issue(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -1941,7 +1964,9 @@ class TestWorkerFindNextIssue:
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "9" in caplog.text
 
-    def test_logs_info_when_no_eligible_issues(self, tmp_path: Path, caplog) -> None:
+    def test_logs_info_when_no_eligible_issues(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -2989,7 +3014,9 @@ class TestWorkerPostPickupComment:
         worker.post_pickup_comment("org/myrepo", 99, "Title", "fido-bot")
         gh.get_issue_comments.assert_called_once_with("org/myrepo", 99)
 
-    def test_logs_info_when_skipping(self, tmp_path: Path, caplog) -> None:
+    def test_logs_info_when_skipping(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         mock_client = _client()
@@ -3945,7 +3972,7 @@ class TestGit:
         calls: list[int] = []
         success = MagicMock(returncode=0)
 
-        def _run(*args, **kwargs):  # noqa: ARG001
+        def _run(*args: object, **kwargs: object) -> object:  # noqa: ARG001
             calls.append(1)
             if len(calls) == 1:
                 raise subprocess.CalledProcessError(
@@ -4114,7 +4141,7 @@ class TestGitClean:
         worker = self._make_worker(tmp_path)
         calls: list[list[str]] = []
 
-        def capture(args, **kwargs):
+        def capture(args: object, **kwargs: object) -> object:
             calls.append(args)
             return self._git_result()
 
@@ -4127,7 +4154,7 @@ class TestGitClean:
         worker = self._make_worker(tmp_path)
         calls: list[list[str]] = []
 
-        def capture(args, **kwargs):
+        def capture(args: object, **kwargs: object) -> object:
             calls.append(args)
             return self._git_result()
 
@@ -4137,11 +4164,11 @@ class TestGitClean:
         assert ["clean", "-fd"] in calls
 
     def test_logs_removed_files_when_output_present(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         worker = self._make_worker(tmp_path)
 
-        def fake_git(args, **kwargs):
+        def fake_git(args: object, **kwargs: object) -> object:
             if args == ["clean", "-fd"]:
                 return self._git_result("Removing foo.py\nRemoving bar/")
             return self._git_result()
@@ -4155,7 +4182,7 @@ class TestGitClean:
         assert "Removing foo.py" in caplog.text
 
     def test_logs_nothing_to_remove_when_output_empty(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         worker = self._make_worker(tmp_path)
 
@@ -4171,7 +4198,7 @@ class TestGitClean:
         worker = self._make_worker(tmp_path)
         order: list[str] = []
 
-        def capture(args, **kwargs):
+        def capture(args: object, **kwargs: object) -> object:
             if args == ["checkout", "--", "."]:
                 order.append("checkout")
             elif args == ["clean", "-fd"]:
@@ -4238,14 +4265,14 @@ class TestWritePrDescription:
 
     def _call(
         self,
-        gh,
-        task_list=None,
-        existing_body="",
-        print_return="<body>Desc.\n\nFixes #1.</body>",
-        issue=1,
-        pr_number=42,
+        gh: MagicMock,
+        task_list: list[dict[str, object]] | None = None,
+        existing_body: str = "",
+        print_return: str = "<body>Desc.\n\nFixes #1.</body>",
+        issue: int = 1,
+        pr_number: int = 42,
         work_dir: Path | None = None,
-    ):
+    ) -> object:
         from contextlib import nullcontext
 
         mock_cc = _client(print_return)
@@ -4404,7 +4431,9 @@ class TestWritePrDescription:
         assert "The current body is short" not in body
         assert "Want me to update it directly" not in body
 
-    def test_skips_write_when_provider_returns_no_body_tags(self, caplog) -> None:
+    def test_skips_write_when_provider_returns_no_body_tags(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """No body tags = unusable output; skip write + warn instead of raising."""
         import logging
 
@@ -4538,7 +4567,9 @@ class TestFindOrCreatePr:
             )
         assert result == (20, "my-branch", False)
 
-    def test_open_pr_logs_resuming(self, tmp_path: Path, caplog) -> None:
+    def test_open_pr_logs_resuming(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -4617,7 +4648,7 @@ class TestFindOrCreatePr:
         task = {"title": "t", "status": "pending"}
         call_count = 0
 
-        def list_tasks_side_effect():
+        def list_tasks_side_effect() -> list[dict[str, object]]:
             nonlocal call_count
             call_count += 1
             return [] if call_count <= 2 else [task]
@@ -4666,7 +4697,7 @@ class TestFindOrCreatePr:
         task = {"title": "t", "status": "pending"}
         call_count = 0
 
-        def list_tasks_side_effect():
+        def list_tasks_side_effect() -> list[dict[str, object]]:
             nonlocal call_count
             call_count += 1
             return [] if call_count == 1 else [task]
@@ -4705,7 +4736,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(args)
             if args == ["rev-parse", "--verify", "--quiet", "refs/heads/br"]:
                 raise subprocess.CalledProcessError(1, "git")
@@ -4728,7 +4759,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(args)
             if args == ["rev-parse", "--verify", "--quiet", "refs/heads/br"]:
                 raise subprocess.CalledProcessError(128, "git", stderr="fatal: bad cwd")
@@ -4749,7 +4780,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(args)
             return MagicMock()
 
@@ -4788,7 +4819,9 @@ class TestFindOrCreatePr:
         assert slug == "fix-bug"
         assert is_fresh is True
 
-    def test_no_pr_logs_new_branch(self, tmp_path: Path, caplog) -> None:
+    def test_no_pr_logs_new_branch(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         mock_client = _client()
@@ -4893,7 +4926,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(list(args))
             fake = MagicMock()
             fake.stdout = ""  # no existing non-default branches to delete
@@ -4936,7 +4969,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(list(args))
             return MagicMock()
 
@@ -4961,7 +4994,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         git_calls = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(list(args))
             return MagicMock()
 
@@ -4999,7 +5032,9 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         gh.create_pr.assert_not_called()
 
-    def test_no_pr_logs_pr_number(self, tmp_path: Path, caplog) -> None:
+    def test_no_pr_logs_pr_number(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         mock_client = _client()
@@ -5232,7 +5267,7 @@ class TestResetLocalWorkspaceAndRetryAck:
         fido_dir = self._fido_dir(tmp_path)
         git_calls: list[list[str]] = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             git_calls.append(list(args))
             fake = MagicMock()
             fake.stdout = ""  # no non-default branches
@@ -5255,7 +5290,7 @@ class TestResetLocalWorkspaceAndRetryAck:
         fido_dir = self._fido_dir(tmp_path)
         delete_calls: list[str] = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             fake = MagicMock()
             fake.returncode = 0
             if args[:1] == ["for-each-ref"]:
@@ -5275,13 +5310,15 @@ class TestResetLocalWorkspaceAndRetryAck:
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         assert delete_calls == ["old-feature", "stale-branch"]
 
-    def test_reset_tolerates_missing_branch(self, tmp_path: Path, caplog) -> None:
+    def test_reset_tolerates_missing_branch(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             fake = MagicMock()
             if args[:1] == ["for-each-ref"]:
                 fake.stdout = "main\nghost-branch\n"
@@ -5308,7 +5345,7 @@ class TestResetLocalWorkspaceAndRetryAck:
         fido_dir = self._fido_dir(tmp_path)
         tasks_captured: list[list] = []
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             fake = MagicMock()
             fake.stdout = ""
             fake.returncode = 0
@@ -5317,11 +5354,11 @@ class TestResetLocalWorkspaceAndRetryAck:
         initial = [{"id": "t1", "title": "old", "status": "pending", "type": "spec"}]
 
         class FakeLock:
-            def __enter__(self_lock):
+            def __enter__(self_lock) -> object:
                 tasks_captured.append(initial)
                 return initial
 
-            def __exit__(self_lock, *args):
+            def __exit__(self_lock, *args: object) -> object:
                 pass
 
         with (
@@ -5348,7 +5385,7 @@ class TestResetLocalWorkspaceAndRetryAck:
             }
         )
 
-        def side_effect(args, check=True):  # noqa: ARG001
+        def side_effect(args: object, check: bool = True) -> object:  # noqa: ARG001
             fake = MagicMock()
             fake.stdout = ""
             fake.returncode = 0
@@ -5614,7 +5651,9 @@ class TestSeedTasksFromPrBody:
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
-    def test_skips_lines_without_type_comment(self, tmp_path: Path, caplog) -> None:
+    def test_skips_lines_without_type_comment(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -5635,7 +5674,9 @@ class TestSeedTasksFromPrBody:
         assert mock_add.call_count == 1
         assert "without type marker" in caplog.text
 
-    def test_logs_info_with_task_count(self, tmp_path: Path, caplog) -> None:
+    def test_logs_info_with_task_count(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -5649,7 +5690,9 @@ class TestSeedTasksFromPrBody:
         assert "seeded" in caplog.text
         assert "2" in caplog.text
 
-    def test_does_not_log_when_no_tasks_found(self, tmp_path: Path, caplog) -> None:
+    def test_does_not_log_when_no_tasks_found(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -5739,7 +5782,7 @@ class TestRunSeedTasksIntegration:
         repo_ctx = self._make_mock_repo_ctx()
         calls: list[int] = []
 
-        def _backfill(*_args, **kwargs):
+        def _backfill(*_args: object, **kwargs: object) -> int:
             calls.append(kwargs.get("gh_user") or _args[-1])
             return 0
 
@@ -5998,7 +6041,7 @@ class TestFilterCiThreads:
         first_body: str = "CI is failing",
         last_author: str = "reviewer",
         last_body: str = "CI is failing",
-        url: str = "https://example.com/comment",
+        url: str = "https://example.com/comment: object",
     ) -> dict:
         return {
             "isResolved": resolved,
@@ -6774,7 +6817,9 @@ class TestHandleCi:
         # First failing check is "fail-check"
         mock_status.assert_called_once_with("Fixing CI: fail-check on PR #1")
 
-    def test_logs_ci_failing(self, tmp_path: Path, caplog) -> None:
+    def test_logs_ci_failing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -7049,7 +7094,7 @@ class TestFilterThreads:
         first_body: str = "please fix this",
         last_author: str | None = None,
         last_body: str = "please fix this",
-        url: str = "https://example.com/comment",
+        url: str = "https://example.com/comment: object",
         extra_comments: list | None = None,
     ) -> dict:
         """Build a review-thread node.
@@ -7476,7 +7521,7 @@ class TestHandleThreads:
     """Tests for Worker.handle_threads."""
 
     @pytest.fixture(autouse=True)
-    def _clean_claimed(self):  # type: ignore[override]
+    def _clean_claimed(self) -> object:  # type: ignore[override]
         """Kept as an autouse fixture for tests that previously used globals."""
         yield
 
@@ -7668,7 +7713,9 @@ class TestHandleThreads:
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         mock_sync.assert_called_once_with(tmp_path, gh)
 
-    def test_logs_thread_count(self, tmp_path: Path, caplog) -> None:
+    def test_logs_thread_count(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -7715,7 +7762,7 @@ class TestHandleThreads:
         }
         fido_dir = self._fido_dir(tmp_path)
 
-        def fake_reply(action, *_args, **_kwargs):
+        def fake_reply(action: object, *_args: object, **_kwargs: object) -> object:
             store = FidoStore(tmp_path)
             promise_id = action.context["reply_promise_id"]
             store.mark_posted(promise_id)
@@ -7838,7 +7885,7 @@ class TestHandleThreads:
         assert FidoStore(tmp_path).claim_state(1) == "retryable_failed"
 
     def test_logs_skip_when_thread_claimed_in_race_window(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Threads dropped in the race window produce an info-level log with the claimed ID."""
         import logging
@@ -8794,7 +8841,9 @@ class TestEnsurePushed:
             result = worker.ensure_pushed("origin", "my-branch")
         assert result is False
 
-    def test_logs_warning_on_push_failure(self, tmp_path: Path, caplog) -> None:
+    def test_logs_warning_on_push_failure(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker = self._make_worker(tmp_path)
@@ -9142,12 +9191,12 @@ class TestExecuteTask:
         return {"id": "t1", "title": title, "status": "pending", "type": task_type}
 
     @staticmethod
-    def _git_with_new_commits():
+    def _git_with_new_commits() -> object:
         """Mock _git so rev-parse HEAD returns different SHAs before/after."""
         shas = iter(["aaa", "bbb"])
         orig = MagicMock()
 
-        def side_effect(args, **kwargs):
+        def side_effect(args: object, **kwargs: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
@@ -9575,7 +9624,9 @@ class TestExecuteTask:
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
-    def test_logs_task_name(self, tmp_path: Path, caplog) -> None:
+    def test_logs_task_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, _ = self._make_worker(tmp_path)
@@ -9595,7 +9646,9 @@ class TestExecuteTask:
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "Log me please" in caplog.text
 
-    def test_logs_task_done_with_session_id(self, tmp_path: Path, caplog) -> None:
+    def test_logs_task_done_with_session_id(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, _ = self._make_worker(tmp_path)
@@ -9734,7 +9787,7 @@ class TestExecuteTask:
         in_progress_task = {**task, "status": "in_progress"}
         completed_task = {**task, "status": "completed"}
 
-        def fake_git(args, **kw):
+        def fake_git(args: object, **kw: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
@@ -9855,7 +9908,7 @@ class TestExecuteTask:
         prompt_snapshots: list[str] = []
         run_calls = 0
 
-        def fake_run(fd, *args, **kwargs):
+        def fake_run(fd: int, *args: object, **kwargs: object) -> object:
             nonlocal run_calls
             run_calls += 1
             prompt_snapshots.append((fd / "prompt").read_text())
@@ -9913,7 +9966,7 @@ class TestExecuteTask:
         prompt_snapshots: list[str] = []
         run_calls = 0
 
-        def fake_run(fd, *args, **kwargs):
+        def fake_run(fd: int, *args: object, **kwargs: object) -> object:
             nonlocal run_calls
             run_calls += 1
             prompt_snapshots.append((fd / "prompt").read_text())
@@ -10003,7 +10056,7 @@ class TestExecuteTask:
         task = {"id": "task-99", "title": "Do stuff", "status": "pending"}
         captured: dict = {}
 
-        def capture(fd, *args, **kwargs):
+        def capture(fd: int, *args: object, **kwargs: object) -> object:
             captured.update(State(fd).load())
             return ("sess", "")
 
@@ -10047,7 +10100,7 @@ class TestExecuteTask:
         task = {"id": "t-111", "title": "Preserve", "status": "pending"}
         captured: dict = {}
 
-        def capture(fd, *args, **kwargs):
+        def capture(fd: int, *args: object, **kwargs: object) -> object:
             captured.update(State(fd).load())
             return ("sess", "")
 
@@ -10084,11 +10137,11 @@ class TestExecuteTask:
         assert State(fido_dir).load().get("current_task_id") == "task-push-fail"
 
     @staticmethod
-    def _git_same_sha():
+    def _git_same_sha() -> object:
         """Mock _git so rev-parse HEAD always returns the same SHA (no new commits)."""
         orig = MagicMock()
 
-        def side_effect(args, **kwargs):
+        def side_effect(args: object, **kwargs: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
@@ -10458,7 +10511,7 @@ class TestExecuteTask:
         task = {"id": "t-resume-abort", "title": "Resume abort", "status": "pending"}
         call_count = 0
 
-        def set_abort_on_second(fd, **kwargs):
+        def set_abort_on_second(fd: int, **kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -10774,10 +10827,10 @@ class TestYieldForUntriaged:
         return {"id": "t1", "title": title, "status": "pending", "type": "spec"}
 
     @staticmethod
-    def _git_with_new_commits():
+    def _git_with_new_commits() -> object:
         shas = iter(["aaa", "bbb"])
 
-        def side_effect(args, **kwargs):
+        def side_effect(args: object, **kwargs: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
@@ -12102,7 +12155,7 @@ class TestHandlePromoteMerge:
         gh.add_pr_reviewers.assert_called_once()
 
     def test_changes_requested_newer_than_commit_logs_skip(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -12635,7 +12688,7 @@ class TestHandlePromoteMerge:
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
     def test_draft_promote_unresolved_threads_logs_deferring(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -12781,7 +12834,9 @@ class TestHandlePromoteMerge:
 
     # --- logging ---
 
-    def test_logs_review_status_check(self, tmp_path: Path, caplog) -> None:
+    def test_logs_review_status_check(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12795,7 +12850,7 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "review status" in caplog.text
 
-    def test_logs_merge(self, tmp_path: Path, caplog) -> None:
+    def test_logs_merge(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12811,7 +12866,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "merging" in caplog.text
 
-    def test_logs_auto_merge(self, tmp_path: Path, caplog) -> None:
+    def test_logs_auto_merge(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12825,7 +12882,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "auto-merge" in caplog.text
 
-    def test_logs_changes_requested(self, tmp_path: Path, caplog) -> None:
+    def test_logs_changes_requested(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12840,7 +12899,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "changes requested" in caplog.text
 
-    def test_logs_not_promoting(self, tmp_path: Path, caplog) -> None:
+    def test_logs_not_promoting(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12853,7 +12914,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "not promoting" in caplog.text
 
-    def test_logs_marking_ready(self, tmp_path: Path, caplog) -> None:
+    def test_logs_marking_ready(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12870,7 +12933,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "marking ready" in caplog.text
 
-    def test_logs_no_work(self, tmp_path: Path, caplog) -> None:
+    def test_logs_no_work(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -12956,7 +13021,9 @@ class TestHandlePromoteMerge:
             )
         assert result == 0
 
-    def test_pending_ask_logs_deferring(self, tmp_path: Path, caplog) -> None:
+    def test_pending_ask_logs_deferring(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -13046,7 +13113,7 @@ class TestHandlePromoteMerge:
         )
 
     def test_auto_merge_skipped_when_repo_has_it_disabled(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -13065,7 +13132,9 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert "auto-merge not available" in caplog.text
 
-    def test_auto_merge_enabled_logs_confirmation(self, tmp_path: Path, caplog) -> None:
+    def test_auto_merge_enabled_logs_confirmation(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
@@ -13084,7 +13153,7 @@ class TestHandlePromoteMerge:
         assert "auto-merge enabled" in caplog.text
 
     def test_auto_merge_failure_logs_and_continues(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Auto-merge enable raising doesn't break the mark-ready flow —
         polling fallback still works, but we log the failure."""
@@ -13541,7 +13610,9 @@ class TestSyncTasks:
             "_auto_complete_ask_tasks_fn": MagicMock(),
         }
 
-    def test_warns_when_git_dir_not_resolved(self, tmp_path: Path, caplog) -> None:
+    def test_warns_when_git_dir_not_resolved(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         gh = MagicMock()
@@ -13698,7 +13769,7 @@ class TestSyncTasks:
         gh.edit_pr_body.assert_not_called()
 
     def test_warns_and_skips_when_only_start_marker_present(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -13719,7 +13790,7 @@ class TestSyncTasks:
         assert "incomplete work queue markers" in caplog.text
 
     def test_warns_and_skips_when_only_end_marker_present(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -13969,7 +14040,7 @@ class TestWorkerThread:
         wt._wake = mock_wake
         calls: list[int] = []
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             calls.append(len(calls))
             if len(calls) < 3:
                 return 1
@@ -13990,7 +14061,7 @@ class TestWorkerThread:
         mock_wake = MagicMock()
         wt._wake = mock_wake
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             wt._stop = True
             return 0
 
@@ -14007,7 +14078,7 @@ class TestWorkerThread:
         mock_wake = MagicMock()
         wt._wake = mock_wake
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             wt._stop = True
             return 2
 
@@ -14021,7 +14092,7 @@ class TestWorkerThread:
         """An unexpected exception propagates and kills the thread."""
         wt = self._make_thread(tmp_path)
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14038,7 +14109,7 @@ class TestWorkerThread:
     def test_crash_error_set_on_exception(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             raise ValueError("bad value")
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14051,7 +14122,7 @@ class TestWorkerThread:
     def test_crash_error_includes_exception_type(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14065,7 +14136,7 @@ class TestWorkerThread:
     def test_crash_error_logs_exception(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14090,7 +14161,7 @@ class TestWorkerThread:
         wt._wake = mock_wake
         call_count = 0
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -14123,7 +14194,7 @@ class TestWorkerThread:
         wt._wake = MagicMock()
         captured: list[str] = []
 
-        def fake_worker_run(self_w):
+        def fake_worker_run(self_w: object) -> int:
             import fido.worker as wmod
 
             captured.append(getattr(wmod._thread_repo, "repo_name", None))
@@ -14141,21 +14212,21 @@ class TestWorkerThread:
         captured: list = []
 
         def fake_worker_init(
-            self_w,
-            work_dir,
-            gh,
-            abort_task=None,
-            repo_name="",
-            registry=None,
-            membership=None,
-            session=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=None,
-            provider_factory=None,
-            first_iteration=False,
-            issue_cache=None,
-        ):
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
+            issue_cache: object = None,
+        ) -> None:
             del provider_factory, first_iteration, issue_cache
             captured.append(abort_task)
             self_w.work_dir = work_dir
@@ -14164,7 +14235,7 @@ class TestWorkerThread:
             self_w._session = session
             self_w._session_issue = session_issue
 
-        def fake_worker_run(self_w):
+        def fake_worker_run(self_w: object) -> int:
             wt._stop = True
             return 0
 
@@ -14185,7 +14256,7 @@ class TestWorkerThread:
         wt._wake = MagicMock()
         call_count = 0
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
@@ -14213,7 +14284,7 @@ class TestWorkerThread:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
         wt._wake = MagicMock()
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             wt._stop = True
             return 2
 
@@ -14230,7 +14301,7 @@ class TestWorkerThread:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=None)
         wt._wake = MagicMock()
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             wt._stop = True
             return 0
 
@@ -14248,20 +14319,20 @@ class TestWorkerThread:
         sessions_received: list = []
 
         def fake_worker_init(
-            self_w,
-            work_dir,
-            gh,
-            abort_task=None,
-            repo_name="",
-            registry=None,
-            membership=None,
-            session=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=None,
-            provider_factory=None,
-            first_iteration=False,
-            issue_cache=None,
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
+            issue_cache: object = None,
         ) -> None:
             del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
@@ -14273,7 +14344,7 @@ class TestWorkerThread:
 
         call_count = 0
 
-        def fake_worker_run(self_w) -> int:
+        def fake_worker_run(self_w: object) -> int:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -14302,20 +14373,20 @@ class TestWorkerThread:
         issues_received: list = []
 
         def fake_worker_init(
-            self_w,
-            work_dir,
-            gh,
-            abort_task=None,
-            repo_name="",
-            registry=None,
-            membership=None,
-            session=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=None,
-            provider_factory=None,
-            first_iteration=False,
-            issue_cache=None,
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
+            issue_cache: object = None,
         ) -> None:
             del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
@@ -14327,7 +14398,7 @@ class TestWorkerThread:
 
         call_count = 0
 
-        def fake_worker_run(self_w) -> int:
+        def fake_worker_run(self_w: object) -> int:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -14381,7 +14452,7 @@ class TestWorkerThread:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
 
-        def fake_worker_run(self_w) -> int:
+        def fake_worker_run(self_w: object) -> int:
             self_w._session = mock_session
             raise RuntimeError("boom")
 
@@ -14459,19 +14530,19 @@ class TestWorkerThread:
         carried_session = MagicMock()
 
         def fake_worker_init(
-            self_w,
-            work_dir,
-            gh,
-            abort_task=None,
-            repo_name="",
-            registry=None,
-            membership=None,
-            session=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=None,
-            provider_factory=None,
-            first_iteration=False,
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
         ) -> None:
             del provider_factory, first_iteration
             self_w.work_dir = work_dir
@@ -14480,7 +14551,7 @@ class TestWorkerThread:
             self_w._session = session
             self_w._session_issue = session_issue
 
-        def fake_worker_run(self_w) -> int:
+        def fake_worker_run(self_w: object) -> int:
             wt._stop = True
             return 0
 
@@ -14581,7 +14652,7 @@ class TestWorkerThread:
         wt._wake = MagicMock()
         call_count = 0
 
-        def fake_worker_run(self_ignored=None) -> int:
+        def fake_worker_run(self_ignored: object = None) -> int:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -14743,20 +14814,20 @@ class TestWorkerThread:
         received_repo_cfg: list = []
 
         def fake_worker_init(
-            self_w,
-            work_dir,
-            gh,
-            abort_task=None,
-            repo_name="",
-            registry=None,
-            membership=None,
-            session=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=None,
-            provider_factory=None,
-            first_iteration=False,
-            issue_cache=None,
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
+            issue_cache: object = None,
         ) -> None:
             del provider_factory, first_iteration, issue_cache
             self_w.work_dir = work_dir
@@ -14767,7 +14838,7 @@ class TestWorkerThread:
             received_config.append(config)
             received_repo_cfg.append(repo_cfg)
 
-        def fake_worker_run(self_w) -> int:
+        def fake_worker_run(self_w: object) -> int:
             wt._stop = True
             return 0
 

@@ -14,7 +14,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, cast
+from types import TracebackType
+from typing import IO, Any, cast
 from urllib.parse import urlparse
 from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
@@ -43,7 +44,7 @@ from fido.infra import (
     real_infra,
 )
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import RateLimitMonitor
+from fido.rate_limit import RateLimitMonitor, RateLimitWindow
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.rocq import self_restart as restart_fsm
 from fido.state import State
@@ -253,7 +254,9 @@ def _parse_repo_from_url(url: str) -> str | None:
     return path if len(parts) == 2 and all(parts) else None
 
 
-def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
+def _serialize_provider_status(
+    status: "provider.ProviderPressureStatus | None",
+) -> dict[str, Any] | None:
     """Convert a ProviderPressureStatus to a JSON-friendly dict."""
     if status is None:
         return None
@@ -270,7 +273,7 @@ def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
     }
 
 
-def _serialize_rate_limit(monitor: Any) -> dict[str, Any] | None:
+def _serialize_rate_limit(monitor: object) -> dict[str, Any] | None:
     """Serialize the latest :class:`~fido.rate_limit.RateLimitSnapshot`
     for the ``/status.json`` payload (closes #812 follow-up).
 
@@ -291,7 +294,7 @@ def _serialize_rate_limit(monitor: Any) -> dict[str, Any] | None:
     }
 
 
-def _serialize_rate_window(window: Any) -> dict[str, Any]:
+def _serialize_rate_window(window: RateLimitWindow) -> dict[str, Any]:
     return {
         "name": window.name,
         "used": window.used,
@@ -300,7 +303,7 @@ def _serialize_rate_window(window: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_issue_cache(cache: Any) -> dict[str, Any] | None:
+def _serialize_issue_cache(cache: object) -> dict[str, Any] | None:
     """Serialize an :class:`~fido.issue_cache.IssueTreeCache` snapshot for
     the /status.json payload (#812).  Returns ``None`` when the cache has
     not been bootstrapped yet (or when *cache* isn't a real cache, which
@@ -1423,7 +1426,7 @@ def run(
     _make_registry: Callable[..., WorkerRegistry] = make_registry,
     _path_home: Callable[[], Path] = Path.home,
     _basic_config: Callable[..., None] = logging.basicConfig,
-    _stderr: Any = sys.stderr,
+    _stderr: IO[str] = sys.stderr,
     _populate_memberships: Callable[..., None] = populate_memberships,
     _signal: Callable[..., Any] = signal.signal,
     _kill_active_children: Callable[..., None] = kill_active_children,
@@ -1454,7 +1457,9 @@ def run(
     # Route uncaught exceptions through the logger so Docker/stdout captures
     # tracebacks through the same stream as normal runtime logs.
     def _log_uncaught(
-        exc_type: type[BaseException], exc_value: BaseException, exc_tb: Any
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        exc_tb: TracebackType | None,
     ) -> None:
         log.critical("uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
 

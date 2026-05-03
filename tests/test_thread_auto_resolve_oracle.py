@@ -2,6 +2,8 @@ from pathlib import Path
 
 from fido.rocq import thread_auto_resolve as oracle
 
+_PENDING: oracle.TaskStatus = oracle.StatusPending()
+
 
 def _comment(
     comment_id: int, author: oracle.ThreadCommentAuthor
@@ -25,7 +27,7 @@ def _thread(
 
 def _task(
     comment_id: int,
-    status: oracle.TaskStatus = oracle.StatusPending(),
+    status: oracle.TaskStatus = _PENDING,
 ) -> oracle.ThreadTask:
     return oracle.ThreadTask(
         thread_task_comment=comment_id,

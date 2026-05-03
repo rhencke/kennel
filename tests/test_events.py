@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Never
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -67,7 +68,12 @@ def _synthesis_response(
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 
@@ -101,7 +107,7 @@ def _payload(repo_owner: str = "owner") -> dict:
     }
 
 
-def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+def _client(return_value: str = "", *, side_effect: object = None) -> MagicMock:
     """Build a mock ClaudeClient with run_turn configured."""
     client = MagicMock(spec=ClaudeClient)
     client.voice_model = "claude-opus-4-6"
@@ -653,7 +659,7 @@ class TestRecoverReplyPromises:
             "user": {"login": "owner"},
         }
 
-        def fail_after_reply(*args, **kwargs):
+        def fail_after_reply(*args: object, **kwargs: object) -> Never:
             assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
             raise RuntimeError("task add failed")
 
@@ -895,7 +901,7 @@ class TestRecoverReplyPromises:
 
         gh.get_pull_comment.side_effect = get_pull_comment
 
-        def fail_after_reply(*args, **kwargs):
+        def fail_after_reply(*args: object, **kwargs: object) -> Never:
             store = FidoStore(tmp_path)
             assert store.promise(first.promise_id).state == "prepared"
             assert store.promise(second.promise_id).state == "prepared"
@@ -1925,7 +1931,9 @@ class TestReplyToComment:
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
 
-        def reply_to_review_comment(repo, pr, body, comment_id):
+        def reply_to_review_comment(
+            repo: str, pr: int, body: str, comment_id: int
+        ) -> object:
             effect = store.reply_outbox_effect(promise.promise_id)
             assert effect is not None
             assert effect.delivery_id == "github-delivery-10"
@@ -2439,7 +2447,7 @@ class TestReplyToComment:
 
         captured_calls: list[dict] = []
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             captured_calls.append(kwargs)
             return _synthesis_response("I will add logging.")
 
@@ -2470,7 +2478,7 @@ class TestReplyToComment:
 
         captured_calls: list[dict] = []
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             captured_calls.append(kwargs)
             return _synthesis_response("I will add logging.")
 
@@ -2726,7 +2734,9 @@ class TestReplyToIssueComment:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def _action(self, comment="please fix", is_bot=False, cid=42):
+    def _action(
+        self, comment: object = "please fix", is_bot: bool = False, cid: int = 42
+    ) -> object:
         return Action(
             prompt="PR top-level comment on #7 by owner:\n\nplease fix",
             comment_body=comment,
@@ -2812,7 +2822,7 @@ class TestReplyToIssueComment:
 
         mock_gh = self._mock_gh()
 
-        def comment_issue(repo, number, body):
+        def comment_issue(repo: str, number: int, body: str) -> object:
             effect = store.reply_outbox_effect(promise.promise_id)
             assert effect is not None
             assert effect.delivery_id == "github-delivery-42"
@@ -3036,7 +3046,7 @@ class TestReplyToIssueComment:
 
         captured_calls: list[dict] = []
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             captured_calls.append(kwargs)
             return _synthesis_response("ok", change_request="Do it")
 
@@ -3154,7 +3164,7 @@ class TestReplyToIssueComment:
 
         captured_calls: list[dict] = []
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             captured_calls.append(kwargs)
             return _synthesis_response("I'll fix that.", change_request="Fix crash")
 
@@ -3177,7 +3187,7 @@ class TestReplyToIssueComment:
 
         captured_calls: list[dict] = []
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             captured_calls.append(kwargs)
             return _synthesis_response("I'll fix that.")
 
@@ -4010,6 +4020,7 @@ class TestGetCommitSummary:
             capture_output=True,
             text=True,
             timeout=10,
+            check=True,
         )
 
     def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
@@ -4028,23 +4039,14 @@ class TestGetCommitSummary:
         assert result == ""
 
     def test_returns_empty_on_nonzero_exit(self, tmp_path: Path) -> None:
+        # check=True turns a non-zero exit into CalledProcessError, which the
+        # ``except (SubprocessError, OSError)`` arm catches → "".
         import subprocess as sp
 
-        fake_result = sp.CompletedProcess(
-            args=[], returncode=128, stdout="", stderr="not a git repo"
-        )
-        with patch("fido.events.subprocess.run", return_value=fake_result):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
-
-    def test_nonzero_exit_ignored_even_with_stdout(self, tmp_path: Path) -> None:
-        import subprocess as sp
-
-        # Explicit guard: returncode wins over any stdout content.
-        fake_result = sp.CompletedProcess(
-            args=[], returncode=1, stdout="abc123 orphan output\n", stderr=""
-        )
-        with patch("fido.events.subprocess.run", return_value=fake_result):
+        with patch(
+            "fido.events.subprocess.run",
+            side_effect=sp.CalledProcessError(128, ["git"]),
+        ):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
@@ -4075,7 +4077,7 @@ class TestReorderTasksBackground:
         """Return (calls_list, mock_reorder_fn) that records (work_dir, cs, kwargs)."""
         calls: list = []
 
-        def mock_reorder(work_dir, commit_summary, **kwargs):
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
             calls.append((work_dir, commit_summary, kwargs))
 
         return calls, mock_reorder
@@ -4219,7 +4221,7 @@ class TestReorderTasksBackground:
         registry = MagicMock()
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-        def fail_start(_thread):
+        def fail_start(_thread: object) -> Never:
             raise RuntimeError("cannot start")
 
         with pytest.raises(RuntimeError, match="cannot start"):
@@ -4262,10 +4264,10 @@ class TestReorderTasksBackground:
         sync_calls: list = []
         calls, mock_reorder = self._capture_reorder_calls()
 
-        def mock_rewrite(*a, **kw):
+        def mock_rewrite(*a: object, **kw: object) -> None:
             rewrite_calls.append((a, kw))
 
-        def mock_sync(*a, **kw):
+        def mock_sync(*a: object, **kw: object) -> None:
             sync_calls.append((a, kw))
 
         _reorder_tasks_background(
@@ -4293,7 +4295,7 @@ class TestReorderTasksBackground:
         fake_client = MagicMock()
         calls, mock_reorder = self._capture_reorder_calls()
 
-        def mock_rewrite(*a, **kw):
+        def mock_rewrite(*a: object, **kw: object) -> None:
             rewrite_calls.append(kw)
 
         _reorder_tasks_background(
@@ -4318,10 +4320,10 @@ class TestReorderTasksBackground:
         order: list[str] = []
         calls, mock_reorder = self._capture_reorder_calls()
 
-        def mock_sync(*a, **kw):
+        def mock_sync(*a: object, **kw: object) -> None:
             order.append("sync")
 
-        def mock_rewrite(*a, **kw):
+        def mock_rewrite(*a: object, **kw: object) -> None:
             order.append("rewrite")
 
         _reorder_tasks_background(
@@ -4636,7 +4638,7 @@ class TestReorderTasksBackground:
         registry = MagicMock()
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-        def boom(work_dir, commit_summary, **kwargs):
+        def boom(work_dir: Path, commit_summary: str, **kwargs: object) -> Never:
             raise RuntimeError("reorder exploded")
 
         _reorder_tasks_background(
@@ -4681,7 +4683,7 @@ class TestReorderTasksBackground:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         seen: list = []
 
-        def mock_reorder(work_dir, commit_summary, **kwargs):
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
             seen.append(current_repo())
 
         _reorder_tasks_background(
@@ -4728,7 +4730,7 @@ class TestReorderTasksBackground:
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-        def boom(work_dir, commit_summary, **kwargs):
+        def boom(work_dir: Path, commit_summary: str, **kwargs: object) -> Never:
             raise RuntimeError("reorder exploded")
 
         _reorder_tasks_background(
@@ -4752,7 +4754,7 @@ class TestReorderTasksBackground:
         started: list = []
         seen: list = []
 
-        def mock_reorder(work_dir, commit_summary, **kwargs):
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
             seen.append(current_repo())
 
         _reorder_tasks_background(
@@ -4778,7 +4780,7 @@ class TestReorderTasksBackground:
         started: list = []
         seen: list = []
 
-        def mock_reorder(work_dir, commit_summary, **kwargs):
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
             seen.append(current_thread_kind())
 
         _reorder_tasks_background(
@@ -4821,7 +4823,7 @@ class TestReorderTasksBackground:
 
         started: list = []
 
-        def boom(work_dir, commit_summary, **kwargs):
+        def boom(work_dir: Path, commit_summary: str, **kwargs: object) -> Never:
             raise RuntimeError("reorder exploded")
 
         _reorder_tasks_background(
@@ -4849,7 +4851,7 @@ class TestNotifyThreadChange:
             sub_dir=tmp_path / "sub",
         )
 
-    def _task(self, **overrides) -> dict:
+    def _task(self, **overrides: object) -> dict:
         t = {
             "id": "t1",
             "title": "Fix the thing",
@@ -4976,7 +4978,7 @@ class TestNotifyThreadChange:
         cfg = self._cfg(tmp_path)
         captured_prompt: list[str] = []
 
-        def fake_pp(prompt, model, **kwargs):
+        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
             captured_prompt.append(prompt)
             return "ok"
 
@@ -4994,7 +4996,7 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         invoked: list[bool] = []
 
-        def should_not_be_called(prompt, model, **kwargs):
+        def should_not_be_called(prompt: str, model: object, **kwargs: object) -> str:
             invoked.append(True)
             return "oops"
 
@@ -5769,7 +5771,7 @@ class TestReplyToCommentEyesReaction:
             "reaction"
         )
 
-        def capture_synthesis(*args, **kwargs):
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
             call_order.append("synthesis")
             return _synthesis_response("On it!")
 
@@ -5958,7 +5960,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6012,7 +6014,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6068,7 +6070,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6111,7 +6113,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh = MagicMock()
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6173,7 +6175,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6227,7 +6229,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             # Both fetches return the same Fido reply — it was already there
             return [
                 {"id": 509, "author": "reviewer", "body": "looks good"},
@@ -6266,7 +6268,7 @@ class TestReplyToCommentThreadRefetch:
         mock_gh = MagicMock()
         call_count = 0
 
-        def fetch_side_effect(repo, pr, cid):
+        def fetch_side_effect(repo: str, pr: int, cid: int) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -6310,7 +6312,7 @@ class TestReplyToCommentThreadRefetch:
 
 class TestRewritePrDescription:
     @pytest.fixture(autouse=True)
-    def _mock_pr_body_lock(self):
+    def _mock_pr_body_lock(self) -> object:
         from contextlib import nullcontext
 
         with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
@@ -6552,7 +6554,7 @@ class TestRewritePrDescription:
         tasks = MagicMock()
         call_count = [0]
 
-        def ever_changing():
+        def ever_changing() -> object:
             n = call_count[0]
             call_count[0] += 1
             return [{"id": str(n), "status": "pending", "title": f"task {n}"}]

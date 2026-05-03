@@ -436,7 +436,7 @@ class TestCallSynthesis:
 # ---------------------------------------------------------------------------
 
 
-def _make_failure_prompts(failure_text: str = "fallback prompt") -> MagicMock:
+def _make_failure_prompts(failure_text: str = "fallback prompt: str") -> MagicMock:
     prompts = MagicMock()
     prompts.synthesis_failure_explanation_prompt.return_value = failure_text
     return prompts

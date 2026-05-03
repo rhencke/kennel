@@ -131,7 +131,7 @@ def _rocq_string_key(key: object) -> str:
     return key
 
 
-def _rocq_sorted_key(key: object) -> Any:
+def _rocq_sorted_key(key: object) -> Any:  # noqa: ANN401  # rich-comparable opaque sort key
     return key.encode("utf-8") if isinstance(key, str) else key
 
 

@@ -405,54 +405,53 @@ def _task_file(work_dir: Path) -> Path:
     return work_dir / ".git" / "fido" / "tasks.json"
 
 
-def _locked(path: Path, write: bool = False):
+def _locked(path: Path, write: bool = False) -> "_TaskFileLock":  # noqa: ARG001
     """Context manager: flock the task file."""
+    return _TaskFileLock(path)
 
-    class Lock:
-        def __init__(self):
-            self.fd: IO[str] | None = None
 
-        def __enter__(self):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(exist_ok=True)
-            self.fd = open(path, "r+")
-            fcntl.flock(self.fd, fcntl.LOCK_EX)
-            return self
+class _TaskFileLock:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self.fd: IO[str] | None = None
 
-        def __exit__(self, *_):
-            if self.fd:
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
-                self.fd.close()
+    def __enter__(self) -> "_TaskFileLock":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.touch(exist_ok=True)
+        self.fd = open(self._path, "r+")
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
 
-        def _fd(self) -> IO[str]:
-            assert self.fd is not None, "Lock used outside context manager"
-            return self.fd
+    def __exit__(self, *_: object) -> None:
+        if self.fd:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            self.fd.close()
 
-        def read(self) -> list[dict[str, Any]]:
-            fd = self._fd()
-            fd.seek(0)
-            text = fd.read().strip()
-            if not text:
-                return []
-            try:
-                result = json.loads(text)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"corrupt tasks.json: {e}") from e
-            for t in result:
-                if "type" not in t:
-                    raise ValueError(
-                        f"task {t.get('id', '?')} missing required type field"
-                    )
-            return result
+    def _fd(self) -> IO[str]:
+        assert self.fd is not None, "Lock used outside context manager"
+        return self.fd
 
-        def write(self, tasks: list[dict[str, Any]]) -> None:
-            fd = self._fd()
-            fd.seek(0)
-            fd.truncate()
-            json.dump(tasks, fd, indent=2)
-            fd.flush()
+    def read(self) -> list[dict[str, Any]]:
+        fd = self._fd()
+        fd.seek(0)
+        text = fd.read().strip()
+        if not text:
+            return []
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"corrupt tasks.json: {e}") from e
+        for t in result:
+            if "type" not in t:
+                raise ValueError(f"task {t.get('id', '?')} missing required type field")
+        return result
 
-    return Lock()
+    def write(self, tasks: list[dict[str, Any]]) -> None:
+        fd = self._fd()
+        fd.seek(0)
+        fd.truncate()
+        json.dump(tasks, fd, indent=2)
+        fd.flush()
 
 
 # Compatibility shims — callers are migrated to Tasks in subsequent commits.
@@ -818,12 +817,8 @@ def _apply_reorder(
     - Opus-returned items with a null or absent id are treated as new tasks
       and inserted after existing pending tasks (before completed tasks).
     """
-    snapshot_ids = (
-        original_ids
-        if original_ids
-        else frozenset(
-            t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
-        )
+    snapshot_ids = original_ids or frozenset(
+        t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
     )
     oracle_result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
     _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, oracle_result)
@@ -1089,9 +1084,11 @@ class Tasks(JsonFileStore):
     def _default(self) -> list[dict[str, Any]]:
         return []
 
-    def _validate(self, data: Any) -> None:
+    def _validate(self, data: object) -> None:
         """Ensure every task has a ``type`` field."""
+        assert isinstance(data, list), "tasks.json must hold a list"
         for t in data:
+            assert isinstance(t, dict), "task entries must be JSON objects"
             if "type" not in t:
                 raise ValueError(f"task {t.get('id', '?')} missing required type field")
 

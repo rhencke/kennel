@@ -5,9 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from tools.compose_pyproject import compose_fragments
+from tools.compose_pyproject import _discover_fragments, compose_fragments
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def test_discover_fragments_globs_pyproject_files(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.alpha.toml").write_text("[a]\nx = 1\n")
+    (tmp_path / "pyproject.beta.toml").write_text("[b]\ny = 2\n")
+    (tmp_path / "pyproject.toml").write_text("[c]\nz = 3\n")  # not a fragment
+    (tmp_path / "ignored.toml").write_text("[d]\nw = 4\n")
+
+    discovered = _discover_fragments(tmp_path)
+
+    assert [path.name for path in discovered] == [
+        "pyproject.alpha.toml",
+        "pyproject.beta.toml",
+    ]
 
 
 def test_compose_fragments_preserves_fragment_order(tmp_path: Path) -> None:
@@ -35,15 +49,8 @@ class TestPyprojectWrapper:
     def _temp_repo(self, tmp_path: Path) -> Path:
         repo = tmp_path / "repo"
         (repo / "tools").mkdir(parents=True)
-        (repo / "pyproject.project.toml").write_text(
-            (REPO / "pyproject.project.toml").read_text()
-        )
-        (repo / "pyproject.build.toml").write_text(
-            (REPO / "pyproject.build.toml").read_text()
-        )
-        (repo / "pyproject.tools.toml").write_text(
-            (REPO / "pyproject.tools.toml").read_text()
-        )
+        for fragment in sorted(REPO.glob("pyproject.*.toml")):
+            (repo / fragment.name).write_text(fragment.read_text())
         (repo / "pyproject").write_text((REPO / "pyproject").read_text())
         (repo / "tools" / "compose_pyproject.py").write_text(
             (REPO / "tools" / "compose_pyproject.py").read_text()

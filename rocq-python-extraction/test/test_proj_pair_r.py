@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from records import (
     Pair_r,
     pair_r_same,
@@ -40,7 +42,7 @@ def test_proj_pair_r_round_trip() -> None:
     assert pair_r_same(p1, Pair_r(pfst_r=7, psnd_r=3)) is False
 
 
-def test_record_update_uses_dataclasses_replace(build_default) -> None:
+def test_record_update_uses_dataclasses_replace(build_default: Path) -> None:
     p = Pair_r(pfst_r=3, psnd_r=7)
     updated = set_second_direct(p, 11)
 
@@ -59,7 +61,7 @@ def test_record_update_uses_dataclasses_replace(build_default) -> None:
     assert "Pair_r(pfst_r=p.pfst_r, psnd_r=n)" not in source
 
 
-def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
+def test_record_fields_do_not_emit_accessor_functions(build_default: Path) -> None:
     source = (build_default / "records.py").read_text()
 
     assert "def pfst_r(" not in source
@@ -68,7 +70,7 @@ def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
     assert "return p.psnd_r" in source
 
 
-def test_record_equality_lowers_to_direct_equality(build_default) -> None:
+def test_record_equality_lowers_to_direct_equality(build_default: Path) -> None:
     source = (build_default / "records.py").read_text()
 
     assert "pair_r_eq =" not in source

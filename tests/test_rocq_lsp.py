@@ -303,7 +303,7 @@ def test_cli_outputs_json_for_each_command() -> None:
 
 
 def test_cli_reports_os_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(_self: RocqLspCli, _service: RocqLanguageService, _args: Any) -> Any:
+    def boom(_self: RocqLspCli, _service: RocqLanguageService, _args: object) -> object:
         raise OSError("nope")
 
     monkeypatch.setattr(RocqLspCli, "_run_command", boom)
@@ -683,7 +683,7 @@ def test_index_symbol_at_falls_back_to_source_token_lookup(tmp_path: Path) -> No
     assert index.symbol_at(source, 0, 1) == symbol
 
 
-def _argparse_namespace(command: str) -> Any:
+def _argparse_namespace(command: str) -> object:
     return type("Args", (), {"command": command})()
 
 

@@ -188,6 +188,11 @@ class TestModelsBuildScript:
         assert "schedule:" not in workflow
         assert "cron:" not in workflow
         assert "runs-on: self-hosted" in workflow
+        # Cancel-in-progress for non-main events so superseded PR runs don't
+        # waste runner cycles; pushes to main always finish.
+        assert "concurrency:" in workflow
+        assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow
+        assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
         assert "FIDO_BUILDX_CACHE_BACKEND" not in workflow
         assert "ubuntu-latest" not in workflow
         assert "docker/setup-buildx-action" not in workflow
@@ -679,13 +684,12 @@ class TestFidoLauncher:
         help_text = (REPO / "src" / "fido" / "fido_help.py").read_text()
         main_py = (REPO / "src" / "fido" / "main.py").read_text()
         fragments = [
-            (REPO / "pyproject.project.toml").read_text(),
-            (REPO / "pyproject.build.toml").read_text(),
-            (REPO / "pyproject.tools.toml").read_text(),
+            fragment.read_text() for fragment in sorted(REPO.glob("pyproject.*.toml"))
         ]
 
         assert "host-side interactive persona session" in help_text
         assert (REPO / "pyproject").exists()
+        assert fragments  # at least one fragment present
         assert all("fido-chat" not in fragment for fragment in fragments)
         assert 'args[0] == "chat"' not in main_py
         assert not (REPO / "src" / "fido" / "chat.py").exists()
@@ -742,9 +746,14 @@ class TestModelDockerfile:
         assert "FROM fido-python-prod AS fido-python-dev" in dockerfile
         assert "FROM node:24-bookworm-slim AS node-runtime" in dockerfile
         assert "FROM fido-python-prod AS fido-base" in dockerfile
+        # uv sync only needs the project + build fragments — adopting a new
+        # ruff or pytest rule must not invalidate the prod venv layer.
         assert (
-            "COPY .python-version pyproject pyproject.*.toml uv.lock ./" in dockerfile
+            "COPY .python-version pyproject pyproject.project.toml pyproject.build.toml uv.lock ./"
+            in dockerfile
         )
+        assert "pyproject.ruff.toml uv.lock ./" not in dockerfile
+        assert "pyproject.tools.toml uv.lock ./" not in dockerfile
         assert (
             "COPY tools/compose_pyproject.py tools/compose_pyproject.py" in dockerfile
         )
@@ -818,27 +827,48 @@ class TestModelDockerfile:
     def test_python_checks_have_explicit_host_inputs(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
 
+        # python-workspace-base is the bare-minimum common ancestor: only the
+        # wrapper script + composer + the project/build fragments needed for
+        # compose to render a valid pyproject.toml. Everything else (ruff
+        # fragment, pyright config, src trees, the misc bag) lives on the
+        # per-tool sub-bases so a stage's cache invalidates only on its own
+        # inputs.
         assert "FROM fido-python-dev AS python-workspace-base" in dockerfile
         assert "FROM python-deps AS python-workspace-base" not in dockerfile
+        assert "COPY pyproject ./" in dockerfile
+        assert "COPY tools/compose_pyproject.py tools/" in dockerfile
+        assert "COPY pyproject.project.toml pyproject.build.toml ./" in dockerfile
+        assert "ENV PYTHONPATH=/workspace/src" in dockerfile
+
+        # Per-tool sub-bases.
+        assert "FROM python-workspace-base AS python-ruff-base" in dockerfile
+        assert "FROM python-workspace-base AS python-pyright-base" in dockerfile
+        assert "FROM python-workspace-base AS python-test-base" in dockerfile
+
+        # python-ruff-base scans every .py file in the repo but skips the
+        # non-Python build-graph bag.
+        assert "COPY pyproject.ruff.toml ./" in dockerfile
+        assert "COPY src src" in dockerfile
+        assert "COPY tests tests" in dockerfile
+        assert "COPY rocq-python-extraction rocq-python-extraction" in dockerfile
         assert (
-            "COPY .dockerignore .lsp.json .python-version docker-bake.hcl dune-workspace fido package.json "
-            "package-lock.json pyproject pyproject.*.toml pyrightconfig.json uv.lock ./"
-        ) in dockerfile
-        assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
-        assert (
-            "COPY tools/build_graph.sh tools/compose_pyproject.py tools/gen_workflows.py tools/"
+            "COPY tools/gen_workflows.py tools/measure_build_graph.py tools/"
             in dockerfile
         )
+
+        # python-pyright-base only needs src/ (pyrightconfig restricts include).
+        assert "COPY pyrightconfig.json ./" in dockerfile
+
+        # The misc bag belongs only to the test image (legacy, not in ci bake).
+        assert (
+            "COPY .dockerignore .lsp.json docker-bake.hcl dune-workspace fido "
+            "package.json package-lock.json ./"
+        ) in dockerfile
+        assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
         assert (
             "COPY models/Dockerfile models/dune-project models/dune models/*.v models/"
             in dockerfile
         )
-        assert "COPY src src" in dockerfile
-        assert "COPY tests tests" in dockerfile
-        assert "COPY rocq-python-extraction rocq-python-extraction" in dockerfile
-        assert "FROM python-workspace-base AS python-check-base" in dockerfile
-        assert "FROM python-workspace-base AS python-test-base" in dockerfile
-        assert "ENV PYTHONPATH=/workspace/src" in dockerfile
 
     def test_fido_runtime_uses_host_uid_gid_build_args(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
@@ -853,10 +883,10 @@ class TestModelDockerfile:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()
         launcher = FIDO.read_text()
 
-        assert "FROM python-check-base AS format" in dockerfile
-        assert "FROM python-check-base AS lint" in dockerfile
-        assert "FROM python-check-base AS typecheck" in dockerfile
-        assert "FROM python-test-base AS generated-typecheck" in dockerfile
+        assert "FROM python-ruff-base AS format" in dockerfile
+        assert "FROM python-ruff-base AS lint" in dockerfile
+        assert "FROM python-pyright-base AS typecheck" in dockerfile
+        assert "FROM python-pyright-base AS generated-typecheck" in dockerfile
         assert "FROM python-test-base AS test" in dockerfile
         # Tests are NOT executed inside the buildkit-managed `test` stage
         # — buildx bake has no per-target memory cap so a leaky test

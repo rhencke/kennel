@@ -86,7 +86,9 @@ class TestBuildParser:
 
 
 class TestCmdAdd:
-    def test_adds_task(self, tmp_path: Path, capsys) -> None:
+    def test_adds_task(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(
             tmp_path, TaskType.SPEC, "my task", "some description"
@@ -100,7 +102,9 @@ class TestCmdAdd:
         assert tasks[0]["description"] == "some description"
         assert tasks[0]["type"] == "spec"
 
-    def test_adds_task_no_description(self, tmp_path: Path, capsys) -> None:
+    def test_adds_task_no_description(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(tmp_path, TaskType.CI, "bare task", "")
         capsys.readouterr()
@@ -111,7 +115,7 @@ class TestCmdAdd:
         assert tasks[0]["type"] == "ci"
 
     def test_adds_task_with_comment_id_builds_thread(
-        self, tmp_path: Path, capsys
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(
@@ -123,7 +127,9 @@ class TestCmdAdd:
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 42, "repo": "a/b", "pr": 7}
 
-    def test_adds_task_comment_id_only(self, tmp_path: Path, capsys) -> None:
+    def test_adds_task_comment_id_only(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(
@@ -135,7 +141,9 @@ class TestCmdAdd:
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 99}
 
-    def test_add_deduplicates_by_comment_id(self, tmp_path: Path, capsys) -> None:
+    def test_add_deduplicates_by_comment_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(
             tmp_path,
@@ -163,7 +171,9 @@ class TestCmdAdd:
         assert len(tasks) == 1
         assert tasks[0]["title"] == "first title"
 
-    def test_add_prints_task_json(self, tmp_path: Path, capsys) -> None:
+    def test_add_prints_task_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(tmp_path, TaskType.SPEC, "my task", "")
         out = capsys.readouterr().out
@@ -176,7 +186,9 @@ class TestCmdAdd:
 
 
 class TestCmdComplete:
-    def test_completes_task_no_thread(self, tmp_path: Path, capsys) -> None:
+    def test_completes_task_no_thread(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         cmd = Cmd(github=MagicMock())
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
@@ -187,7 +199,10 @@ class TestCmdComplete:
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
     def test_completes_task_with_thread_resolves(
-        self, tmp_path: Path, capsys, caplog
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         _task_file(tmp_path)
         from fido.tasks import add_task
@@ -237,7 +252,10 @@ class TestCmdComplete:
         assert "thread resolved: thread_node_abc" in caplog.text
 
     def test_completes_task_with_thread_skips_if_not_last(
-        self, tmp_path: Path, capsys, caplog
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         _task_file(tmp_path)
         from fido.tasks import add_task
@@ -310,7 +328,7 @@ class TestCmdComplete:
         mock_github.resolve_thread.assert_not_called()
 
     def test_completes_task_with_thread_exception_silenced(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         _task_file(tmp_path)
         from fido.tasks import add_task
@@ -384,7 +402,9 @@ class TestCmdComplete:
 
 
 class TestCmdList:
-    def test_prints_json(self, tmp_path: Path, capsys) -> None:
+    def test_prints_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         cmd = Cmd(github=MagicMock())
         cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
@@ -398,7 +418,9 @@ class TestCmdList:
         assert data[0]["title"] == "alpha"
         assert data[1]["title"] == "beta"
 
-    def test_empty_list(self, tmp_path: Path, capsys) -> None:
+    def test_empty_list(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).list(tmp_path)
         out = capsys.readouterr().out
@@ -409,7 +431,9 @@ class TestCmdList:
 
 
 class TestMain:
-    def test_add_via_main(self, tmp_path: Path, capsys) -> None:
+    def test_add_via_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         main([str(tmp_path), "add", "spec", "task title"], _GitHub=MagicMock)
         capsys.readouterr()
@@ -418,7 +442,9 @@ class TestMain:
         tasks = list_tasks(tmp_path)
         assert tasks[0]["title"] == "task title"
 
-    def test_add_via_main_with_comment_id(self, tmp_path: Path, capsys) -> None:
+    def test_add_via_main_with_comment_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         main(
             [
@@ -441,7 +467,9 @@ class TestMain:
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 55, "repo": "r/r", "pr": 3}
 
-    def test_complete_via_main(self, tmp_path: Path, capsys) -> None:
+    def test_complete_via_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         main([str(tmp_path), "add", "spec", "finish me"], _GitHub=MagicMock)
         out = capsys.readouterr().out
@@ -451,7 +479,9 @@ class TestMain:
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
-    def test_list_via_main(self, tmp_path: Path, capsys) -> None:
+    def test_list_via_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _task_file(tmp_path)
         main([str(tmp_path), "add", "spec", "one"], _GitHub=MagicMock)
         capsys.readouterr()
@@ -464,7 +494,9 @@ class TestMain:
         with pytest.raises(SystemExit):
             main([])
 
-    def test_unknown_command_raises(self, tmp_path: Path, monkeypatch) -> None:
+    def test_unknown_command_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Fallback case in match statement raises AssertionError."""
         from unittest.mock import MagicMock
 

@@ -60,7 +60,7 @@ def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
 
 
 def test_nested_with_inside_hold_does_not_double_register(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Re-entering ``with session:`` inside ``hold_for_handler`` must not
     attempt a second talker registration (would raise SessionLeakError)."""
@@ -68,7 +68,7 @@ def test_nested_with_inside_hold_does_not_double_register(
     register_calls = []
     real_register = provider.register_talker
 
-    def counting_register(talker):
+    def counting_register(talker: object) -> None:
         register_calls.append(talker.kind)
         real_register(talker)
 
@@ -88,7 +88,7 @@ def test_nested_with_inside_hold_does_not_double_register(
 
 
 def test_hold_preempt_fires_cancel_when_worker_holds(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """hold_for_handler() fires _fire_worker_cancel iff
     the current lock holder is a worker and the caller is a webhook."""
@@ -118,7 +118,7 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
 
 
 def test_hold_preempt_no_fire_when_no_worker_holder(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """preempt_worker=True with no current holder — try_preempt_worker returns
     (False, None) and no cancel fires.  Exercises the ``else`` branch of the
@@ -139,7 +139,7 @@ def test_hold_preempt_no_fire_when_no_worker_holder(
 
 
 def test_hold_preempt_skipped_when_no_preempt_worker_flag(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Default preempt_worker=False — no cancel fires even with a worker
     holder."""
@@ -304,7 +304,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 
 
 def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Post-#979: after hold_for_handler() fires the
     cancel signal, the handler's own prompt() must run to completion.  In
@@ -442,7 +442,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
 
 
 def test_hold_reraises_leak_error_and_releases_lock(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If register_talker raises SessionLeakError inside hold, the lock must
     be released before the exception propagates so we don't deadlock."""

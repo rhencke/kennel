@@ -8,7 +8,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
@@ -936,7 +936,7 @@ class FidoStore:
         conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
-    def _transaction(self) -> Any:
+    def _transaction(self) -> "_FidoTransaction":
         return _FidoTransaction(self)
 
     def _promise_row(

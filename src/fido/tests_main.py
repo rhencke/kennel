@@ -31,8 +31,7 @@ def run_pytest(argv: list[str], *, paths: list[str], coverage: list[str]) -> int
     # override; only inject the default when the caller hasn't specified.
     user_argv = argv or paths
     has_n_flag = any(
-        a == "-n" or a.startswith("-n=") or a.startswith("--numprocesses")
-        for a in user_argv
+        a == "-n" or a.startswith(("-n=", "--numprocesses")) for a in user_argv
     )
     xdist_args = ["-n", "2"] if not has_n_flag else []
     args = [

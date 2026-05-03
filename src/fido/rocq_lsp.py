@@ -730,7 +730,7 @@ class RocqLspServer:
         if request_id is not None:
             self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
 
-    def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
+    def _dispatch(self, method: str, params: dict[str, Any]) -> object:
         if method == "initialize":
             return {
                 "capabilities": {
@@ -895,7 +895,7 @@ class RocqLspCli:
 
     def _run_command(
         self, service: RocqLanguageService, args: argparse.Namespace
-    ) -> Any:
+    ) -> object:
         if args.command == "hover":
             return service.hover(Path(args.file), args.line - 1, args.column - 1)
         if args.command == "definition":

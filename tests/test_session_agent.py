@@ -14,12 +14,12 @@ class _FakeAgent(SessionBackedAgent):
     def __init__(
         self,
         *,
-        session_fn=lambda: None,
+        session_fn: object = lambda: None,
         session_system_file: Path | None = None,
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
-        session=None,
-        session_factory=None,
+        session: object = None,
+        session_factory: object = None,
     ) -> None:
         self._session_factory = (
             MagicMock() if session_factory is None else session_factory
@@ -32,7 +32,9 @@ class _FakeAgent(SessionBackedAgent):
             session=session,
         )
 
-    def _spawn_owned_session(self, model: ProviderModel, *, session_id=None):
+    def _spawn_owned_session(
+        self, model: ProviderModel, *, session_id: str = None
+    ) -> object:
         self._last_session_id = session_id
         return self._session_factory(model)
 

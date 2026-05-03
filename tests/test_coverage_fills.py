@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import queue
 from pathlib import Path
+from typing import Never
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -334,20 +335,20 @@ class TestStatusFallbacks:
     def _make_repo(self, **kwargs: object) -> object:
         from fido.status import RepoStatus
 
-        defaults: dict[str, object] = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults: dict[str, object] = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)  # type: ignore[arg-type]
 
@@ -905,6 +906,8 @@ class TestCodexAppServerErrorPaths:
     def test_handle_line_rejects_non_json_object(self) -> None:
         """A JSON value that decodes to non-object → CodexProtocolError
         (codex.py:359)."""
+        from fido.codex import CodexProtocolError
+
         client, lines = self._client()
         try:
             lines.put('"just-a-string"\n')
@@ -913,7 +916,7 @@ class TestCodexAppServerErrorPaths:
             import time
 
             time.sleep(0.05)
-            with pytest.raises(Exception):
+            with pytest.raises(CodexProtocolError):
                 client.request("anything")  # type: ignore[attr-defined]
         finally:
             lines.put(None)
@@ -922,13 +925,15 @@ class TestCodexAppServerErrorPaths:
     def test_handle_line_rejects_unknown_shape(self) -> None:
         """Object lacking ``id`` and ``method`` → CodexProtocolError
         (codex.py:377)."""
+        from fido.codex import CodexProtocolError
+
         client, lines = self._client()
         try:
             lines.put('{"unknown":"shape"}\n')
             import time
 
             time.sleep(0.05)
-            with pytest.raises(Exception):
+            with pytest.raises(CodexProtocolError):
                 client.request("anything")  # type: ignore[attr-defined]
         finally:
             lines.put(None)
@@ -947,7 +952,7 @@ class TestCodexAppServerErrorPaths:
 class TestCodexSessionLeafBranches:
     """Property/method short-circuits and small branches in CodexSession."""
 
-    def _session(self, tmp_path: Path, **kwargs) -> object:
+    def _session(self, tmp_path: Path, **kwargs: object) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -960,10 +965,10 @@ class TestCodexSessionLeafBranches:
         }
         fake.is_alive.return_value = True
         fake.pid = 1234
-        defaults: dict = dict(
-            client_factory=lambda **_: fake,
-            model=ProviderModel("gpt-5", "medium"),
-        )
+        defaults: dict = {
+            "client_factory": lambda **_: fake,
+            "model": ProviderModel("gpt-5", "medium"),
+        }
         defaults.update(kwargs)
         return CodexSession(system_file, work_dir=tmp_path, **defaults)
 
@@ -1083,7 +1088,9 @@ class TestRocqLspMoreBranches:
         (models / "session_lock.v").write_text("Definition transition := 1.\n")
         generated = tmp_path / "src" / "fido" / "rocq"
         generated.mkdir(parents=True)
-        (generated / "session_lock.py").write_text("def transition(): return 1\n")
+        (generated / "session_lock.py").write_text(
+            "def transition() -> object: return 1\n"
+        )
         (generated / "session_lock.pymap").write_text(
             "stability,python_start_line,python_start_col,python_end_line,"
             "python_end_col,source_file,source_start_line,source_start_col,"
@@ -1172,7 +1179,7 @@ class TestCopilotCLIOwnerMore:
     (copilotcli.py:975-981)."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, repo_name: str | None = "test/repo"):
+    def _build_session(tmp_path: Path, repo_name: str | None = "test/repo") -> object:
         from fido.copilotcli import CopilotCLISession
 
         runtime = MagicMock()
@@ -1441,7 +1448,7 @@ class TestCodexSessionMoreBranches:
     """More CodexSession defensive branches."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, fake):
+    def _build_session(tmp_path: Path, fake: object) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -1576,7 +1583,7 @@ class TestCodexCLIErrorBranch:
         from fido.codex import CodexCLIError, run_codex_exec_resume
         from fido.provider import ProviderModel
 
-        def runner(*args, **kwargs):  # noqa: ARG001
+        def runner(*args: object, **kwargs: object) -> object:  # noqa: ARG001
             return subprocess.CompletedProcess(
                 args=[], returncode=1, stdout="", stderr="codex died"
             )
@@ -1598,7 +1605,7 @@ class TestWorkerHandleQueuedComment:
     """Cover ``_handle_queued_comment`` defensive paths (worker.py:2424-2447)."""
 
     @staticmethod
-    def _make_queued_record():
+    def _make_queued_record() -> object:
         from fido.store import PRCommentQueueRecord
 
         return PRCommentQueueRecord(
@@ -1733,7 +1740,7 @@ class TestWorkerLeafBranches:
     """Cover small leaf branches in worker.py."""
 
     @staticmethod
-    def _make_worker(tmp_path: Path):
+    def _make_worker(tmp_path: Path) -> object:
         """Construct a Worker via the test scaffolding in tests/test_worker.py."""
         from tests.test_worker import Worker
 
@@ -1755,7 +1762,7 @@ class TestWorkerLeafBranches:
         assert worker._task_still_current(fido_dir, "task-xyz") is False  # type: ignore[attr-defined]
 
     @staticmethod
-    def _make_worker_with_stubs(tmp_path: Path):
+    def _make_worker_with_stubs(tmp_path: Path) -> object:
         """Build a Worker whose provider_agent and tasks are MagicMocks
         so we can drive the empty-msg branches without real I/O."""
         from tests.test_worker import Worker
@@ -1830,7 +1837,7 @@ class TestEventsCreateTaskExitUntriaged:
             "comment_id": 42,
         }
 
-        def boom(*args, **kwargs):  # noqa: ARG001
+        def boom(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
             raise RuntimeError("explode")
 
         with patch.object(events, "_reorder_tasks_background", new=boom):
@@ -1897,10 +1904,10 @@ class TestWorkerHandleQueuedCommentsDrain:
         responses = iter([queued, None])
 
         class _StoreStub:
-            def __init__(self, *_a, **_kw) -> None:
+            def __init__(self, *_a: object, **_kw: object) -> None:
                 pass
 
-            def claim_next_pr_comment(self, **_kw):
+            def claim_next_pr_comment(self, **_kw: object) -> object:
                 return next(responses)
 
             def complete_pr_comment(self, _qid: str) -> None:
@@ -1923,7 +1930,7 @@ class TestWorkerExecuteTaskBranches:
     main test_worker.py suite doesn't exercise."""
 
     @staticmethod
-    def _make_worker(tmp_path: Path):
+    def _make_worker(tmp_path: Path) -> object:
         from tests.test_worker import Worker
 
         gh = MagicMock()
@@ -1933,7 +1940,7 @@ class TestWorkerExecuteTaskBranches:
         return Worker(tmp_path, gh), gh
 
     @staticmethod
-    def _repo_ctx():
+    def _repo_ctx() -> object:
         from fido.config import RepoMembership
         from fido.worker import RepoContext
 
@@ -1953,10 +1960,10 @@ class TestWorkerExecuteTaskBranches:
         return d
 
     @staticmethod
-    def _git_with_new_commits():
+    def _git_with_new_commits() -> object:
         shas = iter(["aaa", "bbb"])
 
-        def side_effect(args, **_kw):
+        def side_effect(args: object, **_kw: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
@@ -2028,10 +2035,10 @@ class TestWorkerExecuteTaskBranches:
         active_responses = iter([False, True])
 
         class _AbortStub:
-            def is_active_for(self, _tid):
+            def is_active_for(self, _tid: str) -> object:
                 return next(active_responses)
 
-            def clear(self):
+            def clear(self) -> None:
                 pass
 
         with (
@@ -2053,11 +2060,11 @@ class TestWorkerExecuteTaskBranches:
         assert result is True
 
     @staticmethod
-    def _git_no_new_commits():
+    def _git_no_new_commits() -> object:
         """Mock _git so rev-parse HEAD always returns the SAME SHA — drives
         the retry loop where head_before == head_after."""
 
-        def side_effect(args, **_kw):
+        def side_effect(args: object, **_kw: object) -> object:
             result = MagicMock()
             result.returncode = 0
             result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
@@ -2068,7 +2075,7 @@ class TestWorkerExecuteTaskBranches:
         m.side_effect = side_effect
         return m
 
-    def _setup_retry_loop(self, tmp_path: Path):
+    def _setup_retry_loop(self, tmp_path: Path) -> object:
         """Common setup for tests that exercise the head_before == head_after
         retry loop in execute_task."""
         worker, _ = self._make_worker(tmp_path)
@@ -2115,10 +2122,10 @@ class TestWorkerExecuteTaskBranches:
         abort_responses = iter([False, False, True])
 
         class _AbortStub:
-            def is_active_for(self, _tid):
+            def is_active_for(self, _tid: str) -> object:
                 return next(abort_responses)
 
-            def clear(self):
+            def clear(self) -> None:
                 pass
 
         with (
@@ -2225,7 +2232,7 @@ class TestClaudeIterEventsCancelPaths:
     """Cover the cancel-path BrokenPipeError fallback in iter_events
     (claude.py:1283-1287)."""
 
-    def _build_session_in_turn(self, tmp_path):
+    def _build_session_in_turn(self, tmp_path: Path) -> object:
         """Build a ClaudeSession whose FSM is in AwaitingReply (i.e.
         in_turn=True) so the cancel branch fires."""
         import subprocess
@@ -2254,7 +2261,7 @@ class TestClaudeIterEventsCancelPaths:
 
         session_ref: list[ClaudeSession] = []
 
-        def selector_that_cancels(*_a, **_kw):
+        def selector_that_cancels(*_a: object, **_kw: object) -> object:
             session_ref[0]._cancel.set()
             return ([], [], [])
 
@@ -2314,7 +2321,7 @@ class TestClaudeIterEventsCancelPaths:
             ]
         )
 
-        def selector_that_cancels(*_a, **_kw):
+        def selector_that_cancels(*_a: object, **_kw: object) -> object:
             session_ref[0]._cancel.set()
             try:
                 return next(select_calls)
@@ -2412,13 +2419,13 @@ class TestEventsClaimReplyOutboxEffectsDelivered:
         existing.state = "delivered"
 
         class _StoreStub:
-            def __init__(self, *_a, **_kw) -> None:
+            def __init__(self, *_a: object, **_kw: object) -> None:
                 pass
 
-            def promise(self, _pid: str):
+            def promise(self, _pid: str) -> object:
                 return promise
 
-            def reply_outbox_effect(self, _pid: str):
+            def reply_outbox_effect(self, _pid: str) -> object:
                 return existing
 
         with patch.object(events, "FidoStore", _StoreStub):
@@ -2455,7 +2462,7 @@ class TestEventsDispatchTrailingNone:
     (events.py:1335, 1395)."""
 
     @staticmethod
-    def _config_and_repo_cfg():
+    def _config_and_repo_cfg() -> object:
         config = MagicMock()
         config.allowed_bots = frozenset()
         config.repos = {}
@@ -2600,7 +2607,7 @@ class TestCodexAppServerStderrAndError:
         from fido.codex import CodexAppServerClient
 
         class _StderrProcess:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = io.StringIO()
                 self.stdout = io.StringIO(
                     '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
@@ -2641,7 +2648,7 @@ class TestCodexAppServerStderrAndError:
         )
 
         class _BadErrorProcess:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = io.StringIO()
                 self.stdout = io.StringIO(bad_response)
                 self.stderr = io.StringIO()
@@ -2682,7 +2689,7 @@ class TestCodexProcessExited:
         from fido.codex import CodexAppServerClient, CodexProtocolError
 
         class _Process:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = io.StringIO()
                 self.stdout = io.StringIO(
                     '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
@@ -2727,7 +2734,7 @@ class TestCodexLeafBranches:
         from fido.codex import CodexAppServerClient
 
         class _NoStderrProcess:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = io.StringIO()
                 self.stdout = io.StringIO(
                     '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
@@ -2843,7 +2850,7 @@ class TestCodexSessionMisc:
     """Misc CodexSession leaf branches."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo"):
+    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo") -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -2904,7 +2911,7 @@ class TestCodexAppServerStdinStdout:
         from fido.codex import CodexAppServerClient, CodexProtocolError
 
         class _NoStdinProcess:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = None
                 self.stdout = io.StringIO(
                     '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
@@ -2944,7 +2951,7 @@ class TestCodexAppServerStdinStdout:
         from fido.codex import CodexAppServerClient, CodexProtocolError
 
         class _NoStdoutProcess:
-            def __init__(self, *_, **__) -> None:
+            def __init__(self, *_: object, **__: object) -> None:
                 self.stdin = io.StringIO()
                 self.stdout = None
                 self.stderr = io.StringIO()
@@ -2978,7 +2985,7 @@ class TestCodexSessionEnter:
     """Cover __enter__ paths involving register_talker (codex.py:915-937)."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo"):
+    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo") -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -3001,10 +3008,10 @@ class TestCodexSessionEnter:
         register_calls: list[str] = []
         unregister_calls: list[str] = []
 
-        def fake_register(talker):  # noqa: ARG001
+        def fake_register(talker: object) -> None:  # noqa: ARG001
             register_calls.append(talker.repo_name)
 
-        def fake_unregister(repo_name, thread_id):  # noqa: ARG001
+        def fake_unregister(repo_name: str, thread_id: int) -> None:  # noqa: ARG001
             unregister_calls.append(repo_name)
 
         with patch.object(
@@ -3029,7 +3036,7 @@ class TestCodexSessionEnter:
 
         session = self._build_session(tmp_path)
 
-        def explode(_talker):
+        def explode(_talker: object) -> Never:
             raise provider_module.SessionLeakError("test leak")
 
         with patch.object(provider_module, "register_talker", side_effect=explode):
@@ -3045,7 +3052,7 @@ class _FakeAppServerForCoverage:
     test_coverage_fills.py can import it without crossing the test boundary.
     """
 
-    def __init__(self, *, cwd=None) -> None:
+    def __init__(self, *, cwd: str = None) -> None:
         self.cwd = cwd
         self.pid = 456
         self.requests: list[tuple[str, dict]] = []
@@ -3054,7 +3061,9 @@ class _FakeAppServerForCoverage:
         self.stopped = False
         self.alive = True
 
-    def request(self, method, params=None, *, timeout=30.0):  # noqa: ARG002
+    def request(
+        self, method: str, params: object = None, *, timeout: float = 30.0
+    ) -> object:  # noqa: ARG002
         payload = params or {}
         self.requests.append((method, payload))
         response = self.responses.get(method)
@@ -3070,10 +3079,12 @@ class _FakeAppServerForCoverage:
             return {"turn": {"id": "turn-1"}}
         return {}
 
-    def notify(self, method, params=None) -> None:
+    def notify(self, method: str, params: object = None) -> None:
         self.requests.append((method, params or {}))
 
-    def wait_notification(self, method, *, predicate=None, timeout=30.0):  # noqa: ARG002
+    def wait_notification(
+        self, method: str, *, predicate: object = None, timeout: float = 30.0
+    ) -> object:  # noqa: ARG002
         for index, notification in enumerate(self.notifications):
             if method != "*" and notification["method"] != method:
                 continue

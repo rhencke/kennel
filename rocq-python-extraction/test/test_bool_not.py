@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from conftest import RenderedSourceAssert
 from primitives import (
     bool_and,
     bool_and_eq,
@@ -116,20 +119,20 @@ def test_lambda_call_head_round_trip() -> None:
     assert lambda_call_head(4) == 5
 
 
-def test_bool_and_lowers_to_native_and(build_default) -> None:
+def test_bool_and_lowers_to_native_and(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "return b1 and b2" in source
 
 
-def test_bool_or_lowers_to_native_or(build_default) -> None:
+def test_bool_or_lowers_to_native_or(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "def orb(" not in source
     assert "return b1 or b2" in source
 
 
-def test_bool_neg_lowers_to_native_not(build_default) -> None:
+def test_bool_neg_lowers_to_native_not(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "def negb(" not in source
@@ -137,8 +140,8 @@ def test_bool_neg_lowers_to_native_not(build_default) -> None:
 
 
 def test_bool_neg_and_preserves_precedence(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -150,8 +153,8 @@ def test_bool_neg_and_preserves_precedence(
 
 
 def test_bool_neg_or_preserves_precedence(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -163,8 +166,8 @@ def test_bool_neg_or_preserves_precedence(
 
 
 def test_bool_or_and_keeps_python_precedence(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -176,8 +179,8 @@ def test_bool_or_and_keeps_python_precedence(
 
 
 def test_bool_and_or_parenthesizes_or_operand(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -188,29 +191,29 @@ def test_bool_and_or_parenthesizes_or_operand(
     )
 
 
-def test_bool_eq_lowers_to_native_equality(build_default) -> None:
+def test_bool_eq_lowers_to_native_equality(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "def eqb(" not in source
     assert "return b1 == b2" in source
 
 
-def test_bool_lowering_helpers_are_suppressed(build_default) -> None:
+def test_bool_lowering_helpers_are_suppressed(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     for helper in ("andb", "orb", "negb", "eqb"):
         assert f"def {helper}(" not in source
 
 
-def test_bool_equality_operand_keeps_and_precedence(build_default) -> None:
+def test_bool_equality_operand_keeps_and_precedence(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "return b1 == b2 and b3" in source
 
 
 def test_bool_and_operand_is_parenthesized_for_equality(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -222,8 +225,8 @@ def test_bool_and_operand_is_parenthesized_for_equality(
 
 
 def test_option_nat_neq_lowers_to_direct_comparison(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     """Specifically the body of ``option_nat_neq`` must lower to
     ``return left != right`` — not the longer ``not (left == right)`` —
@@ -248,15 +251,15 @@ def test_option_nat_neq_lowers_to_direct_comparison(
     del assert_rendered_source
 
 
-def test_list_append_preserves_left_associative_grouping(build_default) -> None:
+def test_list_append_preserves_left_associative_grouping(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "return [h] + left + right" in source
 
 
 def test_nested_list_append_expressions_stay_flat(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -271,8 +274,8 @@ def test_nested_list_append_expressions_stay_flat(
 
 
 def test_list_append_low_precedence_children_are_parenthesized(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
@@ -295,7 +298,7 @@ def test_list_append_low_precedence_children_are_parenthesized(
     assert "return [0] if flag else [0 + 1] + right" not in body
 
 
-def test_lambda_call_head_is_parenthesized(build_default) -> None:
+def test_lambda_call_head_is_parenthesized(build_default: Path) -> None:
     """The call-head ``(fun f => f n)`` must be parenthesized so Python
     parses it as a callable rather than associating the trailing argument
     with the lambda body.  The extraction can either inline the inner
@@ -311,14 +314,14 @@ def test_lambda_call_head_is_parenthesized(build_default) -> None:
     assert inlined or hoisted
 
 
-def test_remapped_primitives_do_not_emit_unused_typevars(build_default) -> None:
+def test_remapped_primitives_do_not_emit_unused_typevars(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert '_A = TypeVar("_A")' not in source
     assert '_B = TypeVar("_B")' not in source
 
 
-def test_remapped_primitives_do_not_emit_section_comments(build_default) -> None:
+def test_remapped_primitives_do_not_emit_section_comments(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "remapped to Python primitive" not in source

@@ -117,7 +117,7 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         try:
             gh._get("/bad")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except Exception as e:
             assert "404" in str(e)
 
@@ -138,7 +138,7 @@ class TestGitHubClass:
         mock_s.post.return_value = mock_resp
         try:
             gh._post("/bad")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except Exception as e:
             assert "422" in str(e)
 
@@ -171,7 +171,7 @@ class TestGitHubClass:
         mock_s.patch.return_value = mock_resp
         try:
             gh._patch("/bad")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except Exception as e:
             assert "404" in str(e)
 
@@ -193,7 +193,7 @@ class TestGitHubClass:
         mock_s.put.return_value = mock_resp
         try:
             gh._put("/bad")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except Exception as e:
             assert "405" in str(e)
 

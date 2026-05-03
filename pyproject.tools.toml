@@ -1,20 +1,3 @@
-[tool.ruff]
-target-version = "py314"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "PLC2401", "W"]
-# PLC2401 = "non-ASCII characters in identifiers" — guards against the
-# Cyrillic-vs-Latin homoglyph trap (e.g. ``Rescоpe`` with Cyrillic ``о``
-# U+043E vs ``Rescope`` with Latin ``o`` U+006F) that bit us once and is
-# invisible to a human reader.
-ignore = ["E501"]
-
-[tool.ruff.lint.per-file-ignores]
-# Generated Rocq extraction output is format-checked by CI, but lint has
-# intentional noise: reusable runtime imports, type aliases Rocq erases, and
-# names copied from source terms.
-"src/fido/rocq/*.py" = ["E741", "F401", "F403", "F405", "F541", "F811", "F821", "F841", "I001"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests", "rocq-python-extraction/test"]
 addopts = "-n auto"

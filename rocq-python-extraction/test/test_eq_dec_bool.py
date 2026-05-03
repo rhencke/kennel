@@ -9,10 +9,12 @@ def in ``eq_dec_bool.py``; only the ``Left`` and ``Right`` constructor
 classes (the computational content of the Sumbool after erasure) appear.
 """
 
+from pathlib import Path
+
 from eq_dec_bool import Left, Right
 
 
-def test_sumbool_constructors_are_emitted(build_default) -> None:
+def test_sumbool_constructors_are_emitted(build_default: Path) -> None:
     """``Left`` and ``Right`` are the computational survivors of
     Prop-erasure on the Sumbool — they must still be reachable from
     Python."""
@@ -25,7 +27,9 @@ def test_sumbool_constructors_are_emitted(build_default) -> None:
     assert "class Right" in source
 
 
-def test_eq_dec_bool_function_is_suppressed_as_tag_predicate(build_default) -> None:
+def test_eq_dec_bool_function_is_suppressed_as_tag_predicate(
+    build_default: Path,
+) -> None:
     """The predicate body shapes as ``match d with Left _ -> true | Right
     _ -> false`` so the backend classifies it as a constructor tag
     predicate and inlines call sites with ``isinstance``.  Verify it

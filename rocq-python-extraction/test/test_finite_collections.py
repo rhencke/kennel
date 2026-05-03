@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import FiniteCollectionFixtures
+from conftest import RenderedSourceAssert
 
 fixtures = FiniteCollectionFixtures.FiniteCollectionFixtures
 
@@ -55,8 +58,8 @@ def test_string_maps_and_sets_have_sorted_views() -> None:
 
 
 def test_set_infix_lowerings_preserve_precedence(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
@@ -115,8 +118,8 @@ def test_set_infix_lowerings_preserve_precedence(
 
 
 def test_finite_collection_rule_shapes_are_characterized(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
@@ -144,8 +147,8 @@ def test_finite_collection_rule_shapes_are_characterized(
 
 
 def test_finite_collection_stdlib_refs_are_filtered_from_module_exports(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 

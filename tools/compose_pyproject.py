@@ -5,18 +5,24 @@ import argparse
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-FRAGMENTS = [
-    ROOT / "pyproject.project.toml",
-    ROOT / "pyproject.build.toml",
-    ROOT / "pyproject.tools.toml",
-]
+
+
+def _discover_fragments(root: Path = ROOT) -> list[Path]:
+    """Return ``pyproject.*.toml`` fragments present in ``root``.
+
+    Fragments are intentionally split across files so each Dockerfile stage can
+    COPY only what it needs — e.g. the typecheck stage skips
+    ``pyproject.ruff.toml`` so editing ruff config does not invalidate
+    pyright's cache. The glob means new fragments are picked up automatically
+    and missing-but-irrelevant fragments do not break composition.
+    """
+    return sorted(root.glob("pyproject.*.toml"))
 
 
 def _collect_leaf_paths(
-    value: Any, prefix: tuple[str, ...] = ()
+    value: object, prefix: tuple[str, ...] = ()
 ) -> set[tuple[str, ...]]:
     if isinstance(value, dict):
         paths: set[tuple[str, ...]] = set()
@@ -46,7 +52,7 @@ def compose_fragments(fragments: list[Path]) -> str:
 
 
 def compose() -> str:
-    return compose_fragments(FRAGMENTS)
+    return compose_fragments(_discover_fragments())
 
 
 def main() -> int:

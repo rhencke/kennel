@@ -2,11 +2,13 @@ from pathlib import Path
 
 from fido.rocq import pr_body_task_store as oracle
 
+_PENDING: oracle.TaskStatus = oracle.StatusPending()
+
 
 def _row(
     title: str,
     kind: oracle.TaskKind,
-    status: oracle.TaskStatus = oracle.StatusPending(),
+    status: oracle.TaskStatus = _PENDING,
     description: str = "",
 ) -> oracle.TaskRow:
     return oracle.TaskRow(

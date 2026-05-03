@@ -104,7 +104,7 @@ class TestGeneratePersonaEmoji:
 
 
 class TestSetGhStatus:
-    def test_happy_path(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_happy_path(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("You are Fido")
         mock_gh = MagicMock()
@@ -122,7 +122,7 @@ class TestSetGhStatus:
             "sniffing around", ":dog2:", busy=True
         )
 
-    def test_missing_persona_file(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_missing_persona_file(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         mock_gh = MagicMock()
         mock_client = _client()
         mock_client.run_turn.return_value = "woof"
@@ -141,7 +141,7 @@ class TestSetGhStatus:
         assert system.startswith("\n\n") or "rewriting a status" in system
         mock_gh.set_user_status.assert_called_once()
 
-    def test_creates_default_client_when_none(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_creates_default_client_when_none(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
@@ -155,7 +155,7 @@ class TestSetGhStatus:
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
         mock_gh.set_user_status.assert_called_once_with("woof", ":dog:", busy=True)
 
-    def test_tries_next_provider_when_first_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_tries_next_provider_when_first_fails(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
@@ -175,7 +175,7 @@ class TestSetGhStatus:
         mock_gh.set_user_status.assert_called_once_with("back soon", ":dog:", busy=True)
 
     def test_falls_back_to_generic_message_when_all_providers_fail(
-        self, tmp_path
+        self, tmp_path: Path
     ) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
@@ -211,7 +211,7 @@ class TestCandidateProviders:
 class TestDefaultProviderFactories:
     def test_raises_when_no_live_fido(self) -> None:
         with pytest.raises(RuntimeError, match="No running fido repo configs found"):
-            _default_provider_factories(_running_repo_configs_fn=lambda: [])
+            _default_provider_factories(_running_repo_configs_fn=list)
 
     def test_set_gh_status_propagates_when_no_live_fido(self, tmp_path: Path) -> None:
         persona_file = tmp_path / "persona.md"

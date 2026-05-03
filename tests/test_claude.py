@@ -170,7 +170,7 @@ class TestClaudeHelper:
 
 
 @pytest.fixture
-def session_resolver():
+def session_resolver() -> object:
     """Install a session resolver that returns a MagicMock session for any
     repo, and wire the thread-local repo so ``run_turn`` can find it.
     Yields the fake session so tests can assert on ``session.prompt.*``.
@@ -519,11 +519,11 @@ class TestRunStreamingTracksChildren:
         proc = self._make_proc(["one\n"])
         captured: list = []
 
-        def fake_popen(*args, **kwargs):
+        def fake_popen(*args: object, **kwargs: object) -> object:
             captured.append(proc in _active_children)
             return proc
 
-        def fake_select(rs, ws, xs, t):
+        def fake_select(rs: object, ws: object, xs: object, t: float) -> object:
             return (rs, [], [])
 
         list(
@@ -622,10 +622,10 @@ class TestRunStreamingTracksChildren:
 
         observed: list = []
 
-        def fake_popen(*args, **kwargs):
+        def fake_popen(*args: object, **kwargs: object) -> object:
             return proc
 
-        def fake_select(rs, ws, xs, t):
+        def fake_select(rs: object, ws: object, xs: object, t: float) -> object:
             observed.append(get_talker("owner/repo"))
             return (rs, [], [])
 
@@ -1068,7 +1068,9 @@ class TestClaudeSessionDrainToBoundary:
 
 
 class TestClaudeSessionLogEvent:
-    def test_assistant_text(self, tmp_path: Path, caplog) -> None:
+    def test_assistant_text(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1082,7 +1084,9 @@ class TestClaudeSessionLogEvent:
             )
         assert "claude>" in caplog.text and "thinking hard" in caplog.text
 
-    def test_tool_use_command(self, tmp_path: Path, caplog) -> None:
+    def test_tool_use_command(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1104,7 +1108,9 @@ class TestClaudeSessionLogEvent:
             )
         assert "claude tool: Bash" in caplog.text and "ls -la" in caplog.text
 
-    def test_tool_use_file_path(self, tmp_path: Path, caplog) -> None:
+    def test_tool_use_file_path(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1126,7 +1132,9 @@ class TestClaudeSessionLogEvent:
             )
         assert "claude tool: Read" in caplog.text and "/tmp/foo.py" in caplog.text
 
-    def test_tool_use_fallback_first_value(self, tmp_path: Path, caplog) -> None:
+    def test_tool_use_fallback_first_value(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1156,7 +1164,9 @@ class TestClaudeSessionLogEvent:
             {"type": "assistant", "message": {"content": ["not a dict"]}}
         )
 
-    def test_user_tool_result(self, tmp_path: Path, caplog) -> None:
+    def test_user_tool_result(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1172,7 +1182,9 @@ class TestClaudeSessionLogEvent:
             )
         assert "claude tool result" in caplog.text
 
-    def test_system_event(self, tmp_path: Path, caplog) -> None:
+    def test_system_event(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1181,7 +1193,9 @@ class TestClaudeSessionLogEvent:
             session._log_event({"type": "system", "subtype": "init"})
         assert "claude system: init" in caplog.text
 
-    def test_result_event(self, tmp_path: Path, caplog) -> None:
+    def test_result_event(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1190,7 +1204,9 @@ class TestClaudeSessionLogEvent:
             session._log_event({"type": "result", "result": "all done"})
         assert "claude result: all done" in caplog.text
 
-    def test_error_event(self, tmp_path: Path, caplog) -> None:
+    def test_error_event(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _l
 
         proc = _make_session_proc([])
@@ -1566,7 +1582,9 @@ class TestClaudeSessionStop:
         session.stop(grace_seconds=0.0)
         proc.kill.assert_called()
 
-    def test_raises_oserror_on_stdin_close(self, tmp_path: Path, caplog) -> None:
+    def test_raises_oserror_on_stdin_close(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         proc = _make_session_proc([])
         proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
         session = _make_session(tmp_path, proc)
@@ -1584,7 +1602,9 @@ class TestClaudeSessionStop:
             session.stop()
         assert proc not in _active_children  # outer finally must still unregister
 
-    def test_logs_oserror_on_wait(self, tmp_path: Path, caplog) -> None:
+    def test_logs_oserror_on_wait(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(side_effect=OSError("already gone"))
         session = _make_session(tmp_path, proc)
@@ -1593,7 +1613,7 @@ class TestClaudeSessionStop:
         assert any("wait failed" in r.message for r in caplog.records)
 
     def test_raises_and_logs_on_kill_after_timeout(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         proc = _make_session_proc([])
         proc.wait = MagicMock(
@@ -1911,7 +1931,9 @@ class TestClaudeSessionIsAliveAndReset:
         # cleanup
         session.stop()
 
-    def test_reset_logs_info(self, tmp_path: Path, caplog) -> None:
+    def test_reset_logs_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging as _logging
 
         system_file = tmp_path / "system.md"
@@ -1964,7 +1986,9 @@ class TestClaudeSessionIsAliveAndReset:
         assert session._proc is new_proc
         session.stop()
 
-    def test_reset_raises_oserror_on_kill(self, tmp_path: Path, caplog) -> None:
+    def test_reset_raises_oserror_on_kill(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1980,7 +2004,9 @@ class TestClaudeSessionIsAliveAndReset:
                 session.reset()
         assert any("kill/wait failed" in r.message for r in caplog.records)
 
-    def test_reset_raises_timeout_on_wait(self, tmp_path: Path, caplog) -> None:
+    def test_reset_raises_timeout_on_wait(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import subprocess as _subprocess
 
         system_file = tmp_path / "system.md"

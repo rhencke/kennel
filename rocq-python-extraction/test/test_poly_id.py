@@ -1,7 +1,9 @@
+from pathlib import Path
+
 from poly_id import poly_id
 
 
-def test_poly_id_universe_erasure(build_default) -> None:
+def test_poly_id_universe_erasure(build_default: Path) -> None:
     assert poly_id(7) == 7
     assert poly_id("woof") == "woof"
 

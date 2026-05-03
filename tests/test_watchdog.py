@@ -16,7 +16,12 @@ from fido.watchdog import (
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 

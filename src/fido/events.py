@@ -844,7 +844,7 @@ def queue_reply_tasks(
     *,
     thread: dict[str, Any] | None,
     is_bot: bool = False,
-    registry: Any = None,
+    registry: Any = None,  # noqa: ANN401  # WorkerRegistry-or-ActivityReporter; either works
     create_task_fn: Callable[..., object] | None = None,
 ) -> int:
     """Create any tasks implied by a reply outcome.
@@ -974,7 +974,7 @@ def recover_reply_promises(
                 (promise.promise_id, comment)
             )
 
-    for comment_pr, group in issue_groups.items():
+    for group in issue_groups.values():
         combined_parts: list[str] = []
         for _, group_comment in group:
             body = group_comment["body"] or ""
@@ -1904,8 +1904,8 @@ def _maybe_abort_for_new_task(
     new_task: dict[str, Any],
     registry: WorkerRegistry,
     *,
-    _state: Any = None,
-    _tasks: Any = None,
+    _state: State | None = None,
+    _tasks: Tasks | None = None,
 ) -> None:
     """Abort the current task if the new task has higher priority.
 
@@ -1960,9 +1960,8 @@ def _get_commit_summary(work_dir: Path) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            check=True,
         )
-        if result.returncode != 0:
-            return ""
         return result.stdout.strip()
     except subprocess.SubprocessError, OSError:
         return ""
@@ -2066,11 +2065,11 @@ def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple[str, str, str]
 
 def _rewrite_pr_description(
     work_dir: Path,
-    gh: Any,
+    gh: GitHub,
     *,
     agent: ProviderAgent | None = None,
-    _state: Any = None,
-    _tasks: Any = None,
+    _state: State | None = None,
+    _tasks: Tasks | None = None,
     _max_retries: int = 3,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
@@ -2153,7 +2152,7 @@ def _rewrite_pr_description(
 def _load_active_context_for_rescope(
     work_dir: Path,
     repo_name: str,
-    gh: Any,
+    gh: GitHub,
 ) -> tuple[ActiveIssue | None, ActivePR | None]:
     """Read issue/PR snapshots from state and GitHub for the rescope prompt.
 
@@ -2194,7 +2193,7 @@ def _make_reorder_kwargs(
     config: Config,
     repo_cfg: RepoConfig | None,
     registry: WorkerRegistry | None,
-    gh: Any,
+    gh: GitHub,
     agent: ProviderAgent,
     prompts: Prompts,
     rewrite_fn: Callable[..., None],

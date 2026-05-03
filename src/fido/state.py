@@ -40,11 +40,11 @@ class JsonFileStore(ABC):
         """Path to the flock target file.  Defaults to :attr:`_data_path`."""
         return self._data_path
 
-    def _default(self) -> Any:
+    def _default(self) -> object:
         """Value yielded when the data file is absent or empty."""
         return {}
 
-    def _validate(self, data: Any) -> None:
+    def _validate(self, data: object) -> None:
         """Validate loaded data.  Raise :exc:`ValueError` if invalid.
 
         Called by :meth:`modify` after deserialising the JSON and before

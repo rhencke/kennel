@@ -857,7 +857,9 @@ class TestApplyReorder:
         titles = {t["id"]: t["title"] for t in result}
         assert titles == {"1": "Old A", "2": "Old B", "3": "Old C"}
 
-    def test_duplicate_title_rewrites_do_not_log_warning(self, caplog) -> None:
+    def test_duplicate_title_rewrites_do_not_log_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
         items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
         _apply_reorder(current, items)
@@ -1061,7 +1063,9 @@ class TestFindDuplicateTitles:
 
 
 class TestReorderTasks:
-    def _add(self, tmp_path: Path, title: str, task_type=TaskType.SPEC) -> dict:
+    def _add(
+        self, tmp_path: Path, title: str, task_type: TaskType = TaskType.SPEC
+    ) -> dict:
         return add_task(tmp_path, title=title, task_type=task_type)
 
     def _response(self, items: list[dict]) -> str:
@@ -1158,7 +1162,7 @@ class TestReorderTasks:
         t1 = self._add(tmp_path, "Original task")
         new_task_id: list[str] = []
 
-        def slow_run_turn(prompt, *, model=None, **kw):
+        def slow_run_turn(prompt: str, *, model: object = None, **kw: object) -> object:
             # Simulate a new task arriving while Opus is running
             t2 = add_task(
                 tmp_path, title="Arrived mid-reorder", task_type=TaskType.SPEC
@@ -1777,7 +1781,9 @@ class TestTasksCompleteWithResolve:
             Tasks(work_dir).complete_with_resolve("nonexistent-id", gh)
         mock_sync.assert_called_once_with(work_dir, gh)
 
-    def test_resolves_thread_when_we_are_last(self, tmp_path: Path, caplog) -> None:
+    def test_resolves_thread_when_we_are_last(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         work_dir = self._work_dir(tmp_path)
@@ -1806,7 +1812,7 @@ class TestTasksCompleteWithResolve:
         assert "thread resolved: thread_node_abc" in caplog.text
 
     def test_skips_resolve_when_not_last_commenter(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -1897,7 +1903,7 @@ class TestTasksCompleteWithResolve:
         gh.resolve_thread.assert_not_called()
 
     def test_skips_resolve_when_pending_sibling_task_remains(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
@@ -1933,7 +1939,9 @@ class TestTasksCompleteWithResolve:
         gh.resolve_thread.assert_not_called()
         assert "pending same-thread work" in caplog.text
 
-    def test_exception_silenced_and_logged(self, tmp_path: Path, caplog) -> None:
+    def test_exception_silenced_and_logged(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
         work_dir = self._work_dir(tmp_path)

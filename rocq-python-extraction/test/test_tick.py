@@ -1,7 +1,9 @@
+from pathlib import Path
+
 from tick import StateT, tick
 
 
-def test_tick_extracts_to_state_class(build_default) -> None:
+def test_tick_extracts_to_state_class(build_default: Path) -> None:
     assert isinstance(tick, StateT)
     assert tick.run(41) == 41
     assert tick.state == 42
@@ -26,7 +28,7 @@ def test_tick_extracts_to_state_class(build_default) -> None:
     assert "def put_state" in runtime
 
 
-def test_state_monad_marker_calls_lower_to_runtime_methods(build_default) -> None:
+def test_state_monad_marker_calls_lower_to_runtime_methods(build_default: Path) -> None:
     source = (build_default / "tick.py").read_text()
 
     for snippet in (

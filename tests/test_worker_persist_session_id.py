@@ -3,14 +3,17 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Never
 from unittest.mock import MagicMock
+
+import pytest
 
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.worker import WorkerThread
 
 
-def _make_thread(tmp_path: Path, **kwargs) -> WorkerThread:
+def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     gh = MagicMock(spec=GitHub)
     kwargs.setdefault("issue_cache", IssueTreeCache("owner/repo"))
     return WorkerThread(
@@ -52,14 +55,14 @@ def test_load_persisted_session_id_none_when_not_a_git_repo(tmp_path: Path) -> N
 
 
 def test_load_persisted_session_id_handles_state_load_oserror(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fido_dir = _init_git_repo(tmp_path)
     (fido_dir / "state.json").write_text(json.dumps({"session_id": "abc"}))
     thread = _make_thread(tmp_path)
     from fido import state as state_mod
 
-    def boom(self):
+    def boom(self: object) -> Never:
         raise OSError("permission denied")
 
     monkeypatch.setattr(state_mod.State, "load", boom)
@@ -140,7 +143,7 @@ def test_persist_session_id_noop_when_fido_dir_unresolvable(tmp_path: Path) -> N
 
 
 def test_persist_session_id_swallows_state_modify_oserror(
-    tmp_path: Path, monkeypatch, caplog
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
 
@@ -155,7 +158,7 @@ def test_persist_session_id_swallows_state_modify_oserror(
     from fido import state as state_mod
 
     @contextmanager
-    def boom(self):
+    def boom(self: object) -> object:
         raise OSError("state.json locked by another process")
         yield  # unreachable
 
@@ -210,7 +213,9 @@ def test_retire_poisoned_session_clears_session_issue(tmp_path: Path) -> None:
     assert thread._session_issue is None  # pyright: ignore[reportPrivateUsage]
 
 
-def test_retire_poisoned_session_logs_warning(tmp_path: Path, caplog) -> None:
+def test_retire_poisoned_session_logs_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     import logging
 
     _init_git_repo(tmp_path)
@@ -242,7 +247,7 @@ def test_retire_poisoned_session_noop_when_no_session(tmp_path: Path) -> None:
 
 
 def test_retire_poisoned_session_swallows_state_modify_oserror(
-    tmp_path: Path, monkeypatch, caplog
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
     from contextlib import contextmanager
@@ -253,7 +258,7 @@ def test_retire_poisoned_session_swallows_state_modify_oserror(
     thread = _make_thread(tmp_path)
 
     @contextmanager
-    def boom(self):
+    def boom(self: object) -> object:
         raise OSError("state.json locked")
         yield  # unreachable
 

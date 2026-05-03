@@ -13,7 +13,10 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import IO, TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from fido.events import Action
 
 import requests as _requests
 
@@ -969,7 +972,7 @@ def _extract_body(raw: str | None) -> str:
 
 def _write_pr_description(
     work_dir: Path,
-    gh: Any,
+    gh: GitHub,
     repo: str,
     pr_number: int,
     issue: int,
@@ -2479,7 +2482,7 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> Any | None:
+    ) -> "Action | None":
         if queued.comment_type == "pulls":
             return self._queued_review_comment_action(queued, repo, pr_title, pr_body)
         return self._queued_issue_comment_action(queued, repo, pr_title, pr_body)
@@ -2487,7 +2490,7 @@ class Worker:
     def _reply_to_queued_comment(
         self,
         queued: PRCommentQueueRecord,
-        action: Any,
+        action: "Action",
         config: Config,
         repo_cfg: RepoConfig,
     ) -> tuple[str, list[str]]:
@@ -2517,7 +2520,7 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> Any | None:
+    ) -> "Action | None":
         from fido import events
 
         comment = self.gh.get_pull_comment(repo, queued.comment_id)
@@ -2540,7 +2543,7 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> Any | None:
+    ) -> "Action | None":
         from fido import events
 
         comment = self.gh.get_issue_comment(repo, queued.comment_id)
@@ -3778,14 +3781,19 @@ class Worker:
             )
 
     def _git_config_get(self, key: str) -> str:
-        """Return ``git config --get <key>`` in the workspace, empty on unset."""
-        result = subprocess.run(
+        """Return ``git config --get <key>`` in the workspace.
+
+        Raises ``CalledProcessError`` when the key is unset — for the only
+        callers (``user.name``/``user.email`` for the git-identity invariant)
+        an unset key is a real config bug, not a graceful-degradation case.
+        """
+        return subprocess.run(
             ["git", "config", "--get", key],
             cwd=self.work_dir,
             capture_output=True,
             text=True,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
+            check=True,
+        ).stdout.strip()
 
     def run(self) -> int:
         """Run one iteration of the worker loop.

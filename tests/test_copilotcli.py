@@ -257,13 +257,13 @@ class FakeAgentContext:
         self._process.returncode = 0
 
 
-def _spawn_factory(*connections: FakeConnection):
+def _spawn_factory(*connections: FakeConnection) -> object:
     available = list(connections)
 
     @asynccontextmanager
     async def spawn(
         client: _CopilotACPClient, command: str, *args: str, **kwargs: object
-    ):
+    ) -> object:
         del command, args, kwargs
         connection = available.pop(0)
         context = FakeAgentContext(client, connection)
@@ -456,7 +456,7 @@ class TestTerminalManager:
 
         process = TimeoutProcess()
 
-        def popen(*args, **kwargs):
+        def popen(*args: object, **kwargs: object) -> object:
             del args
             process.last_env = kwargs["env"]
             return process
@@ -548,7 +548,7 @@ class TestCopilotACPRuntime:
         @asynccontextmanager
         async def spawn(
             client: _CopilotACPClient, command: str, *args: str, **kwargs: object
-        ):
+        ) -> object:
             del command, args
             seen_kwargs.update(kwargs)
             context = FakeAgentContext(client, FakeConnection())
@@ -787,7 +787,9 @@ class TestCopilotACPRuntime:
         with pytest.raises(RuntimeError, match="runtime is stopped"):
             runtime._run_async(object())  # pyright: ignore[reportPrivateUsage]
 
-    def test_logs_tool_activity_with_repo_name(self, tmp_path: Path, caplog) -> None:
+    def test_logs_tool_activity_with_repo_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             repo_name="owner/orly",
@@ -824,7 +826,9 @@ class TestCopilotACPRuntime:
         finally:
             runtime.stop()
 
-    def test_logs_tool_fallback_branches(self, tmp_path: Path, caplog) -> None:
+    def test_logs_tool_fallback_branches(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             repo_name="owner/orly",
@@ -1235,7 +1239,9 @@ class TestCopilotCLISession:
         thread.join(timeout=1.0)
         assert runtime.cancel_calls == []
 
-    def test_prompt_logs_transcript(self, tmp_path: Path, caplog) -> None:
+    def test_prompt_logs_transcript(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("persona")
         runtime = FakeRuntime()
@@ -1704,7 +1710,9 @@ class TestCopilotCLIClient:
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         assert client._run_cli_prompt("body", model="claude-opus-4-6", timeout=1) == ""
 
-    def test_cli_prompt_logs_transcript(self, tmp_path: Path, caplog) -> None:
+    def test_cli_prompt_logs_transcript(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         runner = MagicMock(return_value=_completed(_copilot_output("cli result")))
         client = CopilotCLIClient(
             runner=runner,

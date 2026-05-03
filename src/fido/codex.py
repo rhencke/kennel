@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn, Protocol
 
-import fido.provider as provider
+from fido import provider
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
@@ -99,7 +99,7 @@ class CodexAppServer(Protocol):
 
     def request(
         self, method: str, params: dict[str, Any] | None = None, *, timeout: float = ...
-    ) -> Any: ...
+    ) -> object: ...
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None: ...
 
@@ -222,7 +222,7 @@ class CodexAppServerClient:
         params: dict[str, Any] | None = None,
         *,
         timeout: float = _CODEX_APP_SERVER_TIMEOUT,
-    ) -> Any:
+    ) -> object:
         request_id = self._next_request_id()
         self._write({"id": request_id, "method": method, "params": params or {}})
         deadline = time.monotonic() + timeout
@@ -1011,7 +1011,7 @@ class CodexSession(OwnedSession):
         return final_text
 
 
-def _thread_id_from_result(result: Any) -> str:
+def _thread_id_from_result(result: object) -> str:
     thread = result.get("thread") if isinstance(result, dict) else None
     thread_id = thread.get("id") if isinstance(thread, dict) else None
     if not isinstance(thread_id, str) or not thread_id:

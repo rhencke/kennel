@@ -10,12 +10,12 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import acp
 from acp.exceptions import RequestError
@@ -48,6 +48,8 @@ from fido.provider import (
 from fido.session_agent import SessionBackedAgent
 
 log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 _COPILOT_COMMAND = ("copilot", "--acp", "--allow-all")
 _COPILOT_JSON_BASE_ARGS = (
@@ -187,7 +189,7 @@ def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
     lowered = normalized.model.lower()
     if lowered.startswith("claude-haiku"):
         return ProviderModel("claude-haiku-4.5", normalized.effort)
-    if lowered.startswith("claude-opus") or lowered.startswith("claude-sonnet"):
+    if lowered.startswith(("claude-opus", "claude-sonnet")):
         return ProviderModel("gpt-4.1", normalized.effort)
     return normalized
 
@@ -358,7 +360,7 @@ class _TerminalManager:
             reader.start()
         return terminal_id
 
-    def _read_stream(self, record: _TerminalRecord, stream: Any) -> None:
+    def _read_stream(self, record: _TerminalRecord, stream: Any) -> None:  # noqa: ANN401  # asyncio stream protocol
         try:
             for chunk in iter(lambda: stream.read(4096), ""):
                 if not chunk:
@@ -423,7 +425,7 @@ class _CopilotACPClient:
         session_id: str,
         limit: int | None = None,
         line: int | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.ReadTextFileResponse:
         del session_id, kwargs
         text = Path(path).read_text()
@@ -438,7 +440,7 @@ class _CopilotACPClient:
         content: str,
         path: str,
         session_id: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.WriteTextFileResponse:
         del session_id, kwargs
         target = Path(path)
@@ -454,7 +456,7 @@ class _CopilotACPClient:
         cwd: str | None = None,
         env: list[EnvVariable] | None = None,
         output_byte_limit: int | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.CreateTerminalResponse:
         del session_id, kwargs
         terminal_id = self._terminals.create(
@@ -470,7 +472,7 @@ class _CopilotACPClient:
         self,
         session_id: str,
         terminal_id: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.TerminalOutputResponse:
         del session_id, kwargs
         output, truncated, exit_code, signal_name = self._terminals.output(terminal_id)
@@ -490,7 +492,7 @@ class _CopilotACPClient:
         self,
         session_id: str,
         terminal_id: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.WaitForTerminalExitResponse:
         del session_id, kwargs
         exit_code, signal_name = await asyncio.to_thread(
@@ -505,7 +507,7 @@ class _CopilotACPClient:
         self,
         session_id: str,
         terminal_id: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.KillTerminalResponse:
         del session_id, kwargs
         await asyncio.to_thread(self._terminals.kill, terminal_id)
@@ -515,7 +517,7 @@ class _CopilotACPClient:
         self,
         session_id: str,
         terminal_id: str,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.ReleaseTerminalResponse:
         del session_id, kwargs
         await asyncio.to_thread(self._terminals.release, terminal_id)
@@ -526,7 +528,7 @@ class _CopilotACPClient:
         options: list[PermissionOption],
         session_id: str,
         tool_call: ToolCallUpdate,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> acp.RequestPermissionResponse:
         del session_id, tool_call, kwargs
         for option in options:
@@ -541,8 +543,8 @@ class _CopilotACPClient:
     async def session_update(
         self,
         session_id: str,
-        update: Any,
-        **kwargs: Any,
+        update: dict[str, Any],
+        **kwargs: Any,  # noqa: ANN401  # session-update JSON pass-through,
     ) -> None:
         del kwargs
         self._runtime.record_session_update(session_id, update)
@@ -676,7 +678,7 @@ class CopilotACPRuntime:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
 
-    def record_session_update(self, session_id: str, update: Any) -> None:
+    def record_session_update(self, session_id: str, update: dict[str, Any]) -> None:
         if session_id != self._active_prompt_session_id:
             return
         update_type = getattr(update, "session_update", "")
@@ -692,7 +694,7 @@ class CopilotACPRuntime:
         if update_type == "tool_call_update":
             self._log_tool_result(update)
 
-    def _log_tool_call(self, update: Any) -> None:
+    def _log_tool_call(self, update: dict[str, Any]) -> None:
         tool_call_id = getattr(update, "tool_call_id", None)
         if (
             not isinstance(tool_call_id, str)
@@ -709,7 +711,7 @@ class CopilotACPRuntime:
             return
         self.log_info("copilot tool: %s", title)
 
-    def _log_tool_result(self, update: Any) -> None:
+    def _log_tool_result(self, update: dict[str, Any]) -> None:
         tool_call_id = getattr(update, "tool_call_id", None)
         if (
             not isinstance(tool_call_id, str)
@@ -911,7 +913,7 @@ class CopilotACPRuntime:
             return False
         return bool(getattr(capabilities, "load_session", False))
 
-    def _run_async(self, coro: Any) -> Any:
+    def _run_async(self, coro: Coroutine[object, object, _T]) -> _T:
         if self._stopped:
             raise RuntimeError("Copilot ACP runtime is stopped")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)

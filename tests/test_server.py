@@ -30,11 +30,16 @@ from fido.store import FidoStore
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 
-def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
+def _client(return_value: str = "", *, side_effect: object = None) -> MagicMock:
     client = MagicMock(spec=ClaudeClient)
     client.voice_model = "claude-opus-4-6"
     client.work_model = "claude-sonnet-4-6"
@@ -102,7 +107,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _restore_handler_fns():
+def _restore_handler_fns() -> object:
     saved = {
         "gh": WebhookHandler.gh,
         "_fn_dispatch": WebhookHandler._fn_dispatch,
@@ -139,13 +144,13 @@ def _restore_handler_fns():
 
 
 @pytest.fixture(autouse=True)
-def _stub_provider_statuses():
+def _stub_provider_statuses() -> object:
     with patch("fido.server.provider_statuses_for_repo_configs", return_value={}):
         yield
 
 
 @pytest.fixture()
-def server(tmp_path: Path):
+def server(tmp_path: Path) -> object:
     cfg = _config(tmp_path)
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
@@ -341,7 +346,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
             death_count=3,
             last_error="RuntimeError: boom",
-            last_crash_time=datetime(2026, 1, 1),
+            last_crash_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         WebhookHandler.registry.is_stale.return_value = False
         WebhookHandler.registry.thread_started_at.return_value = None
@@ -864,7 +869,7 @@ class TestGetEndpoint:
 class TestCollectFidoState:
     """Unit tests for _collect_fido_state covering edge-case branches."""
 
-    def _now(self) -> Any:
+    def _now(self) -> object:
         from datetime import datetime, timezone
 
         return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -2136,13 +2141,12 @@ class TestProcessAction:
         }
         call_order: list[str] = []
 
-        def fake_dispatch(*_args, **_kwargs):
+        def fake_dispatch(*_args: object, **_kwargs: object) -> None:
             call_order.append("dispatch")
-            return None
 
         original_respond = WebhookHandler._respond
 
-        def fake_respond(self, code, msg):
+        def fake_respond(self: object, code: int, msg: str) -> None:
             call_order.append(f"respond_{code}")
             original_respond(self, code, msg)
 
@@ -3351,7 +3355,7 @@ class TestRun:
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         installed: dict[int, object] = {}
 
-        def fake_signal(signum, handler):
+        def fake_signal(signum: int, handler: object) -> None:
             installed[signum] = handler
 
         run(
@@ -3381,7 +3385,7 @@ class TestRun:
         mock_kill = MagicMock()
         captured: dict[int, object] = {}
 
-        def fake_signal(signum, handler):
+        def fake_signal(signum: int, handler: object) -> None:
             captured[signum] = handler
 
         run(
@@ -3421,7 +3425,7 @@ class TestRun:
 
         captured_kwargs: list[dict] = []
 
-        def fake_basic_config(**kwargs):
+        def fake_basic_config(**kwargs: object) -> None:
             captured_kwargs.append(kwargs)
 
         run(
@@ -3451,7 +3455,7 @@ class TestRun:
 
         captured_handlers: list = []
 
-        def fake_basic_config(**kwargs):
+        def fake_basic_config(**kwargs: object) -> None:
             captured_handlers.extend(kwargs.get("handlers", []))
 
         run(
@@ -3520,7 +3524,7 @@ class TestRun:
         captured_handlers: list = []
         fake_stderr = MagicMock()
 
-        def fake_basic_config(**kwargs):
+        def fake_basic_config(**kwargs: object) -> None:
             captured_handlers.extend(kwargs.get("handlers", []))
 
         run(
@@ -3564,7 +3568,7 @@ class TestRun:
 
         captured_handlers: list = []
 
-        def fake_basic_config(**kwargs):
+        def fake_basic_config(**kwargs: object) -> None:
             captured_handlers.extend(kwargs.get("handlers", []))
 
         run(
@@ -3858,7 +3862,7 @@ class _FakeProcessRunner:
     def call_count(self) -> int:
         return len(self.calls)
 
-    def run(self, cmd: Any, **kwargs: Any) -> Any:
+    def run(self, cmd: object, **kwargs: object) -> object:
         self.calls.append((cmd, kwargs))
         if self._error is not None:
             raise self._error
@@ -3896,10 +3900,10 @@ class _FakeOsProcess:
     def exit(self, code: int) -> None:
         self.exit_calls.append(code)
 
-    def chdir(self, path: Any) -> None:
+    def chdir(self, path: object) -> None:
         self.chdir_calls.append(path)
 
-    def install_signal(self, signum: Any, handler: Any) -> Any:
+    def install_signal(self, signum: int, handler: object) -> object:
         return None
 
 
@@ -4399,7 +4403,7 @@ class TestPullWithBackoff:
 class TestSelfRestart:
     """Tests for the self-restart flow."""
 
-    def _make_server(self, tmp_path: Path):
+    def _make_server(self, tmp_path: Path) -> object:
         cfg = _self_restart_cfg(tmp_path)
         mock_registry = MagicMock()
         WebhookHandler.config = cfg
@@ -4445,7 +4449,7 @@ class TestSelfRestart:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
             call_log: list[str] = []
 
-            def _kill():
+            def _kill() -> None:
                 call_log.append("kill_active_children")
 
             real_stop_all = mock_registry.stop_all
@@ -4458,7 +4462,7 @@ class TestSelfRestart:
 
             os_proc = _FakeOsProcess()
 
-            def _tracking_exit(code):  # type: ignore[no-untyped-def]
+            def _tracking_exit(code: int) -> None:  # type: ignore[no-untyped-def]
                 call_log.append(f"exit:{code}")
                 os_proc.exit_calls.append(code)
 
@@ -4627,7 +4631,7 @@ class TestSelfRestart:
         finally:
             srv.shutdown()
 
-    def _make_unregistered_server(self, tmp_path: Path):
+    def _make_unregistered_server(self, tmp_path: Path) -> object:
         """Server whose config does NOT include the fido repo."""
         from fido.config import RepoMembership
 

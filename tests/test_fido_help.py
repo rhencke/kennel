@@ -1,7 +1,9 @@
+import pytest
+
 from fido.fido_help import main
 
 
-def test_help_lists_commands(capsys) -> None:  # type: ignore[no-untyped-def]
+def test_help_lists_commands(capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
     main()
 
     out = capsys.readouterr().out

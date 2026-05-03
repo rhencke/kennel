@@ -1,8 +1,10 @@
+from pathlib import Path
+
 from option_chain import option_chain
 from option_chain_twice import option_chain_twice
 
 
-def test_option_chain_uses_none_short_circuit(build_default) -> None:
+def test_option_chain_uses_none_short_circuit(build_default: Path) -> None:
     assert option_chain(None) is None
     assert option_chain(4) == 5
 
@@ -11,7 +13,7 @@ def test_option_chain_uses_none_short_circuit(build_default) -> None:
     assert "__PYMONAD_OPTION_BIND__" not in source
 
 
-def test_nested_option_bind_child_preserves_precedence(build_default) -> None:
+def test_nested_option_bind_child_preserves_precedence(build_default: Path) -> None:
     assert option_chain_twice(None) is None
     assert option_chain_twice(4) == 6
 

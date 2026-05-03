@@ -10,10 +10,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import IO, Any
+from typing import IO
 
 from fido.rocq_pymap import PyMap, PyMapError
 
@@ -314,7 +315,7 @@ class OcamlReference:
         repo_root: Path,
         model: LoadedModel,
         stderr: IO[str],
-        run: Any = subprocess.run,
+        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
         self._repo_root = repo_root
         self._model = model

@@ -112,7 +112,7 @@ class _FakeAppServer:
         self,
         method: str,
         *,
-        predicate=None,
+        predicate: object = None,
         timeout: float = 30.0,
     ) -> dict:
         self.notification_timeouts.append(timeout)
@@ -180,13 +180,7 @@ class TestCodexJsonlParsing:
         assert extract_result_text(_fixture("normal.jsonl")) == "final reply"
 
     def test_extract_result_text_ignores_non_agent_items(self) -> None:
-        output = "\n".join(
-            [
-                "not-json",
-                '{"type":"item.completed","item":{"id":"x","type":"reasoning","text":"ignore"}}',
-                '{"type":"item.completed","item":{"id":"y","type":"agent_message","text":"ok"}}',
-            ]
-        )
+        output = 'not-json\n{"type":"item.completed","item":{"id":"x","type":"reasoning","text":"ignore"}}\n{"type":"item.completed","item":{"id":"y","type":"agent_message","text":"ok"}}'
         assert extract_result_text(output) == "ok"
 
 
@@ -383,7 +377,7 @@ class TestCodexAppServerClient:
             def close(self) -> None:
                 self._closed = True
 
-            def __iter__(self):
+            def __iter__(self) -> object:
                 while True:
                     line = self.readline()
                     if not line:

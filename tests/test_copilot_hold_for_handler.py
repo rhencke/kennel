@@ -15,13 +15,13 @@ class FakeRuntime:
         self.dropped_session_count = 0
         self.pid = None
 
-    def ensure_session(self, session_id, model):  # noqa: ARG002
+    def ensure_session(self, session_id: str, model: object) -> object:  # noqa: ARG002
         return self._session_id
 
-    def recover_session(self, session_id, model):  # noqa: ARG002
+    def recover_session(self, session_id: str, model: object) -> object:  # noqa: ARG002
         return self._session_id
 
-    def reset_session(self, model):  # noqa: ARG002
+    def reset_session(self, model: object) -> object:  # noqa: ARG002
         return self._session_id
 
     def cancel(self, session_id: str) -> None:
@@ -33,7 +33,7 @@ class FakeRuntime:
     def stop(self) -> None:
         pass
 
-    def prompt(self, session_id, content, model):  # noqa: ARG002
+    def prompt(self, session_id: str, content: str, model: object) -> object:  # noqa: ARG002
         return "ok", "completed", session_id
 
 

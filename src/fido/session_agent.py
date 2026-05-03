@@ -72,7 +72,7 @@ class SessionBackedAgent:
             session = self._session
         if session is None or not hasattr(session, "session_id"):
             return None
-        session_id = getattr(session, "session_id")
+        session_id = session.session_id
         return session_id if isinstance(session_id, str) and session_id else None
 
     @property
@@ -81,8 +81,8 @@ class SessionBackedAgent:
             session = self._session
         if session is None or not hasattr(session, "dropped_session_count"):
             return 0
-        dropped = getattr(session, "dropped_session_count")
-        return dropped if isinstance(dropped, int) and dropped >= 0 else 0
+        dropped = session.dropped_session_count
+        return dropped if dropped >= 0 else 0
 
     @property
     def session_sent_count(self) -> int:

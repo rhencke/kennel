@@ -19,7 +19,12 @@ from fido.rocq import worker_registry_crash as registry_fsm
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 
@@ -131,15 +136,15 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
-        for call_result in factory.side_effect:
+        for _call_result in factory.side_effect:
             # side_effect is exhausted; check via factory call args
             pass
         # Each mock returned by the factory should have stop() called once
         assert factory.call_count == 2
-        for mock_thread in [factory.return_value] + list(factory.side_effect or []):
+        for _mock_thread in [factory.return_value] + list(factory.side_effect or []):
             pass  # can't reuse side_effect after exhaustion; use call_args_list
         # Re-verify via the two distinct mock objects captured from calls
-        thread_a = factory.call_args_list[0]  # noqa: F841 - structural check
+        _thread_a = factory.call_args_list[0]  # structural check
         assert factory.return_value is not None  # sanity
 
     def test_stop_all_calls_stop_count(self, tmp_path: Path) -> None:
@@ -538,10 +543,10 @@ class TestWorkerRegistry:
     def test_record_crash_sets_last_crash_time(self) -> None:
         import datetime as dt
 
-        before = dt.datetime.now()
+        before = dt.datetime.now(tz=dt.timezone.utc)
         reg, _ = self._make_registry()
         reg.record_crash("foo/bar", "oops")
-        after = dt.datetime.now()
+        after = dt.datetime.now(tz=dt.timezone.utc)
         info = reg.get_crash_info("foo/bar")
         assert info is not None
         assert before <= info.last_crash_time <= after
@@ -595,7 +600,7 @@ class TestWorkerRegistry:
     def test_worker_crash_dataclass_fields(self) -> None:
         import datetime as dt
 
-        ts = dt.datetime(2026, 1, 1, 12, 0, 0)
+        ts = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         crash = WorkerCrash(death_count=3, last_error="oops", last_crash_time=ts)
         assert crash.death_count == 3
         assert crash.last_error == "oops"

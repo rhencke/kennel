@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from primitives import pair_first, pair_second, pair_swap
 
 
@@ -19,7 +21,7 @@ def test_pair_projection_round_trip() -> None:
     assert pair_second((7, False)) is False
 
 
-def test_pair_projection_lowers_to_index_access(build_default) -> None:
+def test_pair_projection_lowers_to_index_access(build_default: Path) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "def fst(" not in source

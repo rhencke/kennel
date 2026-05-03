@@ -1,6 +1,8 @@
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
+from conftest import RenderedSourceAssert
 from n_case import n_case
 from n_seven import n_seven
 from nat_compare_and import nat_compare_and
@@ -68,8 +70,8 @@ def test_q_extracts_to_fraction_with_normalized_fields() -> None:
 
 
 def test_positive_equality_lowers_without_pos_protocol(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "positive_eq.py").read_text()
 
@@ -85,8 +87,8 @@ def test_positive_equality_lowers_without_pos_protocol(
 
 
 def test_numeric_stdlib_operation_declarations_are_suppressed(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     compare_and_source = (build_default / "nat_compare_and.py").read_text()
     compare_or_source = (build_default / "nat_compare_or.py").read_text()
@@ -112,8 +114,8 @@ def test_numeric_stdlib_operation_declarations_are_suppressed(
 
 
 def test_numeric_constructor_constants_render_as_literals(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     assert_rendered_source(
         (build_default / "nat_three.py").read_text(),
@@ -138,8 +140,8 @@ def test_numeric_constructor_constants_render_as_literals(
 
 
 def test_primitive_comparisons_compose_with_bool_ops(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     compare_and = (build_default / "nat_compare_and.py").read_text()
     compare_or = (build_default / "nat_compare_or.py").read_text()
@@ -175,8 +177,8 @@ def test_primitive_comparisons_compose_with_bool_ops(
 
 
 def test_primitive_comparison_as_equality_operand_is_parenthesized(
-    build_default,
-    assert_rendered_source,
+    build_default: Path,
+    assert_rendered_source: RenderedSourceAssert,
 ) -> None:
     source = (build_default / "nat_compare_bool_eq.py").read_text()
 
