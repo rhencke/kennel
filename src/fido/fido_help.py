@@ -25,7 +25,8 @@ Commands:
   lsp               Query Rocq navigation, actions, graph, rename, and tokens.
   ruff              Run ruff from the prebuilt container toolchain.
   pyright           Run pyright from the prebuilt container toolchain.
-  pytest            Run pytest from the prebuilt container toolchain."""
+  pytest            Run pytest from the prebuilt container toolchain.
+  smoke             Run the Codex app-server smoke test."""
     )
 
 

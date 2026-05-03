@@ -8,8 +8,6 @@ that no other test currently covers.  Tests are grouped by source
 module.
 """
 
-from __future__ import annotations
-
 import io
 import queue
 from pathlib import Path

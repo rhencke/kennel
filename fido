@@ -1095,6 +1095,9 @@ case "$command" in
   pytest)
     run_fido_pyproject_image_capped pytest "${@:2}"
     ;;
+  smoke)
+    run_fido_test_python_image tools/codex_appserver_smoke.py "${@:2}"
+    ;;
   *)
     echo "unsupported fido command: $command" >&2
     echo "run ./fido help for supported commands" >&2

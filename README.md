@@ -105,7 +105,7 @@ Extra arguments are passed through to `docker buildx bake` before the
 `make-rocq` target:
 
 ```bash
-./fido make-rocq --no-cache
+./fido make-rocq --set='*.args.ROCQ_JOBS=4'
 ```
 
 All Python checks run inside buildx bake targets. Rocq test artifacts are

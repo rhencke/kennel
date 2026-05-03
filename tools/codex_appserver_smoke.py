@@ -4,9 +4,9 @@
 This is intentionally not part of CI: it talks to the local Codex install and
 account. Run it when changing Codex app-server integration code:
 
-    PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py --turn
-    PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py --resume
-    PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py --interrupt
+    ./fido smoke --turn
+    ./fido smoke --resume
+    ./fido smoke --interrupt
 """
 
 import argparse
