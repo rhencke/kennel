@@ -1866,6 +1866,182 @@ class TestEventsCreateTaskExitUntriaged:
         registry.exit_untriaged.assert_called_once_with("test/repo")
 
 
+class TestWorkerHandleQueuedCommentsDrain:
+    """Cover the registry note_durable_demand_drained call after draining
+    one or more queued comments (worker.py:2407-2409)."""
+
+    def test_notifies_registry_after_draining_at_least_one_comment(
+        self, tmp_path: Path
+    ) -> None:
+        from fido.store import PRCommentQueueRecord
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.get_pr.return_value = {"title": "T", "body": "B"}
+        gh.get_issue_comment.return_value = None  # forces _queued_issue_comment_action → None
+        worker = Worker(tmp_path, gh)
+        worker._config = MagicMock()  # type: ignore[attr-defined]
+        worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
+        worker._repo_cfg.work_dir = tmp_path
+        worker._registry = MagicMock()  # type: ignore[attr-defined]
+        worker._repo_name = "test/repo"  # type: ignore[attr-defined]
+
+        queued = PRCommentQueueRecord(
+            queue_id="q1",
+            delivery_id="d1",
+            repo="test/repo",
+            pr_number=1,
+            comment_type="issues",
+            comment_id=42,
+            author="alice",
+            is_bot=False,
+            body="hi",
+            github_created_at="2026-01-01T00:00:00Z",
+            state="pending",
+            claim_owner=None,
+            retry_count=0,
+            next_retry_after=None,
+            payload_json="{}",
+        )
+
+        # First claim returns queued, second returns None.
+        responses = iter([queued, None])
+
+        class _StoreStub:
+            def __init__(self, *_a, **_kw) -> None:
+                pass
+
+            def claim_next_pr_comment(self, **_kw):
+                return next(responses)
+
+            def complete_pr_comment(self, _qid: str) -> None:
+                pass
+
+        from fido import worker as worker_module
+
+        with patch.object(worker_module, "FidoStore", _StoreStub):
+            repo_ctx = MagicMock()
+            repo_ctx.repo = "test/repo"
+            result = worker.handle_queued_comments(tmp_path, repo_ctx, 1, "slug")
+        assert result is True
+        worker._registry.note_durable_demand_drained.assert_called_once_with(  # type: ignore[attr-defined]
+            "test/repo"
+        )
+
+
+class TestWorkerOracleAssertion:
+    """Cover the AssertionError raise in _assert_ci_failure_matches_oracle
+    (worker.py:849-852)."""
+
+    def test_raises_when_oracle_pick_disagrees(self) -> None:
+        from fido import worker as worker_module
+        from fido.worker import _assert_ci_failure_matches_oracle
+
+        task_list: list[dict] = []
+        # Patch ci_oracle.pick_next_task to return a value that does NOT
+        # match the just-admitted CI failure → fires the assertion.
+        with patch.object(
+            worker_module.ci_oracle, "pick_next_task", return_value="mismatched-task"
+        ):
+            with pytest.raises(AssertionError, match="not first pickup"):
+                _assert_ci_failure_matches_oracle(task_list, "tests", "FAILURE", "run-1")
+
+
+class TestClaudeStderrPump:
+    """Cover the stderr pump loop in ClaudeSession (claude.py:691-693)."""
+
+    def test_stderr_pump_drains_lines_to_log(self) -> None:
+        import time
+
+        from fido.claude import ClaudeSession
+
+        # Construct a session via __new__ to skip the real Popen spawn —
+        # _start_stderr_pump is an instance method that only needs ``self``
+        # to call ``log`` (module-level).
+        session = ClaudeSession.__new__(ClaudeSession)
+
+        class _Proc:
+            def __init__(self, lines: list[str]) -> None:
+                self.pid = 9999
+                self._stderr_iter = iter(lines)
+                # Provide an iterable stderr; ``for raw in stderr`` walks it.
+                self.stderr = self._stderr_iter
+
+        # Two lines + a blank one (which the ``if line`` guard skips).
+        proc = _Proc(["hello\n", "\n", "world\n"])
+        session._start_stderr_pump(proc)  # type: ignore[arg-type]
+
+        # Wait for the daemon thread to drain the iterator.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                next(proc._stderr_iter)
+            except StopIteration:
+                break
+            time.sleep(0.01)
+
+
+class TestEventsDispatchTrailingNone:
+    """Cover the trailing ``return None`` fall-throughs in dispatch
+    (events.py:1335, 1395)."""
+
+    @staticmethod
+    def _config_and_repo_cfg():
+        config = MagicMock()
+        config.allowed_bots = frozenset()
+        config.repos = {}
+        repo_cfg = MagicMock()
+        repo_cfg.name = "test/repo"
+        repo_cfg.membership = MagicMock()
+        repo_cfg.membership.collaborators = frozenset(["alice"])
+        repo_cfg.membership.team_members = frozenset()
+        return config, repo_cfg
+
+    def test_review_comment_with_no_comment_id_falls_through(self) -> None:
+        # events.py:1335 — pull_request_review_comment with comment_id None
+        # passes the early-returns but skips the enqueue branch.
+        from fido.events import dispatch
+
+        config, repo_cfg = self._config_and_repo_cfg()
+        payload = {
+            "action": "created",
+            "repository": {"full_name": "test/repo"},
+            "comment": {
+                "user": {"login": "alice"},
+                "body": "comment",
+                # no "id" key → comment_id stays None
+            },
+            "pull_request": {"number": 1, "title": "T", "body": "B"},
+        }
+        result = dispatch(
+            "pull_request_review_comment", payload, config, repo_cfg
+        )
+        assert result is None
+
+    def test_issue_comment_with_no_number_falls_through(self) -> None:
+        # events.py:1395 — issue_comment with number/comment_id None.
+        from fido.events import dispatch
+
+        config, repo_cfg = self._config_and_repo_cfg()
+        payload = {
+            "action": "created",
+            "repository": {"full_name": "test/repo"},
+            "comment": {
+                "user": {"login": "alice"},
+                "body": "comment",
+                "id": 42,
+            },
+            "issue": {
+                # number missing
+                "pull_request": {"url": "https://github.com/.../pull/1"},
+                "title": "T",
+                "body": "B",
+            },
+        }
+        result = dispatch("issue_comment", payload, config, repo_cfg)
+        assert result is None
+
+
 class TestEventsThreadResolved:
     """Cover ``_thread_task_is_stale_resolved`` early-return branches."""
 
