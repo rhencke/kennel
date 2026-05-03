@@ -737,15 +737,14 @@ class GitHub:
             "pageInfo{endCursor hasNextPage}"
             "}}}"
         )
-        issues: list[dict[str, Any]] = []
-        for node in self._graphql_paginate(
-            query,
-            ("repository", "issues"),
-            owner=owner,
-            repo=repo,
-        ):
-            issues.append(node)
-        return issues
+        return list(
+            self._graphql_paginate(
+                query,
+                ("repository", "issues"),
+                owner=owner,
+                repo=repo,
+            )
+        )
 
     def add_assignee(self, repo: str, number: int | str, login: str) -> None:
         """Assign *login* to issue *number* in *repo*.

@@ -122,6 +122,11 @@ select = [
   "LOG002",
   # "LOG004", # log-exception-outside-except-handler: preview-only.
   "LOG007",
+  "LOG009",
+  "N804",
+  "PERF101",
+  "PERF102",
+  "PERF402",
   "PLC2401",
   "W",
 ]

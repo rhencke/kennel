@@ -974,7 +974,7 @@ def recover_reply_promises(
                 (promise.promise_id, comment)
             )
 
-    for _comment_pr, group in issue_groups.items():
+    for group in issue_groups.values():
         combined_parts: list[str] = []
         for _, group_comment in group:
             body = group_comment["body"] or ""
