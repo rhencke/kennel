@@ -1898,7 +1898,11 @@ let consistent_method_prefix field_names =
   | _ -> None
 
 (** Python keyword-argument name for record field at position [i].
-    Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
+    Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones.
+    Always strips any qualifier prefix from the field name — attribute
+    access on a Python instance is always unqualified, regardless of
+    whether the surrounding scope can name the record class directly
+    or only via a module path. *)
 let pp_field_name state r fds i =
   let ind_ref = get_ind r in
   let ind_kn = kn_of_ind ind_ref in
@@ -1907,7 +1911,8 @@ let pp_field_name state r fds i =
   match List.nth fds i with
   | Some r' ->
       let field_name = pp_global_with_key state Term ind_kn r' in
-      str (record_field_display_name class_name field_names field_name)
+      let display = record_field_display_name class_name field_names field_name in
+      str (source_name_tail display)
   | None    -> str (Printf.sprintf "arg%d" i)
 
 (** Raw constructor name for [r], accounting for inline-custom declarations. *)

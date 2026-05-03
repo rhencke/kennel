@@ -2028,6 +2028,54 @@ class TestCodexAppServerStderrAndError:
         client.stop()
 
 
+class TestCodexProcessExited:
+    """Cover ``_raise_if_unavailable_locked`` process-exited check
+    (codex.py:390-391)."""
+
+    def test_raise_if_unavailable_raises_when_process_exited(self) -> None:
+        # codex.py:390-391 — directly drive the locked check by setting up
+        # a CodexAppServerClient whose process reports exited but whose
+        # protocol_error is still None (happy path through init).
+        from fido.codex import CodexAppServerClient, CodexProtocolError
+
+        class _Process:
+            def __init__(self, *_, **__) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+                )
+                self.stderr = io.StringIO()
+                self.pid = 1234
+                self._returncode: int | None = None
+                self.terminated = False
+
+            def poll(self) -> int | None:
+                return self._returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self._returncode = 0
+
+            def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+                self._returncode = 0
+                return 0
+
+            def kill(self) -> None:
+                self._returncode = -9
+
+        proc = _Process()
+        client = CodexAppServerClient(process_factory=lambda **_: proc)
+        # Manually clear any protocol error from EOF, mark process as exited,
+        # then exercise the helper directly.
+        with client._state_lock:  # type: ignore[attr-defined]
+            client._protocol_error = None  # type: ignore[attr-defined]
+            client._stopped = False  # type: ignore[attr-defined]
+            proc._returncode = 0
+            with pytest.raises(CodexProtocolError, match="exited"):
+                client._raise_if_unavailable_locked()  # type: ignore[attr-defined]
+        client.stop()
+
+
 class TestCodexLeafBranches:
     """Final small leaf branches in codex.py."""
 
