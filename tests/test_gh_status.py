@@ -211,7 +211,7 @@ class TestCandidateProviders:
 class TestDefaultProviderFactories:
     def test_raises_when_no_live_fido(self) -> None:
         with pytest.raises(RuntimeError, match="No running fido repo configs found"):
-            _default_provider_factories(_running_repo_configs_fn=lambda: [])
+            _default_provider_factories(_running_repo_configs_fn=list)
 
     def test_set_gh_status_propagates_when_no_live_fido(self, tmp_path: Path) -> None:
         persona_file = tmp_path / "persona.md"
