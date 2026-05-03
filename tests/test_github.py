@@ -2012,6 +2012,7 @@ class TestGitHubClass:
         gh, mock_s = self._gh()
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
+            "title": "Fix bug",
             "draft": False,
             "mergeable_state": "clean",
             "body": "desc",
@@ -2058,11 +2059,16 @@ class TestGitHubClass:
                 "committedDate": "2024-01-02T00:00:00Z",
             }
         ]
+        # Title must be propagated — _load_active_context_for_rescope reads it
+        # directly via pr_data["title"]; missing it crashes the worker (#1280
+        # neighborhood, observed as confusio crash-loop on PR #365).
+        assert result["title"] == "Fix bug"
 
     def test_get_pr_null_body(self) -> None:
         gh, mock_s = self._gh()
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
+            "title": "Draft title",
             "draft": True,
             "mergeable_state": None,
             "body": None,

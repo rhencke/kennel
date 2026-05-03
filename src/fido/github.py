@@ -980,7 +980,7 @@ class GitHub:
             return False
 
     def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
-        """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
+        """Return PR data (title, reviews, isDraft, mergeStateStatus, body, commits)."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
         reviews_data = list(
             self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews")
@@ -1006,6 +1006,7 @@ class GitHub:
             for c in commits_data
         ]
         return {
+            "title": pr_data["title"],
             "reviews": reviews,
             "isDraft": pr_data["draft"],
             "mergeStateStatus": (pr_data.get("mergeable_state") or "").upper(),
