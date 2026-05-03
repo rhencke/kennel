@@ -962,6 +962,10 @@ class CopilotCLISession(OwnedSession):
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
+        # _metrics_lock guards both counters: they are written by the worker
+        # thread (send / prompt) and read from other threads (status,
+        # registry).  Python 3.14t has no GIL, so += is not atomic.
+        self._metrics_lock = threading.Lock()
         self._sent_count: int = 0
         self._received_count: int = 0
         # Resume an existing Copilot ACP session when *session_id* is given
@@ -1001,7 +1005,8 @@ class CopilotCLISession(OwnedSession):
         Accumulates across session switches and recoveries — model changes and
         resets do not reset the count.
         """
-        return self._sent_count
+        with self._metrics_lock:
+            return self._sent_count
 
     @property
     def received_count(self) -> int:
@@ -1010,7 +1015,8 @@ class CopilotCLISession(OwnedSession):
         Accumulates across session switches and recoveries — model changes and
         resets do not reset the count.
         """
-        return self._received_count
+        with self._metrics_lock:
+            return self._received_count
 
     @property
     def last_turn_cancelled(self) -> bool:
@@ -1158,13 +1164,15 @@ class CopilotCLISession(OwnedSession):
             "%s",
             _transcript_block("copilot prompt", prompt),
         )
-        self._sent_count += 1
+        with self._metrics_lock:
+            self._sent_count += 1
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
             prompt,
             effective_model,
         )
-        self._received_count += 1
+        with self._metrics_lock:
+            self._received_count += 1
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)
