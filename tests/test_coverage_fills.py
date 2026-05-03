@@ -906,6 +906,8 @@ class TestCodexAppServerErrorPaths:
     def test_handle_line_rejects_non_json_object(self) -> None:
         """A JSON value that decodes to non-object → CodexProtocolError
         (codex.py:359)."""
+        from fido.codex import CodexProtocolError
+
         client, lines = self._client()
         try:
             lines.put('"just-a-string"\n')
@@ -914,7 +916,7 @@ class TestCodexAppServerErrorPaths:
             import time
 
             time.sleep(0.05)
-            with pytest.raises(Exception):
+            with pytest.raises(CodexProtocolError):
                 client.request("anything")  # type: ignore[attr-defined]
         finally:
             lines.put(None)
@@ -923,13 +925,15 @@ class TestCodexAppServerErrorPaths:
     def test_handle_line_rejects_unknown_shape(self) -> None:
         """Object lacking ``id`` and ``method`` → CodexProtocolError
         (codex.py:377)."""
+        from fido.codex import CodexProtocolError
+
         client, lines = self._client()
         try:
             lines.put('{"unknown":"shape"}\n')
             import time
 
             time.sleep(0.05)
-            with pytest.raises(Exception):
+            with pytest.raises(CodexProtocolError):
                 client.request("anything")  # type: ignore[attr-defined]
         finally:
             lines.put(None)
