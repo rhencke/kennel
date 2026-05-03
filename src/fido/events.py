@@ -2638,3 +2638,61 @@ def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
     """Wake the per-repo WorkerThread via the registry."""
     log.info("waking worker thread for %s", repo_cfg.name)
     registry.wake(repo_cfg.name)
+
+
+class Dispatcher:
+    """Typed collaborator that owns :func:`dispatch`, :func:`backfill_missed_pr_comments`,
+    and :func:`launch_sync`.
+
+    Accepts ``config`` and ``gh`` at construction time — these are stable
+    across requests.  ``repo_cfg`` is passed at call time because it is
+    resolved per-webhook from the incoming repository name.
+
+    This is the replacement for the ``_fn_dispatch`` callable-slot pattern on
+    :class:`~fido.server.WebhookHandler`.  Callers construct one instance and
+    hold it as a proper collaborator rather than reaching into a class-level
+    function slot.
+    """
+
+    def __init__(self, config: Config, gh: GitHub) -> None:
+        self._config = config
+        self._gh = gh
+
+    def dispatch(
+        self,
+        event: str,
+        payload: dict[str, Any],
+        repo_cfg: RepoConfig,
+        *,
+        delivery_id: str | None = None,
+        oracle: WebhookIngressOracle | None = None,
+    ) -> Action | None:
+        """Delegate to the module-level :func:`dispatch` free function."""
+        return dispatch(
+            event,
+            payload,
+            self._config,
+            repo_cfg,
+            delivery_id=delivery_id,
+            oracle=oracle,
+        )
+
+    def backfill_missed_pr_comments(
+        self,
+        repo_cfg: RepoConfig,
+        pr_number: int,
+        *,
+        gh_user: str,
+    ) -> int:
+        """Delegate to the module-level :func:`backfill_missed_pr_comments`."""
+        return backfill_missed_pr_comments(
+            self._config,
+            repo_cfg,
+            self._gh,
+            pr_number,
+            gh_user=gh_user,
+        )
+
+    def launch_sync(self, repo_cfg: RepoConfig) -> None:
+        """Delegate to the module-level :func:`launch_sync`."""
+        launch_sync(self._config, repo_cfg, self._gh)

@@ -11,6 +11,7 @@ from fido.events import (
     _INSIGHT_LABEL,
     _INSIGHT_REPO,
     Action,
+    Dispatcher,
     WebhookIngressOracle,
     _apply_reply_result,
     _BackgroundRescopeTrigger,
@@ -7096,3 +7097,55 @@ class TestGitHubInsightFiler:
 
         body = gh.create_issue.call_args.args[2]
         assert "https://github.com/org/proj/pull/10#discussion_r555" in body
+
+
+class TestDispatcher:
+    """Unit tests for the :class:`~fido.events.Dispatcher` collaborator."""
+
+    def test_dispatch_delegates_to_free_function(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        repo_cfg = _repo_cfg(tmp_path)
+        oracle = WebhookIngressOracle()
+        payload = {**_payload(), "action": "opened"}
+        with patch("fido.events.dispatch") as mock_dispatch:
+            mock_dispatch.return_value = None
+            d = Dispatcher(cfg, mock_gh)
+            result = d.dispatch(
+                "issues", payload, repo_cfg, delivery_id="abc", oracle=oracle
+            )
+        mock_dispatch.assert_called_once_with(
+            "issues", payload, cfg, repo_cfg, delivery_id="abc", oracle=oracle
+        )
+        assert result is None
+
+    def test_dispatch_returns_action(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        repo_cfg = _repo_cfg(tmp_path)
+        action = Action(prompt="hello")
+        with patch("fido.events.dispatch", return_value=action):
+            d = Dispatcher(cfg, mock_gh)
+            result = d.dispatch("ping", {}, repo_cfg)
+        assert result is action
+
+    def test_backfill_delegates_to_free_function(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        repo_cfg = _repo_cfg(tmp_path)
+        with patch(
+            "fido.events.backfill_missed_pr_comments", return_value=3
+        ) as mock_bf:
+            d = Dispatcher(cfg, mock_gh)
+            count = d.backfill_missed_pr_comments(repo_cfg, 42, gh_user="fido")
+        mock_bf.assert_called_once_with(cfg, repo_cfg, mock_gh, 42, gh_user="fido")
+        assert count == 3
+
+    def test_launch_sync_delegates_to_free_function(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        repo_cfg = _repo_cfg(tmp_path)
+        with patch("fido.events.launch_sync") as mock_sync:
+            d = Dispatcher(cfg, mock_gh)
+            d.launch_sync(repo_cfg)
+        mock_sync.assert_called_once_with(cfg, repo_cfg, mock_gh)
