@@ -1480,6 +1480,45 @@ class TestCodexSessionMoreBranches:
         assert "died" in client._dead_prompt_error_message()  # type: ignore[attr-defined]
 
 
+class TestRocqLspBranches:
+    """Coverage fills for ``rocq_lsp.py`` leaf branches."""
+
+    def test_comment_and_string_ranges_closes_string_literal(self) -> None:
+        """``_comment_and_string_ranges`` exits the in-string branch when
+        it sees the closing ``"`` (rocq_lsp.py:1134-1142)."""
+        from fido.rocq_lsp import _comment_and_string_ranges
+
+        # A complete string literal must produce a "string" range.
+        ranges = _comment_and_string_ranges('Definition x := "hello".')
+        kinds = [kind for *_, kind in ranges]
+        assert "string" in kinds
+
+    def test_symbol_at_uses_python_index_for_generated_path(
+        self, tmp_path: Path
+    ) -> None:
+        """``RocqIndex.symbol_at`` routes to ``_python_symbols`` when the
+        path is inside the generated dir (rocq_lsp.py:222)."""
+        from fido.rocq_lsp import RocqIndex
+
+        # Set up a fake repo so the generated dir resolves correctly:
+        # ``<root>/src/fido/rocq/`` is what RocqIndex treats as generated.
+        gen_dir = tmp_path / "src" / "fido" / "rocq"
+        gen_dir.mkdir(parents=True)
+        py_file = gen_dir / "toy.py"
+        py_file.write_text("def toy() -> int:\n    return 0\n")
+
+        index = RocqIndex(tmp_path)
+        # Don't refresh — we just want to exercise the symbol_at branch
+        # at line 222 (path is_relative_to generated_dir → python_symbols).
+        # Even when _python_symbols is empty, get(token) returns None and
+        # the line is exercised.
+        # We need a valid token at the position — find_token requires the
+        # token to exist in the file content.  Position points into "toy".
+        result = index.symbol_at(py_file, line=0, character=5)
+        # Either hit a python symbol (none registered) or return None.
+        assert result is None
+
+
 class TestCodexCLIErrorBranch:
     def test_run_codex_exec_resume_raises_on_nonzero_returncode(
         self, tmp_path: Path
