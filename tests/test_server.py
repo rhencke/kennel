@@ -346,7 +346,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
             death_count=3,
             last_error="RuntimeError: boom",
-            last_crash_time=datetime(2026, 1, 1),
+            last_crash_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         WebhookHandler.registry.is_stale.return_value = False
         WebhookHandler.registry.thread_started_at.return_value = None

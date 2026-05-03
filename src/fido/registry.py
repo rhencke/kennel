@@ -304,7 +304,7 @@ class WorkerRegistry:
             self._crashes[repo_name] = WorkerCrash(
                 death_count=(existing.death_count + 1 if existing else 1),
                 last_error=error,
-                last_crash_time=datetime.now(),
+                last_crash_time=_utcnow(),
             )
 
     def get_crash_info(self, repo_name: str) -> WorkerCrash | None:

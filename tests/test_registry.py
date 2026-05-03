@@ -543,10 +543,10 @@ class TestWorkerRegistry:
     def test_record_crash_sets_last_crash_time(self) -> None:
         import datetime as dt
 
-        before = dt.datetime.now()
+        before = dt.datetime.now(tz=dt.timezone.utc)
         reg, _ = self._make_registry()
         reg.record_crash("foo/bar", "oops")
-        after = dt.datetime.now()
+        after = dt.datetime.now(tz=dt.timezone.utc)
         info = reg.get_crash_info("foo/bar")
         assert info is not None
         assert before <= info.last_crash_time <= after
@@ -600,7 +600,7 @@ class TestWorkerRegistry:
     def test_worker_crash_dataclass_fields(self) -> None:
         import datetime as dt
 
-        ts = dt.datetime(2026, 1, 1, 12, 0, 0)
+        ts = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         crash = WorkerCrash(death_count=3, last_error="oops", last_crash_time=ts)
         assert crash.death_count == 3
         assert crash.last_error == "oops"
