@@ -2031,11 +2031,13 @@ class TestClaudeSessionLock:
         session = _make_session(tmp_path, proc)
         provider.set_thread_kind("webhook")
         try:
-            with patch(
-                "fido.provider.try_preempt_worker", return_value=(False, "webhook")
+            with (
+                patch(
+                    "fido.provider.try_preempt_worker", return_value=(False, "webhook")
+                ),
+                session.hold_for_handler(),
             ):
-                with session.hold_for_handler():
-                    assert isinstance(session._fsm_state, OwnedByHandler)
+                assert isinstance(session._fsm_state, OwnedByHandler)
         finally:
             provider.set_thread_kind(None)
             session.stop()

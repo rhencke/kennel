@@ -331,9 +331,8 @@ class TestWorkerContextManager:
         ctx = WorkerContext(
             work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
         )
-        with pytest.raises(RuntimeError):
-            with ctx:
-                raise RuntimeError("boom")
+        with pytest.raises(RuntimeError), ctx:
+            raise RuntimeError("boom")
         assert fd.closed
 
 

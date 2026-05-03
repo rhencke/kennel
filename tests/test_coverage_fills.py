@@ -1199,9 +1199,7 @@ class TestCopilotCLIOwnerMore:
             repo_name=repo_name,
         )
 
-    def test_owner_returns_none_when_no_talker_registered(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
         # copilotcli.py:975-977 — get_talker None or wrong kind.
         from fido import provider as provider_module
 
@@ -1209,9 +1207,7 @@ class TestCopilotCLIOwnerMore:
         with patch.object(provider_module, "get_talker", return_value=None):
             assert session.owner is None
 
-    def test_owner_returns_none_when_no_thread_matches(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # copilotcli.py:978-981 — talker.kind == worker but thread_id absent.
         from fido import provider as provider_module
 
@@ -1285,14 +1281,20 @@ class TestCodexHelperFunctions:
 
         # Cover codex.py:1034 (thread_id mismatch)
         params = {"threadId": "thread-other", "turnId": "turn-1"}
-        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+        assert (
+            _notification_matches(params, thread_id="thread-1", turn_id="turn-1")
+            is False
+        )
 
     def test_notification_matches_turn_id_mismatch_returns_false(self) -> None:
         from fido.codex import _notification_matches
 
         # Cover codex.py:1037 (turn_id mismatch at top level)
         params = {"threadId": "thread-1", "turnId": "turn-other"}
-        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+        assert (
+            _notification_matches(params, thread_id="thread-1", turn_id="turn-1")
+            is False
+        )
 
     def test_notification_matches_nested_turn_id_mismatch_returns_false(self) -> None:
         from fido.codex import _notification_matches
@@ -1303,7 +1305,10 @@ class TestCodexHelperFunctions:
             "turnId": "turn-1",
             "turn": {"id": "turn-mismatch", "status": "completed"},
         }
-        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+        assert (
+            _notification_matches(params, thread_id="thread-1", turn_id="turn-1")
+            is False
+        )
 
     def test_notification_matches_returns_true_on_match(self) -> None:
         from fido.codex import _notification_matches
@@ -1313,7 +1318,10 @@ class TestCodexHelperFunctions:
             "turnId": "turn-1",
             "turn": {"id": "turn-1", "status": "completed"},
         }
-        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is True
+        assert (
+            _notification_matches(params, thread_id="thread-1", turn_id="turn-1")
+            is True
+        )
 
     def test_extract_completed_turn_returns_params_when_status_present(self) -> None:
         from fido.codex import _extract_completed_turn
@@ -1341,9 +1349,7 @@ class TestCodexProviderErrorEvents:
         from fido.codex import _provider_error_from_event
 
         # Error is a plain string, not a dict — drives the else branch.
-        result = _provider_error_from_event(
-            {"type": "turn.failed", "error": "boom"}
-        )
+        result = _provider_error_from_event({"type": "turn.failed", "error": "boom"})
         assert result is not None
         assert "boom" in str(result)
 
@@ -1407,9 +1413,7 @@ class TestCodexSessionDefensivePaths:
         # No send() — so _active_turn_id is None
         assert session.consume_until_result() == ""
 
-    def test_is_alive_delegates_to_underlying_client(
-        self, tmp_path: Path
-    ) -> None:
+    def test_is_alive_delegates_to_underlying_client(self, tmp_path: Path) -> None:
         # codex.py:873-874 — is_alive() reflects client state.
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
@@ -1450,7 +1454,7 @@ class TestCodexSessionMoreBranches:
     """More CodexSession defensive branches."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, fake) -> "CodexSession":
+    def _build_session(tmp_path: Path, fake):
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -1463,9 +1467,7 @@ class TestCodexSessionMoreBranches:
             client_factory=lambda **_: fake,
         )
 
-    def test_owner_returns_none_when_no_talker_registered(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
         # codex.py:701 — owner returns None when get_talker returns None
         # (or talker.kind != "worker").
         from fido import provider as provider_module
@@ -1480,9 +1482,7 @@ class TestCodexSessionMoreBranches:
         with patch.object(provider_module, "get_talker", return_value=None):
             assert session.owner is None
 
-    def test_owner_returns_none_when_no_thread_matches(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # codex.py:702-705 — owner walks threading.enumerate() and returns
         # None when no thread.ident matches talker.thread_id.
         from fido import provider as provider_module
@@ -1605,6 +1605,73 @@ class TestCodexCLIErrorBranch:
             )
         assert exc_info.value.returncode == 1
         assert "codex died" in exc_info.value.stderr
+
+
+class TestWorkerHandleQueuedComment:
+    """Cover ``_handle_queued_comment`` defensive paths (worker.py:2424-2447)."""
+
+    @staticmethod
+    def _make_queued_record():
+        from fido.store import PRCommentQueueRecord
+
+        return PRCommentQueueRecord(
+            queue_id="q1",
+            delivery_id="d1",
+            repo="test/repo",
+            pr_number=1,
+            comment_type="issues",
+            comment_id=42,
+            author="alice",
+            is_bot=False,
+            body="hi",
+            github_created_at="2026-01-01T00:00:00Z",
+            state="pending",
+            claim_owner=None,
+            retry_count=0,
+            next_retry_after=None,
+            payload_json="{}",
+        )
+
+    def test_raises_when_config_or_repo_cfg_is_missing(self, tmp_path: Path) -> None:
+        # worker.py:2424-2425 — RuntimeError if config/repo_cfg are None.
+        from tests.test_worker import Worker
+
+        worker = Worker(tmp_path, MagicMock())
+        # Force config to None via the underlying attribute.
+        worker._config = None  # type: ignore[attr-defined]
+        store = MagicMock()
+        repo_ctx = MagicMock()
+        repo_ctx.repo = "test/repo"
+        with pytest.raises(RuntimeError, match="explicit config"):
+            worker._handle_queued_comment(  # type: ignore[attr-defined]
+                store, self._make_queued_record(), repo_ctx
+            )
+
+    def test_completes_when_promise_is_none(self, tmp_path: Path) -> None:
+        # worker.py:2445-2447 — promise None → complete_pr_comment + return.
+        from tests.test_worker import Worker
+
+        gh = MagicMock()
+        gh.get_pr.return_value = {"title": "T", "body": "B"}
+        worker = Worker(tmp_path, gh)
+        # Wire config + repo_cfg as MagicMocks so the early-return guard
+        # (config is None or repo_cfg is None) doesn't trigger.
+        worker._config = MagicMock()  # type: ignore[attr-defined]
+        worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
+        store = MagicMock()
+        store.prepare_reply.return_value = None  # forces the promise None branch
+        repo_ctx = MagicMock()
+        repo_ctx.repo = "test/repo"
+        # Patch _queued_comment_action so it returns a non-None action.
+        action_stub = MagicMock()
+        action_stub.thread = {"comment_id": 42}
+        action_stub.reply_to = {"comment_id": 42}
+        action_stub.context = None
+        with patch.object(worker, "_queued_comment_action", return_value=action_stub):
+            worker._handle_queued_comment(  # type: ignore[attr-defined]
+                store, self._make_queued_record(), repo_ctx
+            )
+        store.complete_pr_comment.assert_called_with("q1")
 
 
 class TestWorkerEmptyPrComment:
@@ -1781,7 +1848,9 @@ class TestEventsCreateTaskExitUntriaged:
 
         with patch.object(events, "_reorder_tasks_background", new=boom):
             with patch.object(events, "launch_sync"):
-                with patch.object(events, "_get_commit_summary", return_value="summary"):
+                with patch.object(
+                    events, "_get_commit_summary", return_value="summary"
+                ):
                     with pytest.raises(RuntimeError, match="explode"):
                         events.create_task(
                             "prompt",
@@ -1805,9 +1874,7 @@ class TestEventsThreadResolved:
         from fido.events import _thread_task_is_stale_resolved
 
         gh = MagicMock()
-        result = _thread_task_is_stale_resolved(
-            gh, {"repo": "test/repo", "pr": 1}
-        )
+        result = _thread_task_is_stale_resolved(gh, {"repo": "test/repo", "pr": 1})
         assert result is True
 
     def test_returns_true_when_no_comments_fetched(self) -> None:
@@ -2026,9 +2093,7 @@ class TestCodexLeafBranches:
         with patch.object(provider_module, "get_talker", return_value=fake_talker):
             assert session.owner == current.name
 
-    def test_poll_completed_turn_returns_none_on_timeout(
-        self, tmp_path: Path
-    ) -> None:
+    def test_poll_completed_turn_returns_none_on_timeout(self, tmp_path: Path) -> None:
         # codex.py:988-989 — _poll_completed_turn returns None when the
         # underlying client wait_notification raises TimeoutError.
         from fido.codex import CodexSession
@@ -2110,9 +2175,7 @@ class TestCodexSessionMisc:
             session.interrupt_active_turn()
             cancel.assert_called_once()
 
-    def test_enter_reentrant_bumps_depth_and_returns_self(
-        self, tmp_path: Path
-    ) -> None:
+    def test_enter_reentrant_bumps_depth_and_returns_self(self, tmp_path: Path) -> None:
         # codex.py:906-908 — re-entrant __enter__ skips fsm acquire.
         from fido import provider as provider_module
 
@@ -2132,7 +2195,9 @@ class TestCodexSessionMisc:
         from fido import provider as provider_module
 
         session = self._build_session(tmp_path)
-        with patch.object(provider_module, "current_thread_kind", return_value="handler"):
+        with patch.object(
+            provider_module, "current_thread_kind", return_value="handler"
+        ):
             with patch.object(provider_module, "register_talker"):
                 with patch.object(provider_module, "unregister_talker"):
                     with session:
@@ -2236,9 +2301,7 @@ class TestCodexSessionEnter:
             client_factory=lambda **_: _FakeAppServerForCoverage(),
         )
 
-    def test_enter_registers_talker_then_exit_unregisters(
-        self, tmp_path: Path
-    ) -> None:
+    def test_enter_registers_talker_then_exit_unregisters(self, tmp_path: Path) -> None:
         # Cover happy-path through __enter__ (line 917-926) and __exit__
         # (line 936-937 unregister_talker).
         from fido import provider as provider_module
@@ -2253,7 +2316,9 @@ class TestCodexSessionEnter:
         def fake_unregister(repo_name, thread_id):  # noqa: ARG001
             unregister_calls.append(repo_name)
 
-        with patch.object(provider_module, "register_talker", side_effect=fake_register):
+        with patch.object(
+            provider_module, "register_talker", side_effect=fake_register
+        ):
             with patch.object(
                 provider_module, "unregister_talker", side_effect=fake_unregister
             ):
