@@ -1199,3 +1199,362 @@ class TestCopilotCLIOwner:
         )
         assert session.owner is None
         del ProviderID  # quiet pyright
+
+
+class TestCodexHelperFunctions:
+    """Standalone helpers in codex.py that don't require a full session."""
+
+    def test_thread_id_from_result_raises_when_missing(self) -> None:
+        from fido.codex import CodexProtocolError, _thread_id_from_result
+
+        # Cover codex.py:1018 (missing thread.id)
+        with pytest.raises(CodexProtocolError, match="thread.id"):
+            _thread_id_from_result({"thread": {}})
+        with pytest.raises(CodexProtocolError, match="thread.id"):
+            _thread_id_from_result({})
+        with pytest.raises(CodexProtocolError, match="thread.id"):
+            _thread_id_from_result({"thread": "not-a-dict"})
+
+    def test_thread_id_from_result_returns_id_when_present(self) -> None:
+        from fido.codex import _thread_id_from_result
+
+        assert _thread_id_from_result({"thread": {"id": "abc"}}) == "abc"
+
+    def test_notification_matches_thread_id_mismatch_returns_false(self) -> None:
+        from fido.codex import _notification_matches
+
+        # Cover codex.py:1034 (thread_id mismatch)
+        params = {"threadId": "thread-other", "turnId": "turn-1"}
+        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+
+    def test_notification_matches_turn_id_mismatch_returns_false(self) -> None:
+        from fido.codex import _notification_matches
+
+        # Cover codex.py:1037 (turn_id mismatch at top level)
+        params = {"threadId": "thread-1", "turnId": "turn-other"}
+        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+
+    def test_notification_matches_nested_turn_id_mismatch_returns_false(self) -> None:
+        from fido.codex import _notification_matches
+
+        # Cover codex.py:1042 (nested turn.id mismatch)
+        params = {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "turn": {"id": "turn-mismatch", "status": "completed"},
+        }
+        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is False
+
+    def test_notification_matches_returns_true_on_match(self) -> None:
+        from fido.codex import _notification_matches
+
+        params = {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "turn": {"id": "turn-1", "status": "completed"},
+        }
+        assert _notification_matches(params, thread_id="thread-1", turn_id="turn-1") is True
+
+    def test_extract_completed_turn_returns_params_when_status_present(self) -> None:
+        from fido.codex import _extract_completed_turn
+
+        # Cover codex.py:1050 path (turn dict with str status)
+        params = {"turn": {"status": "completed"}}
+        assert _extract_completed_turn(params) is params
+
+    def test_extract_completed_turn_returns_none_when_no_turn_dict(self) -> None:
+        from fido.codex import _extract_completed_turn
+
+        # turn missing or not a dict
+        assert _extract_completed_turn({}) is None
+        assert _extract_completed_turn({"turn": "not-a-dict"}) is None
+        # turn dict but status not a string
+        assert _extract_completed_turn({"turn": {"status": 42}}) is None
+
+
+class TestCodexProviderErrorEvents:
+    """Cover branches in ``_provider_error_from_event``."""
+
+    def test_turn_failed_with_non_dict_error_uses_str_fallback(self) -> None:
+        # codex.py:475 — turn.failed with error that is not a dict falls
+        # through to ``str(error or obj)``.
+        from fido.codex import _provider_error_from_event
+
+        # Error is a plain string, not a dict — drives the else branch.
+        result = _provider_error_from_event(
+            {"type": "turn.failed", "error": "boom"}
+        )
+        assert result is not None
+        assert "boom" in str(result)
+
+    def test_turn_failed_with_no_error_uses_obj_str_fallback(self) -> None:
+        # codex.py:475 — when ``error`` is falsy, message falls back to
+        # ``str(obj)``.
+        from fido.codex import _provider_error_from_event
+
+        result = _provider_error_from_event({"type": "turn.failed"})
+        assert result is not None
+        # str(obj) contains the dict repr
+        assert "turn.failed" in str(result)
+
+
+class TestCodexSessionDefensivePaths:
+    """Defensive branches in CodexSession that require a fake app-server."""
+
+    @staticmethod
+    def _fake_app_server() -> "_FakeAppServerForCoverage":
+        """Build a minimal fake app server matching CodexAppServer protocol."""
+        return _FakeAppServerForCoverage()
+
+    def test_send_raises_when_turn_id_missing_from_response(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:770 — turn/start response without turn.id raises.
+        from fido.codex import CodexProtocolError, CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = self._fake_app_server()
+        # Override turn/start to return a response without turn.id
+        fake.responses["turn/start"] = {"turn": {}}  # missing 'id'
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        with pytest.raises(CodexProtocolError, match="turn.id"):
+            session.send("hello")
+
+    def test_consume_until_result_returns_empty_when_no_active_turn(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:780 — consume_until_result short-circuits when no
+        # active_turn_id (e.g. nothing was sent yet).
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = self._fake_app_server()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        # No send() — so _active_turn_id is None
+        assert session.consume_until_result() == ""
+
+    def test_is_alive_delegates_to_underlying_client(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:873-874 — is_alive() reflects client state.
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = self._fake_app_server()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        assert session.is_alive() is True
+        fake.alive = False
+        assert session.is_alive() is False
+
+    def test_stop_delegates_to_underlying_client(self, tmp_path: Path) -> None:
+        # codex.py:877-879 — stop() pulls client out under lock and stops it.
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = self._fake_app_server()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        assert fake.stopped is False
+        session.stop()
+        assert fake.stopped is True
+
+
+class TestCodexSessionMoreBranches:
+    """More CodexSession defensive branches."""
+
+    @staticmethod
+    def _build_session(tmp_path: Path, fake) -> "CodexSession":
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        return CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+
+    def test_owner_returns_none_when_no_talker_registered(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:701 — owner returns None when get_talker returns None
+        # (or talker.kind != "worker").
+        from fido import provider as provider_module
+
+        fake = _FakeAppServerForCoverage()
+        session = self._build_session(tmp_path, fake)
+        # _repo_name is None by default (we didn't set it), so _repo_name is None
+        # short-circuits.  Set it manually so we can exercise the get_talker
+        # None branch (line 700-701).
+        session._repo_name = "test/repo"  # type: ignore[attr-defined]
+        # Ensure no talker is registered for this repo.
+        with patch.object(provider_module, "get_talker", return_value=None):
+            assert session.owner is None
+
+    def test_owner_returns_none_when_no_thread_matches(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:702-705 — owner walks threading.enumerate() and returns
+        # None when no thread.ident matches talker.thread_id.
+        from fido import provider as provider_module
+
+        fake = _FakeAppServerForCoverage()
+        session = self._build_session(tmp_path, fake)
+        session._repo_name = "test/repo"  # type: ignore[attr-defined]
+        # Talker.kind == "worker" but thread_id won't match any live thread.
+        fake_talker = MagicMock()
+        fake_talker.kind = "worker"
+        fake_talker.thread_id = -1  # no real thread has this ident
+        with patch.object(provider_module, "get_talker", return_value=fake_talker):
+            assert session.owner is None
+
+    def test_consume_until_result_raises_provider_error_on_error_notification(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:805-811 — error notification mid-stream raises
+        # CodexProviderError.
+        from fido.codex import CodexProviderError
+
+        fake = _FakeAppServerForCoverage()
+        # First we need to send() to set _active_turn_id.
+        fake.notifications.append(
+            {
+                "method": "error",
+                "params": {"message": "rate limit hit"},
+            }
+        )
+        session = self._build_session(tmp_path, fake)
+        session.send("hello")
+        with pytest.raises(CodexProviderError, match="rate limit"):
+            session.consume_until_result()
+
+    def test_require_thread_id_raises_when_session_id_unset(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:974 — _require_thread_id raises when no thread id.
+        from fido.codex import CodexProtocolError
+
+        fake = _FakeAppServerForCoverage()
+        session = self._build_session(tmp_path, fake)
+        # Force the session_id to None — bypassing _ensure_thread which
+        # set it on construction.
+        with session._state_lock:  # type: ignore[attr-defined]
+            session._session_id = None  # type: ignore[attr-defined]
+        with pytest.raises(CodexProtocolError, match="no thread id"):
+            session._require_thread_id()  # type: ignore[attr-defined]
+
+    def test_dead_prompt_error_message_returns_static_text(self) -> None:
+        # codex.py:1178 — dead prompt error message constant on CodexClient.
+        from fido.codex import CodexClient
+
+        client = CodexClient(session=MagicMock())
+        assert "died" in client._dead_prompt_error_message()  # type: ignore[attr-defined]
+
+
+class TestCodexCLIErrorBranch:
+    def test_run_codex_exec_resume_raises_on_nonzero_returncode(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:1117 — non-zero returncode raises CodexCLIError.
+        import subprocess
+
+        from fido.codex import CodexCLIError, run_codex_exec_resume
+        from fido.provider import ProviderModel
+
+        def runner(*args, **kwargs):  # noqa: ARG001
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="codex died"
+            )
+
+        with pytest.raises(CodexCLIError) as exc_info:
+            run_codex_exec_resume(
+                "session-id",
+                "prompt",
+                model=ProviderModel("gpt-5.5", "medium"),
+                cwd=tmp_path,
+                runner=runner,
+                timeout=5,
+            )
+        assert exc_info.value.returncode == 1
+        assert "codex died" in exc_info.value.stderr
+
+
+class _FakeAppServerForCoverage:
+    """Minimal fake matching ``fido.codex.CodexAppServer`` protocol.
+
+    Mirrors ``_FakeAppServer`` from tests/test_codex.py but lives here so
+    test_coverage_fills.py can import it without crossing the test boundary.
+    """
+
+    def __init__(self, *, cwd=None) -> None:
+        self.cwd = cwd
+        self.pid = 456
+        self.requests: list[tuple[str, dict]] = []
+        self.responses: dict[str, object | Exception] = {}
+        self.notifications: list[dict] = []
+        self.stopped = False
+        self.alive = True
+
+    def request(self, method, params=None, *, timeout=30.0):  # noqa: ARG002
+        payload = params or {}
+        self.requests.append((method, payload))
+        response = self.responses.get(method)
+        if isinstance(response, Exception):
+            raise response
+        if response is not None:
+            return response
+        if method == "thread/start":
+            return {"thread": {"id": "thread-new"}}
+        if method == "thread/resume":
+            return {"thread": {"id": payload["threadId"]}}
+        if method == "turn/start":
+            return {"turn": {"id": "turn-1"}}
+        return {}
+
+    def notify(self, method, params=None) -> None:
+        self.requests.append((method, params or {}))
+
+    def wait_notification(self, method, *, predicate=None, timeout=30.0):  # noqa: ARG002
+        for index, notification in enumerate(self.notifications):
+            if method != "*" and notification["method"] != method:
+                continue
+            params = notification["params"]
+            if predicate is None or predicate(params):
+                return self.notifications.pop(index)
+        raise TimeoutError(method)
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.alive = False
