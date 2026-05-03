@@ -86,6 +86,15 @@ _RETRY_COMMENT_MARKER = "<!-- fido:retry-ack -->"
 # subsequent iteration.
 _EMPTY_PR_COMMENT_MARKER = "<!-- fido:empty-pr-blocked -->"
 
+# Invisible HTML marker on the one-time comment fido posts when the
+# setup turn legitimately produces zero tasks because the work appears
+# already complete on the branch.  Closes #1275 (worker crash-loop):
+# previously the worker raised RuntimeError on zero tasks and the
+# watchdog respawned it into the same setup turn forever.  Now we
+# post a Fido-voice justification, mark the PR ready, and request
+# review.  The marker keeps the comment idempotent across re-entry.
+_NO_TASKS_PR_COMMENT_MARKER = "<!-- fido:no-tasks-finalize -->"
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -1873,7 +1882,13 @@ class Worker:
                     session_mode=self._consume_turn_session_mode(),
                 )
                 if not self._tasks.list():
-                    raise RuntimeError(f"setup produced no tasks for PR #{pr_number}")
+                    # Setup legitimately produced zero tasks — the work on this
+                    # branch already covers the issue.  Finalize rather than
+                    # crash (closes #1275): post a Fido-voice comment, mark
+                    # the PR ready, request review.
+                    self._finalize_setup_with_no_tasks(
+                        repo_ctx, issue, issue_title, pr_number, slug
+                    )
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
                 pr_number,
@@ -1953,9 +1968,6 @@ class Worker:
             session_mode=self._consume_turn_session_mode(),
         )
 
-        if not self._tasks.list():
-            raise RuntimeError("setup produced no tasks")
-
         # Create draft PR, then write the description using the same function
         # used for post-rescope rewrites so both paths share one code path.
         url = self.gh.create_pr(
@@ -1969,6 +1981,22 @@ class Worker:
         with State(fido_dir).modify() as state:
             state["pr_number"] = pr_number
             state["pr_title"] = request
+
+        if not self._tasks.list():
+            # Setup legitimately produced zero tasks — the model decided no
+            # further work is needed beyond what's already on the branch.
+            # Finalize rather than crash (closes #1275): post a Fido-voice
+            # comment, mark the PR ready, request review.  The PR was just
+            # created so it has only the wip:start commit; the finalize
+            # helper's diff guard will leave it as draft if there's nothing
+            # to review (#1194), and the comment will still explain why.
+            self._finalize_setup_with_no_tasks(
+                repo_ctx, issue, issue_title, pr_number, slug
+            )
+            log.info("PR: #%s opened with 0 tasks (setup found no work)", pr_number)
+            log.info("PR: #%s  %s", pr_number, url)
+            return pr_number, slug, True
+
         _write_pr_description(
             self.work_dir,
             self.gh,
@@ -2722,6 +2750,71 @@ class Worker:
                     repo,
                     pr_number,
                 )
+
+    def _finalize_setup_with_no_tasks(
+        self,
+        repo_ctx: RepoContext,
+        issue: int,
+        issue_title: str,
+        pr_number: int,
+        slug: str,
+    ) -> None:
+        """Setup produced 0 tasks because the work appears already complete —
+        finalize the PR rather than crash.
+
+        Generates a Fido-voice comment justifying why no further tasks are
+        needed, posts it, marks the PR ready for review, and requests review
+        from the configured collaborators.  Closes #1275 (worker crash-loop
+        on the previous ``RuntimeError("setup produced no tasks ...")``).
+
+        Idempotent on :data:`_NO_TASKS_PR_COMMENT_MARKER`: a second call on
+        a PR already finalized via this path will not re-post or re-mark.
+        The diff guard from #1194 still applies — if the branch has no diff
+        vs base, the PR is left as draft (still with the explanation comment).
+        """
+        existing = self.gh.get_issue_comments(repo_ctx.repo, pr_number)
+        if any(_NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing):
+            log.info(
+                "PR #%s: setup produced no tasks — finalize already posted, skipping",
+                pr_number,
+            )
+            return
+        body_text = safe_voice_turn(
+            self._provider_agent,
+            (
+                f'Setup just finished for issue #{issue} ("{issue_title}") and '
+                "produced zero new tasks because the work on this branch already "
+                "covers what the issue asked for. Write a PR comment in your "
+                "voice (1-2 short paragraphs) justifying why this PR has no "
+                "further tasks left to plan. Reference what's actually on the "
+                "branch vs what the issue asked for, and conclude that the PR "
+                "is ready for review. Output ONLY the comment body — no "
+                "preamble, no markdown fence, no signature."
+            ),
+            model=self._provider_agent.voice_model,
+            log_prefix="finalize_setup_no_tasks",
+        )
+        body = f"{body_text.strip()}\n\n{_NO_TASKS_PR_COMMENT_MARKER}"
+        self.gh.comment_issue(repo_ctx.repo, pr_number, body)
+        log.info("PR #%s: setup produced no tasks — posted finalize comment", pr_number)
+        if not self._pr_has_real_diff("origin", slug, repo_ctx.default_branch):
+            log.warning(
+                "PR #%s: setup produced no tasks but branch has no diff vs %s — "
+                "leaving as draft (#1194)",
+                pr_number,
+                repo_ctx.default_branch,
+            )
+            return
+        self.gh.pr_ready(repo_ctx.repo, pr_number)
+        log.info("PR #%s: setup produced no tasks — marked ready for review", pr_number)
+        if repo_ctx.collaborators:
+            reviewers = sorted(repo_ctx.collaborators)
+            self.gh.add_pr_reviewers(repo_ctx.repo, pr_number, reviewers)
+            log.info(
+                "PR #%s: setup produced no tasks — requested review from %s",
+                pr_number,
+                ", ".join(reviewers),
+            )
 
     def _post_empty_pr_comment_once(self, repo: str, pr_number: int) -> None:
         """Post a one-time BLOCKED comment when the empty-diff guard refuses
