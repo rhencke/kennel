@@ -622,7 +622,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
-    dispatcher: Dispatcher | None = None
+    dispatchers: dict[str, Dispatcher] = {}
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
     static_files: StaticFiles | None = None
@@ -761,12 +761,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Dispatch BEFORE acknowledging — if dispatch raises, return 500 so
         # GitHub retries instead of treating the event as successfully handled.
-        assert self.dispatcher is not None, "dispatcher not wired — call run() first"
+        dispatcher = self.dispatchers.get(repo_name)
+        assert dispatcher is not None, "dispatcher not wired — call run() first"
         try:
-            action = self.dispatcher.dispatch(
+            action = dispatcher.dispatch(
                 event,
                 payload,
-                repo_cfg,
                 delivery_id=delivery,
                 oracle=type(self).ingress_oracle,
             )
@@ -1085,7 +1085,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         is_bot=action.is_bot,
                         registry=self.registry,
                         create_task_fn=type(self)._fn_create_task,
-                        dispatcher=self.dispatcher,
+                        dispatcher=self.dispatchers.get(repo_cfg.name),
                     )
 
             if action.review_comments:
@@ -1130,7 +1130,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     is_bot=action.is_bot,
                     registry=self.registry,
                     create_task_fn=type(self)._fn_create_task,
-                    dispatcher=self.dispatcher,
+                    dispatcher=self.dispatchers.get(repo_cfg.name),
                 )
 
             log.info(
@@ -1529,15 +1529,18 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
-    dispatcher = Dispatcher(config, gh)
-    WebhookHandler.dispatcher = dispatcher
+    dispatchers = {
+        name: Dispatcher(config, repo_cfg, gh)
+        for name, repo_cfg in config.repos.items()
+    }
+    WebhookHandler.dispatchers = dispatchers
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
     WebhookHandler.provider_factory = DefaultProviderFactory(
         session_system_file=config.sub_dir / "persona.md"
     )
-    registry = _make_registry(config.repos, gh, config, dispatcher=dispatcher)
+    registry = _make_registry(config.repos, gh, config, dispatchers=dispatchers)
     WebhookHandler.registry = registry
     # Bootstrap issue caches eagerly so the picker has populated data immediately —
     # even for repos whose worker resumes on an existing issue and never calls

@@ -4026,7 +4026,6 @@ class Worker:
                 # comment_id so re-tasking already-handled comments is a no-op.
                 if self._dispatcher is not None:
                     self._dispatcher.backfill_missed_pr_comments(
-                        recovery_repo_cfg,
                         pr_number,
                         gh_user=repo_ctx.gh_user,
                     )

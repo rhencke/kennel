@@ -1102,29 +1102,31 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
 class Dispatcher:
     """Typed collaborator that owns the dispatch, backfill, and sync logic.
 
-    Accepts ``config`` and optionally ``gh`` at construction time — these are
-    stable across requests.  ``repo_cfg`` is passed at call time because it is
-    resolved per-webhook from the incoming repository name.
+    One ``Dispatcher`` is constructed per repo at startup — accepting
+    ``config``, ``repo_cfg``, and optionally ``gh`` — so every method call
+    uses the repo context already baked into the instance.
 
     This is the replacement for the ``_fn_dispatch`` callable-slot pattern on
-    :class:`~fido.server.WebhookHandler`.  Callers construct one instance and
-    hold it as a proper collaborator rather than reaching into a class-level
-    function slot.
+    :class:`~fido.server.WebhookHandler`.  Callers construct one instance per
+    repo and hold them in a ``dict[str, Dispatcher]`` collaborator rather than
+    reaching into a class-level function slot.
 
     ``gh`` is optional because :meth:`dispatch` does not use it.  Pass ``gh``
     when constructing a ``Dispatcher`` that will call
     :meth:`backfill_missed_pr_comments` or :meth:`launch_sync`.
     """
 
-    def __init__(self, config: Config, gh: GitHub | None = None) -> None:
+    def __init__(
+        self, config: Config, repo_cfg: RepoConfig, gh: GitHub | None = None
+    ) -> None:
         self._config = config
+        self._repo_cfg = repo_cfg
         self._gh = gh
 
     def dispatch(
         self,
         event: str,
         payload: dict[str, Any],
-        repo_cfg: RepoConfig,
         *,
         delivery_id: str | None = None,
         oracle: WebhookIngressOracle | None = None,
@@ -1141,6 +1143,7 @@ class Dispatcher:
         worker wakes up without waiting for the next poll cycle.
         """
         action = payload.get("action")
+        repo_cfg = self._repo_cfg
         repo = repo_cfg.name  # validated at routing time
 
         # Oracle check — deduplicate at the ingress boundary.
@@ -1370,7 +1373,6 @@ class Dispatcher:
 
     def backfill_missed_pr_comments(
         self,
-        repo_cfg: RepoConfig,
         pr_number: int,
         *,
         gh_user: str,
@@ -1390,6 +1392,7 @@ class Dispatcher:
         WorkerThread lifetime** (at startup) — not every iteration.
         """
         assert self._gh is not None, "gh required for backfill_missed_pr_comments"
+        repo_cfg = self._repo_cfg
         log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
         comments = self._gh.get_issue_comments(repo_cfg.name, pr_number)
         for c in comments:
@@ -1427,12 +1430,12 @@ class Dispatcher:
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
         return len(comments)
 
-    def launch_sync(self, repo_cfg: RepoConfig) -> None:
+    def launch_sync(self) -> None:
         """Sync tasks.json → PR body in a background thread."""
         assert self._gh is not None, "gh required for launch_sync"
         from fido.tasks import sync_tasks_background
 
-        sync_tasks_background(repo_cfg.work_dir, self._gh)
+        sync_tasks_background(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
 
 
@@ -1450,8 +1453,8 @@ def dispatch(
     Use :meth:`Dispatcher.dispatch` directly; this free function is kept
     only until all callers have migrated.
     """
-    return Dispatcher(config).dispatch(
-        event, payload, repo_cfg, delivery_id=delivery_id, oracle=oracle
+    return Dispatcher(config, repo_cfg).dispatch(
+        event, payload, delivery_id=delivery_id, oracle=oracle
     )
 
 
@@ -2654,7 +2657,7 @@ def create_task(
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
     if dispatcher is not None:
-        dispatcher.launch_sync(repo_cfg)
+        dispatcher.launch_sync()
     else:
         launch_sync(config, repo_cfg, gh)
     if thread:
@@ -2696,8 +2699,8 @@ def backfill_missed_pr_comments(
     Use :meth:`Dispatcher.backfill_missed_pr_comments` directly; this free
     function is kept only until all callers have migrated.
     """
-    return Dispatcher(config, gh).backfill_missed_pr_comments(
-        repo_cfg, pr_number, gh_user=gh_user
+    return Dispatcher(config, repo_cfg, gh).backfill_missed_pr_comments(
+        pr_number, gh_user=gh_user
     )
 
 
@@ -2707,7 +2710,7 @@ def launch_sync(config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
     Use :meth:`Dispatcher.launch_sync` directly; this free function is kept
     only until all callers have migrated.
     """
-    Dispatcher(config, gh).launch_sync(repo_cfg)
+    Dispatcher(config, repo_cfg, gh).launch_sync()
 
 
 def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:

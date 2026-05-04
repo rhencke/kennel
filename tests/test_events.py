@@ -3250,7 +3250,7 @@ class TestCreateTask:
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
         )
-        mock_dispatcher.launch_sync.assert_called_once_with(repo_cfg)
+        mock_dispatcher.launch_sync.assert_called_once_with()
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -7120,8 +7120,8 @@ class TestDispatcher:
     def test_dispatch_routes_ping_to_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         repo_cfg = _repo_cfg(tmp_path)
-        d = Dispatcher(cfg)
-        result = d.dispatch("ping", {"hook_id": 1}, repo_cfg)
+        d = Dispatcher(cfg, repo_cfg)
+        result = d.dispatch("ping", {"hook_id": 1})
         assert result is None
 
     def test_dispatch_returns_action_for_issue_assigned(self, tmp_path: Path) -> None:
@@ -7132,8 +7132,8 @@ class TestDispatcher:
             "assignee": {"login": "rhencke"},
             "issue": {"number": 7, "title": "Do the thing"},
         }
-        d = Dispatcher(cfg)
-        result = d.dispatch("issues", payload, repo_cfg)
+        d = Dispatcher(cfg, repo_cfg)
+        result = d.dispatch("issues", payload)
         assert isinstance(result, Action)
         assert "7" in result.prompt
 
@@ -7142,8 +7142,8 @@ class TestDispatcher:
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
         repo_cfg = _repo_cfg(tmp_path)
-        d = Dispatcher(cfg, mock_gh)
-        count = d.backfill_missed_pr_comments(repo_cfg, 42, gh_user="fido")
+        d = Dispatcher(cfg, repo_cfg, mock_gh)
+        count = d.backfill_missed_pr_comments(42, gh_user="fido")
         mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
         assert count == 0
 
@@ -7152,6 +7152,6 @@ class TestDispatcher:
         mock_gh = MagicMock()
         repo_cfg = _repo_cfg(tmp_path)
         with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            d = Dispatcher(cfg, mock_gh)
-            d.launch_sync(repo_cfg)
+            d = Dispatcher(cfg, repo_cfg, mock_gh)
+            d.launch_sync()
         mock_sync.assert_called_once_with(repo_cfg.work_dir, mock_gh)
