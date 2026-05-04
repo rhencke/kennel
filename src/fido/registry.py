@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from frozendict import frozendict
+
+from fido.atomic import AtomicReference
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
@@ -25,6 +28,56 @@ log = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     """Return the current UTC time as a timezone-aware datetime."""
     return datetime.now(tz=timezone.utc)
+
+
+@dataclass(frozen=True)
+class RepoState:
+    """Per-repo sub-snapshot within :class:`FidoState`.
+
+    *key* is the repo slug (e.g. ``"rhencke/confusio"``), matching the key
+    under which this record is stored in :attr:`FidoState.repos`.
+
+    *started_at* is the UTC timestamp when the most recent
+    :class:`~fido.worker.WorkerThread` for this repo was started.
+
+    As subsequent lock-free PRs migrate fields out of the per-lock dicts in
+    :class:`WorkerRegistry`, those fields grow here (e.g. ``activity``,
+    ``crash_record``, ``rescoping``).  Each migration removes the
+    corresponding lock and dict from ``WorkerRegistry.__init__``.
+    """
+
+    key: str
+    started_at: datetime
+
+
+@dataclass(frozen=True)
+class FidoState:
+    """Atomically-swapped coordination snapshot owned by :class:`WorkerRegistry`.
+
+    ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
+    a :class:`frozendict` so stale readers that hold a reference to an old
+    snapshot can never accidentally mutate the mapping — the immutability
+    guarantee holds even on the free-threaded (no-GIL) build.
+
+    **Convergence target**: ``FidoState`` is intended to grow to cover all
+    coordination fields currently scattered across the per-lock dicts in
+    :class:`WorkerRegistry` (worker activities, crash records, webhook
+    activities, rescoping flags, …).  As each field migrates here, the
+    corresponding lock disappears.
+
+    **Replaces FidoStatus long-term**: :class:`~fido.status.FidoStatus` in
+    ``status.py`` is a display-oriented dataclass shaped by the old
+    ``/status.json`` schema.  The end-state is to serialise ``FidoState``
+    directly to JSON — even where that changes the wire format — and retire
+    ``FidoStatus``.  The ``./fido status`` CLI output serves as the living
+    requirement: whatever ``FidoState`` carries must be sufficient to render
+    everything that ``./fido status`` currently shows.
+    """
+
+    repos: frozendict[str, RepoState]
+
+
+_EMPTY_FIDO_STATE = FidoState(repos=frozendict())
 
 
 @dataclass
@@ -109,8 +162,10 @@ class WorkerRegistry:
         self._status_lock = threading.Lock()
         self._crashes: dict[str, WorkerCrash] = {}
         self._crash_lock = threading.Lock()
-        self._started_at: dict[str, datetime] = {}
-        self._started_at_lock = threading.Lock()
+        # _state holds the atomically-swapped FidoState snapshot.  Writers
+        # call AtomicReference.update() under the single internal lock; readers
+        # call AtomicReference.get() without any lock (observationally lock-free).
+        self._state: AtomicReference[FidoState] = AtomicReference(_EMPTY_FIDO_STATE)
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
         self._rescoping: dict[str, bool] = {}
@@ -223,15 +278,23 @@ class WorkerRegistry:
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         with self._threads_lock:
             self._threads[repo_cfg.name] = thread
-        with self._started_at_lock:
-            self._started_at[repo_cfg.name] = _utcnow()
+        _name = repo_cfg.name
+        _now = _utcnow()
+        self._state.lens_update(
+            lambda root: root.repos[_name],
+            RepoState(key=_name, started_at=_now),
+        )
         thread.start()
         log.info("started WorkerThread for %s", repo_cfg.name)
 
     def thread_started_at(self, repo_name: str) -> datetime | None:
-        """Return when the worker thread for *repo_name* was started, or None."""
-        with self._started_at_lock:
-            return self._started_at.get(repo_name)
+        """Return when the worker thread for *repo_name* was started, or None.
+
+        Lock-free: reads from the current :class:`FidoState` snapshot without
+        acquiring any lock.
+        """
+        repo_state = self._state.get().repos.get(repo_name)
+        return repo_state.started_at if repo_state is not None else None
 
     def wake(self, repo_name: str) -> None:
         """Wake the thread for *repo_name* so it checks for work immediately.
