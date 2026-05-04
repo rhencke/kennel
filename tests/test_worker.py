@@ -3949,13 +3949,21 @@ class TestProviderRun:
 
     # ── Session path ──────────────────────────────────────────────────────
 
-    def test_session_path_returns_empty_tuple(self, tmp_path: Path) -> None:
+    def test_session_path_returns_empty_session_id(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
         client = _client()
         client.session = session
-        result = provider_run(fido_dir, agent=client, model=client.work_model)
-        assert result == ("", "")
+        session_id, _ = provider_run(fido_dir, agent=client, model=client.work_model)
+        assert session_id == ""
+
+    def test_session_path_returns_run_turn_output(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        client = _client("the turn output text")
+        client.session = session
+        _, output = provider_run(fido_dir, agent=client, model=client.work_model)
+        assert output == "the turn output text"
 
     def _mock_session(self) -> MagicMock:
         session = MagicMock()

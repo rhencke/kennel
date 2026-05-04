@@ -477,8 +477,9 @@ def provider_run(
     """Continue or start a provider session, streaming progress as raw text.
 
     When the provider agent already has an attached persistent session, the
-    prompt is sent through :meth:`ProviderAgent.run_turn` and ``("", "")`` is
-    returned.
+    prompt is sent through :meth:`ProviderAgent.run_turn` and
+    ``("", output)`` is returned — the session-id slot is always empty for
+    persistent sessions since the session is already tracked by the agent.
 
     When no persistent session is attached, a new one-shot session is started
     from *fido_dir/system* and *fido_dir/prompt*. Returns ``(session_id,
@@ -488,13 +489,13 @@ def provider_run(
     if agent is None:
         raise ValueError("provider_run requires agent")
     if agent.session is not None:
-        agent.run_turn(
+        output = agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=retry_on_preempt,
             session_mode=session_mode,
         )
-        return "", ""
+        return "", output
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
