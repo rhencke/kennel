@@ -2,11 +2,13 @@
 
 import logging
 import threading
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+from frozendict import frozendict
 
 from fido.atomic import AtomicReference
 from fido.config import Config, RepoConfig
@@ -29,13 +31,33 @@ def _utcnow() -> datetime:
 
 
 @dataclass(frozen=True)
+class RepoState:
+    """Per-repo sub-snapshot within :class:`FidoState`.
+
+    *key* is the repo slug (e.g. ``"rhencke/confusio"``), matching the key
+    under which this record is stored in :attr:`FidoState.repos`.
+
+    *started_at* is the UTC timestamp when the most recent
+    :class:`~fido.worker.WorkerThread` for this repo was started.
+
+    As subsequent lock-free PRs migrate fields out of the per-lock dicts in
+    :class:`WorkerRegistry`, those fields grow here (e.g. ``activity``,
+    ``crash_record``, ``rescoping``).  Each migration removes the
+    corresponding lock and dict from ``WorkerRegistry.__init__``.
+    """
+
+    key: str
+    started_at: datetime
+
+
+@dataclass(frozen=True)
 class FidoState:
     """Atomically-swapped coordination snapshot owned by :class:`WorkerRegistry`.
 
-    ``started_at_by_repo`` maps each repo name to the UTC timestamp when
-    its most recent :class:`~fido.worker.WorkerThread` was started.  It is
-    populated once per thread boot and never mutated — making it a natural
-    fit for the single-lock CAS pattern in :class:`~fido.atomic.AtomicReference`.
+    ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
+    a :class:`frozendict` so stale readers that hold a reference to an old
+    snapshot can never accidentally mutate the mapping — the immutability
+    guarantee holds even on the free-threaded (no-GIL) build.
 
     **Convergence target**: ``FidoState`` is intended to grow to cover all
     coordination fields currently scattered across the per-lock dicts in
@@ -52,10 +74,10 @@ class FidoState:
     everything that ``./fido status`` currently shows.
     """
 
-    started_at_by_repo: Mapping[str, datetime]
+    repos: frozendict[str, RepoState]
 
 
-_EMPTY_FIDO_STATE = FidoState(started_at_by_repo={})
+_EMPTY_FIDO_STATE = FidoState(repos=frozendict())
 
 
 @dataclass
@@ -260,7 +282,9 @@ class WorkerRegistry:
         _now = _utcnow()
         self._state.update(
             lambda old: FidoState(
-                started_at_by_repo={**old.started_at_by_repo, _name: _now}
+                repos=frozendict(
+                    {**old.repos, _name: RepoState(key=_name, started_at=_now)}
+                )
             )
         )
         thread.start()
@@ -272,7 +296,8 @@ class WorkerRegistry:
         Lock-free: reads from the current :class:`FidoState` snapshot without
         acquiring any lock.
         """
-        return self._state.get().started_at_by_repo.get(repo_name)
+        repo_state = self._state.get().repos.get(repo_name)
+        return repo_state.started_at if repo_state is not None else None
 
     def wake(self, repo_name: str) -> None:
         """Wake the thread for *repo_name* so it checks for work immediately.
