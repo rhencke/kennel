@@ -30,7 +30,6 @@ from fido.harness_commit import (
     CommitSkipped,
     CommitSuccess,
     HarnessCommitter,
-    hook_failure_nudge,
 )
 from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueNode, IssueTreeCache
@@ -3222,7 +3221,7 @@ class Worker:
                     )
                 elif isinstance(commit_result, CommitHookFailure):
                     # Pre-commit hook rejected the commit — nudge LLM to fix it.
-                    nudge = hook_failure_nudge(commit_result)
+                    nudge = harness_committer.hook_failure_nudge(commit_result)
                     (fido_dir / "prompt").write_text(nudge)
                     log.info("task pre-commit hook rejected commit — nudging")
                 else:

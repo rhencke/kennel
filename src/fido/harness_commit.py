@@ -15,7 +15,6 @@ here so importers get a single canonical source.
 """
 
 import logging
-import os
 import subprocess
 from pathlib import Path
 
@@ -44,25 +43,7 @@ __all__ = [
     "CommitSkipped",
     "CommitSuccess",
     "HarnessCommitter",
-    "hook_failure_nudge",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Nudge prompt helper
-# ---------------------------------------------------------------------------
-
-
-def hook_failure_nudge(failure: CommitHookFailure) -> str:
-    """Format a nudge prompt for the LLM after a hook failure.
-
-    Pure formatting helper — no collaborators, no side effects.
-    """
-    return (
-        "The pre-commit hook rejected the commit. Fix the issues below "
-        "and emit a new turn_outcome sentinel.\n\n"
-        f"Hook output:\n{failure.output}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -86,29 +67,38 @@ class HarnessCommitter:
         self,
         args: list[str],
         check: bool = True,
-        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run a git command in the workspace.
-
-        *extra_env* is merged on top of the current environment so ``git``
-        still has access to ``PATH``, ``HOME``, etc.  When *extra_env* is
-        ``None``, the subprocess inherits the parent environment as usual.
-        """
-        kwargs: dict[str, object] = {
-            "capture_output": True,
-            "text": True,
-        }
-        if extra_env is not None:
-            kwargs["env"] = {**os.environ, **extra_env}
+        """Run a git command in the workspace."""
         return self._runner.run(
-            ["git", *args], check=check, cwd=self._work_dir, **kwargs
+            ["git", *args],
+            check=check,
+            cwd=self._work_dir,
+            capture_output=True,
+            text=True,
+        )
+
+    def _build_message(
+        self, summary: str, *, helped_by: GitIdentity | None = None
+    ) -> str:
+        """Build the full commit message with optional Helped-by trailer."""
+        if helped_by is None:
+            return summary
+        trailer = f"Helped-by: {helped_by.name} <{helped_by.email}>"
+        return f"{summary}\n\n{trailer}"
+
+    def hook_failure_nudge(self, failure: CommitHookFailure) -> str:
+        """Format a nudge prompt for the LLM after a hook failure."""
+        return (
+            "The pre-commit hook rejected the commit. Fix the issues below "
+            "and emit a new turn_outcome sentinel.\n\n"
+            f"Hook output:\n{failure.output}"
         )
 
     def apply(
         self,
         outcome: TurnOutcome,
         *,
-        committer: GitIdentity | None = None,
+        helped_by: GitIdentity | None = None,
     ) -> CommitResult:
         """Stage tracked changes and commit based on *outcome*.
 
@@ -122,15 +112,14 @@ class HarnessCommitter:
         Returns :class:`CommitHookFailure` if the pre-commit hook (or
         ``git commit`` itself) exits non-zero.
 
-        *committer* overrides ``GIT_COMMITTER_NAME`` / ``GIT_COMMITTER_EMAIL``
-        for attribution on thread tasks — the reviewer who requested the
-        change gets committer credit.
+        *helped_by* appends a ``Helped-by: Name <email>`` trailer to the
+        commit message for thread tasks — the reviewer who requested the
+        change gets attribution in the git log.
         """
         if isinstance(outcome, SkipTaskWithReason):
             return CommitSkipped(reason=outcome.reason)
 
         assert isinstance(outcome, CommitTaskComplete | CommitTaskInProgress)
-        summary = outcome.summary
 
         # Stage tracked files only — never sweep untracked files like
         # .coverage artifacts, editor scratch files, or build outputs.
@@ -141,24 +130,13 @@ class HarnessCommitter:
         if diff_cached.returncode == 0:
             return CommitNothingStaged()
 
-        # Build committer attribution env when the task came from a thread.
-        extra_env: dict[str, str] | None = None
-        if committer is not None:
-            extra_env = {
-                "GIT_COMMITTER_NAME": committer.name,
-                "GIT_COMMITTER_EMAIL": committer.email,
-            }
-
-        result = self._git(
-            ["commit", "-m", summary],
-            check=False,
-            extra_env=extra_env,
-        )
+        message = self._build_message(outcome.summary, helped_by=helped_by)
+        result = self._git(["commit", "-m", message], check=False)
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             log.warning("commit rejected (hook or error): %s", output[:200])
             return CommitHookFailure(output=output)
 
         sha = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        log.info("harness commit: %s (%s)", sha[:12], summary[:60])
+        log.info("harness commit: %s (%s)", sha[:12], outcome.summary[:60])
         return CommitSuccess(sha=sha)

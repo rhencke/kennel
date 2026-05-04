@@ -10755,10 +10755,16 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.side_effect = [
+            mock_hc = mock_hc_cls.return_value
+            mock_hc.apply.side_effect = [
                 CommitHookFailure(output="ruff: 3 errors"),
                 CommitSuccess(sha="abc123"),
             ]
+            mock_hc.hook_failure_nudge.return_value = (
+                "The pre-commit hook rejected the commit. "
+                "Fix the issues below and emit a new turn_outcome sentinel."
+                "\n\nHook output:\nruff: 3 errors"
+            )
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         prompt_text = (fido_dir / "prompt").read_text()

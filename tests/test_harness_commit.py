@@ -4,7 +4,6 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 from fido.harness_commit import (
     CommitHookFailure,
@@ -13,7 +12,6 @@ from fido.harness_commit import (
     CommitSkipped,
     CommitSuccess,
     HarnessCommitter,
-    hook_failure_nudge,
 )
 from fido.turn_outcome import (
     CommitTaskComplete,
@@ -75,7 +73,7 @@ class TestApplySkip:
         hc, runner = _committer(tmp_path, [])
         result = hc.apply(
             SkipTaskWithReason(reason="nope"),
-            committer=GitIdentity(name="X", email="x@y"),
+            helped_by=GitIdentity(name="X", email="x@y"),
         )
         assert isinstance(result, CommitSkipped)
         assert runner.calls == []
@@ -205,8 +203,8 @@ class TestApplyHookFailure:
 # ---------------------------------------------------------------------------
 
 
-class TestCommitterAttribution:
-    def test_committer_env_set_on_commit(self, tmp_path: Path) -> None:
+class TestHelpedByAttribution:
+    def test_helped_by_trailer_in_commit_message(self, tmp_path: Path) -> None:
         hc, runner = _committer(
             tmp_path,
             [
@@ -217,21 +215,21 @@ class TestCommitterAttribution:
             ],
         )
         identity = GitIdentity(name="Alice", email="alice@example.com")
-        with patch.dict("os.environ", {"PATH": "/usr/bin", "HOME": "/home/test"}):
-            result = hc.apply(
-                CommitTaskComplete(summary="Fix review feedback"),
-                committer=identity,
-            )
+        result = hc.apply(
+            CommitTaskComplete(summary="Fix review feedback"),
+            helped_by=identity,
+        )
         assert result == CommitSuccess(sha="sha1")
-        # The commit call (index 2) should have env with committer vars
-        commit_kwargs = runner.calls[2][1]
-        env = commit_kwargs["env"]
-        assert env["GIT_COMMITTER_NAME"] == "Alice"
-        assert env["GIT_COMMITTER_EMAIL"] == "alice@example.com"
-        # Should also have inherited env
-        assert env["PATH"] == "/usr/bin"
+        # The commit message should include the Helped-by trailer
+        commit_cmd = runner.calls[2][0]
+        assert commit_cmd == [
+            "git",
+            "commit",
+            "-m",
+            "Fix review feedback\n\nHelped-by: Alice <alice@example.com>",
+        ]
 
-    def test_no_committer_no_env_override(self, tmp_path: Path) -> None:
+    def test_no_helped_by_plain_message(self, tmp_path: Path) -> None:
         hc, runner = _committer(
             tmp_path,
             [
@@ -242,12 +240,12 @@ class TestCommitterAttribution:
             ],
         )
         hc.apply(CommitTaskComplete(summary="Regular commit"))
-        # The commit call should NOT have an 'env' key in kwargs
-        commit_kwargs = runner.calls[2][1]
-        assert "env" not in commit_kwargs
+        # The commit message should just be the summary
+        commit_cmd = runner.calls[2][0]
+        assert commit_cmd == ["git", "commit", "-m", "Regular commit"]
 
-    def test_committer_on_hook_failure(self, tmp_path: Path) -> None:
-        """Committer env is passed even when the commit fails."""
+    def test_helped_by_on_hook_failure(self, tmp_path: Path) -> None:
+        """Helped-by trailer is in the message even when the commit fails."""
         hc, runner = _committer(
             tmp_path,
             [
@@ -257,14 +255,18 @@ class TestCommitterAttribution:
             ],
         )
         identity = GitIdentity(name="Bob", email="bob@x.com")
-        with patch.dict("os.environ", {"PATH": "/bin"}):
-            result = hc.apply(
-                CommitTaskInProgress(summary="wip"),
-                committer=identity,
-            )
+        result = hc.apply(
+            CommitTaskInProgress(summary="wip"),
+            helped_by=identity,
+        )
         assert isinstance(result, CommitHookFailure)
-        commit_kwargs = runner.calls[2][1]
-        assert commit_kwargs["env"]["GIT_COMMITTER_NAME"] == "Bob"
+        commit_cmd = runner.calls[2][0]
+        assert commit_cmd == [
+            "git",
+            "commit",
+            "-m",
+            "wip\n\nHelped-by: Bob <bob@x.com>",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -319,14 +321,16 @@ class TestGitPlumbing:
 
 
 class TestHookFailureNudge:
-    def test_contains_output(self) -> None:
+    def test_contains_output(self, tmp_path: Path) -> None:
+        hc, _ = _committer(tmp_path, [])
         failure = CommitHookFailure(output="ruff found 3 errors")
-        nudge = hook_failure_nudge(failure)
+        nudge = hc.hook_failure_nudge(failure)
         assert "ruff found 3 errors" in nudge
         assert "turn_outcome" in nudge
 
-    def test_contains_instruction(self) -> None:
-        nudge = hook_failure_nudge(CommitHookFailure(output="x"))
+    def test_contains_instruction(self, tmp_path: Path) -> None:
+        hc, _ = _committer(tmp_path, [])
+        nudge = hc.hook_failure_nudge(CommitHookFailure(output="x"))
         assert "pre-commit hook rejected" in nudge.lower()
         assert "fix" in nudge.lower()
 
