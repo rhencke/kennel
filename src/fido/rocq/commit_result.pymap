@@ -1,0 +1,8 @@
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,18,0,19,8,commit_result.v,23,10,23,22,extraction,CommitResult,CommitResult
+open,24,0,25,12,commit_result.v,24,2,24,15,extraction,CommitSuccess,CommitSuccess
+open,30,0,31,15,commit_result.v,25,2,25,19,extraction,CommitHookFailure,CommitHookFailure
+open,36,0,37,8,commit_result.v,26,2,26,21,extraction,CommitNothingStaged,CommitNothingStaged
+open,42,0,43,15,commit_result.v,27,2,27,15,extraction,CommitSkipped,CommitSkipped
+open,49,0,60,38,commit_result.v,31,11,31,28,extraction,result_is_success,result_is_success
+open,63,0,74,38,commit_result.v,42,11,42,29,extraction,result_needs_retry,result_needs_retry

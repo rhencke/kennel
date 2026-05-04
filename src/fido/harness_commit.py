@@ -7,15 +7,26 @@ as structured results so the caller can nudge the LLM to fix them.
 
 The LLM declares intent; Python acts on it.  Git operations are never
 the LLM's responsibility.
+
+Type definitions (``CommitSuccess``, ``CommitHookFailure``,
+``CommitNothingStaged``, ``CommitSkipped``, ``CommitResult``) live in the
+Rocq-extracted module :mod:`fido.rocq.commit_result` and are re-exported
+here so importers get a single canonical source.
 """
 
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 from fido.infra import ProcessRunner
+from fido.rocq.commit_result import (
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitResult,
+    CommitSkipped,
+    CommitSuccess,
+)
 from fido.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
@@ -26,46 +37,15 @@ from fido.types import GitIdentity
 
 log = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Result types
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CommitSuccess:
-    """Commit was created successfully.
-
-    *sha* is the full SHA of the new commit.
-    """
-
-    sha: str
-
-
-@dataclass(frozen=True)
-class CommitHookFailure:
-    """Pre-commit hook (or commit itself) rejected the commit.
-
-    *output* contains the combined stdout + stderr from the failed
-    ``git commit`` so the caller can feed it back to the LLM.
-    """
-
-    output: str
-
-
-@dataclass(frozen=True)
-class CommitNothingStaged:
-    """``git add -u`` staged nothing — worktree is clean or only has untracked files."""
-
-
-@dataclass(frozen=True)
-class CommitSkipped:
-    """Turn outcome was ``skip-task-with-reason`` — no commit needed."""
-
-    reason: str
-
-
-CommitResult = CommitSuccess | CommitHookFailure | CommitNothingStaged | CommitSkipped
+__all__ = [
+    "CommitHookFailure",
+    "CommitNothingStaged",
+    "CommitResult",
+    "CommitSkipped",
+    "CommitSuccess",
+    "HarnessCommitter",
+    "hook_failure_nudge",
+]
 
 
 # ---------------------------------------------------------------------------

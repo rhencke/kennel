@@ -26,4 +26,5 @@
   webhook_ingress_dedupe
   self_restart
   handler_preemption
-  turn_outcome))
+  turn_outcome
+  commit_result))
