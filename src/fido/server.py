@@ -1054,7 +1054,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     activity.set_description("triaging review comment")
                     try:
                         category, titles = type(self)._fn_reply_to_comment(
-                            action, self.config, repo_cfg, gh
+                            action, self.config, repo_cfg, gh, self.registry
                         )
                     except Exception:
                         self._fail_reply(repo_cfg, promise)
@@ -1101,7 +1101,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     activity.set_description("triaging PR comment")
                     try:
                         category, titles = type(self)._fn_reply_to_issue_comment(
-                            action, self.config, repo_cfg, gh
+                            action, self.config, repo_cfg, gh, self.registry
                         )
                     except Exception:
                         self._fail_reply(repo_cfg, promise)

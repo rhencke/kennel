@@ -51,6 +51,7 @@ from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
+from fido.worker import ActivityReporter
 
 
 def _synthesis_response(
@@ -276,6 +277,7 @@ class TestRecoverReplyPromises:
             _repo_cfg(tmp_path),
             MagicMock(),
             7,
+            registry=MagicMock(spec=ActivityReporter),
         )
 
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
@@ -303,6 +305,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert result is True
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
@@ -347,6 +350,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -378,6 +382,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -399,6 +404,7 @@ class TestRecoverReplyPromises:
             _repo_cfg(tmp_path),
             gh,
             7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -419,6 +425,7 @@ class TestRecoverReplyPromises:
             _repo_cfg(tmp_path),
             gh,
             7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -445,6 +452,7 @@ class TestRecoverReplyPromises:
             _repo_cfg(tmp_path),
             gh,
             7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -474,6 +482,7 @@ class TestRecoverReplyPromises:
             _repo_cfg(tmp_path),
             gh,
             7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -507,6 +516,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         mock_reply.assert_not_called()
         assert [
@@ -540,6 +550,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -571,6 +582,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         mock_reply.assert_not_called()
         assert [
@@ -605,6 +617,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -639,6 +652,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert result is True
         mock_create_task.assert_not_called()
@@ -677,6 +691,7 @@ class TestRecoverReplyPromises:
                     _repo_cfg(tmp_path),
                     gh,
                     7,
+                    registry=MagicMock(spec=ActivityReporter),
                 )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
 
@@ -729,6 +744,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -789,6 +805,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -850,6 +867,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         store = FidoStore(tmp_path)
@@ -918,6 +936,7 @@ class TestRecoverReplyPromises:
                     _repo_cfg(tmp_path),
                     gh,
                     7,
+                    registry=MagicMock(spec=ActivityReporter),
                 )
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "prepared"
@@ -982,6 +1001,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         store = FidoStore(tmp_path)
@@ -1067,6 +1087,7 @@ class TestRecoverReplyPromises:
                     _repo_cfg(tmp_path),
                     gh,
                     7,
+                    registry=MagicMock(spec=ActivityReporter),
                 )
         assert mock_reply.call_count == 0
         mock_create_task.assert_not_called()
@@ -1130,6 +1151,7 @@ class TestRecoverReplyPromises:
                 _repo_cfg(tmp_path),
                 gh,
                 7,
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert result is True
         assert mock_reply.call_count == 2
@@ -1854,7 +1876,11 @@ class TestReplyToComment:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _make_mock_gh(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
 
@@ -1865,7 +1891,11 @@ class TestReplyToComment:
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _make_mock_gh(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
 
@@ -1905,6 +1935,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
@@ -1954,6 +1985,7 @@ class TestReplyToComment:
                 repo_cfg,
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         effect = store.reply_outbox_effect(promise.promise_id)
@@ -2003,6 +2035,7 @@ class TestReplyToComment:
                 repo_cfg,
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         mock_gh.reply_to_review_comment.assert_not_called()
@@ -2027,6 +2060,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
 
@@ -2057,6 +2091,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         gh.resolve_thread.assert_not_called()
 
@@ -2129,6 +2164,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         assert titles == []
@@ -2157,6 +2193,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert titles == ["Cache results for performance"]
@@ -2185,6 +2222,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert "refactor" in titles[0].lower()
@@ -2211,6 +2249,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
 
@@ -2237,6 +2276,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 MagicMock(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
     def test_claim_race_returns_act_with_no_titles(self, tmp_path: Path) -> None:
@@ -2257,7 +2297,11 @@ class TestReplyToComment:
             is_bot=False,
         )
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            _make_mock_gh(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
         assert titles == []
@@ -2282,6 +2326,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 MagicMock(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
 
@@ -2310,6 +2355,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert titles == ["Add tests and update docs"]
@@ -2342,6 +2388,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert titles == ["Fix the parser"]
@@ -2388,6 +2435,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         # Human spoke last — must post a fresh reply, never edit the old one
@@ -2419,6 +2467,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         # Posted replies are immutable; answer replies also post a new artifact.
@@ -2458,6 +2507,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert captured_calls
         call_kwargs = captured_calls[0]
@@ -2489,6 +2539,7 @@ class TestReplyToComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert captured_calls
         call_kwargs = captured_calls[0]
@@ -2594,6 +2645,7 @@ class TestReplyToCommentSynthesisFallback:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         assert titles == []
@@ -2643,6 +2695,7 @@ class TestReplyToCommentSynthesisFallback:
                     self._repo_cfg(tmp_path),
                     mock_gh,
                     agent=_client(),
+                    registry=MagicMock(spec=ActivityReporter),
                 )
         mock_remove_eyes.assert_called_once()
 
@@ -2680,6 +2733,7 @@ class TestReplyToCommentSynthesisFallback:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         mock_fallback.assert_called_once()
@@ -2714,6 +2768,7 @@ class TestReplyToCommentSynthesisFallback:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         # Reply still posted despite eyes-add failure.
@@ -2767,6 +2822,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert titles == ["Fix the bug"]
@@ -2785,6 +2841,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
 
@@ -2802,6 +2859,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
 
@@ -2843,6 +2901,7 @@ class TestReplyToIssueComment:
                 repo_cfg,
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         effect = store.reply_outbox_effect(promise.promise_id)
@@ -2864,6 +2923,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
 
@@ -2885,6 +2945,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         assert "refactor" in titles[0].lower()
@@ -2934,6 +2995,7 @@ class TestReplyToIssueComment:
                 repo_cfg,
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         assert cat == "ANSWER"
@@ -2957,6 +3019,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
     def test_post_exception_propagates(self, tmp_path: Path) -> None:
@@ -2984,6 +3047,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
@@ -3007,6 +3071,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         mock_gh.add_reaction.assert_not_called()
@@ -3024,7 +3089,11 @@ class TestReplyToIssueComment:
         ):
             factory_cls.return_value.create_agent.return_value = _client()
             cat, titles = reply_to_issue_comment(
-                action, cfg, self._repo_cfg(tmp_path), self._mock_gh()
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         factory_cls.return_value.create_agent.assert_called_once_with(
             self._repo_cfg(tmp_path),
@@ -3057,6 +3126,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
         mock_gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
@@ -3086,6 +3156,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ACT"
 
@@ -3104,6 +3175,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert FidoStore(tmp_path).claim_state(4275080243) == "completed"
 
@@ -3120,6 +3192,7 @@ class TestReplyToIssueComment:
             self._repo_cfg(tmp_path),
             _make_mock_gh(),
             agent=_client("unused"),
+            registry=MagicMock(spec=ActivityReporter),
         )
 
         assert category == "ACT"
@@ -3145,6 +3218,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 self._mock_gh(),
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         claim_dir = tmp_path / ".git" / "fido" / "comments"
         assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
@@ -3175,6 +3249,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert captured_calls
         call_kwargs = captured_calls[0]
@@ -3200,6 +3275,7 @@ class TestReplyToIssueComment:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert captured_calls
         call_kwargs = captured_calls[0]
@@ -3231,6 +3307,123 @@ class TestCreateTask:
             "type": "spec",
         }
         return t
+
+    def test_inbox_balanced_through_create_task_coalesce_and_finally(
+        self, tmp_path: Path
+    ) -> None:
+        """Integration test for #1336: simulate the exact race that produced
+        the bug — rescope-A is running when create_task fires, coalesces a
+        rescope-B (calling enter_untriaged + bumping untriaged_holds), and
+        the BG's finally must call exit_untriaged for the bumped holds.
+
+        Before the fix: registry threaded through reply_to_* as None, so
+        run_loop's closure had registry=None and the finally skipped
+        exit_untriaged.  Inbox stayed at 1 forever.
+
+        After the fix: registry is required throughout, so the finally
+        unconditionally calls exit_untriaged once per untriaged_holds
+        increment, returning the inbox to 0."""
+
+        # Real-ish registry recording enter/exit so we can assert balance.
+        class _CountingRegistry:
+            def __init__(self) -> None:
+                self.count = 0
+                self.events: list[str] = []
+
+            def enter_untriaged(self, repo_name: str) -> None:
+                _ = repo_name
+                self.count += 1
+                self.events.append("enter")
+
+            def exit_untriaged(self, repo_name: str) -> None:
+                _ = repo_name
+                self.count -= 1
+                self.events.append("exit")
+
+            def set_rescoping(self, repo_name: str, active: bool) -> None:
+                _ = (repo_name, active)
+
+            def abort_task(self, repo_name: str, *, task_id: str) -> None:
+                _ = (repo_name, task_id)
+
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        registry = _CountingRegistry()
+        coalesce_state: dict = {}
+        started: list = []
+
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
+            _ = (work_dir, commit_summary, kwargs)
+
+        # rescope-A: simulates the entry-boundary trigger that runs first
+        # (e.g. _BackgroundRescopeTrigger fired from reply_to_*).  No
+        # _release_untriaged_on_finish here — it doesn't bump untriaged_holds
+        # itself.
+        _reorder_tasks_background(
+            tmp_path,
+            "rescope-A",
+            cfg,
+            MagicMock(),
+            repo_cfg,
+            registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=coalesce_state,
+        )
+        # rescope-B: simulates create_task's call. enter_untriaged bumps the
+        # real count to 1, _release_untriaged_on_finish=True bumps
+        # untriaged_holds to 1, and the call coalesces (rescope-A is running).
+        registry.enter_untriaged(repo_cfg.name)
+        _reorder_tasks_background(
+            tmp_path,
+            "rescope-B",
+            cfg,
+            MagicMock(),
+            repo_cfg,
+            registry,
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=coalesce_state,
+            _release_untriaged_on_finish=True,
+        )
+        assert registry.count == 1, "enter must have bumped the count"
+        # Now run the BG to completion.  Its finally must call exit_untriaged
+        # once for each untriaged_holds increment, draining the count.
+        started[0]._target()  # noqa: SLF001
+        assert registry.count == 0, (
+            f"inbox leak (#1336): registry.count={registry.count} after "
+            f"BG finally; events={registry.events}"
+        )
+
+    def test_thread_task_without_registry_warns_and_skips_rescope(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression #1336: a thread task created without a registry must
+        log loudly and skip the background rescope (rather than silently
+        firing _reorder_tasks_background with registry=None — the silent
+        fail-soft path that produced the inbox-leak bug)."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_gh = MagicMock()
+        mock_tasks = self._mock_tasks()
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 99}
+        with (
+            patch("fido.events.launch_sync"),
+            caplog.at_level("WARNING", logger="fido.events"),
+        ):
+            create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                mock_gh,
+                thread=thread,
+                _tasks=mock_tasks,
+                _get_commit_summary_fn=lambda wd: "",
+            )
+        warns = [
+            r for r in caplog.records if "skipping background rescope" in r.message
+        ]
+        assert warns, "expected a WARNING when thread task has no registry"
 
     def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -4139,6 +4332,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1
         t = started[0]
@@ -4155,6 +4350,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert tmp_path.name in started[0].name
 
@@ -4171,6 +4368,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert len(calls) == 1
@@ -4189,6 +4388,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_changes = calls[0][2]["_on_changes"]
@@ -4286,39 +4487,6 @@ class TestReorderTasksBackground:
 
         registry.set_rescoping.assert_called_once_with("owner/repo", False)
         registry.exit_untriaged.assert_called_once_with("owner/repo")
-
-    def test_logs_error_on_thread_start_failure_when_holds_leak_with_no_registry(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Regression for #1336: start-failure path must also log loudly
-        when registry/repo_cfg are unwired but holds were already accumulated."""
-        coalesce_state: dict = {
-            "running": True,
-            "pending": None,
-            "untriaged_holds": 1,
-        }
-
-        def fail_start(_thread: object) -> Never:
-            raise RuntimeError("cannot start")
-
-        with caplog.at_level("ERROR", logger="fido.events"):
-            with pytest.raises(RuntimeError, match="cannot start"):
-                _reorder_tasks_background(
-                    tmp_path,
-                    "commits",
-                    self._cfg(tmp_path),
-                    MagicMock(),
-                    _start=fail_start,
-                    _reorder_fn=MagicMock(),
-                    _coalesce_state=coalesce_state,
-                    _release_untriaged_on_finish=True,
-                )
-
-        leak_records = [r for r in caplog.records if "start failure" in r.message]
-        assert leak_records, "expected a loud ERROR on start-failure leak (#1336)"
-        assert leak_records[0].levelname == "ERROR"
 
     def test_release_runs_before_set_rescoping_in_finally(self, tmp_path: Path) -> None:
         """Release must fire BEFORE set_rescoping so a failure in the latter
@@ -4420,23 +4588,6 @@ class TestReorderTasksBackground:
         set_false_idx = registry.calls.index(("set_rescoping", "owner/repo", False))
         assert exit_idx < set_false_idx
 
-    def test_on_inprogress_affected_not_in_kwargs_when_no_registry(
-        self, tmp_path: Path
-    ) -> None:
-        started: list = []
-        calls, mock_reorder = self._capture_reorder_calls()
-        _reorder_tasks_background(
-            tmp_path,
-            "commits",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
-        )
-        self._run_thread(started)
-        assert "_on_inprogress_affected" not in calls[0][2]
-
     def test_on_done_kwarg_calls_rewrite_fn(self, tmp_path: Path) -> None:
         started: list = []
         rewrite_calls: list = []
@@ -4459,6 +4610,8 @@ class TestReorderTasksBackground:
             _reorder_fn=mock_reorder,
             _sync_fn=mock_sync,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -4488,6 +4641,8 @@ class TestReorderTasksBackground:
             agent=fake_client,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -4515,6 +4670,8 @@ class TestReorderTasksBackground:
             _reorder_fn=mock_reorder,
             _sync_fn=mock_sync,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -4536,6 +4693,8 @@ class TestReorderTasksBackground:
             _rewrite_fn=lambda *a, **kw: None,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -4558,6 +4717,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1
         assert state[str(tmp_path)]["running"] is True
@@ -4571,6 +4732,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1  # no second thread spawned
         assert state[str(tmp_path)]["pending"] is not None
@@ -4590,6 +4753,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Simulate a second trigger arriving before the thread runs
         _reorder_tasks_background(
@@ -4600,6 +4765,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Run the single thread — should execute reorder twice (cs1 then cs2)
         self._run_thread(started)
@@ -4624,6 +4791,8 @@ class TestReorderTasksBackground:
                 _start=lambda t: started.append(t),
                 _reorder_fn=mock_reorder,
                 _coalesce_state=state,
+                registry=MagicMock(spec=ActivityReporter),
+                repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
             )
         # Only one thread spawned; pending holds cs4 (the latest)
         assert len(started) == 1
@@ -4654,6 +4823,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Second call — coalesces, adds intent2
         _reorder_tasks_background(
@@ -4665,6 +4836,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Third call — coalesces, adds intent3
         _reorder_tasks_background(
@@ -4676,6 +4849,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Only one thread spawned; pending holds all three intents
         assert len(started) == 1
@@ -4703,6 +4878,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert state[str(tmp_path)]["running"] is False
@@ -4723,6 +4900,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)  # first thread completes
 
@@ -4734,6 +4913,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 2  # new thread spawned
 
@@ -4753,6 +4934,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         _reorder_tasks_background(
             dir_b,
@@ -4762,6 +4945,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 2  # each dir gets its own thread
 
@@ -4838,69 +5023,6 @@ class TestReorderTasksBackground:
         last_call = registry.set_rescoping.call_args_list[-1]
         assert last_call[0] == ("owner/repo", False)
 
-    def test_logs_error_when_holds_leak_with_no_registry(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Regression for #1336: when a coalesced caller bumped
-        ``untriaged_holds`` but the running BG has no registry to call
-        ``exit_untriaged`` on, the finally must log a loud ERROR (not
-        silently misreport the release count)."""
-        started: list = []
-        _, mock_reorder = self._capture_reorder_calls()
-        coalesce_state: dict = {}
-        # First call: starts the BG with registry=None (the original bug
-        # scenario — _BackgroundRescopeTrigger constructed with registry=None
-        # because the worker reply path forgot to thread it through).
-        _reorder_tasks_background(
-            tmp_path,
-            "cs",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=coalesce_state,
-        )
-        # Second call coalesces with _release_untriaged_on_finish=True,
-        # bumping untriaged_holds (a real create_task path would have called
-        # registry.enter_untriaged() too, leaking a hold the BG cannot release).
-        _reorder_tasks_background(
-            tmp_path,
-            "cs",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=coalesce_state,
-            _release_untriaged_on_finish=True,
-        )
-        with caplog.at_level("ERROR", logger="fido.events"):
-            self._run_thread(started)
-        leak_records = [
-            r
-            for r in caplog.records
-            if "leaking" in r.message and "untriaged hold" in r.message
-        ]
-        assert leak_records, "expected a loud ERROR when holds leak (#1336)"
-        assert leak_records[0].levelname == "ERROR"
-
-    def test_no_rescoping_calls_when_no_registry(self, tmp_path: Path) -> None:
-        """When registry is None, set_rescoping is not called."""
-        started: list = []
-        _, mock_reorder = self._capture_reorder_calls()
-        _reorder_tasks_background(
-            tmp_path,
-            "cs",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
-        )
-        self._run_thread(started)
-        # No registry provided — must not raise and must complete normally
-
     def test_sets_thread_local_repo_name_during_reorder(self, tmp_path: Path) -> None:
         """Thread-local repo_name is set to repo_cfg.name when reorder runs."""
         from fido.provider import current_repo
@@ -4921,6 +5043,7 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
         )
         self._run_thread(started)
         assert seen == ["owner/repo"]
@@ -4943,6 +5066,7 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
         )
         self._run_thread(started)
         assert current_repo() is None
@@ -4968,32 +5092,11 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=boom,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
         )
         with pytest.raises(RuntimeError, match="reorder exploded"):
             self._run_thread(started)
         assert current_repo() is None
-
-    def test_no_thread_local_set_when_no_repo_cfg(self, tmp_path: Path) -> None:
-        """When repo_cfg is None, set_thread_repo is not called (no crash)."""
-        from fido.provider import current_repo
-
-        started: list = []
-        seen: list = []
-
-        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
-            seen.append(current_repo())
-
-        _reorder_tasks_background(
-            tmp_path,
-            "cs",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
-        )
-        self._run_thread(started)
-        assert seen == [None]
 
     def test_sets_thread_kind_webhook_during_reorder(self, tmp_path: Path) -> None:
         """Thread kind is set to 'webhook' while the reorder loop runs (#955).
@@ -5017,6 +5120,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert seen == ["webhook"]
@@ -5037,6 +5142,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         # run_loop must clear kind in its finally block so the caller's
@@ -5060,6 +5167,8 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=boom,
             _coalesce_state={},
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         with pytest.raises(RuntimeError, match="reorder exploded"):
             self._run_thread(started)
@@ -5789,6 +5898,7 @@ class TestBackgroundRescopeTrigger:
             cfg,
             mock_gh,
             repo_cfg=repo_cfg,
+            registry=MagicMock(spec=ActivityReporter),
         )
 
         with patch("fido.events._reorder_tasks_background") as mock_reorder:
@@ -5812,6 +5922,7 @@ class TestBackgroundRescopeTrigger:
             cfg,
             mock_gh,
             repo_cfg=repo_cfg,
+            registry=MagicMock(spec=ActivityReporter),
         )
 
         with patch("fido.events._reorder_tasks_background") as mock_reorder:
@@ -5831,6 +5942,7 @@ class TestBackgroundRescopeTrigger:
             cfg,
             mock_gh,
             repo_cfg=repo_cfg,
+            registry=MagicMock(spec=ActivityReporter),
         )
 
         with patch("fido.events._reorder_tasks_background") as mock_reorder:
@@ -5880,6 +5992,7 @@ class TestReplyToCommentElseBranch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
         assert cat == "ANSWER"
         assert titles == []
@@ -5910,6 +6023,7 @@ class TestReplyToCommentElseBranch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
     def test_skips_review_reply_when_artifact_already_recorded(
@@ -5956,6 +6070,7 @@ class TestReplyToCommentElseBranch:
                 repo_cfg,
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         assert cat == "ACT"
@@ -6008,6 +6123,7 @@ class TestReplyToCommentEyesReaction:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Eyes reaction must come before synthesis
@@ -6041,6 +6157,7 @@ class TestReplyToCommentEyesReaction:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # First add_reaction call should be the eyes reaction
@@ -6076,6 +6193,7 @@ class TestReplyToCommentEyesReaction:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Reply still posted despite reaction failure
@@ -6106,6 +6224,7 @@ class TestReplyToCommentEyesReaction:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         mock_gh.add_reaction.assert_not_called()
@@ -6161,6 +6280,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Must be called exactly twice: initial context fetch + pre-post re-fetch
@@ -6215,6 +6335,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Re-fetch shows human is last → post new reply, not edit
@@ -6275,6 +6396,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Fresh data shows human is last speaker → post new reply, never edit
@@ -6316,6 +6438,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Falls back to initial snapshot (no Fido reply) → posts new reply
@@ -6374,6 +6497,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Concurrent handler already replied — neither post nor edit is called
@@ -6434,6 +6558,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Sibling-comment reply must NOT skip our post — we still reply.
@@ -6474,6 +6599,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Posted replies are immutable; Fido posts a new reply instead.
@@ -6526,6 +6652,7 @@ class TestReplyToCommentThreadRefetch:
                 self._repo_cfg(tmp_path),
                 mock_gh,
                 agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
             )
 
         # Concurrent Fido reply detected (via fido-can-code) — skip
@@ -6955,7 +7082,7 @@ class TestMakeReorderKwargsActiveContext:
             tmp_path,
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
-            None,
+            MagicMock(),
             gh,
             MagicMock(),
             MagicMock(),
@@ -6973,7 +7100,7 @@ class TestMakeReorderKwargsActiveContext:
             tmp_path,
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
-            None,
+            MagicMock(),
             gh,
             MagicMock(),
             MagicMock(),
@@ -6996,7 +7123,7 @@ class TestMakeReorderKwargsActiveContext:
             tmp_path,
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
-            None,
+            MagicMock(),
             gh,
             MagicMock(),
             MagicMock(),
@@ -7007,24 +7134,6 @@ class TestMakeReorderKwargsActiveContext:
         assert isinstance(pr, ActivePR)
         assert pr.number == 99
         assert pr.url == "https://github.com/owner/repo/pull/99"
-
-    def test_no_issue_or_pr_when_repo_cfg_is_none(self, tmp_path: Path) -> None:
-        fido_dir = self._fido_dir(tmp_path)
-        State(fido_dir).save({"issue": 5, "pr_number": 10})
-        gh = MagicMock()
-        kwargs = _make_reorder_kwargs(
-            tmp_path,
-            self._cfg(tmp_path),
-            None,  # no repo_cfg
-            None,
-            gh,
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-        )
-        assert "issue" not in kwargs
-        assert "pr" not in kwargs
-        gh.view_issue.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

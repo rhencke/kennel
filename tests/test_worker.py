@@ -44,6 +44,7 @@ from fido.types import GitIdentity
 from fido.worker import (
     _RETRY_COMMENT_MARKER,
     AbortHandle,
+    ActivityReporter,
     GitIdentityError,
     LockHeld,
     RepoContext,
@@ -140,6 +141,8 @@ class WorkerThread(_WorkerThreadBase):
         *args: object,
         **kwargs: object,
     ) -> None:
+        if "registry" not in kwargs:
+            kwargs["registry"] = MagicMock(spec=ActivityReporter)
         repo_cfg = kwargs.get("repo_cfg", _MISSING)
         if repo_cfg is _MISSING and kwargs.get("provider") is None:
             kwargs["repo_cfg"] = _default_repo_cfg(
@@ -251,7 +254,7 @@ class TestRepoNameFilter:
 
 class TestResolveGitDir:
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def test_returns_path(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
@@ -355,7 +358,9 @@ class TestCreateContext:
     def test_returns_worker_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        ctx = Worker(tmp_path, MagicMock()).create_context(_run=self._mock_run(git_dir))
+        ctx = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).create_context(_run=self._mock_run(git_dir))
         assert isinstance(ctx, WorkerContext)
         assert ctx.work_dir == tmp_path
         assert ctx.git_dir == git_dir
@@ -365,7 +370,9 @@ class TestCreateContext:
     def test_creates_fido_dir(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        ctx = Worker(tmp_path, MagicMock()).create_context(_run=self._mock_run(git_dir))
+        ctx = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).create_context(_run=self._mock_run(git_dir))
         assert ctx.fido_dir.is_dir()
         ctx.lock_fd.close()
 
@@ -376,9 +383,9 @@ class TestCreateContext:
         fd1 = acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld):
-                Worker(tmp_path, MagicMock()).create_context(
-                    _run=self._mock_run(git_dir)
-                )
+                Worker(
+                    tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+                ).create_context(_run=self._mock_run(git_dir))
         finally:
             fd1.close()
 
@@ -441,7 +448,13 @@ class TestWorker:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        worker = Worker(tmp_path, MagicMock(), config=config, repo_cfg=None)
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            config=config,
+            repo_cfg=None,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert worker._config is config
 
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
@@ -450,7 +463,12 @@ class TestWorker:
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
         )
-        worker = Worker(tmp_path, MagicMock(), repo_cfg=cfg)
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=cfg,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert worker._repo_cfg is cfg
 
     def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
@@ -464,6 +482,7 @@ class TestWorker:
                 work_dir=tmp_path,
                 provider=ProviderID.COPILOT_CLI,
             ),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert worker._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
 
@@ -479,80 +498,116 @@ class TestWorker:
                 provider=ProviderID.CODEX,
             ),
             issue_cache=MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert worker._provider.provider_id == ProviderID.CODEX  # pyright: ignore[reportPrivateUsage]
 
     def test_config_defaults_to_none(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         assert worker._config is None
 
     def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock(), repo_cfg=None, provider=MagicMock())
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=None,
+            provider=MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert worker._repo_cfg is None
 
     # --- discover_repo_context ---
 
     def test_discover_returns_repo_context(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert isinstance(result, RepoContext)
 
     def test_discover_repo_field(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.repo == "alice/proj"
 
     def test_discover_owner_parsed(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.owner == "alice"
 
     def test_discover_repo_name_parsed(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="alice/proj")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.repo_name == "proj"
 
     def test_discover_gh_user(self, tmp_path: Path) -> None:
         gh = self._make_gh(user="fido")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.gh_user == "fido"
 
     def test_discover_default_branch(self, tmp_path: Path) -> None:
         gh = self._make_gh(branch="develop")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.default_branch == "develop"
 
     def test_discover_passes_cwd_to_get_repo_info(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        Worker(tmp_path, gh).discover_repo_context()
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         gh.get_repo_info.assert_called_once_with(cwd=tmp_path)
 
     def test_discover_passes_cwd_to_get_default_branch(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        Worker(tmp_path, gh).discover_repo_context()
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         gh.get_default_branch.assert_called_once_with(cwd=tmp_path)
 
     def test_discover_splits_on_first_slash_only(self, tmp_path: Path) -> None:
         gh = self._make_gh(repo="org/repo")
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.owner == "org"
         assert result.repo_name == "repo"
 
     def test_discover_uses_injected_membership(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         membership = RepoMembership(collaborators=frozenset({"alice", "bob"}))
-        result = Worker(tmp_path, gh, membership=membership).discover_repo_context()
+        result = Worker(
+            tmp_path,
+            gh,
+            membership=membership,
+            registry=MagicMock(spec=ActivityReporter),
+        ).discover_repo_context()
         assert result.membership is membership
         assert result.collaborators == frozenset({"alice", "bob"})
 
     def test_discover_default_membership_empty(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        result = Worker(tmp_path, gh).discover_repo_context()
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         assert result.collaborators == frozenset()
 
     def test_discover_does_not_call_get_collaborators(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        Worker(tmp_path, gh).discover_repo_context()
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).discover_repo_context()
         gh.get_collaborators.assert_not_called()
 
     # --- set_status ---
@@ -574,16 +629,22 @@ class TestWorker:
     def test_set_status_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh, session=self._session(status="writing tests")).set_status(
-            "writing tests", _sub_dir_fn=lambda: tmp_path
-        )
+        Worker(
+            tmp_path,
+            gh,
+            session=self._session(status="writing tests"),
+            registry=MagicMock(spec=ActivityReporter),
+        ).set_status("writing tests", _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
 
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
-            tmp_path, gh, session=self._session(status="napping", emoji="😴")
+            tmp_path,
+            gh,
+            session=self._session(status="napping", emoji="😴"),
+            registry=MagicMock(spec=ActivityReporter),
         ).set_status("napping", busy=False, _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
@@ -593,7 +654,10 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
-            tmp_path, gh, session=self._session(status="", emoji=":dog:")
+            tmp_path,
+            gh,
+            session=self._session(status="", emoji=":dog:"),
+            registry=MagicMock(spec=ActivityReporter),
         ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         assert gh.set_user_status.call_args[0][0] == "idle"
 
@@ -601,7 +665,10 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
-            tmp_path, gh, session=self._session(status="Sniffing endpoints", emoji="")
+            tmp_path,
+            gh,
+            session=self._session(status="Sniffing endpoints", emoji=""),
+            registry=MagicMock(spec=ActivityReporter),
         ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_called_once_with(
             "Sniffing endpoints", ":dog:", busy=True
@@ -611,9 +678,12 @@ class TestWorker:
         gh = self._make_gh()
         long_text = "x" * 100
         (tmp_path / "persona.md").write_text("I am Fido.")
-        Worker(tmp_path, gh, session=self._session(status=long_text)).set_status(
-            "something", _sub_dir_fn=lambda: tmp_path
-        )
+        Worker(
+            tmp_path,
+            gh,
+            session=self._session(status=long_text),
+            registry=MagicMock(spec=ActivityReporter),
+        ).set_status("something", _sub_dir_fn=lambda: tmp_path)
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -625,9 +695,9 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.INFO, logger="fido"):
-            Worker(tmp_path, gh, session=None).set_status(
-                "idle", _sub_dir_fn=lambda: tmp_path
-            )
+            Worker(
+                tmp_path, gh, session=None, registry=MagicMock(spec=ActivityReporter)
+            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         gh.set_user_status.assert_not_called()
         assert "no session available" in caplog.text
 
@@ -640,7 +710,10 @@ class TestWorker:
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.WARNING, logger="fido"):
             Worker(
-                tmp_path, gh, session=self._session(status="", emoji=":dog:")
+                tmp_path,
+                gh,
+                session=self._session(status="", emoji=":dog:"),
+                registry=MagicMock(spec=ActivityReporter),
             ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
         assert "falling back" in caplog.text
 
@@ -652,9 +725,12 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.INFO, logger="fido"):
-            Worker(tmp_path, gh, session=self._session(status="fetching")).set_status(
-                "fetching", _sub_dir_fn=lambda: tmp_path
-            )
+            Worker(
+                tmp_path,
+                gh,
+                session=self._session(status="fetching"),
+                registry=MagicMock(spec=ActivityReporter),
+            ).set_status("fetching", _sub_dir_fn=lambda: tmp_path)
         assert "set_status" in caplog.text
 
     def test_set_status_falls_back_to_empty_persona_on_oserror(
@@ -673,9 +749,9 @@ class TestWorker:
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
         session = self._session(status="working")
-        Worker(tmp_path, gh, session=session).set_status(
-            "working", _sub_dir_fn=lambda: tmp_path
-        )
+        Worker(
+            tmp_path, gh, session=session, registry=MagicMock(spec=ActivityReporter)
+        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
         assert session.prompt.call_args[1]["system_prompt"] is not None
 
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
@@ -799,21 +875,33 @@ class TestWorker:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         gh = self._make_issue_gh()
-        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
+        assert (
+            Worker(
+                tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+            ).get_current_issue(fido_dir, "owner/repo")
+            is None
+        )
 
     def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
-        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") == 7
+        assert (
+            Worker(
+                tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+            ).get_current_issue(fido_dir, "owner/repo")
+            == 7
+        )
 
     def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
-        result = Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        result = Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).get_current_issue(fido_dir, "owner/repo")
         assert isinstance(result, int)
 
     def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
@@ -821,14 +909,21 @@ class TestWorker:
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
-        assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
+        assert (
+            Worker(
+                tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+            ).get_current_issue(fido_dir, "owner/repo")
+            is None
+        )
 
     def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
-        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).get_current_issue(fido_dir, "owner/repo")
         assert State(fido_dir).load() == {}
 
     def test_get_issue_does_not_call_view_issue_when_no_state(
@@ -837,7 +932,9 @@ class TestWorker:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         gh = self._make_issue_gh()
-        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).get_current_issue(fido_dir, "owner/repo")
         gh.view_issue.assert_not_called()
 
     def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
@@ -845,7 +942,9 @@ class TestWorker:
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 12})
         gh = self._make_issue_gh(state="OPEN")
-        Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).get_current_issue(fido_dir, "alice/proj")
         gh.view_issue.assert_called_once_with("alice/proj", 12)
 
     def test_get_issue_logs_info_when_closed(
@@ -858,7 +957,9 @@ class TestWorker:
         State(fido_dir).save({"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
         with caplog.at_level(logging.INFO, logger="fido"):
-            Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+            Worker(
+                tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+            ).get_current_issue(fido_dir, "owner/repo")
         assert "advancing" in caplog.text
 
     def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
@@ -866,7 +967,9 @@ class TestWorker:
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 5})
         gh = self._make_issue_gh(state="OPEN")
-        Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
+        Worker(
+            tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
+        ).get_current_issue(fido_dir, "owner/repo")
         assert State(fido_dir).load() == {"issue": 5}
 
     # --- run ---
@@ -890,14 +993,18 @@ class TestWorker:
     def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
         from fido import claude
 
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker.create_session()
         claude.ClaudeSession.assert_called_once()
 
     def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
         from fido import claude
 
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker.create_session()
         _, kwargs = claude.ClaudeSession.call_args
         assert kwargs.get("work_dir") == tmp_path
@@ -907,7 +1014,9 @@ class TestWorker:
 
         mock_session = MagicMock()
         claude.ClaudeSession.return_value = mock_session
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker.create_session()
         _, kwargs = claude.ClaudeSession.call_args
         assert kwargs.get("model") == "claude-opus-4-6"
@@ -918,7 +1027,9 @@ class TestWorker:
 
         mock_session = MagicMock()
         claude.ClaudeSession.return_value = mock_session
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker.create_session()
         assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
 
@@ -929,6 +1040,7 @@ class TestWorker:
             tmp_path,
             MagicMock(),
             repo_cfg=_default_repo_cfg(tmp_path, repo_name="owner/repo"),
+            registry=MagicMock(spec=ActivityReporter),
         )
         worker._provider = None  # pyright: ignore[reportPrivateUsage]
         agent = worker._provider_agent
@@ -936,7 +1048,12 @@ class TestWorker:
         assert agent is worker._provider.agent  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock(), repo_cfg=None)
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=None,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with pytest.raises(
             RuntimeError, match="worker provider requires explicit repo_cfg"
         ):
@@ -950,32 +1067,44 @@ class TestWorker:
         provider.agent.attach_session.side_effect = lambda attached: setattr(
             provider.agent, "session", attached
         )
-        worker = Worker(tmp_path, MagicMock(), provider=provider, session=session)
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            provider=provider,
+            session=session,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         provider.agent.attach_session.assert_called_once_with(session)
         assert worker._provider.agent.session is session  # pyright: ignore[reportPrivateUsage]
 
     def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
         mock_session = MagicMock()
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker._provider.agent.attach_session(mock_session)  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()
         mock_session.stop.assert_called_once()
 
     def test_stop_session_clears_session(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         worker._provider.agent.attach_session(MagicMock())  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()
         assert worker._provider.agent.session is None  # pyright: ignore[reportPrivateUsage]
 
     def test_stop_session_is_noop_when_none(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         assert worker._provider.agent.session is None  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()  # must not raise
 
     def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_create = MagicMock()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -998,7 +1127,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         order: list[str] = []
 
         def mark_recover(*args: object, **kwargs: object) -> bool:
@@ -1048,7 +1177,13 @@ class TestWorker:
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         mock_session = MagicMock()
         # same issue as last time — no boundary restart, no model switch
-        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
+        worker = Worker(
+            tmp_path,
+            gh,
+            session=mock_session,
+            session_issue=7,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1078,7 +1213,13 @@ class TestWorker:
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         mock_session = MagicMock()
         # session was working on issue 5; now issue 7 is picked — boundary
-        worker = Worker(tmp_path, gh, session=mock_session, session_issue=5)
+        worker = Worker(
+            tmp_path,
+            gh,
+            session=mock_session,
+            session_issue=5,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1105,7 +1246,13 @@ class TestWorker:
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         mock_session = MagicMock()
-        worker = Worker(tmp_path, gh, session=mock_session, session_issue=7)
+        worker = Worker(
+            tmp_path,
+            gh,
+            session=mock_session,
+            session_issue=7,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1131,7 +1278,12 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         mock_session = MagicMock()
-        worker = Worker(tmp_path, gh, session=mock_session)
+        worker = Worker(
+            tmp_path,
+            gh,
+            session=mock_session,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1150,7 +1302,7 @@ class TestWorker:
 
     def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with patch.object(worker, "create_context", side_effect=LockHeld("held")):
             assert worker.run() == 2
 
@@ -1177,7 +1329,7 @@ class TestWorker:
     def test_run_returns_0_on_success(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1198,7 +1350,7 @@ class TestWorker:
         import logging
 
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with patch.object(worker, "create_context", side_effect=LockHeld("held")):
             with caplog.at_level(logging.WARNING, logger="fido"):
                 worker.run()
@@ -1211,7 +1363,7 @@ class TestWorker:
 
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1235,7 +1387,7 @@ class TestWorker:
 
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1257,7 +1409,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         mock_teardown = MagicMock()
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1277,7 +1429,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         mock_setup = MagicMock(return_value=("c", "s"))
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1294,7 +1446,7 @@ class TestWorker:
     def test_run_calls_get_current_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_get_issue = MagicMock(return_value=None)
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -1312,7 +1464,7 @@ class TestWorker:
     def test_run_calls_find_next_issue_when_no_current(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_find = MagicMock(return_value=None)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -1332,7 +1484,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix bug", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_find = MagicMock(return_value=None)
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -1356,7 +1508,7 @@ class TestWorker:
     def test_run_returns_0_when_no_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1379,7 +1531,7 @@ class TestWorker:
             "body": "",
             "state": "OPEN",
         }
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_pickup = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -1410,7 +1562,7 @@ class TestWorker:
             "body": "",
             "state": "OPEN",
         }
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_pickup = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -1437,7 +1589,7 @@ class TestWorker:
             "body": "",
             "state": "OPEN",
         }
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1464,7 +1616,7 @@ class TestWorker:
             "body": "Issue body text",
             "state": "OPEN",
         }
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_focp = MagicMock(return_value=(42, "my-branch", False))
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -1493,7 +1645,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "New thing", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
@@ -1527,7 +1679,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Old thing", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
@@ -1560,7 +1712,7 @@ class TestWorker:
         """CI/thread/rescope checks are unreachable when no issue is selected."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
@@ -1591,7 +1743,7 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         iteration = 0
 
         def focp_side_effect(*_a: object, **_kw: object) -> tuple[int, str, bool]:
@@ -1642,7 +1794,9 @@ class TestWorkerFindNextIssue:
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
         )
-        return Worker(tmp_path, gh, provider=provider), gh
+        return Worker(
+            tmp_path, gh, provider=provider, registry=MagicMock(spec=ActivityReporter)
+        ), gh
 
     def _make_repo_ctx(
         self,
@@ -1701,7 +1855,13 @@ class TestWorkerFindNextIssue:
                 ),
             ),
         )
-        worker = Worker(tmp_path, gh, provider=provider, repo_name="owner/repo")
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider=provider,
+            repo_name="owner/repo",
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = self._fido_dir(tmp_path)
 
         result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1729,7 +1889,13 @@ class TestWorkerFindNextIssue:
                 ),
             ),
         )
-        worker = Worker(tmp_path, gh, provider=provider, repo_name="owner/repo")
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider=provider,
+            repo_name="owner/repo",
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = self._fido_dir(tmp_path)
 
         worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -2179,7 +2345,9 @@ class TestIssueHasOpenSubIssues:
                 inventory,
                 snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
             )
-        return Worker(tmp_path, gh, issue_cache=cache)
+        return Worker(
+            tmp_path, gh, issue_cache=cache, registry=MagicMock(spec=ActivityReporter)
+        )
 
     def _issue(
         self,
@@ -2722,7 +2890,9 @@ class TestWorkerVerifyCachedIssueStillOpen:
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
         )
-        return Worker(tmp_path, gh, provider=provider), gh
+        return Worker(
+            tmp_path, gh, provider=provider, registry=MagicMock(spec=ActivityReporter)
+        ), gh
 
     def test_returns_true_when_state_open(self, tmp_path: Path) -> None:
         worker, gh = self._worker(tmp_path)
@@ -2752,7 +2922,13 @@ class TestWorkerPickFromCache:
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
         )
-        return Worker(tmp_path, gh, provider=provider, issue_cache=cache), gh
+        return Worker(
+            tmp_path,
+            gh,
+            provider=provider,
+            issue_cache=cache,
+            registry=MagicMock(spec=ActivityReporter),
+        ), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -2870,7 +3046,13 @@ class TestWorkerFindNextIssueCacheBranch:
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
         )
-        worker = Worker(tmp_path, gh, provider=provider, issue_cache=cache)
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider=provider,
+            issue_cache=cache,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         repo_ctx = RepoContext(
@@ -2902,7 +3084,12 @@ class TestWorkerPostPickupComment:
         gh = MagicMock()
         gh.view_issue.return_value = {"created_at": "2024-01-01T00:00:00Z"}
         gh.get_issue_events.return_value = []
-        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
+        return Worker(
+            tmp_path,
+            gh,
+            provider_agent=provider_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        ), gh
 
     def test_skips_when_pickup_marker_present(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3103,7 +3290,9 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        compact_cmd, sync_cmd = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         assert compact_cmd.startswith("bash ")
         assert "sync_tasks_cli" in sync_cmd
 
@@ -3111,14 +3300,18 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        compact_cmd, _ = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        compact_cmd, _ = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         assert "compact.sh" in compact_cmd
 
     def test_sync_cmd_references_sync_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        _, sync_cmd = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         assert "python -m fido.sync_tasks_cli" in sync_cmd
         assert "uv run" not in sync_cmd
 
@@ -3126,14 +3319,18 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        _, sync_cmd = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         assert str(tmp_path) in sync_cmd
 
     def test_creates_compact_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         assert (fido_dir / "compact.sh").exists()
 
     def test_adds_hooks_to_settings(self, tmp_path: Path) -> None:
@@ -3142,7 +3339,9 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         settings = tmp_path / ".claude" / "settings.local.json"
         assert settings.exists()
         cfg = json.loads(settings.read_text())
@@ -3152,7 +3351,9 @@ class TestSetupHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
+        Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).setup_hooks(fido_dir)
         exclude = tmp_path / ".git" / "info" / "exclude"
         assert ".claude/settings.local.json" in exclude.read_text()
 
@@ -3162,7 +3363,9 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         compact_cmd, sync_cmd = worker.setup_hooks(fido_dir)
         worker.teardown_hooks(fido_dir, compact_cmd, sync_cmd)
         assert not (fido_dir / "compact.sh").exists()
@@ -3173,7 +3376,9 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         compact_cmd, sync_cmd = worker.setup_hooks(fido_dir)
         worker.teardown_hooks(fido_dir, compact_cmd, sync_cmd)
         settings = tmp_path / ".claude" / "settings.local.json"
@@ -3184,17 +3389,17 @@ class TestTeardownHooks:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # Should not raise even when compact.sh does not exist
-        Worker(tmp_path, MagicMock()).teardown_hooks(
-            fido_dir, "bash /x/compact.sh", "bash sync.sh &"
-        )
+        Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).teardown_hooks(fido_dir, "bash /x/compact.sh", "bash sync.sh &")
 
     def test_noop_when_settings_missing(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # No settings file created — should not raise
-        Worker(tmp_path, MagicMock()).teardown_hooks(
-            fido_dir, "bash /x/compact.sh", "bash sync.sh &"
-        )
+        Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        ).teardown_hooks(fido_dir, "bash /x/compact.sh", "bash sync.sh &")
 
 
 class TestLoadState:
@@ -3919,7 +4124,9 @@ class TestGit:
 
     def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
+        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
+            ["status"], _run=mock_run
+        )
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
         assert args[0] == "git"
@@ -3927,29 +4134,37 @@ class TestGit:
 
     def test_passes_work_dir_as_cwd(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
+        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
+            ["status"], _run=mock_run
+        )
         assert mock_run.call_args[1]["cwd"] == tmp_path
 
     def test_check_true_by_default(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
+        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
+            ["status"], _run=mock_run
+        )
         assert mock_run.call_args[1]["check"] is True
 
     def test_check_false_propagated(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(returncode=1))
-        Worker(tmp_path, MagicMock())._git(["status"], check=False, _run=mock_run)
+        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
+            ["status"], check=False, _run=mock_run
+        )
         assert mock_run.call_args[1]["check"] is False
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(tmp_path, MagicMock())._git(
-                ["checkout", "no-such-branch"], _run=mock_run
-            )
+            Worker(
+                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            )._git(["checkout", "no-such-branch"], _run=mock_run)
 
     def test_capture_output_and_text_set(self, tmp_path: Path) -> None:
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock())._git(["log"], _run=mock_run)
+        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
+            ["log"], _run=mock_run
+        )
         assert mock_run.call_args[1]["capture_output"] is True
         assert mock_run.call_args[1]["text"] is True
 
@@ -3978,7 +4193,9 @@ class TestGit:
                 )
             return success
 
-        result = Worker(tmp_path, MagicMock())._git(["add", "-A"], _run=_run)
+        result = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )._git(["add", "-A"], _run=_run)
         assert result is success
         assert len(calls) == 2
         assert not lock.exists()
@@ -3999,7 +4216,9 @@ class TestGit:
             )
         )
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(tmp_path, MagicMock())._git(["add", "-A"], _run=mock_run)
+            Worker(
+                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            )._git(["add", "-A"], _run=mock_run)
         assert lock.exists()
         assert mock_run.call_count == 1
 
@@ -4011,7 +4230,9 @@ class TestGit:
             )
         )
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
+            Worker(
+                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            )._git(["status"], _run=mock_run)
         assert mock_run.call_count == 1
 
 
@@ -4084,7 +4305,7 @@ class TestLocalBranchExists:
     """Tests for Worker._local_branch_exists (closes #828)."""
 
     def _worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def test_returns_true_on_exit_zero(self, tmp_path: Path) -> None:
         worker = self._worker(tmp_path)
@@ -4126,7 +4347,7 @@ class TestGitClean:
     """Tests for Worker.git_clean."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def _git_result(self, stdout: str = "") -> MagicMock:
         r = MagicMock()
@@ -4526,7 +4747,12 @@ class TestFindOrCreatePr:
         # retry-acknowledgement comment on every test.
         gh.find_closed_unmerged_prs_for_issue.return_value = []
         gh.find_closed_prs_as_context.return_value = []
-        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
+        return Worker(
+            tmp_path,
+            gh,
+            provider_agent=provider_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        ), gh
 
     def _make_repo_ctx(
         self,
@@ -5281,7 +5507,16 @@ class TestFinalizeSetupWithNoTasks:
         gh = MagicMock()
         gh.get_issue_comments.return_value = []
         agent = _client(return_value=comment_text)
-        return Worker(tmp_path, gh, provider_agent=agent), gh, agent
+        return (
+            Worker(
+                tmp_path,
+                gh,
+                provider_agent=agent,
+                registry=MagicMock(spec=ActivityReporter),
+            ),
+            gh,
+            agent,
+        )
 
     def _make_repo_ctx(
         self, *, collaborators: frozenset[str] = frozenset({"rhencke"})
@@ -5377,7 +5612,12 @@ class TestResetLocalWorkspaceAndRetryAck:
         self, tmp_path: Path, provider_agent: MagicMock | None = None
     ) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh, provider_agent=provider_agent), gh
+        return Worker(
+            tmp_path,
+            gh,
+            provider_agent=provider_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        ), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -5615,7 +5855,7 @@ class TestSeedTasksFromPrBody:
 
     def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _pr_with_queue(self, *task_titles: str, task_type: str = "spec") -> dict:
         lines = "\n".join(f"- [ ] {t} <!-- type:{task_type} -->" for t in task_titles)
@@ -5886,7 +6126,7 @@ class TestRunSeedTasksIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "My task", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_seed = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -5920,7 +6160,12 @@ class TestRunSeedTasksIntegration:
             return 0
 
         def _run_once(first: bool) -> None:
-            worker = Worker(tmp_path, gh, first_iteration=first)
+            worker = Worker(
+                tmp_path,
+                gh,
+                first_iteration=first,
+                registry=MagicMock(spec=ActivityReporter),
+            )
             with (
                 patch.object(
                     worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
@@ -5964,7 +6209,12 @@ class TestRunSeedTasksIntegration:
 
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh, first_iteration=True)
+        worker = Worker(
+            tmp_path,
+            gh,
+            first_iteration=True,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(
@@ -6000,7 +6250,12 @@ class TestRunSeedTasksIntegration:
         avoid one superfluous API round-trip."""
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh, first_iteration=True)
+        worker = Worker(
+            tmp_path,
+            gh,
+            first_iteration=True,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(
@@ -6026,7 +6281,7 @@ class TestRunSeedTasksIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_seed = MagicMock()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -6059,7 +6314,7 @@ class TestRunSeedTasksIntegration:
         fido_dir.mkdir(parents=True)
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         # Persist initial state naming #201 as active.
         (fido_dir / "state.json").write_text(
             '{"issue": 201, "issue_title": "Parent", '
@@ -6107,7 +6362,7 @@ class TestRunSeedTasksIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Leaf", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -6134,7 +6389,7 @@ class TestExtractRunId:
     """Tests for Worker._extract_run_id."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def test_extracts_id_from_standard_url(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
@@ -6164,7 +6419,7 @@ class TestFilterCiThreads:
     """Tests for Worker._filter_ci_threads."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def _make_node(
         self,
@@ -6332,7 +6587,7 @@ class TestHandleMergeConflict:
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         gh.get_pr.return_value = {"mergeStateStatus": "DIRTY"}
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -6485,7 +6740,7 @@ class TestRunHandleMergeConflictIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_handle_mc = MagicMock(return_value=False)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -6512,7 +6767,7 @@ class TestRunHandleMergeConflictIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -6536,7 +6791,7 @@ class TestRunHandleMergeConflictIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         mock_ci = MagicMock(return_value=False)
         with (
@@ -6560,7 +6815,7 @@ class TestRunHandleMergeConflictIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         mock_mc = MagicMock(return_value=False)
         with (
@@ -6588,7 +6843,7 @@ class TestHandleCi:
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -7047,7 +7302,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_handle_ci = MagicMock(return_value=False)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -7074,7 +7329,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -7097,7 +7352,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -7123,7 +7378,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_handle_ci = MagicMock(return_value=False)
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -7151,7 +7406,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         call_order: list[str] = []
 
@@ -7187,7 +7442,7 @@ class TestRunHandleCiIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         mock_handle_ci = MagicMock(return_value=True)
 
@@ -7215,7 +7470,7 @@ class TestFilterThreads:
     """Tests for Worker._filter_threads."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def _make_node(
         self,
@@ -7449,6 +7704,7 @@ class TestResolveAddressedThreads:
                 repo_cfg=repo_cfg,
                 repo_name="owner/repo",
                 issue_cache=MagicMock(),
+                registry=MagicMock(spec=ActivityReporter),
             ),
             gh,
         )
@@ -7676,6 +7932,7 @@ class TestHandleThreads:
                 repo_cfg=repo_cfg,
                 repo_name="owner/repo",
                 issue_cache=MagicMock(),
+                registry=MagicMock(spec=ActivityReporter),
             ),
             gh,
         )
@@ -8130,7 +8387,12 @@ class TestHandleThreads:
     def test_requires_explicit_config_and_repo_cfg(self, tmp_path: Path) -> None:
         gh = MagicMock()
         gh.get_review_threads.return_value = [self._open_thread_node()]
-        worker = Worker(tmp_path, gh, issue_cache=MagicMock())
+        worker = Worker(
+            tmp_path,
+            gh,
+            issue_cache=MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with pytest.raises(
             RuntimeError, match="thread handling requires explicit config and repo_cfg"
         ):
@@ -8216,6 +8478,7 @@ class TestHandleQueuedComments:
                 repo_cfg=repo_cfg,
                 repo_name="owner/repo",
                 issue_cache=MagicMock(),
+                registry=MagicMock(spec=ActivityReporter),
             ),
             gh,
         )
@@ -8281,11 +8544,10 @@ class TestHandleQueuedComments:
         mock_reply.assert_called_once()
         # Regression #1336: registry must flow through to reply_to_issue_comment
         # so _BackgroundRescopeTrigger gets a real registry to call
-        # exit_untriaged on.  Worker._registry is None in this fixture, but the
-        # kwarg must still be present and equal to whatever Worker is holding.
-        kwargs = mock_reply.call_args.kwargs
-        assert "registry" in kwargs, "registry must be passed to reply_to_*"
-        assert kwargs["registry"] is worker._registry  # noqa: SLF001
+        # exit_untriaged on.  registry is the 5th positional arg.
+        args = mock_reply.call_args.args
+        assert len(args) >= 5, "registry must be passed positionally (5th arg)"
+        assert args[4] is worker._registry  # noqa: SLF001
         mock_create_task.assert_called_once()
         mock_sync.assert_called()
         store = FidoStore(tmp_path)
@@ -8460,7 +8722,7 @@ class TestRunThreadsIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_threads = MagicMock(return_value=False)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -8485,7 +8747,7 @@ class TestRunThreadsIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -8509,7 +8771,7 @@ class TestRunThreadsIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -8671,11 +8933,19 @@ class TestRescopeBeforePick:
             sub_dir=tmp_path,
         )
         if with_config:
-            return Worker(tmp_path, MagicMock(), config=config, repo_cfg=cfg)
-        return Worker(tmp_path, MagicMock())
+            return Worker(
+                tmp_path,
+                MagicMock(),
+                config=config,
+                repo_cfg=cfg,
+                registry=MagicMock(spec=ActivityReporter),
+            )
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def test_skips_when_config_is_none(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
@@ -8694,7 +8964,13 @@ class TestRescopeBeforePick:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        worker = Worker(tmp_path, MagicMock(), config=config, repo_cfg=None)
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            config=config,
+            repo_cfg=None,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
@@ -8772,8 +9048,8 @@ class TestRescopeBeforePick:
             worker.rescope_before_pick()
         assert mock_reorder.call_args[0][1] == "abc123 first commit"
 
-    def test_no_inprogress_affected_callback(self, tmp_path: Path) -> None:
-        """Registry is passed as None so _on_inprogress_affected is not registered."""
+    def test_passes_registry_to_make_reorder_kwargs(self, tmp_path: Path) -> None:
+        """Registry is threaded through to _make_reorder_kwargs (#1336)."""
         worker = self._make_worker(tmp_path)
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
@@ -8790,7 +9066,7 @@ class TestRescopeBeforePick:
             ),
         ):
             worker.rescope_before_pick()
-        assert captured_registry == [None]
+        assert captured_registry == [worker._registry]  # noqa: SLF001
 
     def test_calls_reorder_with_three_or_more_pending_tasks(
         self, tmp_path: Path
@@ -8841,7 +9117,7 @@ class TestRunRescopeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         mock_rescope = MagicMock()
         with (
@@ -8868,7 +9144,7 @@ class TestRunRescopeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         call_order: list[str] = []
 
@@ -8904,7 +9180,7 @@ class TestEnsurePushed:
     """Tests for Worker.ensure_pushed."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def _git_result(
         self, returncode: int = 0, stdout: str = "", stderr: str = ""
@@ -9016,7 +9292,7 @@ class TestSquashWipCommit:
     """Tests for Worker._squash_wip_commit."""
 
     def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
 
     def _ok(self, stdout: str = "") -> MagicMock:
         r = MagicMock()
@@ -9293,7 +9569,7 @@ class TestExecuteTask:
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -9903,7 +10179,12 @@ class TestExecuteTask:
             "planning-only, so I am marking it done and keeping this PR intact."
         )
         gh = MagicMock()
-        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider_agent=mock_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1, "current_task_id": "t1"})
         task = self._pending_task("Already done task")
@@ -10075,7 +10356,12 @@ class TestExecuteTask:
         mock_agent.supports_no_commit_reset = False
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
-        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider_agent=mock_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = self._fido_dir(tmp_path)
         (fido_dir / "prompt").write_text("initial prompt")
         task = self._pending_task("Port to Python 3")
@@ -10132,7 +10418,12 @@ class TestExecuteTask:
         )
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
-        worker = Worker(tmp_path, gh, provider_agent=mock_agent)
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider_agent=mock_agent,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         fido_dir = self._fido_dir(tmp_path)
         (fido_dir / "prompt").write_text("initial prompt")
         task = self._pending_task("Add type hints")
@@ -10969,7 +11260,12 @@ class TestYieldForUntriaged:
     def test_no_op_when_registry_is_none(self, tmp_path: Path) -> None:
         """_yield_for_untriaged must not crash when _registry is None."""
         gh = MagicMock()
-        worker = Worker(tmp_path, gh, repo_name="owner/repo")
+        worker = Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/repo",
+            registry=MagicMock(spec=ActivityReporter),
+        )
         worker._yield_for_untriaged()  # pyright: ignore[reportPrivateUsage]
 
     def test_no_op_when_inbox_empty(self, tmp_path: Path) -> None:
@@ -11168,6 +11464,22 @@ class _FakeActivityReporter:
     def assert_worker_turn_ok(self, repo_name: str) -> None:
         self.assert_calls.append(repo_name)
 
+    def enter_untriaged(self, repo_name: str) -> None:  # pragma: no cover — unused
+        _ = repo_name
+
+    def exit_untriaged(self, repo_name: str) -> None:  # pragma: no cover — unused
+        _ = repo_name
+
+    def set_rescoping(  # pragma: no cover — unused
+        self, repo_name: str, active: bool
+    ) -> None:
+        _ = (repo_name, active)
+
+    def abort_task(  # pragma: no cover — unused
+        self, repo_name: str, *, task_id: str
+    ) -> None:
+        _ = (repo_name, task_id)
+
 
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
@@ -11351,7 +11663,7 @@ class TestRunExecuteTaskIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_execute = MagicMock(return_value=False)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -11378,7 +11690,7 @@ class TestRunExecuteTaskIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -11403,7 +11715,7 @@ class TestRunExecuteTaskIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_execute = MagicMock(return_value=False)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -11605,7 +11917,7 @@ class TestHandlePromoteMerge:
 
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _repo_ctx(self, owner: str = "rhencke") -> RepoContext:
         return RepoContext(
@@ -13415,7 +13727,7 @@ class TestRunPromoteMergeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_hpm = MagicMock(return_value=0)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -13443,7 +13755,7 @@ class TestRunPromoteMergeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -13470,7 +13782,7 @@ class TestRunPromoteMergeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
@@ -13497,7 +13809,7 @@ class TestRunPromoteMergeIntegration:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh)
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_hpm = MagicMock(return_value=0)
         repo_ctx = self._make_mock_repo_ctx()
         with (
@@ -14183,7 +14495,12 @@ class TestSyncTasksBackground:
 
 class TestWorkerThread:
     def _make_thread(self, tmp_path: Path) -> WorkerThread:
-        return WorkerThread(tmp_path, "owner/repo", MagicMock())
+        return WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
     # ── constructor / attributes ──────────────────────────────────────────
 
@@ -14387,7 +14704,12 @@ class TestWorkerThread:
 
     def test_run_sets_thread_local_repo_name(self, tmp_path: Path) -> None:
         """WorkerThread.run() sets _thread_repo.repo_name to the short name."""
-        wt = WorkerThread(tmp_path, "owner/myrepo", MagicMock())
+        wt = WorkerThread(
+            tmp_path,
+            "owner/myrepo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         wt._wake = MagicMock()
         captured: list[str] = []
 
@@ -14667,7 +14989,12 @@ class TestWorkerThread:
         """Session passed to WorkerThread constructor is used as the initial session."""
         mock_session = MagicMock()
         wt = WorkerThread(
-            tmp_path, "owner/repo", MagicMock(), session=mock_session, session_issue=7
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            session=mock_session,
+            session_issue=7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert wt.current_provider().agent.session is mock_session
         assert wt._session_issue == 7
@@ -14684,6 +15011,7 @@ class TestWorkerThread:
             provider=provider,
             session=session,
             session_issue=7,
+            registry=MagicMock(spec=ActivityReporter),
         )
         provider.agent.attach_session.assert_called_once_with(session)
         assert wt.current_provider() is provider
@@ -14693,7 +15021,13 @@ class TestWorkerThread:
     def test_detach_provider_returns_and_clears(self, tmp_path: Path) -> None:
         provider = MagicMock()
         provider.agent = MagicMock(spec=ClaudeClient)
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.detach_provider() is provider
         assert wt.current_provider() is None
 
@@ -14707,7 +15041,13 @@ class TestWorkerThread:
     def test_recover_provider_delegates_to_provider_agent(self, tmp_path: Path) -> None:
         provider = MagicMock()
         provider.agent.recover_session.return_value = True
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.recover_provider() is True
         provider.agent.recover_session.assert_called_once_with()
 
@@ -14777,7 +15117,13 @@ class TestWorkerThread:
     ) -> None:
         provider = MagicMock()
         provider.agent.session_dropped_count = 4
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.session_dropped_count == 4
 
     def test_session_sent_count_defaults_to_zero(self, tmp_path: Path) -> None:
@@ -14789,7 +15135,13 @@ class TestWorkerThread:
     ) -> None:
         provider = MagicMock()
         provider.agent.session_sent_count = 42
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.session_sent_count == 42
 
     def test_session_received_count_defaults_to_zero(self, tmp_path: Path) -> None:
@@ -14801,7 +15153,13 @@ class TestWorkerThread:
     ) -> None:
         provider = MagicMock()
         provider.agent.session_received_count = 38
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.session_received_count == 38
 
     def test_context_overflow_calls_retire_and_loops(self, tmp_path: Path) -> None:
@@ -14866,7 +15224,13 @@ class TestWorkerThread:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), config=config)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            config=config,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt._config is config
 
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
@@ -14875,7 +15239,13 @@ class TestWorkerThread:
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
         )
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=cfg)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=cfg,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt._repo_cfg is cfg
 
     def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
@@ -14890,6 +15260,7 @@ class TestWorkerThread:
                 work_dir=tmp_path,
                 provider=ProviderID.COPILOT_CLI,
             ),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert wt._provider is not None  # pyright: ignore[reportPrivateUsage]
         assert wt._provider.provider_id == ProviderID.COPILOT_CLI  # pyright: ignore[reportPrivateUsage]
@@ -14907,6 +15278,7 @@ class TestWorkerThread:
                 provider=ProviderID.CODEX,
             ),
             issue_cache=MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert wt._provider is not None  # pyright: ignore[reportPrivateUsage]
         assert wt._provider.provider_id == ProviderID.CODEX  # pyright: ignore[reportPrivateUsage]
@@ -14917,19 +15289,36 @@ class TestWorkerThread:
 
     def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
         wt = WorkerThread(
-            tmp_path, "owner/repo", MagicMock(), repo_cfg=None, provider=MagicMock()
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=None,
+            provider=MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert wt._repo_cfg is None
 
     def test_provider_defaults_to_none_when_repo_cfg_is_none(
         self, tmp_path: Path
     ) -> None:
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=None,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.current_provider() is None
         assert wt._bootstrap_session is None  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            repo_cfg=None,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         with pytest.raises(
             RuntimeError, match="worker thread provider requires explicit repo_cfg"
         ):
@@ -14951,7 +15340,12 @@ class TestWorkerThread:
             sub_dir=tmp_path,
         )
         wt = WorkerThread(
-            tmp_path, "owner/repo", MagicMock(), config=config, repo_cfg=cfg
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            config=config,
+            repo_cfg=cfg,
+            registry=MagicMock(spec=ActivityReporter),
         )
         wt._wake = MagicMock()
         received_config: list = []
@@ -15037,7 +15431,7 @@ class TestLeakedCommentCleanup:
 
     def _worker_with_gh(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def test_snapshot_returns_only_fido_ids(self, tmp_path: Path) -> None:
         worker, gh = self._worker_with_gh(tmp_path)

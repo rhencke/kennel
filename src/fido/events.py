@@ -8,9 +8,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
@@ -43,6 +42,9 @@ from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
 
+if TYPE_CHECKING:
+    from fido.worker import ActivityReporter
+
 log = logging.getLogger(__name__)
 
 _FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
@@ -68,8 +70,8 @@ class _BackgroundRescopeTrigger:
         work_dir: Path,
         config: Config,
         gh: GitHub,
-        repo_cfg: RepoConfig | None = None,
-        registry: WorkerRegistry | None = None,
+        repo_cfg: RepoConfig,
+        registry: "ActivityReporter",
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
     ) -> None:
@@ -875,9 +877,8 @@ def _apply_reply_result(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
-    *,
     thread: dict[str, Any] | None,
-    registry: WorkerRegistry | None,
+    registry: "ActivityReporter",
 ) -> None:
     """Apply task side effects from a recovered reply."""
     queue_reply_tasks(
@@ -909,10 +910,10 @@ def recover_reply_promises(
     repo_cfg: RepoConfig,
     gh: GitHub,
     pr_number: int,
+    registry: "ActivityReporter",
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
-    registry: WorkerRegistry | None = None,
 ) -> bool:
     """Recover queued webhook replies for the current PR from SQLite promises."""
     store = FidoStore(repo_cfg.work_dir)
@@ -1013,8 +1014,8 @@ def recover_reply_promises(
             config,
             repo_cfg,
             gh,
-            thread=action.thread,
-            registry=registry,
+            action.thread,
+            registry,
         )
         _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
@@ -1357,10 +1358,10 @@ def reply_to_comment(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
+    registry: "ActivityReporter",
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
-    registry: WorkerRegistry | None = None,
 ) -> tuple[str, list[str]]:
     """Handle a review comment via the synthesis LLM call, post reply.
 
@@ -1465,8 +1466,8 @@ def reply_to_comment(
         repo_cfg.work_dir,
         config,
         gh,
-        repo_cfg=repo_cfg,
-        registry=registry,
+        repo_cfg,
+        registry,
         agent=agent,
         prompts=prompts,
     )
@@ -1689,10 +1690,10 @@ def reply_to_issue_comment(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
+    registry: "ActivityReporter",
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
-    registry: WorkerRegistry | None = None,
 ) -> tuple[str, list[str]]:
     """Handle a top-level PR comment via the synthesis LLM call, post reply.
 
@@ -1778,8 +1779,8 @@ def reply_to_issue_comment(
         repo_cfg.work_dir,
         config,
         gh,
-        repo_cfg=repo_cfg,
-        registry=registry,
+        repo_cfg,
+        registry,
         agent=agent,
         prompts=prompts,
     )
@@ -1895,7 +1896,7 @@ _TYPE_PRIORITY = {TaskType.CI: 0, TaskType.THREAD: 1, TaskType.SPEC: 2}
 def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
-    registry: WorkerRegistry,
+    registry: "ActivityReporter",
     *,
     _state: State | None = None,
     _tasks: Tasks | None = None,
@@ -2181,8 +2182,8 @@ def _load_active_context_for_rescope(
 def _make_reorder_kwargs(
     work_dir: Path,
     config: Config,
-    repo_cfg: RepoConfig | None,
-    registry: WorkerRegistry | None,
+    repo_cfg: RepoConfig,
+    registry: "ActivityReporter",
     gh: GitHub,
     agent: ProviderAgent,
     prompts: Prompts,
@@ -2210,30 +2211,25 @@ def _make_reorder_kwargs(
             _tasks=Tasks(work_dir),
         )
 
+    def on_inprogress_affected(task_id: str) -> None:
+        log.info(
+            "reorder_tasks_background: in-progress task affected — aborting %s",
+            repo_cfg.name,
+        )
+        registry.abort_task(repo_cfg.name, task_id=task_id)
+
     kwargs: dict[str, Any] = {
         "_on_changes": on_changes,
         "_on_done": on_done,
+        "_on_inprogress_affected": on_inprogress_affected,
         "agent": agent,
         "prompts": prompts,
     }
-    if registry is not None and repo_cfg is not None:
-
-        def on_inprogress_affected(task_id: str) -> None:
-            log.info(
-                "reorder_tasks_background: in-progress task affected — aborting %s",
-                repo_cfg.name,
-            )
-            registry.abort_task(repo_cfg.name, task_id=task_id)
-
-        kwargs["_on_inprogress_affected"] = on_inprogress_affected
-    if repo_cfg is not None:
-        issue_ctx, pr_ctx = _load_active_context_for_rescope(
-            work_dir, repo_cfg.name, gh
-        )
-        if issue_ctx is not None:
-            kwargs["issue"] = issue_ctx
-        if pr_ctx is not None:
-            kwargs["pr"] = pr_ctx
+    issue_ctx, pr_ctx = _load_active_context_for_rescope(work_dir, repo_cfg.name, gh)
+    if issue_ctx is not None:
+        kwargs["issue"] = issue_ctx
+    if pr_ctx is not None:
+        kwargs["pr"] = pr_ctx
     return kwargs
 
 
@@ -2242,8 +2238,8 @@ def _reorder_tasks_background(
     commit_summary: str,
     config: Config,
     gh: GitHub,
-    repo_cfg: RepoConfig | None = None,
-    registry: WorkerRegistry | None = None,
+    repo_cfg: RepoConfig,
+    registry: "ActivityReporter",
     *,
     intents: list[RescopeIntent] | None = None,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
@@ -2288,11 +2284,7 @@ def _reorder_tasks_background(
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
     if agent is None:
-        agent = (
-            _configured_agent(config, repo_cfg)
-            if repo_cfg is not None
-            else ClaudeClient()
-        )
+        agent = _configured_agent(config, repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 
@@ -2339,10 +2331,8 @@ def _reorder_tasks_background(
         # inbox holds; otherwise the worker parks forever (#1280).
         try:
             set_thread_kind("webhook")
-            if repo_cfg is not None:
-                set_thread_repo(repo_cfg.name)
-            if registry is not None and repo_cfg is not None:
-                registry.set_rescoping(repo_cfg.name, True)
+            set_thread_repo(repo_cfg.name)
+            registry.set_rescoping(repo_cfg.name, True)
             log.info("rescope BG: starting (work_dir=%s)", work_dir)
             while True:
                 iteration += 1
@@ -2367,31 +2357,15 @@ def _reorder_tasks_background(
             # cleanup step (set_rescoping, set_thread_repo, set_thread_kind)
             # must not skip the exit_untriaged calls — losing them leaves the
             # worker permanently blocked on a non-empty inbox counter (#1280).
-            actually_released = 0
-            if registry is not None and repo_cfg is not None:
-                for _ in range(release_untriaged):
-                    registry.exit_untriaged(repo_cfg.name)
-                    actually_released += 1
-                registry.set_rescoping(repo_cfg.name, False)
-            elif release_untriaged > 0:
-                # Fail loud: the count was bumped (a coalesced caller called
-                # registry.enter_untriaged), but this rescope has no registry
-                # to call exit on — every accumulated hold is now leaked and
-                # the worker will park on the inbox forever.  See #1336 for
-                # the call-chain bug that produces this state.
-                log.error(
-                    "rescope BG: leaking %d untriaged hold(s) — "
-                    "registry=%s, repo_cfg=%s; worker WILL park (#1336)",
-                    release_untriaged,
-                    "set" if registry is not None else "None",
-                    "set" if repo_cfg is not None else "None",
-                )
-            if repo_cfg is not None:
-                set_thread_repo(None)
+            # registry and repo_cfg are required at construction time (#1336)
+            # so the release path is unconditional — no Optional guards.
+            for _ in range(release_untriaged):
+                registry.exit_untriaged(repo_cfg.name)
+            registry.set_rescoping(repo_cfg.name, False)
+            set_thread_repo(None)
             set_thread_kind(None)
             log.info(
-                "rescope BG: finally complete (released %d/%d untriaged hold(s))",
-                actually_released,
+                "rescope BG: finally complete (released %d untriaged hold(s))",
                 release_untriaged,
             )
 
@@ -2412,18 +2386,11 @@ def _reorder_tasks_background(
                 entry["running"] = False
                 entry["pending"] = None
         # Same ordering as run_loop's finally — release before set_rescoping.
-        if registry is not None and repo_cfg is not None:
-            for _ in range(release_untriaged):
-                registry.exit_untriaged(repo_cfg.name)
-            registry.set_rescoping(repo_cfg.name, False)
-        elif release_untriaged > 0:
-            log.error(
-                "rescope BG (start failure): leaking %d untriaged hold(s) — "
-                "registry=%s, repo_cfg=%s; worker WILL park (#1336)",
-                release_untriaged,
-                "set" if registry is not None else "None",
-                "set" if repo_cfg is not None else "None",
-            )
+        # registry and repo_cfg are required (#1336) so this path is
+        # unconditional.
+        for _ in range(release_untriaged):
+            registry.exit_untriaged(repo_cfg.name)
+        registry.set_rescoping(repo_cfg.name, False)
         raise
 
 
@@ -2491,7 +2458,7 @@ def create_task(
     repo_cfg: RepoConfig,
     gh: GitHub,
     thread: dict[str, Any] | None = None,
-    registry: WorkerRegistry | None = None,
+    registry: "ActivityReporter | None" = None,
     *,
     _get_commit_summary_fn: Callable[[Path], str] = _get_commit_summary,
     _reorder_background_fn: Callable[..., None] = _reorder_tasks_background,
@@ -2568,21 +2535,32 @@ def create_task(
     launch_sync(config, repo_cfg, gh)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
-        if registry is not None and _reorder_background_fn is _reorder_tasks_background:
-            registry.enter_untriaged(repo_cfg.name)
-            try:
-                _reorder_background_fn(
-                    repo_cfg.work_dir,
-                    commit_summary,
-                    config,
-                    gh,
-                    repo_cfg,
-                    registry,
-                    _release_untriaged_on_finish=True,
+        if _reorder_background_fn is _reorder_tasks_background:
+            # Production path — _reorder_tasks_background requires a real
+            # registry to bookkeep the inbox.  Without one, skip the rescope
+            # entirely and log loudly (#1336): silently dropping the rescope
+            # is exactly the fail-soft pattern that produced the original
+            # bug.
+            if registry is None:
+                log.warning(
+                    "create_task: thread task created without registry — "
+                    "skipping background rescope (#1336)",
                 )
-            except Exception:
-                registry.exit_untriaged(repo_cfg.name)
-                raise
+            else:
+                registry.enter_untriaged(repo_cfg.name)
+                try:
+                    _reorder_background_fn(
+                        repo_cfg.work_dir,
+                        commit_summary,
+                        config,
+                        gh,
+                        repo_cfg,
+                        registry,
+                        _release_untriaged_on_finish=True,
+                    )
+                except Exception:
+                    registry.exit_untriaged(repo_cfg.name)
+                    raise
         else:
             _reorder_background_fn(
                 repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry

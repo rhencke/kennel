@@ -616,7 +616,12 @@ class Prompts:
             "4. If a task is already covered by a recent commit, omit it from the "
             "output — it will be marked done.\n"
             "5. Include only pending and in_progress tasks in the output — omit "
-            "completed.\n\n"
+            "completed.\n"
+            "6. If a pending task already exists for one of the change requests "
+            "above (matched by content or by its thread metadata), KEEP that "
+            "task and use its exact ID — do NOT emit a second entry with a "
+            'null "id" for the same change request, even if you are rewriting '
+            "its description.  One change request → one task (#1337).\n\n"
             'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
             'Each element: {"id": "..." or null, "title": "...", "description": "..."}.\n'
             "No other text before or after the JSON."
