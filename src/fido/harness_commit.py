@@ -17,6 +17,8 @@ from pathlib import Path
 
 from fido.infra import ProcessRunner
 from fido.turn_outcome import (
+    CommitTaskComplete,
+    CommitTaskInProgress,
     SkipTaskWithReason,
     TurnOutcome,
 )
@@ -151,6 +153,7 @@ class HarnessCommitter:
         if isinstance(outcome, SkipTaskWithReason):
             return CommitSkipped(reason=outcome.reason)
 
+        assert isinstance(outcome, CommitTaskComplete | CommitTaskInProgress)
         summary = outcome.summary
 
         # Stage tracked files only — never sweep untracked files like
