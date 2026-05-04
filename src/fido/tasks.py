@@ -316,7 +316,14 @@ def _rescope_releases_for_oracle(
         oracle_id = ids_by_task_id[task_id]
         item = ordered_by_id.get(task_id)
         if item is None:
-            decision: rescope_oracle.RescopeOp = rescope_oracle.CompleteTask(oracle_id)
+            # Opus omitted this task from its rescope output.  Treat as
+            # "keep as-is", not "completed" (#1357 case A).  Completion is a
+            # decision a worker turn must explicitly signal — it is not
+            # something the rescope reducer is allowed to infer from
+            # omission.  Legitimate consolidation/dedup still happens via the
+            # explicit-completion path; omission here just means Opus didn't
+            # speak for this task on this iteration.
+            decision: rescope_oracle.RescopeOp = rescope_oracle.KeepTask(oracle_id)
         elif "description" in item and item["description"] != task.get(
             "description", ""
         ):
@@ -993,25 +1000,21 @@ def reorder_tasks(
         )
         result = _apply_reorder(current, ordered_items, original_ids, intents=intents)
         if inprogress is not None:
+            # The omission ⇒ completed branch is gone (#1357 case A): the
+            # rescope reducer now uses KeepTask for omitted snapshot tasks,
+            # so the in-progress task always survives the rescope at its
+            # current status.  The only remaining trigger for
+            # _on_inprogress_affected is an explicit modification of the
+            # task's title or description by Opus, which resets the task
+            # to pending so the worker re-picks it under the new scope.
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
             )
-            if (
-                inprogress_in_result is None
-                or inprogress_in_result.get("status") == TaskStatus.COMPLETED
+            if inprogress_in_result is not None and (
+                inprogress_in_result.get("title") != inprogress.get("title")
+                or inprogress_in_result.get("description")
+                != inprogress.get("description")
             ):
-                # Opus omitted the in-progress task — marked completed.
-                inprogress_affected = True
-                log.info(
-                    "reorder_tasks: in-progress task marked completed by Opus: %s",
-                    inprogress.get("title", "")[:60],
-                )
-            elif inprogress_in_result.get("title") != inprogress.get(
-                "title"
-            ) or inprogress_in_result.get("description") != inprogress.get(
-                "description"
-            ):
-                # Opus modified the in-progress task — reset to pending.
                 inprogress_affected = True
                 inprogress_in_result["status"] = str(TaskStatus.PENDING)
                 log.info(
@@ -1226,6 +1229,23 @@ class Tasks(JsonFileStore):
                     if int((t.get("thread") or {}).get("comment_id", -1)) == cid:
                         return True
         return False
+
+    def reset_to_pending(self, task_id: str) -> bool:
+        """Reset a task's status to ``pending``. Returns True if found.
+
+        Used by the worker's abort cleanup so that an aborted in-progress
+        task survives in the queue and can be re-picked under whatever
+        scope the rescope cascade gave it (#1357 case B).
+        """
+        with _locked(self._data_path, write=True) as lock:
+            tasks = lock.read()
+            for t in tasks:
+                if t["id"] == task_id:
+                    if t.get("status") != str(TaskStatus.PENDING):
+                        t["status"] = str(TaskStatus.PENDING)
+                        lock.write(tasks)
+                    return True
+            return False
 
     def remove(self, task_id: str) -> bool:
         """Remove a task. Returns True if found."""

@@ -86,7 +86,8 @@ def _rescope_ops(
         snapshot_order.append(task_id)
         item = ordered_by_id.get(task["id"])
         if item is None:
-            ops.append(oracle.CompleteTask(task_id))
+            # #1357: omission ⇒ keep-as-is, not completed.
+            ops.append(oracle.KeepTask(task_id))
             continue
         if item.get("title", task["title"]) != task["title"] or item.get(
             "description", task.get("description", "")

@@ -10903,9 +10903,13 @@ class TestExecuteTask:
         # and remains scoped to t-prior-removed — not active for t-next.
         assert worker._abort_task.is_active_for("t-next") is False
 
-    def test_abort_after_initial_run_removes_task_and_returns_true(
+    def test_abort_after_initial_run_resets_task_to_pending_and_returns_true(
         self, tmp_path: Path
     ) -> None:
+        """#1357 case B: an aborted in-progress task must SURVIVE in
+        ``tasks.json`` (reset to pending), not be silently removed.  The
+        abort cascade used to drop the task entirely, which is how
+        comment-driven directives disappeared without a trace."""
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1, "current_task_id": "t-abort"})
@@ -10918,20 +10922,24 @@ class TestExecuteTask:
             patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.reset_to_pending") as mock_reset,
             patch("fido.tasks.Tasks.remove") as mock_remove,
             patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
         mock_clean.assert_called_once()
-        mock_remove.assert_called_once_with("t-abort")
+        mock_reset.assert_called_once_with("t-abort")
+        mock_remove.assert_not_called()
         assert "current_task_id" not in State(fido_dir).load()
         assert not worker._abort_task.is_set()
         mock_sync.assert_called()
 
-    def test_abort_during_resume_loop_removes_task_and_returns_true(
+    def test_abort_during_resume_loop_resets_task_to_pending_and_returns_true(
         self, tmp_path: Path
     ) -> None:
+        """#1357 case B: same survival contract during the resume-loop
+        abort path."""
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1})
@@ -10952,13 +10960,15 @@ class TestExecuteTask:
             patch("fido.worker.provider_run", side_effect=set_abort_on_second),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.reset_to_pending") as mock_reset,
             patch("fido.tasks.Tasks.remove") as mock_remove,
             patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
         mock_clean.assert_called_once()
-        mock_remove.assert_called_once_with("t-resume-abort")
+        mock_reset.assert_called_once_with("t-resume-abort")
+        mock_remove.assert_not_called()
         assert "current_task_id" not in State(fido_dir).load()
         assert not worker._abort_task.is_set()
         mock_sync.assert_called()
