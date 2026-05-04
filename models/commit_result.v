@@ -47,5 +47,60 @@ Definition result_needs_retry (r : CommitResult) : bool :=
   | CommitSkipped       _ => false
   end.
 
+(* ----------------------------------------------------------------------- *)
+(** * Lemmas: success and retry are mutually exclusive                       *)
+(* ----------------------------------------------------------------------- *)
+
+(** A successful commit never needs retry. *)
+Lemma success_implies_not_retry :
+  forall r, result_is_success r = true -> result_needs_retry r = false.
+Proof.
+  intros r H. destruct r; simpl in *; reflexivity || discriminate.
+Qed.
+
+(** A result that needs retry is never a success. *)
+Lemma retry_implies_not_success :
+  forall r, result_needs_retry r = true -> result_is_success r = false.
+Proof.
+  intros r H. destruct r; simpl in *; reflexivity || discriminate.
+Qed.
+
+(* ----------------------------------------------------------------------- *)
+(** * Examples: each constructor through both predicates                     *)
+(* ----------------------------------------------------------------------- *)
+
+Example success_is_success :
+  result_is_success (CommitSuccess "abc123") = true.
+Proof. reflexivity. Qed.
+
+Example success_not_retry :
+  result_needs_retry (CommitSuccess "abc123") = false.
+Proof. reflexivity. Qed.
+
+Example hook_failure_not_success :
+  result_is_success (CommitHookFailure "ruff failed") = false.
+Proof. reflexivity. Qed.
+
+Example hook_failure_needs_retry :
+  result_needs_retry (CommitHookFailure "ruff failed") = true.
+Proof. reflexivity. Qed.
+
+Example nothing_staged_not_success :
+  result_is_success CommitNothingStaged = false.
+Proof. reflexivity. Qed.
+
+Example nothing_staged_needs_retry :
+  result_needs_retry CommitNothingStaged = true.
+Proof. reflexivity. Qed.
+
+Example skipped_not_success :
+  result_is_success (CommitSkipped "already done") = false.
+Proof. reflexivity. Qed.
+
+Example skipped_not_retry :
+  result_needs_retry (CommitSkipped "already done") = false.
+Proof. reflexivity. Qed.
+
 Python File Extraction commit_result
   "result_is_success result_needs_retry".
+
