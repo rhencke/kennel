@@ -14,6 +14,7 @@ from fido.atomic import AtomicReference
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
+from fido.lens import Lens
 from fido.provider import PromptSession, Provider
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -281,10 +282,8 @@ class WorkerRegistry:
         _name = repo_cfg.name
         _now = _utcnow()
         self._state.update(
-            lambda old: FidoState(
-                repos=frozendict(
-                    {**old.repos, _name: RepoState(key=_name, started_at=_now)}
-                )
+            lambda root: (
+                Lens(root).repos[_name].set(RepoState(key=_name, started_at=_now))
             )
         )
         thread.start()
