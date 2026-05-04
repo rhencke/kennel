@@ -30,7 +30,7 @@ from fido.tasks import (
     reorder_tasks,
     review_thread_for_auto_resolve_oracle,
 )
-from fido.types import TaskStatus, TaskType
+from fido.types import RescopeIntent, TaskStatus, TaskType
 
 
 def _client(run_turn_return: str = "") -> MagicMock:
@@ -992,6 +992,72 @@ class TestMakeNewTasksFromOpus:
         result = _make_new_tasks_from_opus(items, frozenset({"1"}))
         assert len(result) == 1
         assert result[0]["title"] == "New"
+
+    def test_dedups_against_post_snapshot_thread_task(self) -> None:
+        """#1337 regression: when create_task added a thread task during the
+        Opus call (a new id appearing in current that's NOT in the snapshot
+        and whose lineage_comment_ids overlap a rescope intent), Opus's null-id
+        item for that same intent is a duplicate and must be dropped.
+        """
+        snapshot_ids = frozenset({"orig-1"})
+        current = [
+            {"id": "orig-1", "title": "Original", "status": "pending"},
+            {
+                "id": "post-snapshot-2",
+                "title": "Replace MagicMock with _FakeDispatcher",
+                "status": "in_progress",
+                "type": "thread",
+                "thread": {
+                    "comment_id": 4371338003,
+                    "lineage_comment_ids": [4371338003],
+                },
+            },
+        ]
+        intents = [
+            RescopeIntent(
+                comment_id=4371338003,
+                change_request="Replace MagicMock(spec=Dispatcher) with hand-rolled _FakeDispatcher",
+                timestamp="2026-05-04T13:15:44Z",
+            ),
+        ]
+        items = [
+            {"id": "orig-1", "title": "Original"},
+            {
+                "title": "Replace MagicMock(spec=Dispatcher) with _FakeDispatcher",
+                "description": "Step-by-step rewrite",
+            },
+        ]
+        result = _make_new_tasks_from_opus(
+            items, snapshot_ids, current=current, intents=intents
+        )
+        assert result == [], "covered intent must drop the duplicate (#1337)"
+
+    def test_does_not_dedup_when_lineage_does_not_match_intent(self) -> None:
+        """When no post-snapshot thread task covers the intent, Opus's null-id
+        item is genuinely new and must be kept."""
+        snapshot_ids = frozenset({"orig-1"})
+        current = [
+            {"id": "orig-1", "title": "Original", "status": "pending"},
+            {
+                "id": "post-2",
+                "title": "Some unrelated thread task",
+                "status": "pending",
+                "thread": {"comment_id": 999, "lineage_comment_ids": [999]},
+            },
+        ]
+        intents = [
+            RescopeIntent(
+                comment_id=4371338003,
+                change_request="other intent",
+                timestamp="2026-05-04T13:15:44Z",
+            ),
+        ]
+        items = [{"title": "Genuinely new spec", "description": ""}]
+        result = _make_new_tasks_from_opus(
+            items, snapshot_ids, current=current, intents=intents
+        )
+        assert len(result) == 1
+        assert result[0]["title"] == "Genuinely new spec"
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────

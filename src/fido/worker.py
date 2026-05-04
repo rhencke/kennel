@@ -183,9 +183,18 @@ class RepoNameFilter(logging.Filter):
 class ActivityReporter(Protocol):
     """Structural protocol satisfied by WorkerRegistry.
 
-    Workers use this to report their activity and query the full registry
-    snapshot for status generation, without a direct import of WorkerRegistry
-    (which would create a circular dependency).
+    The Worker holds a reference to the registry as ``ActivityReporter`` and
+    threads it through to the reply / rescope chain in :mod:`fido.events`.
+    Methods cover both worker-side calls (``has_untriaged``,
+    ``wait_for_inbox_drain``, ``assert_worker_turn_ok``, ...) and the
+    ingress/rescope-side calls that ``reply_to_*`` and
+    ``_reorder_tasks_background`` make on the same reference
+    (``enter_untriaged``, ``exit_untriaged``, ``set_rescoping``,
+    ``abort_task``).  Keeping them on one Protocol lets us avoid a circular
+    ``WorkerRegistry`` import in :mod:`fido.events` while still threading a
+    real registry through every code path that needs to bookkeep the inbox
+    (#1336 — silently dropping the registry along the chain is what produced
+    the inbox-leak bug).
     """
 
     def report_activity(self, repo_name: str, what: str, busy: bool) -> None: ...
@@ -207,6 +216,14 @@ class ActivityReporter(Protocol):
     def assert_worker_turn_ok(self, repo_name: str) -> None: ...
 
     def force_clear_untriaged(self, repo_name: str) -> int: ...
+
+    def enter_untriaged(self, repo_name: str) -> None: ...
+
+    def exit_untriaged(self, repo_name: str) -> None: ...
+
+    def set_rescoping(self, repo_name: str, active: bool) -> None: ...
+
+    def abort_task(self, repo_name: str, *, task_id: str) -> None: ...
 
 
 class LockHeld(Exception):
@@ -1009,25 +1026,20 @@ def _write_pr_description(
     ``sync.lock`` that :func:`fido.tasks.sync_tasks` holds, preventing a
     description rewrite from overwriting a concurrent work-queue update.
 
-    Raises ``ValueError`` when the existing body has no ``---`` divider
-    (rewrite precondition).  Returns without writing when the agent returns
-    empty or un-parseable output — the existing body is kept as-is and a
-    warning is logged.
+    Self-heals when the existing body has no ``---`` divider: builds a fresh
+    work-queue section and treats the entire existing body as the description
+    seed.  Returns without writing when the agent returns empty or un-parseable
+    output — the existing body is kept as-is and a warning is logged.
     """
     if agent is None:
         raise ValueError("_write_pr_description requires agent")
 
     divider = "\n\n---\n\n"
 
-    # For a rewrite, only proceed when the divider is present so we know
-    # where the description section ends.  For initial write (empty body)
-    # skip this guard and build the rest section fresh.
-    if existing_body and divider not in existing_body:
-        raise ValueError(
-            f"_write_pr_description: no --- divider in PR #{pr_number} body"
-        )
-
-    # Preserve the existing rest section or build the work-queue from scratch.
+    # Preserve the existing rest section, or build the work-queue from scratch
+    # (covers both empty-body initial writes and divider-less legacy bodies —
+    # see #1335: PR #1328 was opened with no divider, every rescope's _on_done
+    # raised, and the inbox-leak bug surfaced as a side effect).
     if divider in existing_body:
         rest = existing_body.split(divider, 1)[1]
         # Re-apply the work queue from task_list so a stale PR body snapshot
@@ -1051,6 +1063,12 @@ def _write_pr_description(
         else:
             queue = "<!-- no tasks yet -->"
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+        if existing_body:
+            log.info(
+                "_write_pr_description: PR #%s body has no --- divider — "
+                "self-healing by appending a fresh work-queue section (#1335)",
+                pr_number,
+            )
 
     prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
     raw = safe_voice_turn(
@@ -2384,12 +2402,21 @@ class Worker:
                 **(action.context or {}),
                 "reply_promise_id": promise.promise_id,
             }
+            # registry flows through to _BackgroundRescopeTrigger so the
+            # rescope BG run_loop's finally can exit_untriaged the holds it
+            # accumulates from coalesced create_task calls.  Without it the
+            # worker parks on a leaked inbox hold after this reply path
+            # fires (#1336); the registry parameter is now required.
+            assert self._registry is not None, (
+                "Worker._registry is required for handle_threads reply path"
+            )
             try:
                 category, titles = events.reply_to_comment(
                     action,
                     config,
                     repo_cfg,
                     self.gh,
+                    self._registry,
                     agent=self._provider_agent,
                 )
             except Exception:
@@ -2513,12 +2540,20 @@ class Worker:
     ) -> tuple[str, list[str]]:
         from fido import events
 
+        # registry is required (#1336): without it the synthesis path
+        # constructs _BackgroundRescopeTrigger with no registry, the rescope
+        # BG run_loop's finally cannot call exit_untriaged, and the inbox
+        # count leaks.  Worker parks on the next provider turn.
+        assert self._registry is not None, (
+            "Worker._registry is required when replying to queued comments"
+        )
         if queued.comment_type == "pulls":
             return events.reply_to_comment(
                 action,
                 config,
                 repo_cfg,
                 self.gh,
+                self._registry,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
@@ -2527,6 +2562,7 @@ class Worker:
             config,
             repo_cfg,
             self.gh,
+            self._registry,
             agent=self._provider_agent,
             prompts=self._get_prompts(),
         )
@@ -3823,11 +3859,20 @@ class Worker:
         from fido.tasks import reorder_tasks
 
         commit_summary = _get_commit_summary(self.work_dir)
+        # _make_reorder_kwargs always wires up on_inprogress_affected (#1336);
+        # at pick time there is no in-progress task so the callback won't fire,
+        # but the registry must be a real reference to keep the type contract.
+        assert self._registry is not None, (
+            "Worker._registry is required for rescope_before_pick"
+        )
+        assert self._repo_cfg is not None, (
+            "Worker._repo_cfg is required for rescope_before_pick"
+        )
         kwargs = _make_reorder_kwargs(
             self.work_dir,
             self._config,
             self._repo_cfg,
-            None,  # no _on_inprogress_affected: no running task to abort at pick time
+            self._registry,
             self.gh,
             self._provider_agent,
             self._get_prompts(),
@@ -4009,12 +4054,16 @@ class Worker:
             )
             from fido.events import recover_reply_promises
 
+            assert self._registry is not None, (
+                "Worker._registry is required for recover_reply_promises"
+            )
             recovered_promises = recover_reply_promises(
                 ctx.fido_dir,
                 recovery_config,
                 recovery_repo_cfg,
                 self.gh,
                 pr_number,
+                self._registry,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )

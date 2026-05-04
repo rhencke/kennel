@@ -697,6 +697,8 @@ def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
 def _make_new_tasks_from_opus(
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
+    current: list[dict[str, Any]] | None = None,
+    intents: list[RescopeIntent] | None = None,
 ) -> list[dict[str, Any]]:
     """Create fresh task dicts for items Opus returned with a null or absent id.
 
@@ -708,13 +710,42 @@ def _make_new_tasks_from_opus(
     Each new task receives a fresh timestamp-random ID, ``status: "pending"``,
     and ``type: "spec"`` unless Opus specified a different type.  Items with
     blank titles are silently skipped.
+
+    Dedup against post-snapshot thread tasks (#1337): when *current* and
+    *intents* are provided, any rescope intent whose ``comment_id`` is already
+    covered by a thread task added since the snapshot was taken is treated as
+    "already serviced" — the entry-boundary ``create_task`` path produced the
+    thread task while Opus was thinking, so any null-id item Opus emits for
+    the same intent is a duplicate.  We suppress one null-id item per covered
+    intent (in arrival order) to keep at most one task per intent.
     """
+    covered_intents = 0
+    if current is not None and intents:
+        post_snapshot_lineage: set[int] = set()
+        for task in current:
+            if task.get("id") in snapshot_ids:
+                continue
+            for cid in _thread_lineage_comment_ids(task.get("thread")):
+                post_snapshot_lineage.add(cid)
+        for intent in intents:
+            if intent.comment_id in post_snapshot_lineage:
+                covered_intents += 1
+
     new_tasks: list[dict[str, Any]] = []
+    skipped = 0
     for item in ordered_items:
         if "id" in item and item["id"] is not None:
             continue  # has an id — handled by oracle or ignored as unknown
         title = (item.get("title") or "").strip()
         if not title:
+            continue
+        if skipped < covered_intents:
+            log.info(
+                "rescope: dropping duplicate new task %r — already serviced "
+                "by a post-snapshot thread task (#1337)",
+                title[:80],
+            )
+            skipped += 1
             continue
         task: dict[str, Any] = {
             "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
@@ -750,6 +781,7 @@ def _apply_reorder(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
     original_ids: frozenset[str] = frozenset(),
+    intents: list[RescopeIntent] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply Opus-synthesised items to the current task list.
 
@@ -776,7 +808,9 @@ def _apply_reorder(
     oracle_result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
     _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, oracle_result)
 
-    new_tasks = _make_new_tasks_from_opus(ordered_items, snapshot_ids)
+    new_tasks = _make_new_tasks_from_opus(
+        ordered_items, snapshot_ids, current=current, intents=intents
+    )
     if not new_tasks:
         return oracle_result
 
@@ -957,7 +991,7 @@ def reorder_tasks(
         inprogress = next(
             (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
         )
-        result = _apply_reorder(current, ordered_items, original_ids)
+        result = _apply_reorder(current, ordered_items, original_ids, intents=intents)
         if inprogress is not None:
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
