@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -41,9 +41,7 @@ from fido.synthesis_call import (
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
-
-if TYPE_CHECKING:
-    from fido.worker import ActivityReporter
+from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +69,7 @@ class _BackgroundRescopeTrigger:
         config: Config,
         gh: GitHub,
         repo_cfg: RepoConfig,
-        registry: "ActivityReporter",
+        registry: ActivityReporter,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
     ) -> None:
@@ -848,6 +846,7 @@ def queue_reply_tasks(
     is_bot: bool = False,
     registry: Any = None,  # noqa: ANN401  # WorkerRegistry-or-ActivityReporter; either works
     create_task_fn: Callable[..., object] | None = None,
+    dispatcher: "Dispatcher",
 ) -> int:
     """Create any tasks implied by a reply outcome.
 
@@ -865,6 +864,7 @@ def queue_reply_tasks(
             gh,
             thread=thread,
             registry=registry,
+            dispatcher=dispatcher,
         )
         if not (isinstance(task, dict) and task.get("status") == "skipped_resolved"):
             created += 1
@@ -878,7 +878,8 @@ def _apply_reply_result(
     repo_cfg: RepoConfig,
     gh: GitHub,
     thread: dict[str, Any] | None,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
+    dispatcher: "Dispatcher",
 ) -> None:
     """Apply task side effects from a recovered reply."""
     queue_reply_tasks(
@@ -889,6 +890,7 @@ def _apply_reply_result(
         gh,
         thread=thread,
         registry=registry,
+        dispatcher=dispatcher,
     )
 
 
@@ -910,7 +912,8 @@ def recover_reply_promises(
     repo_cfg: RepoConfig,
     gh: GitHub,
     pr_number: int,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
+    dispatcher: "Dispatcher",
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -1016,6 +1019,7 @@ def recover_reply_promises(
             gh,
             action.thread,
             registry,
+            dispatcher,
         )
         _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
@@ -1084,6 +1088,7 @@ def recover_reply_promises(
             gh,
             thread=action.reply_to,
             registry=registry,
+            dispatcher=dispatcher,
         )
         _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
@@ -1100,249 +1105,342 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
     return user in repo_cfg.membership.collaborators or user in config.allowed_bots
 
 
-def dispatch(
-    event: str,
-    payload: dict[str, Any],
-    config: Config,
-    repo_cfg: RepoConfig,
-    *,
-    delivery_id: str | None = None,
-    oracle: WebhookIngressOracle | None = None,
-) -> Action | None:
-    """Map a GitHub webhook event to an action. Returns None if ignored.
+class Dispatcher:
+    """Typed collaborator that owns the dispatch, backfill, and sync logic.
 
-    When *delivery_id* and *oracle* are provided the
-    :class:`WebhookIngressOracle` is consulted before any routing logic runs.
-    Duplicate deliveries (same delivery ID arriving a second time) and
-    ``pull_request_review / submitted`` events with ``review.state ==
-    "commented"`` are suppressed by returning ``None`` before any side
-    effects execute.  Decisive review states (``approved``,
-    ``changes_requested``, ``dismissed``) are dispatched normally so the
-    worker wakes up without waiting for the next poll cycle.
+    One ``Dispatcher`` is constructed per repo at startup — accepting
+    ``config``, ``repo_cfg``, and optionally ``gh`` — so every method call
+    uses the repo context already baked into the instance.
+
+    This is the replacement for the ``_fn_dispatch`` callable-slot pattern on
+    :class:`~fido.server.WebhookHandler`.  Callers construct one instance per
+    repo and hold them in a ``dict[str, Dispatcher]`` collaborator rather than
+    reaching into a class-level function slot.
+
+    ``gh`` is required because :meth:`backfill_missed_pr_comments` and
+    :meth:`launch_sync` both use it.  The composition root always has a real
+    ``GitHub`` instance, so there is no production case where ``gh`` is absent.
     """
-    action = payload.get("action")
-    repo = repo_cfg.name  # validated at routing time
 
-    # Oracle check — deduplicate at the ingress boundary.
-    if delivery_id is not None and oracle is not None:
-        review_state = payload.get("review", {}).get("state", "")
-        collapse_review = (
-            event == "pull_request_review"
-            and action == "submitted"
-            and review_state == "commented"
-        )
-        ingress_result = oracle.check_dispatch(
-            repo_cfg.name,
-            delivery_id,
-            collapse_review=collapse_review,
-        )
-        if ingress_result is None:
+    def __init__(self, config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
+        self._config = config
+        self._repo_cfg = repo_cfg
+        self._gh = gh
+
+    def dispatch(
+        self,
+        event: str,
+        payload: dict[str, Any],
+        *,
+        delivery_id: str | None = None,
+        oracle: WebhookIngressOracle | None = None,
+    ) -> Action | None:
+        """Map a GitHub webhook event to an action. Returns None if ignored.
+
+        When *delivery_id* and *oracle* are provided the
+        :class:`WebhookIngressOracle` is consulted before any routing logic
+        runs.  Duplicate deliveries (same delivery ID arriving a second time)
+        and ``pull_request_review / submitted`` events with ``review.state ==
+        "commented"`` are suppressed by returning ``None`` before any side
+        effects execute.  Decisive review states (``approved``,
+        ``changes_requested``, ``dismissed``) are dispatched normally so the
+        worker wakes up without waiting for the next poll cycle.
+        """
+        action = payload.get("action")
+        repo_cfg = self._repo_cfg
+        repo = repo_cfg.name  # validated at routing time
+
+        # Oracle check — deduplicate at the ingress boundary.
+        if delivery_id is not None and oracle is not None:
+            review_state = payload.get("review", {}).get("state", "")
+            collapse_review = (
+                event == "pull_request_review"
+                and action == "submitted"
+                and review_state == "commented"
+            )
+            ingress_result = oracle.check_dispatch(
+                repo_cfg.name,
+                delivery_id,
+                collapse_review=collapse_review,
+            )
+            if ingress_result is None:
+                return None
+
+        if event == "ping":
+            log.info("ping received — hook_id=%s", payload.get("hook_id"))
             return None
 
-    if event == "ping":
-        log.info("ping received — hook_id=%s", payload.get("hook_id"))
+        if event == "issues" and action == "assigned":
+            assignee = payload["assignee"]["login"]
+            issue = payload["issue"]
+            number = issue["number"]
+            title = issue["title"]
+            if not number:
+                return None
+            log.info("issue #%s assigned to %s: %s", number, assignee, title)
+            wev = wct_oracle.EvtIssueAssigned(1, number, assignee)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdIssueAssigned), "translate_total"
+            return Action(prompt=f"New issue #{number} assigned to {assignee}: {title}")
+
+        if event == "pull_request_review" and action == "submitted":
+            review = payload["review"]
+            pr = payload["pull_request"]
+            number = pr.get("number")
+            state = review["state"]
+            user = review["user"]["login"]
+            review_id = review.get("id")
+            if not number:
+                return None
+            if not _is_allowed(user, repo_cfg, self._config):
+                log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
+                return None
+            log.info("review on PR #%s: %s by %s", number, state, user)
+            if review_id is not None:
+                wev = wct_oracle.EvtReviewSubmitted(1, number, review_id, user)
+                cmd = wct_oracle.translate(wev)
+                assert isinstance(cmd, wct_oracle.CmdReviewSubmitted), "translate_total"
+            return Action(
+                prompt=f"Review on PR #{number}: {state} by {user}",
+                review_comments={"repo": repo, "pr": number, "review_id": review_id}
+                if review_id
+                else None,
+            )
+
+        if event == "pull_request_review_comment" and action in {"created", "edited"}:
+            comment = payload["comment"]
+            pr = payload["pull_request"]
+            number = pr.get("number")
+            user = comment["user"]["login"]
+            comment_id = comment["id"]
+            if user.lower() in ("fidocancode", "fido-can-code"):
+                log.debug("ignoring own comment on PR #%s", number)
+                return None
+            if not number:
+                return None
+            if not _is_allowed(user, repo_cfg, self._config):
+                log.debug(
+                    "ignoring comment on PR #%s by %s (not allowed)", number, user
+                )
+                return None
+            comment_body = comment.get("body", "") or ""
+            log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
+            is_bot = user.endswith("[bot]")
+            comment_id = int(comment_id)
+            wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+            assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
+            prefix = (
+                "Queued edited review comment"
+                if action == "edited"
+                else "Queued review comment"
+            )
+            return _queued_pr_comment_action(
+                prompt=(
+                    f"{prefix} on PR #{number} by {user}"
+                    f" ({'bot' if is_bot else 'human/owner'})"
+                ),
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "delivery_id": delivery_id,
+                    "pr_title": pr.get("title", ""),
+                    "pr_body": pr.get("body", "") or "",
+                    "file": comment.get("path", ""),
+                    "line": comment.get("line"),
+                    "diff_hunk": comment.get("diff_hunk", ""),
+                },
+            )
+
+        if event == "issue_comment" and action in {"created", "edited"}:
+            comment = payload["comment"]
+            issue = payload["issue"]
+            user = comment["user"]["login"]
+            pr = issue.get("pull_request")
+            if not pr:
+                log.debug("issue_comment on non-PR issue — ignoring")
+                return None
+            if user.lower() in ("fidocancode", "fido-can-code"):
+                log.debug("ignoring own comment on PR")
+                return None
+            if not _is_allowed(user, repo_cfg, self._config):
+                log.debug("ignoring comment by %s (not allowed)", user)
+                return None
+            number = issue["number"]
+            comment_body = comment.get("body", "") or ""
+            comment_id = int(comment["id"])
+            is_bot = user.endswith("[bot]")
+            log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
+            wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+            assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
+            prefix = (
+                "Queued edited PR top-level comment"
+                if action == "edited"
+                else "Queued PR top-level comment"
+            )
+            return _queued_pr_comment_action(
+                prompt=f"{prefix} on #{number} by {user}",
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment_id=comment_id,
+                html_url=comment.get("html_url", ""),
+                author=user,
+                is_bot=is_bot,
+                context={
+                    "comment_body": comment_body,
+                    "delivery_id": delivery_id,
+                    "pr_title": issue.get("title", ""),
+                    "pr_body": issue.get("body", "") or "",
+                },
+            )
+
+        if event == "check_run" and action == "completed":
+            check = payload["check_run"]
+            conclusion = check["conclusion"]
+            if conclusion not in ("failure", "timed_out"):
+                log.debug("check_run completed with %s — ignoring", conclusion)
+                return None
+            name = check["name"]
+            prs = check["pull_requests"]
+            pr_nums = [pr["number"] for pr in prs]
+            log.info("CI failure: %s (%s) on PRs %s", name, conclusion, pr_nums)
+            _ci_conclusion = (
+                wct_oracle.CIFailure()
+                if conclusion == "failure"
+                else wct_oracle.CITimedOut()
+            )
+            wev = wct_oracle.EvtCIFailure(1, name, _ci_conclusion, pr_nums)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdCIFailure), "translate_total"
+            pr_str = ", ".join(f"#{n}" for n in pr_nums) if pr_nums else "unknown PR"
+            return Action(
+                prompt=f"CI failure on {pr_str}: {name} ({conclusion})",
+                preempts_worker=True,
+            )
+
+        if event == "pull_request" and action == "closed":
+            pr = payload["pull_request"]
+            number = pr["number"]
+            removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
+                repo=repo,
+                pr_number=int(number),
+            )
+            if removed:
+                log.info(
+                    "cleared %d queued comment(s) for closed PR #%s", removed, number
+                )
+            if not pr["merged"]:
+                log.debug("PR #%s closed without merge — ignoring", number)
+                return None
+            log.info("PR #%s merged", number)
+            wev = wct_oracle.EvtPRMerged(1, number)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdPRMerged), "translate_total"
+            return Action(prompt=f"PR #{number} merged — cleanup")
+
+        log.debug("ignored event: %s (action=%s)", event, action)
         return None
 
-    if event == "issues" and action == "assigned":
-        assignee = payload["assignee"]["login"]
-        issue = payload["issue"]
-        number = issue["number"]
-        title = issue["title"]
-        if not number:
-            return None
-        log.info("issue #%s assigned to %s: %s", number, assignee, title)
-        wev = wct_oracle.EvtIssueAssigned(1, number, assignee)
-        cmd = wct_oracle.translate(wev)
-        assert isinstance(cmd, wct_oracle.CmdIssueAssigned), "translate_total"
-        return Action(prompt=f"New issue #{number} assigned to {assignee}: {title}")
+    def backfill_missed_pr_comments(
+        self,
+        pr_number: int,
+        *,
+        gh_user: str,
+    ) -> int:
+        """Replay ``issue_comment`` webhooks we may have missed while fido was
+        down (fix for #794).  Returns the number of comments inspected.
 
-    if event == "pull_request_review" and action == "submitted":
-        review = payload["review"]
-        pr = payload["pull_request"]
-        number = pr.get("number")
-        state = review["state"]
-        user = review["user"]["login"]
-        review_id = review.get("id")
-        if not number:
-            return None
-        if not _is_allowed(user, repo_cfg, config):
-            log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
-            return None
-        log.info("review on PR #%s: %s by %s", number, state, user)
-        if review_id is not None:
-            wev = wct_oracle.EvtReviewSubmitted(1, number, review_id, user)
-            cmd = wct_oracle.translate(wev)
-            assert isinstance(cmd, wct_oracle.CmdReviewSubmitted), "translate_total"
-        return Action(
-            prompt=f"Review on PR #{number}: {state} by {user}",
-            review_comments={"repo": repo, "pr": number, "review_id": review_id}
-            if review_id
-            else None,
-        )
+        Scope is narrow by design: only **top-level PR comments** are replayed.
+        Inline review comments and review threads are already scanned each
+        iteration by ``Worker.handle_threads``, so the worker loop backfills
+        those on its own — only issue-comments are invisible to the loop.
 
-    if event == "pull_request_review_comment" and action in {"created", "edited"}:
-        comment = payload["comment"]
-        pr = payload["pull_request"]
-        number = pr.get("number")
-        user = comment["user"]["login"]
-        comment_id = comment["id"]
-        if user.lower() in ("fidocancode", "fido-can-code"):
-            log.debug("ignoring own comment on PR #%s", number)
-            return None
-        if not number:
-            return None
-        if not _is_allowed(user, repo_cfg, config):
-            log.debug("ignoring comment on PR #%s by %s (not allowed)", number, user)
-            return None
-        comment_body = comment.get("body", "") or ""
-        log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
-        is_bot = user.endswith("[bot]")
-        comment_id = int(comment_id)
-        wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
-        cmd = wct_oracle.translate(wev)
-        assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
-        assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
-        _enqueue_pr_comment_webhook(
-            repo_cfg=repo_cfg,
-            repo=repo,
-            pr_number=number,
-            comment_type="pulls",
-            comment=comment,
-            author=user,
-            is_bot=is_bot,
-            body=comment_body,
-            delivery_id=delivery_id,
-            payload=payload,
-        )
-        prefix = (
-            "Queued edited review comment"
-            if action == "edited"
-            else "Queued review comment"
-        )
-        return _queued_pr_comment_action(
-            prompt=(
-                f"{prefix} on PR #{number} by {user}"
-                f" ({'bot' if is_bot else 'human/owner'})"
-            ),
-            repo=repo,
-            pr_number=number,
-            comment_type="pulls",
-            comment_id=comment_id,
-            html_url=comment.get("html_url", ""),
-            author=user,
-            is_bot=is_bot,
-            context={
-                "comment_body": comment_body,
-                "delivery_id": delivery_id,
-                "pr_title": pr.get("title", ""),
-                "pr_body": pr.get("body", "") or "",
-                "file": comment.get("path", ""),
-                "line": comment.get("line"),
-                "diff_hunk": comment.get("diff_hunk", ""),
-            },
-        )
+        Idempotent: comments with a completed SQLite claim are skipped — Fido
+        already replied to them.  Comments handled with a task (ACT/DO) are
+        additionally deduped by :func:`create_task` via ``comment_id`` in
+        ``tasks.json``.  This method is intended to run **once per
+        WorkerThread lifetime** (at startup) — not every iteration.
+        """
+        repo_cfg = self._repo_cfg
+        log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
+        comments = self._gh.get_issue_comments(repo_cfg.name, pr_number)
+        for c in comments:
+            user = (c.get("user") or {}).get("login", "")
+            if not user:
+                continue
+            if user.lower() == gh_user.lower():
+                continue
+            if user.lower() in ("fidocancode", "fido-can-code"):
+                continue
+            if not _is_allowed(user, repo_cfg, self._config):
+                continue
+            comment_id = c.get("id")
+            if comment_id is None:
+                continue
+            # Skip comments Fido already claimed or completed in the SQLite store.
+            if FidoStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
+                log.info("backfill: comment %s already claimed — skipping", comment_id)
+                continue
+            body = c.get("body", "") or ""
+            is_bot = user.endswith("[bot]")
+            thread = {
+                "repo": repo_cfg.name,
+                "pr": pr_number,
+                "comment_id": comment_id,
+                "url": c.get("html_url", ""),
+                "author": user,
+                "comment_type": "issues",
+            }
+            prompt = (
+                f"PR top-level comment on #{pr_number} by {user} "
+                f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
+            )
+            create_task(
+                prompt, self._config, repo_cfg, self._gh, thread=thread, dispatcher=self
+            )
+        log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
+        return len(comments)
 
-    if event == "issue_comment" and action in {"created", "edited"}:
-        comment = payload["comment"]
-        issue = payload["issue"]
-        user = comment["user"]["login"]
-        pr = issue.get("pull_request")
-        if not pr:
-            log.debug("issue_comment on non-PR issue — ignoring")
-            return None
-        if user.lower() in ("fidocancode", "fido-can-code"):
-            log.debug("ignoring own comment on PR")
-            return None
-        if not _is_allowed(user, repo_cfg, config):
-            log.debug("ignoring comment by %s (not allowed)", user)
-            return None
-        number = issue["number"]
-        comment_body = comment.get("body", "") or ""
-        comment_id = int(comment["id"])
-        is_bot = user.endswith("[bot]")
-        log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
-        wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
-        cmd = wct_oracle.translate(wev)
-        assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
-        assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
-        _enqueue_pr_comment_webhook(
-            repo_cfg=repo_cfg,
-            repo=repo,
-            pr_number=number,
-            comment_type="issues",
-            comment=comment,
-            author=user,
-            is_bot=is_bot,
-            body=comment_body,
-            delivery_id=delivery_id,
-            payload=payload,
-        )
-        prefix = (
-            "Queued edited PR top-level comment"
-            if action == "edited"
-            else "Queued PR top-level comment"
-        )
-        return _queued_pr_comment_action(
-            prompt=f"{prefix} on #{number} by {user}",
-            repo=repo,
-            pr_number=number,
-            comment_type="issues",
-            comment_id=comment_id,
-            html_url=comment.get("html_url", ""),
-            author=user,
-            is_bot=is_bot,
-            context={
-                "comment_body": comment_body,
-                "delivery_id": delivery_id,
-                "pr_title": issue.get("title", ""),
-                "pr_body": issue.get("body", "") or "",
-            },
-        )
+    def launch_sync(self) -> None:
+        """Sync tasks.json → PR body in a background thread."""
+        from fido.tasks import sync_tasks_background
 
-    if event == "check_run" and action == "completed":
-        check = payload["check_run"]
-        conclusion = check["conclusion"]
-        if conclusion not in ("failure", "timed_out"):
-            log.debug("check_run completed with %s — ignoring", conclusion)
-            return None
-        name = check["name"]
-        prs = check["pull_requests"]
-        pr_nums = [pr["number"] for pr in prs]
-        log.info("CI failure: %s (%s) on PRs %s", name, conclusion, pr_nums)
-        _ci_conclusion = (
-            wct_oracle.CIFailure()
-            if conclusion == "failure"
-            else wct_oracle.CITimedOut()
-        )
-        wev = wct_oracle.EvtCIFailure(1, name, _ci_conclusion, pr_nums)
-        cmd = wct_oracle.translate(wev)
-        assert isinstance(cmd, wct_oracle.CmdCIFailure), "translate_total"
-        pr_str = ", ".join(f"#{n}" for n in pr_nums) if pr_nums else "unknown PR"
-        return Action(
-            prompt=f"CI failure on {pr_str}: {name} ({conclusion})",
-            preempts_worker=True,
-        )
-
-    if event == "pull_request" and action == "closed":
-        pr = payload["pull_request"]
-        number = pr["number"]
-        removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
-            repo=repo,
-            pr_number=int(number),
-        )
-        if removed:
-            log.info("cleared %d queued comment(s) for closed PR #%s", removed, number)
-        if not pr["merged"]:
-            log.debug("PR #%s closed without merge — ignoring", number)
-            return None
-        log.info("PR #%s merged", number)
-        wev = wct_oracle.EvtPRMerged(1, number)
-        cmd = wct_oracle.translate(wev)
-        assert isinstance(cmd, wct_oracle.CmdPRMerged), "translate_total"
-        return Action(prompt=f"PR #{number} merged — cleanup")
-
-    log.debug("ignored event: %s (action=%s)", event, action)
-    return None
+        sync_tasks_background(self._repo_cfg.work_dir, self._gh)
+        log.info("sync-tasks launched")
 
 
 def _load_persona(config: Config) -> str:
@@ -1358,7 +1456,7 @@ def reply_to_comment(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -1690,7 +1788,7 @@ def reply_to_issue_comment(
     config: Config,
     repo_cfg: RepoConfig,
     gh: GitHub,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -1896,7 +1994,7 @@ _TYPE_PRIORITY = {TaskType.CI: 0, TaskType.THREAD: 1, TaskType.SPEC: 2}
 def _maybe_abort_for_new_task(
     repo_cfg: RepoConfig,
     new_task: dict[str, Any],
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
     *,
     _state: State | None = None,
     _tasks: Tasks | None = None,
@@ -2183,7 +2281,7 @@ def _make_reorder_kwargs(
     work_dir: Path,
     config: Config,
     repo_cfg: RepoConfig,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
     gh: GitHub,
     agent: ProviderAgent,
     prompts: Prompts,
@@ -2239,7 +2337,7 @@ def _reorder_tasks_background(
     config: Config,
     gh: GitHub,
     repo_cfg: RepoConfig,
-    registry: "ActivityReporter",
+    registry: ActivityReporter,
     *,
     intents: list[RescopeIntent] | None = None,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
@@ -2458,8 +2556,9 @@ def create_task(
     repo_cfg: RepoConfig,
     gh: GitHub,
     thread: dict[str, Any] | None = None,
-    registry: "ActivityReporter | None" = None,
+    registry: ActivityReporter | None = None,
     *,
+    dispatcher: "Dispatcher",
     _get_commit_summary_fn: Callable[[Path], str] = _get_commit_summary,
     _reorder_background_fn: Callable[..., None] = _reorder_tasks_background,
     _tasks: Tasks | None = None,
@@ -2532,7 +2631,7 @@ def create_task(
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
-    launch_sync(config, repo_cfg, gh)
+    dispatcher.launch_sync()
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
         if _reorder_background_fn is _reorder_tasks_background:
@@ -2568,74 +2667,6 @@ def create_task(
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task
-
-
-def backfill_missed_pr_comments(
-    config: Config,
-    repo_cfg: RepoConfig,
-    gh: GitHub,
-    pr_number: int,
-    *,
-    gh_user: str,
-) -> int:
-    """Replay ``issue_comment`` webhooks we may have missed while fido was
-    down (fix for #794).  Returns the number of comments inspected.
-
-    Scope is narrow by design: only **top-level PR comments** are replayed.
-    Inline review comments and review threads are already scanned each
-    iteration by ``Worker.handle_threads``, so the worker loop backfills
-    those on its own — only issue-comments are invisible to the loop.
-
-    Idempotent: comments with a completed SQLite claim are skipped — Fido
-    already replied to them.  Comments handled with a task (ACT/DO) are additionally
-    deduped by :func:`create_task` via ``comment_id`` in ``tasks.json``.
-    This function is intended to run **once per WorkerThread lifetime** (at
-    startup) — not every iteration.
-    """
-    log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
-    comments = gh.get_issue_comments(repo_cfg.name, pr_number)
-    for c in comments:
-        user = (c.get("user") or {}).get("login", "")
-        if not user:
-            continue
-        if user.lower() == gh_user.lower():
-            continue
-        if user.lower() in ("fidocancode", "fido-can-code"):
-            continue
-        if not _is_allowed(user, repo_cfg, config):
-            continue
-        comment_id = c.get("id")
-        if comment_id is None:
-            continue
-        # Skip comments Fido already claimed or completed in the SQLite store.
-        if FidoStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
-            log.info("backfill: comment %s already claimed — skipping", comment_id)
-            continue
-        body = c.get("body", "") or ""
-        is_bot = user.endswith("[bot]")
-        thread = {
-            "repo": repo_cfg.name,
-            "pr": pr_number,
-            "comment_id": comment_id,
-            "url": c.get("html_url", ""),
-            "author": user,
-            "comment_type": "issues",
-        }
-        prompt = (
-            f"PR top-level comment on #{pr_number} by {user} "
-            f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
-        )
-        create_task(prompt, config, repo_cfg, gh, thread=thread)
-    log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
-    return len(comments)
-
-
-def launch_sync(config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
-    """Sync tasks.json → PR body in a background thread."""
-    from fido.tasks import sync_tasks_background
-
-    sync_tasks_background(repo_cfg.work_dir, gh)
-    log.info("sync-tasks launched")
 
 
 def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:

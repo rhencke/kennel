@@ -27,6 +27,7 @@ from fido.tasks import (
     _thread_task_for_auto_resolve_oracle,
     review_thread_for_auto_resolve_oracle,
 )
+from tests.fakes import _FakeDispatcher
 
 # ---------------------------------------------------------------------------
 # provider_factory.py — fallback ValueError branches
@@ -1839,19 +1840,19 @@ class TestEventsCreateTaskExitUntriaged:
             raise RuntimeError("explode")
 
         with patch.object(events, "_reorder_tasks_background", new=boom):
-            with patch.object(events, "launch_sync"):
-                with pytest.raises(RuntimeError, match="explode"):
-                    events.create_task(
-                        "prompt",
-                        config,
-                        repo_cfg,
-                        gh,
-                        thread=thread,
-                        registry=registry,
-                        _reorder_background_fn=boom,
-                        _get_commit_summary_fn=lambda wd: "summary",
-                        _tasks=tasks,
-                    )
+            with pytest.raises(RuntimeError, match="explode"):
+                events.create_task(
+                    "prompt",
+                    config,
+                    repo_cfg,
+                    gh,
+                    thread=thread,
+                    registry=registry,
+                    dispatcher=_FakeDispatcher(),
+                    _reorder_background_fn=boom,
+                    _get_commit_summary_fn=lambda wd: "summary",
+                    _tasks=tasks,
+                )
         registry.enter_untriaged.assert_called_once_with("test/repo")
         registry.exit_untriaged.assert_called_once_with("test/repo")
 

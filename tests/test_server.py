@@ -21,6 +21,7 @@ from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
+    Dispatcher,
     WebhookIngressOracle,
 )
 from fido.infra import Infra
@@ -29,6 +30,7 @@ from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_st
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
+from tests.fakes import _FakeDispatcher
 
 
 class RepoConfig(_RepoConfig):
@@ -112,7 +114,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 def _restore_handler_fns() -> object:
     saved = {
         "gh": WebhookHandler.gh,
-        "_fn_dispatch": WebhookHandler._fn_dispatch,
+        "dispatchers": WebhookHandler.dispatchers,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
@@ -153,8 +155,10 @@ def _stub_provider_statuses() -> object:
 @pytest.fixture()
 def server(tmp_path: Path) -> object:
     cfg = _config(tmp_path)
+    repo_cfg = cfg.repos["owner/repo"]
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
+    WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
@@ -2130,6 +2134,7 @@ class TestProcessAction:
         handler.config = cfg
         handler.registry = WorkerRegistry(MagicMock())
         handler.gh = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []
 
         def reply_to_issue_comment(*args: object) -> tuple[str, list[str]]:
@@ -2170,7 +2175,8 @@ class TestProcessAction:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server
         payload = {**_payload(), "action": "created"}
-        WebhookHandler._fn_dispatch = MagicMock(side_effect=RuntimeError("boom"))
+        mock_dispatcher = _FakeDispatcher(dispatch_side_effect=RuntimeError("boom"))
+        WebhookHandler.dispatchers = {"owner/repo": mock_dispatcher}
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert exc_info.value.code == 500
@@ -2203,7 +2209,10 @@ class TestProcessAction:
             call_order.append(f"respond_{code}")
             original_respond(self, code, msg)
 
-        WebhookHandler._fn_dispatch = fake_dispatch
+        mock_dispatcher = _FakeDispatcher(
+            dispatch_side_effect=lambda *_a, **_kw: call_order.append("dispatch")
+        )
+        WebhookHandler.dispatchers = {"owner/repo": mock_dispatcher}
         WebhookHandler._respond = fake_respond  # type: ignore[method-assign]
         try:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -2385,6 +2394,7 @@ class TestProcessActionInner:
         handler.config = cfg
         handler.gh = MagicMock()
         handler.registry = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         return handler
 
     def _activity(self) -> MagicMock:
@@ -4498,9 +4508,13 @@ class TestSelfRestart:
 
     def _make_server(self, tmp_path: Path) -> object:
         cfg = _self_restart_cfg(tmp_path)
+        repo_cfg = cfg.repos["owner/fido"]
         mock_registry = MagicMock()
         WebhookHandler.config = cfg
         WebhookHandler.registry = mock_registry
+        WebhookHandler.dispatchers = {
+            "owner/fido": Dispatcher(cfg, repo_cfg, MagicMock())
+        }
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
         t = threading.Thread(

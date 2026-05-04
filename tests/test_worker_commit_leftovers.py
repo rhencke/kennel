@@ -9,6 +9,7 @@ import pytest
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.worker import Worker
+from tests.fakes import _FakeDispatcher
 
 
 def _init_repo(tmp_path: Path) -> None:
@@ -26,7 +27,12 @@ def _init_repo(tmp_path: Path) -> None:
 
 def _worker(tmp_path: Path) -> Worker:
     gh = MagicMock(spec=GitHub)
-    return Worker(tmp_path, gh, issue_cache=IssueTreeCache("test/repo"))
+    return Worker(
+        tmp_path,
+        gh,
+        dispatcher=_FakeDispatcher(),
+        issue_cache=IssueTreeCache("test/repo"),
+    )
 
 
 def _head(tmp_path: Path) -> str:

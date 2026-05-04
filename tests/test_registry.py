@@ -17,6 +17,7 @@ from fido.registry import (
     make_registry,
 )
 from fido.rocq import worker_registry_crash as registry_fsm
+from tests.fakes import _FakeDispatcher
 
 
 class RepoConfig(_RepoConfig):
@@ -632,7 +633,14 @@ class TestMakeThread:
         mock_registry = MagicMock()
         mock_gh = MagicMock()
         mock_wt_cls = MagicMock()
-        result = _make_thread(cfg, mock_registry, gh=mock_gh, _WorkerThread=mock_wt_cls)
+        fake_dispatcher = _FakeDispatcher()
+        result = _make_thread(
+            cfg,
+            mock_registry,
+            gh=mock_gh,
+            dispatchers={"foo/bar": fake_dispatcher},
+            _WorkerThread=mock_wt_cls,
+        )
         from fido.config import RepoMembership
 
         mock_wt_cls.assert_called_once_with(
@@ -645,6 +653,7 @@ class TestMakeThread:
             session_issue=None,
             config=None,
             repo_cfg=cfg,
+            dispatcher=fake_dispatcher,
             issue_cache=mock_registry.get_issue_cache.return_value,
         )
         mock_registry.get_issue_cache.assert_called_once_with("foo/bar")
@@ -655,7 +664,13 @@ class TestMakeThread:
         work_dir.mkdir()
         cfg = _repo("foo/bar", work_dir)
         mock_wt_cls = MagicMock()
-        _make_thread(cfg, MagicMock(), gh=MagicMock(), _WorkerThread=mock_wt_cls)
+        _make_thread(
+            cfg,
+            MagicMock(),
+            gh=MagicMock(),
+            dispatchers={"foo/bar": _FakeDispatcher()},
+            _WorkerThread=mock_wt_cls,
+        )
         assert mock_wt_cls.call_args[0][0] == work_dir
 
     def test_config_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
@@ -672,14 +687,25 @@ class TestMakeThread:
         )
         mock_wt_cls = MagicMock()
         _make_thread(
-            cfg, MagicMock(), gh=MagicMock(), config=config, _WorkerThread=mock_wt_cls
+            cfg,
+            MagicMock(),
+            gh=MagicMock(),
+            config=config,
+            dispatchers={"foo/bar": _FakeDispatcher()},
+            _WorkerThread=mock_wt_cls,
         )
         assert mock_wt_cls.call_args.kwargs["config"] is config
 
     def test_repo_cfg_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_wt_cls = MagicMock()
-        _make_thread(cfg, MagicMock(), gh=MagicMock(), _WorkerThread=mock_wt_cls)
+        _make_thread(
+            cfg,
+            MagicMock(),
+            gh=MagicMock(),
+            dispatchers={"foo/bar": _FakeDispatcher()},
+            _WorkerThread=mock_wt_cls,
+        )
         assert mock_wt_cls.call_args.kwargs["repo_cfg"] is cfg
 
 
@@ -690,6 +716,7 @@ class TestMakeRegistry:
         result = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
+            dispatchers={},
             _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert isinstance(result, WorkerRegistry)
@@ -702,13 +729,14 @@ class TestMakeRegistry:
         make_registry(
             {"foo/bar": cfg1, "foo/baz": cfg2},
             MagicMock(),
+            dispatchers={},
             _thread_factory=mock_factory,
         )
         assert mock_factory.call_count == 2
         assert mock_thread.start.call_count == 2
 
     def test_empty_repos_returns_empty_registry(self) -> None:
-        result = make_registry({}, MagicMock())
+        result = make_registry({}, MagicMock(), dispatchers={})
         assert isinstance(result, WorkerRegistry)
         assert result.is_alive("anything") is False
 
@@ -719,6 +747,7 @@ class TestMakeRegistry:
         reg = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
+            dispatchers={},
             _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert reg.is_alive("foo/bar") is True
@@ -737,7 +766,11 @@ class TestMakeRegistry:
         )
         mock_factory = MagicMock(return_value=MagicMock())
         make_registry(
-            {"foo/bar": cfg}, MagicMock(), config, _thread_factory=mock_factory
+            {"foo/bar": cfg},
+            MagicMock(),
+            config,
+            dispatchers={},
+            _thread_factory=mock_factory,
         )
         assert mock_factory.call_args.kwargs["config"] is config
 

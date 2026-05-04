@@ -11,6 +11,7 @@ from fido.events import (
     _INSIGHT_LABEL,
     _INSIGHT_REPO,
     Action,
+    Dispatcher,
     WebhookIngressOracle,
     _apply_reply_result,
     _BackgroundRescopeTrigger,
@@ -32,8 +33,6 @@ from fido.events import (
     _task_snapshot,
     build_review_comment_action,
     create_task,
-    dispatch,
-    launch_sync,
     launch_worker,
     needs_more_context,
     queue_reply_tasks,
@@ -52,6 +51,7 @@ from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
 from fido.worker import ActivityReporter
+from tests.fakes import _FakeDispatcher
 
 
 def _synthesis_response(
@@ -278,6 +278,7 @@ class TestRecoverReplyPromises:
             MagicMock(),
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
 
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
@@ -306,6 +307,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
@@ -351,6 +353,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -383,6 +386,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -405,6 +409,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -426,6 +431,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -453,6 +459,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -483,6 +490,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -517,6 +525,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert [
@@ -551,6 +560,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -583,6 +593,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert [
@@ -618,6 +629,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -653,6 +665,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         mock_create_task.assert_not_called()
@@ -692,6 +705,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
 
@@ -745,6 +759,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -806,6 +821,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -868,6 +884,7 @@ class TestRecoverReplyPromises:
                 7,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
 
         store = FidoStore(tmp_path)
@@ -937,6 +954,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "prepared"
@@ -1002,6 +1020,7 @@ class TestRecoverReplyPromises:
                 7,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
 
         store = FidoStore(tmp_path)
@@ -1088,6 +1107,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         assert mock_reply.call_count == 0
         mock_create_task.assert_not_called()
@@ -1152,6 +1172,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_count == 2
@@ -1388,8 +1409,8 @@ class TestReplyPromiseHelpers:
 class TestDispatchPing:
     def test_returns_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch(
-            "ping", {"hook_id": 123, **_payload()}, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "ping", {"hook_id": 123, **_payload()}
         )
         assert result is None
 
@@ -1403,7 +1424,9 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 1, "title": "test issue"},
         }
-        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issues", payload
+        )
         assert result is not None
         assert "#1" in result.prompt
 
@@ -1415,7 +1438,9 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 0, "title": "test"},
         }
-        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issues", payload
+        )
         assert result is None
 
 
@@ -1436,8 +1461,8 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "pr title", "body": "pr body"},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is not None
         assert result.reply_to is None
@@ -1464,8 +1489,8 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is not None
         assert result.thread is not None
@@ -1491,11 +1516,9 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-125",
         )
 
@@ -1533,18 +1556,14 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-126-a",
         )
-        dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-126-b",
         )
 
@@ -1570,11 +1589,9 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-127-a",
         )
         edited_payload = {
@@ -1586,11 +1603,9 @@ class TestDispatchReviewComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             edited_payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-127-b",
         )
 
@@ -1609,8 +1624,8 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "done", "user": {"login": "FidoCanCode"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
@@ -1622,8 +1637,8 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "rando"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
@@ -1640,7 +1655,9 @@ class TestDispatchCheckRun:
                 "pull_requests": [{"number": 3}],
             },
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is not None
         assert "CI failure" in result.prompt
         assert result.preempts_worker is True
@@ -1652,7 +1669,9 @@ class TestDispatchCheckRun:
             "action": "completed",
             "check_run": {"conclusion": "success", "name": "lint", "pull_requests": []},
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is None
 
 
@@ -1675,7 +1694,9 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
-        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request", payload
+        )
         assert result is not None
         assert "merged" in result.prompt
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
@@ -1698,7 +1719,9 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": False},
         }
-        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request", payload
+        )
         assert result is None
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
@@ -1722,7 +1745,9 @@ class TestDispatchIssueComment:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is not None
         assert result.comment_body is None
         assert result.preempts_worker is True
@@ -1757,11 +1782,9 @@ class TestDispatchIssueComment:
             },
         }
 
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "issue_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-issue-457",
         )
 
@@ -1798,7 +1821,9 @@ class TestDispatchIssueComment:
             },
         }
 
-        dispatch("issue_comment", payload, cfg, repo_cfg, delivery_id="delivery-a")
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
+            "issue_comment", payload, delivery_id="delivery-a"
+        )
         edited_payload = {
             **payload,
             "action": "edited",
@@ -1808,8 +1833,8 @@ class TestDispatchIssueComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = dispatch(
-            "issue_comment", edited_payload, cfg, repo_cfg, delivery_id="delivery-b"
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
+            "issue_comment", edited_payload, delivery_id="delivery-b"
         )
 
         assert result is not None
@@ -1827,18 +1852,18 @@ class TestDispatchIssueComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "owner"}},
             "issue": {"number": 10, "title": "issue"},
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
 
 class TestDispatchUnknown:
     def test_unknown_event(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "unknown_event",
             {**_payload(), "action": "whatever"},
-            cfg,
-            _repo_cfg(tmp_path),
         )
         assert result is None
 
@@ -2109,6 +2134,7 @@ class TestReplyToComment:
                 MagicMock(),
                 thread=None,
                 registry=None,
+                dispatcher=_FakeDispatcher(),
             )
         mock_create_task.assert_not_called()
 
@@ -2135,6 +2161,7 @@ class TestReplyToComment:
                 MagicMock(),
                 thread=thread,
                 registry=None,
+                dispatcher=_FakeDispatcher(),
             )
         mock_create_task.assert_called_once()
         _, kwargs = mock_create_task.call_args
@@ -3407,10 +3434,7 @@ class TestCreateTask:
         mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
         thread = {"repo": "owner/repo", "pr": 1, "comment_id": 99}
-        with (
-            patch("fido.events.launch_sync"),
-            caplog.at_level("WARNING", logger="fido.events"),
-        ):
+        with caplog.at_level("WARNING", logger="fido.events"):
             create_task(
                 "do something",
                 cfg,
@@ -3418,6 +3442,7 @@ class TestCreateTask:
                 mock_gh,
                 thread=thread,
                 _tasks=mock_tasks,
+                dispatcher=_FakeDispatcher(),
                 _get_commit_summary_fn=lambda wd: "",
             )
         warns = [
@@ -3430,29 +3455,36 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
-        with patch("fido.events.launch_sync") as mock_sync:
-            create_task("do something", cfg, repo_cfg, mock_gh, _tasks=mock_tasks)
+        mock_dispatcher = _FakeDispatcher()
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            _tasks=mock_tasks,
+            dispatcher=mock_dispatcher,
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
         )
-        mock_sync.assert_called_once_with(cfg, repo_cfg, mock_gh)
+        assert mock_dispatcher.launch_sync_calls == 1
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
         mock_tasks = self._mock_tasks()
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3466,16 +3498,16 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.return_value = True
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3495,17 +3527,17 @@ class TestCreateTask:
             {"id": 1002, "author": "owner", "body": "actually queue it"},
             {"id": 1003, "author": "FidoCanCode", "body": "will do"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3526,16 +3558,16 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "owner", "body": "new follow-up"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3554,17 +3586,17 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "copilot[bot]", "body": "suggestion"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3585,16 +3617,16 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "drive-by", "body": "noise"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3607,17 +3639,17 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.side_effect = RuntimeError("api down")
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         mock_tasks.add.assert_called_once()
 
     def test_returns_created_task(self, tmp_path: Path) -> None:
@@ -3630,10 +3662,14 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         assert result == fake_task
 
     def test_queue_reply_tasks_counts_only_created_tasks(self, tmp_path: Path) -> None:
@@ -3655,6 +3691,7 @@ class TestCreateTask:
                 MagicMock(),
                 thread=thread,
                 create_task_fn=fake_create,
+                dispatcher=_FakeDispatcher(),
             )
             == 1
         )
@@ -3688,17 +3725,17 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )  # no registry
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )  # no registry
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_new_task_has_no_thread(self, tmp_path: Path) -> None:
@@ -3728,15 +3765,15 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Another plain task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )  # no thread
+        create_task(
+            "Another plain task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )  # no thread
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_no_current_task_in_state(self, tmp_path: Path) -> None:
@@ -3758,18 +3795,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_has_thread(self, tmp_path: Path) -> None:
@@ -3805,18 +3842,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "New thread task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=new_thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "New thread task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=new_thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_file_absent(self, tmp_path: Path) -> None:
@@ -3833,18 +3870,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_not_in_tasks_json(self, tmp_path: Path) -> None:
@@ -3865,18 +3902,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_has_no_current_task(self, tmp_path: Path) -> None:
@@ -3897,18 +3934,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def _setup_abort_scenario(
@@ -3953,18 +3990,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # ABORT_KEEP: current task stays in tasks.json
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -3985,18 +4022,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # task should still be in tasks.json (ABORT_KEEP)
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -4016,18 +4053,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_ci_preempts_thread(self, tmp_path: Path) -> None:
@@ -4038,15 +4075,15 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "thread")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "CI fix",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -4059,15 +4096,15 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "spec")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "CI fix",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -4084,15 +4121,15 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "New spec task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "New spec task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_thread_task_triggers_reorder_background(self, tmp_path: Path) -> None:
@@ -4109,19 +4146,19 @@ class TestCreateTask:
         mock_gh = MagicMock()
         reorder_called: list[tuple] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _get_commit_summary_fn=lambda wd: "abc1234 add thing",
-                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
-                    reorder_called.append((wd, cs, cfg, gh, rc, reg))
-                ),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _get_commit_summary_fn=lambda wd: "abc1234 add thing",
+            _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
+                reorder_called.append((wd, cs, cfg, gh, rc, reg))
+            ),
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
         assert reorder_called[0][1] == "abc1234 add thing"
@@ -4141,15 +4178,15 @@ class TestCreateTask:
         }
         reorder_called: list = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Spec task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                _reorder_background_fn=lambda *a: reorder_called.append(a),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "Spec task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            _reorder_background_fn=lambda *a: reorder_called.append(a),
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         assert reorder_called == []
 
     def test_spec_task_does_not_call_rewrite_pr_description(
@@ -4159,12 +4196,15 @@ class TestCreateTask:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_tasks = self._mock_tasks()
-        with (
-            patch("fido.events.launch_sync"),
-            patch("fido.events._rewrite_pr_description") as mock_rewrite,
-        ):
+        mock_dispatcher = _FakeDispatcher()
+        with patch("fido.events._rewrite_pr_description") as mock_rewrite:
             create_task(
-                "Spec task", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
+                "Spec task",
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                _tasks=mock_tasks,
+                dispatcher=mock_dispatcher,
             )  # thread=None
         mock_rewrite.assert_not_called()
 
@@ -4183,27 +4223,28 @@ class TestCreateTask:
         }
         summaries: list[str] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "t",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _get_commit_summary_fn=lambda wd: "custom summary",
-                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
-                    summaries.append(cs)
-                ),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "t",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _get_commit_summary_fn=lambda wd: "custom summary",
+            _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: summaries.append(
+                cs
+            ),
+            _tasks=mock_tasks,
+            dispatcher=_FakeDispatcher(),
+        )
         assert summaries == ["custom summary"]
 
     def test_default_tasks_creates_task_in_file(self, tmp_path: Path) -> None:
         """When _tasks is not passed, create_task constructs Tasks(work_dir) itself."""
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with patch("fido.events.launch_sync"):
-            result = create_task("do a thing", cfg, repo_cfg, MagicMock())
+        result = create_task(
+            "do a thing", cfg, repo_cfg, MagicMock(), dispatcher=_FakeDispatcher()
+        )
         assert result["title"] == "do a thing"
 
         from fido.tasks import Tasks
@@ -5407,16 +5448,14 @@ class TestBackfillMissedPrComments:
     def test_creates_task_for_allowed_collaborator_comment(
         self, tmp_path: Path
     ) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [self._comment(100)]
         mock_gh.is_thread_resolved_for_comment.return_value = False
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
         with patch("fido.events.create_task") as mock_create:
-            count = backfill_missed_pr_comments(
-                cfg, repo_cfg, mock_gh, 1, gh_user="fidocancode"
+            count = Dispatcher(cfg, repo_cfg, mock_gh).backfill_missed_pr_comments(
+                1, gh_user="fidocancode"
             )
         assert count == 1
         mock_create.assert_called_once()
@@ -5426,37 +5465,25 @@ class TestBackfillMissedPrComments:
         assert kwargs["thread"]["author"] == "rhencke"
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fidocancode", body="my own reply")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="FidoCanCode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="FidoCanCode")
         mock_create.assert_not_called()
 
     def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="Alice", body="mine")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="alice",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="alice")
         mock_create.assert_not_called()
 
     def test_skips_fido_literal_name_even_if_gh_user_mismatch(
@@ -5464,81 +5491,61 @@ class TestBackfillMissedPrComments:
     ) -> None:
         """Defense in depth: even if ``gh_user`` is misconfigured, comments
         from the literal fido account must never trigger a backfill task."""
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fido-can-code", body="my reply")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="mis-configured-bot",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="mis-configured-bot")
         mock_create.assert_not_called()
 
     def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="random-stranger")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         mock_create.assert_not_called()
 
     def test_allows_configured_bots(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="dependabot[bot]", body="bump dep")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         assert mock_create.call_count == 1
         _, kwargs = mock_create.call_args
         assert "bot" in kwargs["thread"]["author"]
 
     def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="rhencke", body="human msg"),
             self._comment(101, user="bot[bot]", body="bot msg"),
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         prompts = [c.args[0] for c in mock_create.call_args_list]
         assert any("human/owner" in p for p in prompts)
         assert any("(bot)" in p for p in prompts)
 
     def test_skips_empty_login_and_missing_id(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             {"id": 1, "user": {"login": ""}, "body": "x"},
@@ -5546,28 +5553,18 @@ class TestBackfillMissedPrComments:
             {"id": 2, "user": None, "body": "x"},
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         mock_create.assert_not_called()
 
     def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
         with patch("fido.events.create_task") as mock_create:
-            count = backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            count = Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         assert count == 0
         mock_create.assert_not_called()
 
@@ -5577,8 +5574,6 @@ class TestBackfillMissedPrComments:
         reply_to_issue_comment completes comment ids in SQLite after posting;
         backfill must honour that durable claim and skip re-queueing.
         """
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, body="already answered"),
@@ -5592,13 +5587,9 @@ class TestBackfillMissedPrComments:
         FidoStore(tmp_path).ack_promise(promise.promise_id)
 
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
 
         # Only comment 200 (unclaimed) should be queued.
         assert mock_create.call_count == 1
@@ -5624,15 +5615,15 @@ class TestLaunchSync:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            launch_sync(cfg, self._repo_cfg(tmp_path), mock_gh)
+            Dispatcher(cfg, self._repo_cfg(tmp_path), mock_gh).launch_sync()
         mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("fido.tasks.sync_tasks_background"):
-            launch_sync(
+            Dispatcher(
                 cfg, self._repo_cfg(tmp_path), _make_mock_gh()
-            )  # should not raise
+            ).launch_sync()  # should not raise
 
 
 class TestLaunchWorker:
@@ -5658,7 +5649,9 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review", payload
+        )
         assert result is not None
         assert result.review_comments is not None
         assert result.review_comments["review_id"] == 55
@@ -5671,7 +5664,9 @@ class TestDispatchPullRequestReview:
             "review": {"state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review", payload
+        )
         assert result is not None
         assert result.review_comments is None
 
@@ -5683,7 +5678,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review", payload
+        )
         assert result is None
 
     def test_not_allowed_user_ignored(self, tmp_path: Path) -> None:
@@ -5694,7 +5691,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "stranger"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review", payload
+        )
         assert result is None
 
     def test_commented_review_collapsed_by_oracle(self, tmp_path: Path) -> None:
@@ -5709,11 +5708,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 77, "state": "commented", "user": {"login": "owner"}},
             "pull_request": {"number": 4},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-commented-1",
             oracle=oracle,
         )
@@ -5730,11 +5727,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 78, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-approved-1",
             oracle=oracle,
         )
@@ -5755,11 +5750,9 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 6},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-changes-requested-1",
             oracle=oracle,
         )
@@ -5776,11 +5769,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 80, "state": "dismissed", "user": {"login": "owner"}},
             "pull_request": {"number": 7},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-dismissed-1",
             oracle=oracle,
         )
@@ -5799,7 +5790,9 @@ class TestDispatchCheckRunNoPrs:
                 "pull_requests": [],
             },
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is not None
         assert "unknown PR" in result.prompt
 
@@ -5817,7 +5810,9 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
     def test_unallowed_user_ignored(self, tmp_path: Path) -> None:
@@ -5832,7 +5827,9 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
 
@@ -5851,8 +5848,8 @@ class TestDispatchReviewCommentNoNumber:
             },
             "pull_request": {},  # no number
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
@@ -7288,3 +7285,46 @@ class TestGitHubInsightFiler:
 
         body = gh.create_issue.call_args.args[2]
         assert "https://github.com/org/proj/pull/10#discussion_r555" in body
+
+
+class TestDispatcher:
+    """Unit tests for the :class:`~fido.events.Dispatcher` collaborator."""
+
+    def test_dispatch_routes_ping_to_none(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        d = Dispatcher(cfg, repo_cfg, MagicMock())
+        result = d.dispatch("ping", {"hook_id": 1})
+        assert result is None
+
+    def test_dispatch_returns_action_for_issue_assigned(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            "action": "assigned",
+            "assignee": {"login": "rhencke"},
+            "issue": {"number": 7, "title": "Do the thing"},
+        }
+        d = Dispatcher(cfg, repo_cfg, MagicMock())
+        result = d.dispatch("issues", payload)
+        assert isinstance(result, Action)
+        assert "7" in result.prompt
+
+    def test_backfill_returns_count(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = []
+        repo_cfg = _repo_cfg(tmp_path)
+        d = Dispatcher(cfg, repo_cfg, mock_gh)
+        count = d.backfill_missed_pr_comments(42, gh_user="fido")
+        mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
+        assert count == 0
+
+    def test_launch_sync_calls_background(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        mock_gh = MagicMock()
+        repo_cfg = _repo_cfg(tmp_path)
+        with patch("fido.tasks.sync_tasks_background") as mock_sync:
+            d = Dispatcher(cfg, repo_cfg, mock_gh)
+            d.launch_sync()
+        mock_sync.assert_called_once_with(repo_cfg.work_dir, mock_gh)

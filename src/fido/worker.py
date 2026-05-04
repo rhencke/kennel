@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from fido.events import Action
+    from fido.events import Action, Dispatcher
 
 import requests as _requests
 
@@ -1174,6 +1174,7 @@ class Worker:
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
         *,
+        dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
     ) -> None:
         self.work_dir = work_dir
@@ -1197,6 +1198,7 @@ class Worker:
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
+        self._dispatcher = dispatcher
         self._provider_factory = (
             DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
             if provider_factory is None
@@ -2429,6 +2431,7 @@ class Worker:
                 thread=action.reply_to,
                 is_bot=action.is_bot,
                 registry=self._registry,
+                dispatcher=self._dispatcher,
             )
         log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
@@ -2508,6 +2511,7 @@ class Worker:
                 else action.thread,
                 is_bot=action.is_bot,
                 registry=self._registry,
+                dispatcher=self._dispatcher,
             )
             store.ack_promise(promise.promise_id)
         except Exception as exc:
@@ -4062,6 +4066,7 @@ class Worker:
                 self.gh,
                 pr_number,
                 self._registry,
+                self._dispatcher,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
@@ -4071,12 +4076,7 @@ class Worker:
                 # Runs only on the first iteration per WorkerThread lifetime so
                 # the steady-state loop stays fast; create_task dedups on
                 # comment_id so re-tasking already-handled comments is a no-op.
-                from fido.events import backfill_missed_pr_comments
-
-                backfill_missed_pr_comments(
-                    recovery_config,
-                    recovery_repo_cfg,
-                    self.gh,
+                self._dispatcher.backfill_missed_pr_comments(
                     pr_number,
                     gh_user=repo_ctx.gh_user,
                 )
@@ -4171,6 +4171,7 @@ class WorkerThread(threading.Thread):
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
         *,
+        dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
@@ -4216,6 +4217,7 @@ class WorkerThread(threading.Thread):
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
+        self._dispatcher = dispatcher
         self._bootstrap_session: PromptSession | None = session
         # True until the first ``Worker.run()`` returns — flipped after that so
         # the one-shot startup backfill (fix #794) only fires once per thread.
@@ -4494,6 +4496,7 @@ class WorkerThread(threading.Thread):
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,
+                    dispatcher=self._dispatcher,
                     first_iteration=self._is_first_iteration,
                     issue_cache=self._issue_cache,
                 )

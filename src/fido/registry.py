@@ -6,6 +6,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -14,6 +15,9 @@ from fido.provider import PromptSession, Provider
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
+
+if TYPE_CHECKING:
+    from fido.events import Dispatcher
 
 log = logging.getLogger(__name__)
 
@@ -741,6 +745,7 @@ def _make_thread(
     provider: Provider | None = None,
     session_issue: int | None = None,
     config: Config | None = None,
+    dispatchers: "dict[str, Dispatcher]",
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client.
@@ -759,6 +764,7 @@ def _make_thread(
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
+        dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
     )
 
@@ -768,6 +774,7 @@ def make_registry(
     gh: GitHub,
     config: Config | None = None,
     *,
+    dispatchers: "dict[str, Dispatcher]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
@@ -790,6 +797,7 @@ def make_registry(
             provider=provider,
             session_issue=session_issue,
             config=config,
+            dispatchers=dispatchers,
         )
 
     registry = WorkerRegistry(factory)

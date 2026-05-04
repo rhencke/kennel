@@ -74,6 +74,7 @@ from fido.worker import (
 from fido.worker import (
     WorkerThread as _WorkerThreadBase,
 )
+from tests.fakes import _FakeDispatcher
 
 _MISSING = object()
 
@@ -124,6 +125,8 @@ class Worker(_WorkerBase):
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueTreeCache(kwargs.get("repo_name", "test/repo"))
+        if "dispatcher" not in kwargs:
+            kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, gh, *args, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
@@ -152,6 +155,8 @@ class WorkerThread(_WorkerThreadBase):
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueTreeCache(repo_name)
+        if "dispatcher" not in kwargs:
+            kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
@@ -2416,7 +2421,12 @@ class TestAssertGitIdentity:
         gh = MagicMock()
         gh.get_authenticated_identity.return_value = self._EXPECTED
         return (
-            _WorkerBase(tmp_path, gh, issue_cache=IssueTreeCache("test/repo")),
+            _WorkerBase(
+                tmp_path,
+                gh,
+                dispatcher=_FakeDispatcher(),
+                issue_cache=IssueTreeCache("test/repo"),
+            ),
             gh,
         )
 
@@ -6160,10 +6170,12 @@ class TestRunSeedTasksIntegration:
             return 0
 
         def _run_once(first: bool) -> None:
+            mock_dispatcher = _FakeDispatcher(backfill_side_effect=_backfill)
             worker = Worker(
                 tmp_path,
                 gh,
                 first_iteration=first,
+                dispatcher=mock_dispatcher,
                 registry=MagicMock(spec=ActivityReporter),
             )
             with (
@@ -6181,7 +6193,6 @@ class TestRunSeedTasksIntegration:
                 patch.object(worker, "seed_tasks_from_pr_body"),
                 patch.object(worker, "handle_ci", return_value=False),
                 patch.object(worker, "handle_threads", return_value=False),
-                patch("fido.events.backfill_missed_pr_comments", side_effect=_backfill),
             ):
                 worker.run()
 
@@ -6209,10 +6220,12 @@ class TestRunSeedTasksIntegration:
 
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_dispatcher = _FakeDispatcher(backfill_return=0)
         worker = Worker(
             tmp_path,
             gh,
             first_iteration=True,
+            dispatcher=mock_dispatcher,
             registry=MagicMock(spec=ActivityReporter),
         )
         repo_ctx = self._make_mock_repo_ctx()
@@ -6232,7 +6245,6 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
-            patch("fido.events.backfill_missed_pr_comments", return_value=0),
             caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker.run()
@@ -6250,10 +6262,12 @@ class TestRunSeedTasksIntegration:
         avoid one superfluous API round-trip."""
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        mock_dispatcher = _FakeDispatcher()
         worker = Worker(
             tmp_path,
             gh,
             first_iteration=True,
+            dispatcher=mock_dispatcher,
             registry=MagicMock(spec=ActivityReporter),
         )
         repo_ctx = self._make_mock_repo_ctx()
@@ -6270,10 +6284,9 @@ class TestRunSeedTasksIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.events.backfill_missed_pr_comments") as mock_backfill,
         ):
             worker.run()
-        mock_backfill.assert_not_called()
+        assert mock_dispatcher.backfill_calls == []
 
     def test_seed_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path
@@ -14743,10 +14756,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -14850,10 +14864,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -14904,10 +14919,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -15364,10 +15380,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
