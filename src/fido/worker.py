@@ -4030,16 +4030,6 @@ class Worker:
                         pr_number,
                         gh_user=repo_ctx.gh_user,
                     )
-                else:
-                    from fido.events import backfill_missed_pr_comments
-
-                    backfill_missed_pr_comments(
-                        recovery_config,
-                        recovery_repo_cfg,
-                        self.gh,
-                        pr_number,
-                        gh_user=repo_ctx.gh_user,
-                    )
                 self._first_iteration = False
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")

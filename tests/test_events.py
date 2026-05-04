@@ -7117,50 +7117,41 @@ class TestGitHubInsightFiler:
 class TestDispatcher:
     """Unit tests for the :class:`~fido.events.Dispatcher` collaborator."""
 
-    def test_dispatch_delegates_to_free_function(self, tmp_path: Path) -> None:
+    def test_dispatch_routes_ping_to_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        mock_gh = MagicMock()
         repo_cfg = _repo_cfg(tmp_path)
-        oracle = WebhookIngressOracle()
-        payload = {**_payload(), "action": "opened"}
-        with patch("fido.events.dispatch") as mock_dispatch:
-            mock_dispatch.return_value = None
-            d = Dispatcher(cfg, mock_gh)
-            result = d.dispatch(
-                "issues", payload, repo_cfg, delivery_id="abc", oracle=oracle
-            )
-        mock_dispatch.assert_called_once_with(
-            "issues", payload, cfg, repo_cfg, delivery_id="abc", oracle=oracle
-        )
+        d = Dispatcher(cfg)
+        result = d.dispatch("ping", {"hook_id": 1}, repo_cfg)
         assert result is None
 
-    def test_dispatch_returns_action(self, tmp_path: Path) -> None:
+    def test_dispatch_returns_action_for_issue_assigned(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        mock_gh = MagicMock()
         repo_cfg = _repo_cfg(tmp_path)
-        action = Action(prompt="hello")
-        with patch("fido.events.dispatch", return_value=action):
-            d = Dispatcher(cfg, mock_gh)
-            result = d.dispatch("ping", {}, repo_cfg)
-        assert result is action
+        payload = {
+            "action": "assigned",
+            "assignee": {"login": "rhencke"},
+            "issue": {"number": 7, "title": "Do the thing"},
+        }
+        d = Dispatcher(cfg)
+        result = d.dispatch("issues", payload, repo_cfg)
+        assert isinstance(result, Action)
+        assert "7" in result.prompt
 
-    def test_backfill_delegates_to_free_function(self, tmp_path: Path) -> None:
+    def test_backfill_returns_count(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = []
         repo_cfg = _repo_cfg(tmp_path)
-        with patch(
-            "fido.events.backfill_missed_pr_comments", return_value=3
-        ) as mock_bf:
-            d = Dispatcher(cfg, mock_gh)
-            count = d.backfill_missed_pr_comments(repo_cfg, 42, gh_user="fido")
-        mock_bf.assert_called_once_with(cfg, repo_cfg, mock_gh, 42, gh_user="fido")
-        assert count == 3
+        d = Dispatcher(cfg, mock_gh)
+        count = d.backfill_missed_pr_comments(repo_cfg, 42, gh_user="fido")
+        mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
+        assert count == 0
 
-    def test_launch_sync_delegates_to_free_function(self, tmp_path: Path) -> None:
+    def test_launch_sync_calls_background(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         mock_gh = MagicMock()
         repo_cfg = _repo_cfg(tmp_path)
-        with patch("fido.events.launch_sync") as mock_sync:
+        with patch("fido.tasks.sync_tasks_background") as mock_sync:
             d = Dispatcher(cfg, mock_gh)
             d.launch_sync(repo_cfg)
-        mock_sync.assert_called_once_with(cfg, repo_cfg, mock_gh)
+        mock_sync.assert_called_once_with(repo_cfg.work_dir, mock_gh)

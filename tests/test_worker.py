@@ -5913,7 +5913,13 @@ class TestRunSeedTasksIntegration:
             return 0
 
         def _run_once(first: bool) -> None:
-            worker = Worker(tmp_path, gh, first_iteration=first)
+            from fido.events import Dispatcher
+
+            mock_dispatcher = MagicMock(spec=Dispatcher)
+            mock_dispatcher.backfill_missed_pr_comments.side_effect = _backfill
+            worker = Worker(
+                tmp_path, gh, first_iteration=first, dispatcher=mock_dispatcher
+            )
             with (
                 patch.object(
                     worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
@@ -5929,7 +5935,6 @@ class TestRunSeedTasksIntegration:
                 patch.object(worker, "seed_tasks_from_pr_body"),
                 patch.object(worker, "handle_ci", return_value=False),
                 patch.object(worker, "handle_threads", return_value=False),
-                patch("fido.events.backfill_missed_pr_comments", side_effect=_backfill),
             ):
                 worker.run()
 
