@@ -1009,25 +1009,20 @@ def _write_pr_description(
     ``sync.lock`` that :func:`fido.tasks.sync_tasks` holds, preventing a
     description rewrite from overwriting a concurrent work-queue update.
 
-    Raises ``ValueError`` when the existing body has no ``---`` divider
-    (rewrite precondition).  Returns without writing when the agent returns
-    empty or un-parseable output — the existing body is kept as-is and a
-    warning is logged.
+    Self-heals when the existing body has no ``---`` divider: builds a fresh
+    work-queue section and treats the entire existing body as the description
+    seed.  Returns without writing when the agent returns empty or un-parseable
+    output — the existing body is kept as-is and a warning is logged.
     """
     if agent is None:
         raise ValueError("_write_pr_description requires agent")
 
     divider = "\n\n---\n\n"
 
-    # For a rewrite, only proceed when the divider is present so we know
-    # where the description section ends.  For initial write (empty body)
-    # skip this guard and build the rest section fresh.
-    if existing_body and divider not in existing_body:
-        raise ValueError(
-            f"_write_pr_description: no --- divider in PR #{pr_number} body"
-        )
-
-    # Preserve the existing rest section or build the work-queue from scratch.
+    # Preserve the existing rest section, or build the work-queue from scratch
+    # (covers both empty-body initial writes and divider-less legacy bodies —
+    # see #1335: PR #1328 was opened with no divider, every rescope's _on_done
+    # raised, and the inbox-leak bug surfaced as a side effect).
     if divider in existing_body:
         rest = existing_body.split(divider, 1)[1]
         # Re-apply the work queue from task_list so a stale PR body snapshot
@@ -1051,6 +1046,12 @@ def _write_pr_description(
         else:
             queue = "<!-- no tasks yet -->"
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+        if existing_body:
+            log.info(
+                "_write_pr_description: PR #%s body has no --- divider — "
+                "self-healing by appending a fresh work-queue section (#1335)",
+                pr_number,
+            )
 
     prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
     raw = safe_voice_turn(
@@ -2383,12 +2384,18 @@ class Worker:
                 "reply_promise_id": promise.promise_id,
             }
             try:
+                # registry= flows through to _BackgroundRescopeTrigger so the
+                # rescope BG run_loop's finally can exit_untriaged the holds
+                # it accumulates from coalesced create_task calls.  Without it,
+                # the worker parks on a leaked inbox hold after this reply
+                # path fires.  See #1336.
                 category, titles = events.reply_to_comment(
                     action,
                     config,
                     repo_cfg,
                     self.gh,
                     agent=self._provider_agent,
+                    registry=self._registry,  # type: ignore[arg-type]
                 )
             except Exception:
                 store.mark_failed(promise.promise_id)
@@ -2511,6 +2518,11 @@ class Worker:
     ) -> tuple[str, list[str]]:
         from fido import events
 
+        # Thread the registry through to events.reply_to_* — without this, the
+        # synthesis path constructs _BackgroundRescopeTrigger with registry=None,
+        # the rescope BG run_loop's finally has no registry to call
+        # exit_untriaged on, and the inbox count leaks.  Worker parks on the
+        # next provider turn.  See #1336.
         if queued.comment_type == "pulls":
             return events.reply_to_comment(
                 action,
@@ -2519,6 +2531,7 @@ class Worker:
                 self.gh,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
+                registry=self._registry,  # type: ignore[arg-type]
             )
         return events.reply_to_issue_comment(
             action,
@@ -2527,6 +2540,7 @@ class Worker:
             self.gh,
             agent=self._provider_agent,
             prompts=self._get_prompts(),
+            registry=self._registry,  # type: ignore[arg-type]
         )
 
     def _queued_review_comment_action(

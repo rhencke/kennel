@@ -4318,11 +4318,16 @@ class TestWritePrDescription:
         _, kwargs = mock_cc.run_turn.call_args
         assert kwargs.get("retry_on_preempt") is True
 
-    def test_raises_when_no_divider_in_existing_body(self) -> None:
+    def test_self_heals_when_no_divider_in_existing_body(self) -> None:
+        """#1335 regression: a divider-less body must self-heal, not raise."""
         gh = MagicMock()
-        with pytest.raises(ValueError, match="no --- divider"):
-            self._call(gh, existing_body="no divider here")
-        gh.edit_pr_body.assert_not_called()
+        self._call(gh, existing_body="no divider here")
+        body = gh.edit_pr_body.call_args[0][2]
+        # Self-heal must produce a well-formed body with both the divider and
+        # work-queue markers so the next rescope can find the rest section.
+        assert "\n\n---\n\n" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
+        assert "<!-- WORK_QUEUE_END -->" in body
 
     def test_initial_write_contains_work_queue_start_marker(self) -> None:
         gh = MagicMock()
@@ -4495,11 +4500,13 @@ class TestWritePrDescription:
         assert "<!-- WORK_QUEUE_START -->" in body
         assert "<!-- WORK_QUEUE_END -->" in body
 
-    def test_rewrite_raises_when_no_divider(self) -> None:
+    def test_rewrite_self_heals_when_no_divider(self) -> None:
+        """#1335 regression: rewrite path must self-heal a divider-less body."""
         gh = MagicMock()
-        with pytest.raises(ValueError, match="no --- divider"):
-            self._call(gh, existing_body="no divider here")
-        gh.edit_pr_body.assert_not_called()
+        self._call(gh, existing_body="no divider here")
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "\n\n---\n\n" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
 
     def test_requires_agent(self) -> None:
         gh = MagicMock()
@@ -8272,6 +8279,13 @@ class TestHandleQueuedComments:
 
         assert result is True
         mock_reply.assert_called_once()
+        # Regression #1336: registry must flow through to reply_to_issue_comment
+        # so _BackgroundRescopeTrigger gets a real registry to call
+        # exit_untriaged on.  Worker._registry is None in this fixture, but the
+        # kwarg must still be present and equal to whatever Worker is holding.
+        kwargs = mock_reply.call_args.kwargs
+        assert "registry" in kwargs, "registry must be passed to reply_to_*"
+        assert kwargs["registry"] is worker._registry  # noqa: SLF001
         mock_create_task.assert_called_once()
         mock_sync.assert_called()
         store = FidoStore(tmp_path)

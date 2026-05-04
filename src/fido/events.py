@@ -1002,6 +1002,7 @@ def recover_reply_promises(
                 gh,
                 agent=agent,
                 prompts=prompts,
+                registry=registry,
             )
         except Exception:
             _mark_promises_failed(store, (promise_id for promise_id, _ in group))
@@ -1067,6 +1068,7 @@ def recover_reply_promises(
                 gh,
                 agent=agent,
                 prompts=prompts,
+                registry=registry,
             )
         except Exception:
             _mark_promises_failed(
@@ -2365,15 +2367,31 @@ def _reorder_tasks_background(
             # cleanup step (set_rescoping, set_thread_repo, set_thread_kind)
             # must not skip the exit_untriaged calls — losing them leaves the
             # worker permanently blocked on a non-empty inbox counter (#1280).
+            actually_released = 0
             if registry is not None and repo_cfg is not None:
                 for _ in range(release_untriaged):
                     registry.exit_untriaged(repo_cfg.name)
+                    actually_released += 1
                 registry.set_rescoping(repo_cfg.name, False)
+            elif release_untriaged > 0:
+                # Fail loud: the count was bumped (a coalesced caller called
+                # registry.enter_untriaged), but this rescope has no registry
+                # to call exit on — every accumulated hold is now leaked and
+                # the worker will park on the inbox forever.  See #1336 for
+                # the call-chain bug that produces this state.
+                log.error(
+                    "rescope BG: leaking %d untriaged hold(s) — "
+                    "registry=%s, repo_cfg=%s; worker WILL park (#1336)",
+                    release_untriaged,
+                    "set" if registry is not None else "None",
+                    "set" if repo_cfg is not None else "None",
+                )
             if repo_cfg is not None:
                 set_thread_repo(None)
             set_thread_kind(None)
             log.info(
-                "rescope BG: finally complete (released %d untriaged hold(s))",
+                "rescope BG: finally complete (released %d/%d untriaged hold(s))",
+                actually_released,
                 release_untriaged,
             )
 
@@ -2398,6 +2416,14 @@ def _reorder_tasks_background(
             for _ in range(release_untriaged):
                 registry.exit_untriaged(repo_cfg.name)
             registry.set_rescoping(repo_cfg.name, False)
+        elif release_untriaged > 0:
+            log.error(
+                "rescope BG (start failure): leaking %d untriaged hold(s) — "
+                "registry=%s, repo_cfg=%s; worker WILL park (#1336)",
+                release_untriaged,
+                "set" if registry is not None else "None",
+                "set" if repo_cfg is not None else "None",
+            )
         raise
 
 

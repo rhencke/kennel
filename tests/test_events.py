@@ -4287,6 +4287,39 @@ class TestReorderTasksBackground:
         registry.set_rescoping.assert_called_once_with("owner/repo", False)
         registry.exit_untriaged.assert_called_once_with("owner/repo")
 
+    def test_logs_error_on_thread_start_failure_when_holds_leak_with_no_registry(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Regression for #1336: start-failure path must also log loudly
+        when registry/repo_cfg are unwired but holds were already accumulated."""
+        coalesce_state: dict = {
+            "running": True,
+            "pending": None,
+            "untriaged_holds": 1,
+        }
+
+        def fail_start(_thread: object) -> Never:
+            raise RuntimeError("cannot start")
+
+        with caplog.at_level("ERROR", logger="fido.events"):
+            with pytest.raises(RuntimeError, match="cannot start"):
+                _reorder_tasks_background(
+                    tmp_path,
+                    "commits",
+                    self._cfg(tmp_path),
+                    MagicMock(),
+                    _start=fail_start,
+                    _reorder_fn=MagicMock(),
+                    _coalesce_state=coalesce_state,
+                    _release_untriaged_on_finish=True,
+                )
+
+        leak_records = [r for r in caplog.records if "start failure" in r.message]
+        assert leak_records, "expected a loud ERROR on start-failure leak (#1336)"
+        assert leak_records[0].levelname == "ERROR"
+
     def test_release_runs_before_set_rescoping_in_finally(self, tmp_path: Path) -> None:
         """Release must fire BEFORE set_rescoping so a failure in the latter
         cannot leave the inbox stuck (#1280).
@@ -4804,6 +4837,53 @@ class TestReorderTasksBackground:
             self._run_thread(started)
         last_call = registry.set_rescoping.call_args_list[-1]
         assert last_call[0] == ("owner/repo", False)
+
+    def test_logs_error_when_holds_leak_with_no_registry(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Regression for #1336: when a coalesced caller bumped
+        ``untriaged_holds`` but the running BG has no registry to call
+        ``exit_untriaged`` on, the finally must log a loud ERROR (not
+        silently misreport the release count)."""
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        coalesce_state: dict = {}
+        # First call: starts the BG with registry=None (the original bug
+        # scenario — _BackgroundRescopeTrigger constructed with registry=None
+        # because the worker reply path forgot to thread it through).
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=coalesce_state,
+        )
+        # Second call coalesces with _release_untriaged_on_finish=True,
+        # bumping untriaged_holds (a real create_task path would have called
+        # registry.enter_untriaged() too, leaking a hold the BG cannot release).
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            MagicMock(),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=coalesce_state,
+            _release_untriaged_on_finish=True,
+        )
+        with caplog.at_level("ERROR", logger="fido.events"):
+            self._run_thread(started)
+        leak_records = [
+            r
+            for r in caplog.records
+            if "leaking" in r.message and "untriaged hold" in r.message
+        ]
+        assert leak_records, "expected a loud ERROR when holds leak (#1336)"
+        assert leak_records[0].levelname == "ERROR"
 
     def test_no_rescoping_calls_when_no_registry(self, tmp_path: Path) -> None:
         """When registry is None, set_rescoping is not called."""
@@ -6545,19 +6625,21 @@ class TestRewritePrDescription:
             )
         mock_gh.edit_pr_body.assert_not_called()
 
-    def test_raises_when_no_divider_in_body(self, tmp_path: Path) -> None:
+    def test_self_heals_when_no_divider_in_body(self, tmp_path: Path) -> None:
+        """#1335 regression: divider-less bodies must self-heal, not raise."""
         mock_gh = self._mock_gh(
             body="No divider here. <!-- WORK_QUEUE_START -->x<!-- WORK_QUEUE_END -->"
         )
-        with pytest.raises(ValueError, match="no --- divider"):
-            _rewrite_pr_description(
-                tmp_path,
-                mock_gh,
-                agent=_client(),
-                _state=self._mock_state(),
-                _tasks=self._mock_tasks(),
-            )
-        mock_gh.edit_pr_body.assert_not_called()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            agent=_client("<body>New desc.\n\nFixes #42.</body>"),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "\n\n---\n\n" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
 
     def test_raises_when_opus_returns_empty(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
@@ -6717,18 +6799,19 @@ class TestRewritePrDescription:
         )
         assert mock_gh.edit_pr_body.call_count == 3
 
-    def test_no_divider_raises_before_retry(self, tmp_path: Path) -> None:
-        """When the PR body has no --- divider, ValueError propagates immediately."""
+    def test_no_divider_self_heals(self, tmp_path: Path) -> None:
+        """#1335 regression: a body with no --- divider self-heals."""
         mock_gh = self._mock_gh(body="No divider here. Nothing.")
-        with pytest.raises(ValueError, match="no --- divider"):
-            _rewrite_pr_description(
-                tmp_path,
-                mock_gh,
-                agent=_client("<body>New desc.\n\nFixes #42.</body>"),
-                _state=self._mock_state(),
-                _tasks=self._mock_tasks(),
-            )
-        mock_gh.edit_pr_body.assert_not_called()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            agent=_client("<body>New desc.\n\nFixes #42.</body>"),
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+        )
+        body = mock_gh.edit_pr_body.call_args[0][2]
+        assert "\n\n---\n\n" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
 
     def test_refetches_pr_body_on_retry(self, tmp_path: Path) -> None:
         """PR body is re-fetched on each attempt so work-queue stays current."""
