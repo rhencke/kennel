@@ -2974,18 +2974,28 @@ class Worker:
     def _cleanup_aborted_task(
         self, fido_dir: Path, task_id: str, task_title: str
     ) -> None:
-        """Discard uncommitted changes and remove task after an abort signal.
+        """Reset task to pending and discard uncommitted changes after abort.
 
         Called when ``self._abort_task`` is *active for* this task —
-        i.e. an abort was requested with this ``task_id``
-        and ``execute_task`` observed it mid-execution.  Runs
-        ``git_clean`` to restore the working tree, removes the task from
-        the queue, clears ``current_task_id`` from state, clears the
-        abort handle, and syncs the PR work queue.
+        i.e. an abort was requested with this ``task_id`` and
+        ``execute_task`` observed it mid-execution.  Runs ``git_clean`` to
+        restore the working tree (the in-flight work was tied to a scope
+        that's no longer current), resets the task status to ``pending``
+        so the next iteration can re-pick it on its updated scope, clears
+        ``current_task_id`` from state, clears the abort handle, and syncs
+        the PR work queue.
+
+        Per #1357 case B, the task is NOT removed from the queue here —
+        only an explicit worker-turn outcome may delete tasks.  Aborts
+        triggered by rescope (modify-in-progress → reset-to-pending →
+        abort) used to silently drop the task from ``tasks.json``, which
+        meant directives the user posted disappeared without a trace
+        every time the rescope cascade fired.  The task survives the
+        abort; the worker re-picks it under its new scope.
         """
         log.info("task aborted: %s", task_title)
         self.git_clean()
-        self._tasks.remove(task_id)
+        self._tasks.reset_to_pending(task_id)
         with State(fido_dir).modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()

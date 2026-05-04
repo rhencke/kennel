@@ -237,7 +237,10 @@ class TestRescopeOracleAdapter:
             current, frozenset({"a", "b"}), ids_by_task_id
         ) == [1]
 
-    def test_releases_encode_completion_description_updates_and_keeps(self) -> None:
+    def test_releases_encode_description_updates_and_keeps(self) -> None:
+        """#1357: omitted tasks get KeepTask, not CompleteTask.  Completion
+        is a worker-turn decision; the rescope reducer can only Keep,
+        Rewrite, or KeepTask (for omitted)."""
         current = [
             {
                 "id": "a",
@@ -277,7 +280,7 @@ class TestRescopeOracleAdapter:
 
         assert [type(release.release_decision).__name__ for release in releases] == [
             "RewriteTask",
-            "CompleteTask",
+            "KeepTask",
             "KeepTask",
         ]
 
@@ -575,6 +578,27 @@ class TestRemoveTask:
         assert not Tasks(tmp_path).remove("nonexistent")
 
 
+class TestResetToPending:
+    """Tests for Tasks.reset_to_pending — the abort-cleanup helper added
+    for #1357 case B (aborted tasks must survive in the queue, not vanish)."""
+
+    def test_resets_in_progress_to_pending(self, tmp_path: Path) -> None:
+        task = Tasks(tmp_path).add(title="t", task_type=TaskType.SPEC)
+        Tasks(tmp_path).update(task["id"], TaskStatus.IN_PROGRESS)
+        assert Tasks(tmp_path).reset_to_pending(task["id"]) is True
+        assert Tasks(tmp_path).list()[0]["status"] == str(TaskStatus.PENDING)
+
+    def test_no_op_when_already_pending(self, tmp_path: Path) -> None:
+        task = Tasks(tmp_path).add(title="t", task_type=TaskType.SPEC)
+        # Idempotent: returns True (found) without rewriting the file.
+        assert Tasks(tmp_path).reset_to_pending(task["id"]) is True
+        assert Tasks(tmp_path).list()[0]["status"] == str(TaskStatus.PENDING)
+
+    def test_returns_false_if_not_found(self, tmp_path: Path) -> None:
+        Tasks(tmp_path).add(title="t", task_type=TaskType.SPEC)
+        assert Tasks(tmp_path).reset_to_pending("nonexistent") is False
+
+
 class TestUnblockTasks:
     def test_unblocks_blocked_tasks(self, tmp_path: Path) -> None:
         t1 = Tasks(tmp_path).add(title="first", task_type=TaskType.SPEC)
@@ -742,17 +766,20 @@ class TestApplyReorder:
         assert result[0]["id"] == "2"
         assert result[1]["id"] == "1"
 
-    def test_in_progress_task_marked_completed_when_opus_excludes_it(self) -> None:
+    def test_in_progress_task_kept_when_opus_excludes_it(self) -> None:
+        """#1357: Opus-omitting an in-progress task must NOT mark it
+        completed.  The omission is treated as keep-as-is — only an
+        explicit worker-turn outcome may complete a task."""
         current = [
             self._t("1", "Active task", status="in_progress"),
             self._t("2", "Spec task"),
         ]
         original_ids = frozenset({"1", "2"})
-        # Opus omitted task "1" (in_progress) — marked completed; caller aborts worker
         items = [self._item("2", "Spec task")]
         result = _apply_reorder(current, items, original_ids)
         task1 = next(t for t in result if t["id"] == "1")
-        assert task1["status"] == "completed"
+        assert task1["status"] == "in_progress"
+        assert task1["title"] == "Active task"
 
     def test_completed_tasks_preserved_at_end(self) -> None:
         current = [
@@ -787,13 +814,17 @@ class TestApplyReorder:
         assert result[1]["title"] == "New arrival"
         assert result[1]["description"] == ""
 
-    def test_marks_pending_task_completed_when_opus_excludes_it(self) -> None:
-        current = [self._t("1", "Keep"), self._t("2", "No longer needed")]
+    def test_keeps_pending_task_when_opus_excludes_it(self) -> None:
+        """#1357: Opus-omitting a pending task must NOT mark it completed.
+        Completion is a worker-turn decision; the rescope reducer can't
+        infer it from omission."""
+        current = [self._t("1", "Keep"), self._t("2", "Still pending")]
         original_ids = frozenset({"1", "2"})
-        items = [self._item("1", "Keep")]  # Opus omitted "2"
+        items = [self._item("1", "Keep")]
         result = _apply_reorder(current, items, original_ids)
         task2 = next(t for t in result if t["id"] == "2")
-        assert task2["status"] == "completed"
+        assert task2["status"] == "pending"
+        assert task2["title"] == "Still pending"
 
     def test_empty_ordered_items_preserves_completed_and_new(self) -> None:
         current = [
@@ -1163,14 +1194,17 @@ class TestReorderTasks:
         reorder_tasks(tmp_path, "", agent=_client(raw))
         assert Tasks(tmp_path).list()[0]["title"] == "Old title"
 
-    def test_marks_completed_task_opus_excludes(self, tmp_path: Path) -> None:
+    def test_keeps_task_opus_excludes(self, tmp_path: Path) -> None:
+        """#1357: end-to-end — reorder_tasks must not mark a task completed
+        because Opus omitted it.  Status survives the rescope unchanged."""
         t1 = self._add(tmp_path, "Keep")
-        t2 = self._add(tmp_path, "No longer needed")
+        t2 = self._add(tmp_path, "Still pending")
         raw = self._response([{"id": t1["id"], "title": "Keep", "description": ""}])
         reorder_tasks(tmp_path, "", agent=_client(raw))
         result = Tasks(tmp_path).list()
         task2 = next(t for t in result if t["id"] == t2["id"])
-        assert task2["status"] == "completed"
+        assert task2["status"] == "pending"
+        assert task2["title"] == "Still pending"
 
     def test_preserves_completed_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Done")
@@ -1233,9 +1267,12 @@ class TestReorderTasks:
         assert new_task["title"] == "Arrived mid-reorder"
         assert new_task["description"] == ""
 
-    def test_on_changes_called_when_thread_task_completed_by_reorder(
+    def test_on_changes_not_fired_when_opus_omits_thread_task(
         self, tmp_path: Path
     ) -> None:
+        """#1357: omission ⇒ keep-as-is, so no thread-completion change to
+        report.  Opus omitting a thread task no longer counts as a
+        completion event."""
         thread = {
             "repo": "r/r",
             "pr": 1,
@@ -1256,9 +1293,9 @@ class TestReorderTasks:
             agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
         )
-        assert len(received) == 1
-        assert received[0]["kind"] == "completed"
-        assert received[0]["task"]["id"] == t1["id"]
+        assert received == []
+        task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
+        assert task1["status"] == "pending"
 
     def test_on_changes_called_when_thread_task_modified(self, tmp_path: Path) -> None:
         thread = {
@@ -1304,21 +1341,27 @@ class TestReorderTasks:
         assert received == []
 
     def test_on_changes_none_does_not_error(self, tmp_path: Path) -> None:
+        """A None callback must not raise when the rescope rewrites a thread
+        task's description (the change-emitting path under #1357)."""
         thread = {"repo": "r/r", "pr": 1, "comment_id": 42, "url": "https://x.com"}
         t1 = Tasks(tmp_path).add(
             title="Thread task", task_type=TaskType.THREAD, thread=thread
         )
-        t2 = self._add(tmp_path, "Keep")
-        raw = self._response([{"id": t2["id"], "title": "Keep", "description": ""}])
-        # Should not raise even though t1 is completed and _on_changes is None
+        raw = self._response(
+            [{"id": t1["id"], "title": "Thread task", "description": "rewritten"}]
+        )
         reorder_tasks(tmp_path, "", agent=_client(raw), _on_changes=None)
-        # t1 should be marked completed
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
-        assert task1["status"] == "completed"
+        assert task1["description"] == "rewritten"
 
-    def test_on_inprogress_affected_called_when_inprogress_task_completed(
+    def test_on_inprogress_affected_not_called_when_opus_omits_inprogress_task(
         self, tmp_path: Path
     ) -> None:
+        """#1357: omitting an in-progress task no longer auto-completes it,
+        so the affected-callback no longer fires from omission.  The task
+        survives in the queue at in_progress; only an explicit modification
+        by Opus triggers _on_inprogress_affected (covered by the modify
+        test)."""
         t1 = self._add(tmp_path, "In-progress task")
         Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
         t2 = self._add(tmp_path, "Keep this")
@@ -1332,10 +1375,9 @@ class TestReorderTasks:
             agent=_client(raw),
             _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
-        assert affected == [1]
-        # in-progress task is marked completed
+        assert affected == []
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
-        assert task1["status"] == "completed"
+        assert task1["status"] == "in_progress"
 
     def test_on_inprogress_affected_called_when_inprogress_task_modified(
         self, tmp_path: Path
@@ -1397,13 +1439,19 @@ class TestReorderTasks:
         assert affected == []
 
     def test_on_inprogress_affected_none_does_not_error(self, tmp_path: Path) -> None:
+        """A None callback must not raise when Opus modifies the
+        in-progress task — the reset-to-pending + abort path under #1357."""
         t1 = self._add(tmp_path, "In-progress task")
         Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
-        t2 = self._add(tmp_path, "Keep this")
         raw = self._response(
-            [{"id": t2["id"], "title": "Keep this", "description": ""}]
+            [
+                {
+                    "id": t1["id"],
+                    "title": "In-progress task",
+                    "description": "rewritten scope",
+                }
+            ]
         )
-        # Should not raise even though in-progress task is completed and callback is None
         reorder_tasks(
             tmp_path,
             "",
@@ -1411,7 +1459,8 @@ class TestReorderTasks:
             _on_inprogress_affected=None,
         )
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
-        assert task1["status"] == "completed"
+        assert task1["status"] == str(TaskStatus.PENDING)
+        assert task1["description"] == "rewritten scope"
 
     def test_on_done_called_after_successful_reorder(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Task A")
