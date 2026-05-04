@@ -54,36 +54,43 @@ class AtomicReference(Generic[_T]):
         with self._lock:
             self._value = value
 
-    def compare_and_set(self, expected: _T, new_value: _T) -> bool:
+    def compare_and_set(self, expected: _T, new_value: _T) -> tuple[bool, _T]:
         """Swap to *new_value* only if the current reference **is** *expected*.
 
         Uses identity (``is``) rather than equality (``==``) for the check —
         the comparison is always O(1) and unambiguous regardless of how ``_T``
         defines ``__eq__``.
 
-        Returns ``True`` on success, ``False`` when the current value is not
-        *expected* (indicating a concurrent write raced ahead).
+        Returns a ``(success, value)`` tuple:
+
+        - On success: ``(True, new_value)`` — the swap happened.
+        - On failure: ``(False, current)`` — the current reference at the
+          moment of rejection.  Callers (e.g. :meth:`update`) can feed
+          ``current`` straight into the next attempt without an extra
+          :meth:`get` round-trip.
         """
         with self._lock:
             if self._value is not expected:
-                return False
+                return False, self._value
             self._value = new_value
-            return True
+            return True, new_value
 
     def update(self, fn: Callable[[_T], _T]) -> _T:
         """Apply *fn* to the current value and install the result atomically.
 
         Reads the current reference, calls ``fn(current)`` to produce the
         next value, then attempts a compare-and-set.  If a concurrent writer
-        changed the reference first, the loop retries with the new current.
+        changed the reference first, the loop retries — using the value
+        returned by the failed CAS directly, without an extra :meth:`get`.
 
         Returns the value that was successfully installed.
 
         ``fn`` must be a pure function — it may be called more than once
         under write contention.
         """
+        old = self.get()
         while True:
-            old = self.get()
             new = fn(old)
-            if self.compare_and_set(old, new):
+            success, old = self.compare_and_set(old, new)
+            if success:
                 return new

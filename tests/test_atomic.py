@@ -41,7 +41,9 @@ class TestAtomicReferenceCompareAndSet:
         a = _State(0)
         b = _State(1)
         ref: AtomicReference[_State] = AtomicReference(a)
-        assert ref.compare_and_set(a, b) is True
+        success, value = ref.compare_and_set(a, b)
+        assert success is True
+        assert value is b
         assert ref.get() is b
 
     def test_fails_when_expected_differs(self) -> None:
@@ -49,7 +51,9 @@ class TestAtomicReferenceCompareAndSet:
         other = _State(0)  # equal value, different identity
         b = _State(1)
         ref: AtomicReference[_State] = AtomicReference(a)
-        assert ref.compare_and_set(other, b) is False
+        success, current = ref.compare_and_set(other, b)
+        assert success is False
+        assert current is a  # returned current reference, not the rejected new value
         assert ref.get() is a  # unchanged
 
     def test_uses_identity_not_equality(self) -> None:
@@ -62,7 +66,9 @@ class TestAtomicReferenceCompareAndSet:
         assert x is not y  # distinct objects despite equal values
         new: tuple[int, ...] = tuple(range(4, 7))
         ref: AtomicReference[tuple[int, ...]] = AtomicReference(x)
-        assert ref.compare_and_set(y, new) is False
+        success, current = ref.compare_and_set(y, new)
+        assert success is False
+        assert current is x  # returned the actual current reference
         assert ref.get() is x
 
     def test_leaves_value_unchanged_on_failure(self) -> None:
@@ -70,7 +76,9 @@ class TestAtomicReferenceCompareAndSet:
         wrong = _State(99)
         new = _State(20)
         ref: AtomicReference[_State] = AtomicReference(a)
-        ref.compare_and_set(wrong, new)
+        success, current = ref.compare_and_set(wrong, new)
+        assert success is False
+        assert current is a
         assert ref.get() is a
 
 
