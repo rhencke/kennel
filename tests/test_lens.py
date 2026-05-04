@@ -140,11 +140,11 @@ class TestLensFidoStatePattern:
         assert result.repos["a/a"] is new_a
         assert result.repos["b/b"] is b
 
-    def test_with_atomic_reference_update(self) -> None:
-        """End-to-end: Lens inside AtomicReference.update()."""
+    def test_with_lens_update(self) -> None:
+        """End-to-end: lens_update navigates and installs atomically."""
         from fido.atomic import AtomicReference
 
         ref: AtomicReference[FidoState] = AtomicReference(FidoState(repos=frozendict()))
         new_repo = RepoState(key="owner/repo", started_at="now")
-        ref.update(lambda root: Lens(root).repos["owner/repo"].set(new_repo))
+        ref.lens_update(lambda root: root.repos["owner/repo"], new_repo)
         assert ref.get().repos["owner/repo"] is new_repo

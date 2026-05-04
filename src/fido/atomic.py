@@ -14,6 +14,8 @@ import threading
 from collections.abc import Callable
 from typing import Generic, TypeVar
 
+from fido.lens import Lens
+
 _T = TypeVar("_T")
 
 
@@ -94,3 +96,26 @@ class AtomicReference(Generic[_T]):
             success, old = self.compare_and_set(old, new)
             if success:
                 return new
+
+    def lens_update(
+        self,
+        selector: "Callable[[Lens[_T]], Lens[_T]]",
+        value: object,
+    ) -> _T:
+        """Install *value* at the path described by *selector* atomically.
+
+        *selector* receives a :class:`~fido.lens.Lens`-wrapped root and
+        returns a navigated :class:`~fido.lens.Lens` pointing at the target
+        field.  *value* is installed there; the reconstructed root is CAS'd
+        into the reference with automatic retry::
+
+            ref.lens_update(
+                lambda root: root.repos[name],
+                new_repo_state,
+            )
+
+        *selector* must be a pure function — the retry loop may call it
+        more than once under write contention.  Returns the reconstructed
+        root value that was successfully installed.
+        """
+        return self.update(lambda old: selector(Lens(old)).set(value))  # type: ignore[return-value]

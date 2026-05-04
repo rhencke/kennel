@@ -3,7 +3,10 @@
 import threading
 from dataclasses import dataclass
 
+from frozendict import frozendict
+
 from fido.atomic import AtomicReference
+from fido.lens import Lens
 
 
 @dataclass(frozen=True)
@@ -131,3 +134,61 @@ class TestAtomicReferenceUpdate:
             t.join()
 
         assert ref.get() == _State(n_threads * increments_per_thread)
+
+
+@dataclass(frozen=True)
+class _Item:
+    val: int
+
+
+@dataclass(frozen=True)
+class _Container:
+    items: frozendict[str, _Item]
+
+
+class TestAtomicReferenceLensUpdate:
+    def test_installs_value_at_path(self) -> None:
+        state = _Container(items=frozendict({"a": _Item(1)}))
+        ref: AtomicReference[_Container] = AtomicReference(state)
+        new_item = _Item(99)
+        result = ref.lens_update(lambda root: root.items["a"], new_item)
+        assert result.items["a"] is new_item
+        assert ref.get().items["a"] is new_item
+
+    def test_inserts_new_key(self) -> None:
+        ref: AtomicReference[_Container] = AtomicReference(
+            _Container(items=frozendict())
+        )
+        new_item = _Item(7)
+        ref.lens_update(lambda root: root.items["new"], new_item)
+        assert ref.get().items["new"] is new_item
+
+    def test_returns_installed_root(self) -> None:
+        ref: AtomicReference[_Container] = AtomicReference(
+            _Container(items=frozendict({"x": _Item(0)}))
+        )
+        result = ref.lens_update(lambda root: root.items["x"], _Item(5))
+        assert result is ref.get()
+
+    def test_selector_receives_lens(self) -> None:
+        """selector is called with a Lens, not the raw value."""
+        received: list[object] = []
+
+        def selector(root: Lens[_Container]) -> Lens[_Container]:
+            received.append(root)
+            return root.items["a"]
+
+        ref: AtomicReference[_Container] = AtomicReference(
+            _Container(items=frozendict({"a": _Item(1)}))
+        )
+        ref.lens_update(selector, _Item(2))
+        assert isinstance(received[0], Lens)
+
+    def test_preserves_sibling_keys(self) -> None:
+        a = _Item(1)
+        b = _Item(2)
+        ref: AtomicReference[_Container] = AtomicReference(
+            _Container(items=frozendict({"a": a, "b": b}))
+        )
+        ref.lens_update(lambda root: root.items["a"], _Item(99))
+        assert ref.get().items["b"] is b
