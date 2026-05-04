@@ -24,6 +24,15 @@ from fido import hooks, tasks
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
+from fido.harness_commit import (
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitSkipped,
+    CommitSuccess,
+    HarnessCommitter,
+    hook_failure_nudge,
+)
+from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts, render_active_context
 from fido.provider import (
@@ -48,6 +57,10 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
+from fido.turn_outcome import (
+    CommitTaskComplete,
+    parse_turn_outcome,
+)
 from fido.types import (
     ActiveIssue,
     ActivePR,
@@ -899,42 +912,6 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
-_FRESH_SESSION_NUDGE_ATTEMPT = 4
-# How many persistent nudge turns to allow for providers that cannot reset
-# (supports_no_commit_reset = False) before marking the task blocked.
-_PERSISTENT_NO_COMMIT_CAP = 6
-
-
-def _no_commit_nudge(  # pyright: ignore[reportUnusedFunction]
-    attempt: int,
-    task_title: str,
-    task_id: str,
-    work_dir: Path | str,
-    pr_number: int | None,
-) -> str:
-    return Prompts("").task_resume_nudge(
-        attempt=attempt,
-        task_title=task_title,
-        task_id=task_id,
-        work_dir=str(work_dir),
-        pr_number=pr_number,
-    )
-
-
-def _fresh_session_nudge(  # pyright: ignore[reportUnusedFunction]
-    task_title: str,
-    task_id: str,
-    work_dir: Path | str,
-    pr_number: int | None,
-    branch: str,
-) -> str:
-    return Prompts("").fresh_session_retry_prompt(
-        task_title=task_title,
-        task_id=task_id,
-        work_dir=str(work_dir),
-        pr_number=pr_number,
-        branch=branch,
-    )
 
 
 def latest_decisive_review(
@@ -1146,6 +1123,56 @@ class AbortHandle:
         with self._lock:
             self._target_task_id = None
             self._event.clear()
+
+
+def _missing_sentinel_nudge(
+    task_title: str,
+    task_id: str,
+    work_dir: str,
+    pr_number: int,
+) -> str:
+    """Return a nudge prompt when the LLM output has no turn_outcome sentinel.
+
+    The LLM is reminded to end its final output line with a JSON sentinel so
+    the harness can stage and commit on its behalf.
+    """
+    return (
+        "Your last response did not end with a turn_outcome sentinel.\n\n"
+        "Every turn must end with exactly one of these JSON objects on the "
+        "final non-empty line:\n\n"
+        '  {"turn_outcome":"commit-task-complete","summary":"<commit message>"}\n'
+        '  {"turn_outcome":"commit-task-in-progress","summary":"<wip message>"}\n'
+        '  {"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}\n\n'
+        f"Task: {task_title} (id: {task_id})\n"
+        f"PR: {pr_number}\n"
+        f"Work dir: {work_dir}\n\n"
+        "If the task is complete, emit commit-task-complete. If you need "
+        "another turn, emit commit-task-in-progress with a summary of partial "
+        "progress. If no code change is needed, emit skip-task-with-reason."
+    )
+
+
+def _nothing_staged_nudge(
+    task_title: str,
+    task_id: str,
+    work_dir: str,
+    pr_number: int,
+) -> str:
+    """Return a nudge prompt when a commit sentinel was emitted but nothing staged.
+
+    The harness ran ``git add -u`` after the sentinel but found nothing to
+    commit — the working tree has no tracked changes.
+    """
+    return (
+        "Your turn_outcome sentinel declared a commit, but ``git add -u`` "
+        "found nothing staged — the working tree has no tracked changes.\n\n"
+        "Either:\n"
+        "  - Make the necessary file changes, then emit a commit sentinel, or\n"
+        "  - Emit skip-task-with-reason if no code change is actually needed.\n\n"
+        f"Task: {task_title} (id: {task_id})\n"
+        f"PR: {pr_number}\n"
+        f"Work dir: {work_dir}"
+    )
 
 
 class Worker:
@@ -2658,53 +2685,6 @@ class Worker:
             return
         self.ensure_pushed("origin", slug)
 
-    def _commit_provider_leftovers_if_any(
-        self, task_title: str, head_before: str
-    ) -> str:
-        """Commit any uncommitted worktree changes left behind by the provider.
-
-        Copilot in particular sometimes applies patches via ``apply_patch``
-        but never runs ``git commit`` — the worktree diverges from HEAD and
-        the resume loop spins forever waiting for HEAD to move (#654).  If
-        HEAD hasn't moved since *head_before* but ``git status`` reports a
-        dirty worktree, fido takes ownership and commits everything with a
-        ``wip: <task_title> (provider didn't commit)`` message so the outer
-        loop makes progress.  Returns the current HEAD sha.
-
-        No-op when HEAD already moved (provider committed on its own) or
-        when the worktree is clean (provider produced nothing).
-        """
-        head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        if head_after != head_before:
-            return head_after
-        porcelain = self._git(["status", "--porcelain"], check=False)
-        if porcelain.returncode != 0 or not porcelain.stdout.strip():
-            return head_after
-        log.warning(
-            "task produced uncommitted edits but no commit — committing on "
-            "provider's behalf: %s",
-            task_title,
-        )
-        # Stage modified tracked files only (``git add -u``); never sweep
-        # untracked files like .coverage.<host>.<pid>.<rand>.<rand>, stray
-        # build artefacts, or editor scratch files into the wip commit
-        # (closes #657).
-        self._git(["add", "-u"])
-        # If staging produced nothing (only untracked files were dirty),
-        # don't create an empty commit — just return the unchanged HEAD.
-        diff_cached = self._git(["diff", "--cached", "--quiet"], check=False)
-        if diff_cached.returncode == 0:
-            return head_after
-        self._git(
-            [
-                "commit",
-                "-m",
-                f"wip: {task_title} (provider didn't commit)",
-            ],
-            check=False,
-        )
-        return self._git(["rev-parse", "HEAD"]).stdout.strip()
-
     def _snapshot_fido_issue_comment_ids(
         self, repo: str, pr_number: int, fido_login: str
     ) -> set[int]:
@@ -2918,60 +2898,6 @@ class Worker:
         )
         return False
 
-    def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
-        """Drop the empty 'wip: start' sentinel if it is the branch root.
-
-        Checks the first commit on the branch (relative to *remote*'s
-        *default_branch*).  If its message is ``wip: start`` and it carries no
-        file changes, rebases to remove it and force-pushes, returning ``True``.
-        Returns ``False`` if the sentinel is not present (first commit has a
-        different message, branch has no commits beyond the base, or any git
-        operation fails).
-        """
-        # Find the merge-base between HEAD and the remote default branch
-        base = self._git(
-            ["merge-base", "HEAD", f"{remote}/{default_branch}"],
-            check=False,
-        )
-        if base.returncode != 0:
-            return False
-        base_sha = base.stdout.strip()
-
-        # List commits on branch in reverse (oldest first)
-        log_result = self._git(
-            ["log", "--format=%H %s", f"{base_sha}..HEAD", "--reverse"],
-            check=False,
-        )
-        if log_result.returncode != 0 or not log_result.stdout.strip():
-            return False
-
-        first_line = log_result.stdout.strip().splitlines()[0]
-        wip_sha, _, subject = first_line.partition(" ")
-        if subject != "wip: start":
-            return False
-
-        # Confirm it is truly empty (no file diff vs its parent)
-        diff = self._git(["diff-tree", "--no-commit-id", "-r", wip_sha], check=False)
-        if diff.returncode != 0 or diff.stdout.strip():
-            return False
-
-        # Drop the wip commit by rebasing everything after it onto base_sha
-        rebase = self._git(["rebase", "--onto", base_sha, wip_sha, slug], check=False)
-        if rebase.returncode != 0:
-            log.warning("squash wip: start rebase failed: %s", rebase.stderr.strip())
-            return False
-
-        # Force-push the cleaned branch
-        push = self._git(
-            ["push", "--force-with-lease", "-u", remote, slug], check=False
-        )
-        if push.returncode != 0:
-            log.warning("squash wip: start force-push failed: %s", push.stderr.strip())
-            return False
-
-        log.info("squashed wip: start sentinel from %s", slug)
-        return True
-
     def _cleanup_aborted_task(
         self, fido_dir: Path, task_id: str, task_title: str
     ) -> None:
@@ -3093,65 +3019,6 @@ class Worker:
             for t in current_task_list
         )
 
-    def _report_task_completed_without_commit(
-        self,
-        repo: str,
-        pr_number: int,
-        task_id: str,
-        task_title: str,
-    ) -> None:
-        """Explain a completed task that did not produce git progress."""
-        log.warning(
-            "task %s was marked completed but HEAD did not change; "
-            "advancing without branch cleanup",
-            task_id,
-        )
-        prompts = self._get_prompts()
-        prompt = prompts.task_completed_without_commit_comment_prompt(task_title)
-        msg = self._provider_agent.generate_reply(
-            prompt, self._provider_agent.voice_model
-        )
-        if not msg:
-            raise ValueError("task completed without commit comment was empty")
-        body = f"{msg}\n\n<!-- fido:task-complete-no-commit -->"
-        self.gh.comment_issue(repo, pr_number, body)
-
-    def _report_task_stuck_no_commits(
-        self,
-        fido_dir: Path,
-        repo: str,
-        pr_number: int,
-        task_id: str,
-        task_title: str,
-        attempt: int,
-    ) -> None:
-        """Mark task blocked and post a PR comment when persistent nudges fail.
-
-        Called when a non-resettable provider (supports_no_commit_reset = False)
-        exceeds _PERSISTENT_NO_COMMIT_CAP attempts without producing any commits.
-        Marks the task BLOCKED, clears current_task_id, and posts a comment so a
-        human knows the task is stuck.  unblock_tasks() transitions it back to
-        PENDING when a new PR comment arrives.
-        """
-        log.warning(
-            "task %s stuck after %d no-commit attempts — marking blocked",
-            task_id,
-            attempt,
-        )
-        self._tasks.update(task_id, TaskStatus.BLOCKED)
-        with State(fido_dir).modify() as state:
-            state.pop("current_task_id", None)
-        prompts = self._get_prompts()
-        prompt = prompts.task_stuck_no_commit_comment_prompt(task_title, attempt)
-        msg = self._provider_agent.generate_reply(
-            prompt, self._provider_agent.voice_model
-        )
-        if not msg:
-            raise ValueError("task stuck no-commit comment was empty")
-        body = f"{msg}\n\n<!-- fido:task-stuck-no-commit -->"
-        self.gh.comment_issue(repo, pr_number, body)
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-
     def execute_task(
         self,
         fido_dir: Path,
@@ -3257,7 +3124,6 @@ class Worker:
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
         build_prompt(fido_dir, "task", context, labels=issue_labels)
-        prompts = self._get_prompts()
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         # Snapshot fido-authored PR comments so we can detect and delete any
         # improvised top-level BLOCKED/leak comments this task turn posts
@@ -3281,7 +3147,8 @@ class Worker:
                 "task no longer current after webhook turn admission — restarting loop"
             )
             return True
-        session_id, _output = provider_run(
+        harness_committer = HarnessCommitter(self.work_dir, RealProcessRunner())
+        session_id, output = provider_run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -3290,7 +3157,7 @@ class Worker:
             session_mode=self._consume_turn_session_mode(),
             retry_on_preempt=False,
         )
-        log.info("task done (session=%s)", session_id)
+        log.info("task turn done (session=%s)", session_id)
         if self._provider_turn_was_preempted():
             log.info(
                 "task provider turn preempted for %s — yielding to worker loop",
@@ -3304,124 +3171,115 @@ class Worker:
                 log.info("consuming abort signal for preempted task %s", task["id"])
                 self._abort_task.clear()
             return True
-        head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
-
-        if self._abort_task.is_active_for(task["id"]):
-            self._cleanup_aborted_task(fido_dir, task["id"], task_title)
-            return True
-
-        # Yield before the retry loop so any untriaged webhook handlers get a
-        # turn before we start another provider turn (#1067).
-        self._yield_for_untriaged()
-
-        # Resume loop: let the provider agent cook until commits appear
-        attempt = 0
-        fresh_session_retry_used = False
-        completed_without_commit = False
-        while head_before == head_after:
-            current_task_list = self._tasks.list()
-            if any(
-                t["id"] == task["id"] and t.get("status") == TaskStatus.COMPLETED
-                for t in current_task_list
-            ):
-                self._report_task_completed_without_commit(
-                    repo_ctx.repo,
-                    pr_number,
-                    task["id"],
-                    task_title,
-                )
-                completed_without_commit = True
-                break
-            attempt += 1
-            if (
-                not self._provider_agent.supports_no_commit_reset
-                and attempt > _PERSISTENT_NO_COMMIT_CAP
-            ):
-                self._report_task_stuck_no_commits(
-                    fido_dir,
-                    repo_ctx.repo,
-                    pr_number,
-                    task["id"],
-                    task_title,
-                    attempt,
-                )
-                self._delete_leaked_task_comments(
-                    repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
-                )
-                return True
-            use_fresh_session = (
-                self._provider_agent.supports_no_commit_reset
-                and attempt >= _FRESH_SESSION_NUDGE_ATTEMPT
-                and not fresh_session_retry_used
-            )
-            if use_fresh_session:
-                nudge = prompts.fresh_session_retry_prompt(
+        # Sentinel loop: each iteration processes one provider turn's output.
+        while True:
+            outcome = parse_turn_outcome(output)
+            if outcome is None:
+                # LLM did not emit a turn_outcome sentinel — nudge it.
+                nudge = _missing_sentinel_nudge(
                     task_title=task_title,
                     task_id=task["id"],
                     work_dir=str(self.work_dir),
                     pr_number=pr_number,
-                    branch=slug,
-                    issue_number=issue_number,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
                 )
-            elif not self._provider_agent.supports_no_commit_reset:
-                nudge = prompts.no_commit_persistent_nudge(
-                    attempt=attempt,
-                    task_title=task_title,
-                    task_id=task["id"],
-                    work_dir=str(self.work_dir),
-                    pr_number=pr_number,
+                (fido_dir / "prompt").write_text(nudge)
+                log.info(
+                    "task output missing sentinel — nudging (session=%s)", session_id
                 )
             else:
-                nudge = prompts.task_resume_nudge(
-                    attempt=attempt,
-                    task_title=task_title,
-                    task_id=task["id"],
-                    work_dir=str(self.work_dir),
-                    pr_number=pr_number,
-                )
-            (fido_dir / "prompt").write_text(nudge)
-            if use_fresh_session:
-                fresh_session_retry_used = True
-                log.info(
-                    "task produced no commits — retrying with fresh session (attempt %d)",
-                    attempt,
-                )
-            else:
-                log.info(
-                    "task produced no commits — nudging session (attempt %d)",
-                    attempt,
-                )
-            pending_session_mode = self._consume_turn_session_mode()
-            session_mode = (
-                TurnSessionMode.FRESH
-                if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
-                else TurnSessionMode.REUSE
-            )
+                commit_result = harness_committer.apply(outcome)
+                if isinstance(commit_result, CommitSkipped):
+                    # skip-task-with-reason: task is done without a commit.
+                    log.info("task skipped without commit: %s", commit_result.reason)
+                    config = self._config
+                    allowed_bots = (
+                        config.allowed_bots if config is not None else frozenset()
+                    )
+                    self._tasks.complete_with_resolve(
+                        task["id"],
+                        self.gh,
+                        collaborators=repo_ctx.collaborators,
+                        allowed_bots=allowed_bots,
+                    )
+                    with State(fido_dir).modify() as state:
+                        state.pop("current_task_id", None)
+                    tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                    self._delete_leaked_task_comments(
+                        repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+                    )
+                    return True
+                if isinstance(commit_result, CommitNothingStaged):
+                    # Sentinel declared a commit but nothing was staged.
+                    nudge = _nothing_staged_nudge(
+                        task_title=task_title,
+                        task_id=task["id"],
+                        work_dir=str(self.work_dir),
+                        pr_number=pr_number,
+                    )
+                    (fido_dir / "prompt").write_text(nudge)
+                    log.info(
+                        "task sentinel declared commit but nothing staged — nudging"
+                    )
+                elif isinstance(commit_result, CommitHookFailure):
+                    # Pre-commit hook rejected the commit — nudge LLM to fix it.
+                    nudge = hook_failure_nudge(commit_result)
+                    (fido_dir / "prompt").write_text(nudge)
+                    log.info("task pre-commit hook rejected commit — nudging")
+                else:
+                    assert isinstance(commit_result, CommitSuccess)
+                    if isinstance(outcome, CommitTaskComplete):
+                        # Task complete: push and advance the queue.
+                        pushed = self.ensure_pushed("origin", slug)
+                        if pushed is not False:
+                            config = self._config
+                            allowed_bots = (
+                                config.allowed_bots
+                                if config is not None
+                                else frozenset()
+                            )
+                            self._tasks.complete_with_resolve(
+                                task["id"],
+                                self.gh,
+                                collaborators=repo_ctx.collaborators,
+                                allowed_bots=allowed_bots,
+                            )
+                            with State(fido_dir).modify() as state:
+                                state.pop("current_task_id", None)
+                            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                        self._delete_leaked_task_comments(
+                            repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+                        )
+                        return True
+                    # CommitTaskInProgress: partial commit — continue in same session.
+                    log.info(
+                        "task in-progress commit %s — continuing session",
+                        commit_result.sha[:12],
+                    )
+            # Yield so untriaged webhook handlers get a turn (#1067).
+            self._yield_for_untriaged()
             if not self._admit_worker_turn(pr_number):
+                self._tasks.update(task["id"], TaskStatus.PENDING)
+                with State(fido_dir).modify() as state:
+                    state.pop("current_task_id", None)
                 return True
             if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
             if not self._task_still_current(fido_dir, task["id"]):
                 log.info(
-                    "task no longer current after webhook turn admission — "
-                    "stopping retry"
+                    "task no longer current after webhook turn admission — stopping"
                 )
                 return True
-            session_id, _output = provider_run(
+            session_id, output = provider_run(
                 fido_dir,
                 agent=self._provider_agent,
                 model=self._provider_agent.work_model,
                 cwd=self.work_dir,
                 session=session_id or None,
-                session_mode=session_mode,
+                session_mode=self._consume_turn_session_mode(),
                 retry_on_preempt=False,
             )
-            log.info("task resume done (session=%s)", session_id)
+            log.info("task resume turn done (session=%s)", session_id)
             if self._provider_turn_was_preempted():
                 log.info(
                     "task provider resume preempted for %s — yielding to worker loop",
@@ -3435,54 +3293,6 @@ class Worker:
                     log.info("consuming abort signal for preempted task %s", task["id"])
                     self._abort_task.clear()
                 return True
-            head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
-
-            if self._abort_task.is_active_for(task["id"]):
-                self._cleanup_aborted_task(fido_dir, task["id"], task_title)
-                return True
-
-            # Yield at the retry boundary so untriaged handlers get their turn
-            # before we loop back for another provider run (#1067).
-            self._yield_for_untriaged()
-
-        if completed_without_commit:
-            config = self._config
-            allowed_bots = config.allowed_bots if config is not None else frozenset()
-            self._tasks.complete_with_resolve(
-                task["id"],
-                self.gh,
-                collaborators=repo_ctx.collaborators,
-                allowed_bots=allowed_bots,
-            )
-            with State(fido_dir).modify() as state:
-                state.pop("current_task_id", None)
-            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-            self._delete_leaked_task_comments(
-                repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
-            )
-            return True
-
-        self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
-        pushed = self.ensure_pushed("origin", slug)
-        if pushed is not False:
-            config = self._config
-            allowed_bots = config.allowed_bots if config is not None else frozenset()
-            self._tasks.complete_with_resolve(
-                task["id"],
-                self.gh,
-                collaborators=repo_ctx.collaborators,
-                allowed_bots=allowed_bots,
-            )
-            with State(fido_dir).modify() as state:
-                state.pop("current_task_id", None)
-            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-        # Sweep any leaked top-level PR comments (BLOCKED: ...) the provider
-        # improvised during this task turn.  Runs after task completion so a
-        # transient GitHub error during cleanup doesn't block progress.
-        self._delete_leaked_task_comments(
-            repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
-        )
-        return True
 
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.

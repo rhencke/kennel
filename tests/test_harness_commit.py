@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import patch
 
 from fido.harness_commit import (
-    MAX_HOOK_RETRIES,
     CommitHookFailure,
     CommitNothingStaged,
     CommitResult,
@@ -330,17 +329,6 @@ class TestHookFailureNudge:
         nudge = hook_failure_nudge(CommitHookFailure(output="x"))
         assert "pre-commit hook rejected" in nudge.lower()
         assert "fix" in nudge.lower()
-
-
-# ---------------------------------------------------------------------------
-# Tests: MAX_HOOK_RETRIES constant
-# ---------------------------------------------------------------------------
-
-
-class TestMaxHookRetries:
-    def test_is_positive_int(self) -> None:
-        assert isinstance(MAX_HOOK_RETRIES, int)
-        assert MAX_HOOK_RETRIES > 0
 
 
 # ---------------------------------------------------------------------------

@@ -1760,53 +1760,6 @@ class TestWorkerLeafBranches:
             state["current_task_id"] = "task-abc"
         assert worker._task_still_current(fido_dir, "task-xyz") is False  # type: ignore[attr-defined]
 
-    @staticmethod
-    def _make_worker_with_stubs(tmp_path: Path) -> object:
-        """Build a Worker whose provider_agent and tasks are MagicMocks
-        so we can drive the empty-msg branches without real I/O."""
-        from tests.test_worker import Worker
-
-        provider_agent = MagicMock()
-        provider_agent.generate_reply.return_value = ""
-        provider_agent.voice_model = "model"
-        return Worker(
-            tmp_path,
-            MagicMock(),  # gh
-            provider_agent=provider_agent,
-        )
-
-    def test_report_task_completed_no_commit_raises_when_msg_empty(
-        self, tmp_path: Path
-    ) -> None:
-        """``_report_task_completed_without_commit`` raises ValueError when
-        the provider returns an empty message (worker.py:2972)."""
-        worker = self._make_worker_with_stubs(tmp_path)
-        prompts_stub = MagicMock()
-        prompts_stub.task_completed_without_commit_comment_prompt.return_value = "p"
-        with patch.object(worker, "_get_prompts", return_value=prompts_stub):
-            with pytest.raises(ValueError, match="completed without commit"):
-                worker._report_task_completed_without_commit(  # type: ignore[attr-defined]
-                    "test/repo", 1, "task-id", "task-title"
-                )
-
-    def test_report_task_stuck_no_commit_raises_when_msg_empty(
-        self, tmp_path: Path
-    ) -> None:
-        """``_report_task_stuck_no_commits`` raises ValueError when
-        the provider returns an empty message (worker.py:3007)."""
-        worker = self._make_worker_with_stubs(tmp_path)
-        prompts_stub = MagicMock()
-        prompts_stub.task_stuck_no_commit_comment_prompt.return_value = "p"
-        # Patch tasks helper since update is called before generate_reply.
-        worker._tasks = MagicMock()  # type: ignore[attr-defined]
-        fido_dir = tmp_path / ".fido"
-        fido_dir.mkdir()
-        with patch.object(worker, "_get_prompts", return_value=prompts_stub):
-            with pytest.raises(ValueError, match="stuck no-commit"):
-                worker._report_task_stuck_no_commits(  # type: ignore[attr-defined]
-                    fido_dir, "test/repo", 1, "task-id", "task-title", 5
-                )
-
 
 class TestEventsCreateTaskExitUntriaged:
     """Cover the registry.exit_untriaged + raise path in ``create_task``
@@ -2018,7 +1971,7 @@ class TestWorkerExecuteTaskBranches:
         assert result is True
 
     def test_abort_active_after_provider_run_cleans_up(self, tmp_path: Path) -> None:
-        # worker.py:3166-3168 — abort active for task → cleanup + return True.
+        # Inside the sentinel loop, abort active for task → cleanup + return True.
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = {
@@ -2027,8 +1980,7 @@ class TestWorkerExecuteTaskBranches:
             "status": "pending",
             "type": "spec",
         }
-        # First abort check (line 3133) returns False so we proceed past
-        # admission; second abort check (line 3166) returns True.
+        # First abort check (pre-loop) returns False; second (in-loop) returns True.
         active_responses = iter([False, True])
 
         class _AbortStub:
@@ -2044,11 +1996,10 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(
-                worker, "_commit_provider_leftovers_if_any", return_value="bbb"
-            ),
+            patch.object(worker, "_yield_for_untriaged"),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
+            # Empty output → no sentinel → nudge → yield → admit → abort check
             patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "_abort_task", _AbortStub()),
@@ -2086,9 +2037,9 @@ class TestWorkerExecuteTaskBranches:
         return worker, fido_dir, task
 
     def test_retry_admit_worker_turn_false_returns_true(self, tmp_path: Path) -> None:
-        # worker.py:3261-3262 — inside retry loop, _admit_worker_turn False → return True.
+        # Inside the sentinel loop, _admit_worker_turn False → return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
-        # admit returns True for the initial check, then False on retry.
+        # admit returns True for the initial check (pre-loop), then False in-loop.
         admit_responses = iter([True, False])
 
         with (
@@ -2101,11 +2052,9 @@ class TestWorkerExecuteTaskBranches:
             ),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(
-                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
-            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
+            # Empty output → no sentinel → nudge → yield → admit returns False
             patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_no_new_commits()),
         ):
@@ -2113,10 +2062,10 @@ class TestWorkerExecuteTaskBranches:
         assert result is True
 
     def test_retry_abort_active_cleans_and_returns_true(self, tmp_path: Path) -> None:
-        # worker.py:3263-3265 — inside retry loop, abort active → cleanup + return True.
+        # Inside the sentinel loop, abort active → cleanup + return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
-        # initial abort check (line 3133 + 3166): False, then retry abort (line 3263): True.
-        abort_responses = iter([False, False, True])
+        # pre-loop abort check (line 3229): False; in-loop abort check: True.
+        abort_responses = iter([False, True])
 
         class _AbortStub:
             def is_active_for(self, _tid: str) -> object:
@@ -2131,12 +2080,10 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(
-                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
-            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
+            # Empty output → no sentinel → nudge → yield → admit → abort check
             patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_no_new_commits()),
             patch.object(worker, "_abort_task", _AbortStub()),
@@ -2145,9 +2092,10 @@ class TestWorkerExecuteTaskBranches:
         assert result is True
 
     def test_retry_task_no_longer_current_returns_true(self, tmp_path: Path) -> None:
-        # worker.py:3266-3271 — inside retry loop, _task_still_current False → return True.
+        # Inside the sentinel loop, _task_still_current False → return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
-        # First _task_still_current call (line 3136): True.  Retry call (3266): False.
+        # First _task_still_current (pre-loop line 3232): True.
+        # Second (in-loop): False.
         current_responses = iter([True, False])
 
         with (
@@ -2160,11 +2108,9 @@ class TestWorkerExecuteTaskBranches:
                 side_effect=lambda _fd, _tid: next(current_responses),
             ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(
-                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
-            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
+            # Empty output → no sentinel → nudge → yield → admit → task check
             patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_no_new_commits()),
         ):
@@ -2174,6 +2120,8 @@ class TestWorkerExecuteTaskBranches:
     def test_thread_lineage_appends_related_comment_ids(self, tmp_path: Path) -> None:
         # worker.py:3061-3066 — lineage_comment_ids appends the
         # "Related thread comment_ids:" context line.
+        from fido.harness_commit import CommitSuccess
+
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = {
@@ -2188,17 +2136,22 @@ class TestWorkerExecuteTaskBranches:
                 "lineage_comment_ids": [10, 20, 30],
             },
         }
+        sentinel = (
+            '{"turn_outcome":"commit-task-complete","summary":"Reply to comment"}'
+        )
         mock_build = MagicMock()
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.provider_run", return_value=("sid", sentinel)),
             patch.object(worker, "_git", self._git_with_new_commits()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
+            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Related thread comment_ids" in context

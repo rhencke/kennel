@@ -26,10 +26,6 @@ from fido.types import GitIdentity
 
 log = logging.getLogger(__name__)
 
-# Maximum pre-commit hook retry attempts before the caller should give up
-# and treat the task as stuck.  Exported so execute_task can reference it.
-MAX_HOOK_RETRIES = 3
-
 
 # ---------------------------------------------------------------------------
 # Result types
