@@ -10,6 +10,7 @@ import pytest
 
 from fido.harness_commit import HarnessCommitter
 from fido.rocq import harness_commit_decision as _hcd_mod
+from fido.rocq import turn_outcome as _to_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -468,3 +469,48 @@ class TestDecisionOracle:
         with patch.object(_hcd_mod, "harness_commit_decision", bad_oracle):
             with pytest.raises(AssertionError, match="oracle mismatch"):
                 hc.commit(SkipTaskWithReason(reason="done"))
+
+
+class TestCommitDispatchOracle:
+    """Verify outcome_is_commit oracle fires on mismatch with dispatch."""
+
+    def test_dispatch_oracle_mismatch_raises_on_skip(self, tmp_path: Path) -> None:
+        """If outcome_is_commit disagrees with the skip dispatch, AssertionError fires."""
+        hc, _ = _committer(tmp_path, [])
+
+        # Monkeypatch to claim SkipTaskWithReason should trigger a commit
+        def bad_oracle(_o: object) -> bool:
+            return True
+
+        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
+            with pytest.raises(
+                AssertionError, match="outcome_is_commit oracle mismatch"
+            ):
+                hc.commit(SkipTaskWithReason(reason="done"))
+
+    def test_dispatch_oracle_mismatch_raises_on_stuck(self, tmp_path: Path) -> None:
+        """If outcome_is_commit disagrees with the StuckOnTask dispatch, AssertionError fires."""
+        hc, _ = _committer(tmp_path, [])
+
+        def bad_oracle(_o: object) -> bool:
+            return True
+
+        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
+            with pytest.raises(
+                AssertionError, match="outcome_is_commit oracle mismatch"
+            ):
+                hc.commit(StuckOnTask(reason="stuck"))
+
+    def test_dispatch_oracle_mismatch_raises_on_commit(self, tmp_path: Path) -> None:
+        """If outcome_is_commit disagrees with the commit dispatch, AssertionError fires."""
+        hc, _ = _committer(tmp_path, [])
+
+        # Monkeypatch to claim CommitTaskComplete should not trigger a commit
+        def bad_oracle(_o: object) -> bool:
+            return False
+
+        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
+            with pytest.raises(
+                AssertionError, match="outcome_is_commit oracle mismatch"
+            ):
+                hc.commit(CommitTaskComplete(summary="done"))

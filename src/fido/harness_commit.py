@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fido.infra import ProcessRunner
 from fido.rocq import harness_commit_decision as _hcd_mod
+from fido.rocq import turn_outcome as _to_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -109,6 +110,17 @@ class HarnessCommitter:
                 f"oracle={oracle!r}, actual={result!r}"
             )
 
+    def _assert_commit_dispatch_oracle(
+        self, outcome: TurnOutcome, *, dispatched_to_commit: bool
+    ) -> None:
+        """Assert that the Rocq-proven outcome_is_commit agrees with our dispatch."""
+        oracle = _to_mod.outcome_is_commit(outcome)
+        if oracle != dispatched_to_commit:
+            raise AssertionError(
+                f"outcome_is_commit oracle mismatch: "
+                f"oracle={oracle!r}, dispatched_to_commit={dispatched_to_commit!r}"
+            )
+
     def hook_failure_nudge(self, failure: CommitHookFailure) -> str:
         """Format a nudge prompt for the LLM after a hook failure."""
         return (
@@ -141,10 +153,12 @@ class HarnessCommitter:
         """
         match outcome:
             case SkipTaskWithReason(reason=reason):
+                self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=False)
                 result = CommitSkipped(reason=reason)
                 self._assert_decision_oracle(outcome, result)
                 return result
             case StuckOnTask(reason=reason):
+                self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=False)
                 result = CommitSkipped(reason=reason)
                 self._assert_decision_oracle(outcome, result)
                 return result
@@ -152,6 +166,7 @@ class HarnessCommitter:
                 CommitTaskComplete(summary=summary)
                 | CommitTaskInProgress(summary=summary)
             ):
+                self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=True)
                 return self._attempt_commit(outcome, summary, helped_by=helped_by)
             case _:  # pragma: no cover — unreachable; exhaustive above
                 raise ValueError(f"unexpected TurnOutcome variant: {outcome!r}")
