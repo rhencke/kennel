@@ -3291,11 +3291,6 @@ class Worker:
                     )
             # Yield so untriaged webhook handlers get a turn (#1067).
             self._yield_for_untriaged()
-            if not self._admit_worker_turn(pr_number):
-                self._tasks.update(task["id"], TaskStatus.PENDING)
-                with State(fido_dir).modify() as state:
-                    state.pop("current_task_id", None)
-                return True
             if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True

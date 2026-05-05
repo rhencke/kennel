@@ -2035,30 +2035,6 @@ class TestWorkerExecuteTaskBranches:
         }
         return worker, fido_dir, task
 
-    def test_retry_admit_worker_turn_false_returns_true(self, tmp_path: Path) -> None:
-        # Inside the sentinel loop, _admit_worker_turn False → return True.
-        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
-        # admit returns True for the initial check (pre-loop), then False in-loop.
-        admit_responses = iter([True, False])
-
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(
-                worker,
-                "_admit_worker_turn",
-                side_effect=lambda _pr: next(admit_responses),
-            ),
-            patch.object(worker, "_task_still_current", return_value=True),
-            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch("fido.worker.build_prompt"),
-            # Empty output → no sentinel → nudge → yield → admit returns False
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_no_new_commits()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
-        assert result is True
-
     def test_retry_abort_active_cleans_and_returns_true(self, tmp_path: Path) -> None:
         # Inside the sentinel loop, abort active → cleanup + return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
