@@ -1903,6 +1903,7 @@ class TestProcessAction:
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
         handler.registry = WorkerRegistry(MagicMock())
+        handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []

@@ -441,14 +441,12 @@ class WorkerRegistry:
 
         Reads the current list from ``_webhook_activities``, builds the frozen
         tuple, and installs it at ``repos[name].webhook_activities`` via a
-        single lens write.  No-op if *repo_name* is not yet in the snapshot
-        (only possible in tests that bypass :meth:`start`).
+        single lens write.  The repo must have been :meth:`start`-ed first —
+        crashes (``KeyError``) if it is not yet in the snapshot.
 
         Must be called under ``_webhook_lock``.
         """
         acts = tuple(self._webhook_activities.get(repo_name, []))
-        if repo_name not in self._state.get().repos:
-            return
         _name = repo_name
         self._state.update(lambda root: root.repos[_name].webhook_activities, acts)
 
