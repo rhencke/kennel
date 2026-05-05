@@ -26,17 +26,14 @@ class AtomicReference(Generic[_T]):
     read with no lock acquire.  Writers hold the internal ``_lock`` only for
     the atomic swap, keeping write-side latency minimal.
 
-    The typical usage pattern is *update with retry*::
+    The typical usage pattern is *lens update*::
 
         ref = AtomicReference(initial_snapshot)
 
-        def bump(old: Snapshot) -> Snapshot:
-            return replace(old, counter=old.counter + 1)
+        ref.update(lambda root: root.counter, new_counter_value)
 
-        ref.update(bump)  # retries automatically if a concurrent writer raced
-
-    ``fn`` passed to :meth:`update` must be a **pure function** — the retry
-    loop may call it more than once under write contention.
+    *selector* passed to :meth:`update` must be a **pure function** — the
+    retry loop may call it more than once under write contention.
     """
 
     def __init__(self, initial: _T) -> None:
@@ -77,27 +74,7 @@ class AtomicReference(Generic[_T]):
             self._value = new_value
             return True, new_value
 
-    def update(self, fn: Callable[[_T], _T]) -> _T:
-        """Apply *fn* to the current value and install the result atomically.
-
-        Reads the current reference, calls ``fn(current)`` to produce the
-        next value, then attempts a compare-and-set.  If a concurrent writer
-        changed the reference first, the loop retries — using the value
-        returned by the failed CAS directly, without an extra :meth:`get`.
-
-        Returns the value that was successfully installed.
-
-        ``fn`` must be a pure function — it may be called more than once
-        under write contention.
-        """
-        old = self.get()
-        while True:
-            new = fn(old)
-            success, old = self.compare_and_set(old, new)
-            if success:
-                return new
-
-    def lens_update(
+    def update(
         self,
         selector: "Callable[[Lens[_T]], Lens[_T]]",
         value: object,
@@ -109,7 +86,7 @@ class AtomicReference(Generic[_T]):
         field.  *value* is installed there; the reconstructed root is CAS'd
         into the reference with automatic retry::
 
-            ref.lens_update(
+            ref.update(
                 lambda root: root.repos[name],
                 new_repo_state,
             )
@@ -118,4 +95,9 @@ class AtomicReference(Generic[_T]):
         more than once under write contention.  Returns the reconstructed
         root value that was successfully installed.
         """
-        return self.update(lambda old: selector(Lens(old)).set(value))  # type: ignore[return-value]
+        old = self.get()
+        while True:
+            new: _T = selector(Lens(old)).set(value)  # type: ignore[assignment]
+            success, old = self.compare_and_set(old, new)
+            if success:
+                return new

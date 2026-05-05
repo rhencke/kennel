@@ -831,6 +831,9 @@ class TestWorker:
         from fido.registry import WorkerRegistry
 
         registry = WorkerRegistry(MagicMock())
+        # Prepopulate FidoState so report_activity can lens-write into it.
+        for i in range(3):
+            registry.start(_default_repo_cfg(tmp_path, repo_name=f"owner/repo{i}"))
         inside_count = 0
         max_concurrent = 0
         counter_lock = threading.Lock()

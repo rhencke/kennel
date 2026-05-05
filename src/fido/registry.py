@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,9 @@ def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 @dataclass(frozen=True)
 class WorkerActivity:
     """Snapshot of what one worker is currently doing.
@@ -50,11 +53,28 @@ class WorkerCrash:
 
     Frozen so instances can be stored inside frozen :class:`RepoState`
     without breaking the immutability guarantee of the atomic snapshot.
+
+    The zero value (``_ZERO_CRASH``) represents "never crashed" — readers
+    check ``death_count == 0`` rather than testing for ``None``.
     """
 
     death_count: int
     last_error: str
     last_crash_time: datetime
+
+
+_ZERO_CRASH = WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH)
+
+
+def _zero_activity(repo_name: str) -> WorkerActivity:
+    """Return a zero-value :class:`WorkerActivity` for *repo_name*.
+
+    Repo-specific because :attr:`WorkerActivity.repo_name` is part of the
+    value.  Readers check ``what == ""`` to detect the zero sentinel.
+    """
+    return WorkerActivity(
+        repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
+    )
 
 
 @dataclass(frozen=True)
@@ -67,13 +87,16 @@ class RepoState:
     *started_at* is the UTC timestamp when the most recent
     :class:`~fido.worker.WorkerThread` for this repo was started.
 
-    *activity* is the current :class:`WorkerActivity` for this repo, or
-    ``None`` if the worker has not yet reported any activity.  Migrated from
-    ``WorkerRegistry._activities`` / ``_activity_lock`` in PR 2/6.
+    *activity* is the current :class:`WorkerActivity` for this repo.
+    Initialised to the zero sentinel (``what=""``) by :meth:`start`; the
+    worker replaces it on its first :meth:`report_activity` call.
 
     *crash_record* is the accumulated :class:`WorkerCrash` history for this
-    repo, or ``None`` if the worker has never crashed.  Migrated from
-    ``WorkerRegistry._crashes`` / ``_crash_lock`` in PR 2/6.
+    repo.  Initialised to ``_ZERO_CRASH`` (``death_count=0``) by
+    :meth:`start`; the watchdog replaces it on each crash.
+
+    No field is ``None`` — the full tree is prepopulated by :meth:`start`
+    with zero values so lens-path writes never encounter missing keys.
 
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
@@ -83,8 +106,8 @@ class RepoState:
 
     key: str
     started_at: datetime
-    activity: WorkerActivity | None = None
-    crash_record: WorkerCrash | None = None
+    activity: WorkerActivity
+    crash_record: WorkerCrash
 
 
 @dataclass(frozen=True)
@@ -176,12 +199,16 @@ class WorkerRegistry:
         self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
-        self._crashes: dict[str, WorkerCrash] = {}
-        self._crash_lock = threading.Lock()
         # _state holds the atomically-swapped FidoState snapshot.  Writers
-        # call AtomicReference.update() under the single internal lock; readers
-        # call AtomicReference.get() without any lock (observationally lock-free).
+        # call AtomicReference.update(selector, value) to install a value at a
+        # path via CAS; readers call .get() without any lock (lock-free).
         self._state: AtomicReference[FidoState] = AtomicReference(_EMPTY_FIDO_STATE)
+        # Owner-side crash records: the watchdog increments death_count here,
+        # then publishes the result into FidoState via a pure lens write.
+        # Only the watchdog thread writes; start() reads during crash recovery
+        # (also on the watchdog thread after startup).  No lock needed —
+        # single-writer per repo.
+        self._crash_records: dict[str, WorkerCrash] = {}
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
         self._rescoping: dict[str, bool] = {}
@@ -296,10 +323,17 @@ class WorkerRegistry:
             self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
         _now = _utcnow()
-        self._state.lens_update(
-            lambda root: root.repos[_name],
-            RepoState(key=_name, started_at=_now),
+        # Prepopulate the full RepoState with zero values.  Crash history
+        # comes from the class-owned _crash_records (not from FidoState),
+        # so this is a pure write — no read-modify-write CAS.
+        crash_record = self._crash_records.get(_name, _ZERO_CRASH)
+        new_repo = RepoState(
+            key=_name,
+            started_at=_now,
+            activity=_zero_activity(_name),
+            crash_record=crash_record,
         )
+        self._state.update(lambda root: root.repos[_name], new_repo)
         thread.start()
         log.info("started WorkerThread for %s", repo_cfg.name)
 
@@ -354,29 +388,16 @@ class WorkerRegistry:
     ) -> None:
         """Record what *repo_name*'s worker is currently doing.
 
-        Lock-free: installs the new :class:`WorkerActivity` on the repo's
-        :class:`RepoState` via CAS-update on the :class:`FidoState` snapshot.
-        Creates a placeholder :class:`RepoState` if none exists for the repo
-        yet (e.g. called before :meth:`start`).
+        Lock-free pure write: installs the new :class:`WorkerActivity` on the
+        repo's :class:`RepoState` via lens-update on the :class:`FidoState`
+        snapshot.  The repo must have been :meth:`start`-ed first (the
+        ``repos[name]`` key is prepopulated by :meth:`start`).
         """
         activity = WorkerActivity(
             repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
         )
         _name = repo_name
-
-        def _fn(state: FidoState) -> FidoState:
-            existing = state.repos.get(_name)
-            if existing is not None:
-                new_repo = replace(existing, activity=activity)
-            else:
-                new_repo = RepoState(
-                    key=_name,
-                    started_at=activity.last_progress_at,
-                    activity=activity,
-                )
-            return replace(state, repos=frozendict({**state.repos, _name: new_repo}))
-
-        self._state.update(_fn)
+        self._state.update(lambda root: root.repos[_name].activity, activity)
 
     def is_stale(
         self,
@@ -389,12 +410,12 @@ class WorkerRegistry:
 
         Lock-free: reads from the current :class:`FidoState` snapshot.
 
-        Returns False when no activity has been recorded for the repo (e.g. it
-        has never reported in) — the caller can treat that as a fresh start
+        Returns False when the repo is unknown or still on its zero-sentinel
+        activity (``what=""``) — the caller can treat that as a fresh start
         rather than a stall.
         """
         repo_state = self._state.get().repos.get(repo_name)
-        if repo_state is None or repo_state.activity is None:
+        if repo_state is None or repo_state.activity.what == "":
             return False
         return (
             _now() - repo_state.activity.last_progress_at
@@ -404,28 +425,41 @@ class WorkerRegistry:
         """Return a snapshot of all registered workers' current activities.
 
         Lock-free: reads from the current :class:`FidoState` snapshot.
+        Excludes repos whose activity is still the zero sentinel (``what=""``).
         """
         repos = self._state.get().repos
-        return [rs.activity for rs in repos.values() if rs.activity is not None]
+        return [rs.activity for rs in repos.values() if rs.activity.what != ""]
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.
 
-        Increments the death count and stores the error message and time of
-        the most recent crash.  Safe to call from any thread.
+        Increments the death count from the class-owned ``_crash_records``
+        store, then publishes the result into :class:`FidoState` via a pure
+        lens write.  Called from the watchdog thread only.
+
+        The repo must have been :meth:`start`-ed first (the ``repos[name]``
+        key is prepopulated by :meth:`start`).
         """
-        with self._crash_lock:
-            existing = self._crashes.get(repo_name)
-            self._crashes[repo_name] = WorkerCrash(
-                death_count=(existing.death_count + 1 if existing else 1),
-                last_error=error,
-                last_crash_time=_utcnow(),
-            )
+        existing = self._crash_records.get(repo_name, _ZERO_CRASH)
+        new_crash = WorkerCrash(
+            death_count=existing.death_count + 1,
+            last_error=error,
+            last_crash_time=_utcnow(),
+        )
+        self._crash_records[repo_name] = new_crash
+        _name = repo_name
+        self._state.update(lambda root: root.repos[_name].crash_record, new_crash)
 
     def get_crash_info(self, repo_name: str) -> WorkerCrash | None:
-        """Return crash history for *repo_name*, or None if it has never crashed."""
-        with self._crash_lock:
-            return self._crashes.get(repo_name)
+        """Return crash history for *repo_name*, or None if it has never crashed.
+
+        Lock-free: reads from the current :class:`FidoState` snapshot.
+        Returns ``None`` when the repo is unknown or has ``death_count == 0``.
+        """
+        repo_state = self._state.get().repos.get(repo_name)
+        if repo_state is None or repo_state.crash_record.death_count == 0:
+            return None
+        return repo_state.crash_record
 
     @contextmanager
     def webhook_activity(

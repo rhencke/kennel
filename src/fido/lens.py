@@ -11,7 +11,7 @@ reconstructed via ``type(parent)({**parent, key: new_value})``.
 
 Typical usage with :class:`~fido.atomic.AtomicReference`::
 
-    ref.lens_update(lambda root: root.repos[name], new_repo_state)
+    ref.update(lambda root: root.repos[name], new_repo_state)
 """
 
 import dataclasses

@@ -35,9 +35,15 @@ def _repo(name: str, work_dir: Path) -> RepoConfig:
 
 
 class TestWorkerRegistry:
-    def _make_registry(self) -> tuple[WorkerRegistry, MagicMock]:
+    def _make_registry(
+        self, *, repos: list[str] | None = None
+    ) -> tuple[WorkerRegistry, MagicMock]:
         factory = MagicMock()
-        return WorkerRegistry(factory), factory
+        reg = WorkerRegistry(factory)
+        if repos:
+            for name in repos:
+                reg.start(_repo(name, Path("/tmp/fake")))
+        return reg, factory
 
     def test_start_calls_factory_with_repo_cfg(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
@@ -354,7 +360,7 @@ class TestWorkerRegistry:
         assert reg.get_thread_crash_error("foo/bar") is None
 
     def test_report_activity_stores_entry(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         activities = reg.get_all_activities()
         assert len(activities) == 1
@@ -363,7 +369,7 @@ class TestWorkerRegistry:
         assert activities[0].busy is True
 
     def test_report_activity_overwrites_previous(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/bar", "Napping", busy=False)
         activities = reg.get_all_activities()
@@ -372,7 +378,7 @@ class TestWorkerRegistry:
         assert activities[0].busy is False
 
     def test_get_all_activities_returns_all_repos(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar", "foo/baz"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/baz", "Napping", busy=False)
         activities = sorted(reg.get_all_activities(), key=lambda a: a.repo_name)
@@ -386,7 +392,7 @@ class TestWorkerRegistry:
         assert reg.get_all_activities() == []
 
     def test_get_all_activities_returns_snapshot(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         snapshot = reg.get_all_activities()
         reg.report_activity("foo/bar", "Napping", busy=False)
@@ -397,7 +403,7 @@ class TestWorkerRegistry:
         import datetime as dt
 
         fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
         activities = reg.get_all_activities()
         assert activities[0].last_progress_at == fixed
@@ -407,7 +413,7 @@ class TestWorkerRegistry:
 
         t1 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t2 = dt.datetime(2026, 1, 1, 12, 5, 0, tzinfo=dt.timezone.utc)
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
         reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
         activities = reg.get_all_activities()
@@ -422,7 +428,7 @@ class TestWorkerRegistry:
 
         t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t_now = dt.datetime(2026, 1, 1, 12, 0, 30, tzinfo=dt.timezone.utc)  # 30s later
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
         assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is False
 
@@ -431,7 +437,7 @@ class TestWorkerRegistry:
 
         t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t_now = dt.datetime(2026, 1, 1, 12, 10, 0, tzinfo=dt.timezone.utc)  # 10m later
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
         assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is True
 
@@ -440,7 +446,7 @@ class TestWorkerRegistry:
 
         t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t_now = dt.datetime(2026, 1, 1, 12, 1, 0, tzinfo=dt.timezone.utc)  # exactly 60s
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: t0)
         assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is False
 
@@ -449,7 +455,7 @@ class TestWorkerRegistry:
 
         t0 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t_now = dt.datetime(2026, 1, 1, 12, 10, 0, tzinfo=dt.timezone.utc)
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar", "foo/baz"])
         reg.report_activity("foo/bar", "old", busy=True, _now=lambda: t0)
         reg.report_activity("foo/baz", "fresh", busy=True, _now=lambda: t_now)
         assert reg.is_stale("foo/bar", threshold=60.0, _now=lambda: t_now) is True
@@ -463,8 +469,9 @@ class TestWorkerRegistry:
         writers finish, every repo must appear exactly once in the snapshot
         with its final value, proving no data was lost or corrupted.
         """
-        reg, _ = self._make_registry()
         n_repos = 8
+        repos = [f"owner/repo{i}" for i in range(n_repos)]
+        reg, _ = self._make_registry(repos=repos)
         n_writes = 200
         errors: list[Exception] = []
 
@@ -484,7 +491,6 @@ class TestWorkerRegistry:
             except Exception as exc:
                 errors.append(exc)
 
-        repos = [f"owner/repo{i}" for i in range(n_repos)]
         threads = [threading.Thread(target=writer, args=(r,)) for r in repos]
         threads.append(threading.Thread(target=reader))
 
@@ -535,7 +541,7 @@ class TestWorkerRegistry:
         assert reg.get_crash_info("foo/bar") is None
 
     def test_record_crash_stores_error_and_count(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "boom")
         info = reg.get_crash_info("foo/bar")
         assert info is not None
@@ -546,7 +552,7 @@ class TestWorkerRegistry:
         import datetime as dt
 
         before = dt.datetime.now(tz=dt.timezone.utc)
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "oops")
         after = dt.datetime.now(tz=dt.timezone.utc)
         info = reg.get_crash_info("foo/bar")
@@ -554,7 +560,7 @@ class TestWorkerRegistry:
         assert before <= info.last_crash_time <= after
 
     def test_record_crash_increments_death_count(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "err1")
         reg.record_crash("foo/bar", "err2")
         reg.record_crash("foo/bar", "err3")
@@ -563,7 +569,7 @@ class TestWorkerRegistry:
         assert info.death_count == 3
 
     def test_record_crash_updates_last_error(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "first")
         reg.record_crash("foo/bar", "second")
         info = reg.get_crash_info("foo/bar")
@@ -571,7 +577,7 @@ class TestWorkerRegistry:
         assert info.last_error == "second"
 
     def test_crash_info_is_per_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _ = self._make_registry(repos=["foo/bar", "foo/baz"])
         reg.record_crash("foo/bar", "bar error")
         reg.record_crash("foo/baz", "baz error")
         reg.record_crash("foo/baz", "baz error 2")
@@ -580,24 +586,22 @@ class TestWorkerRegistry:
         assert bar is not None and bar.death_count == 1
         assert baz is not None and baz.death_count == 2
 
-    def test_record_crash_is_threadsafe(self) -> None:
-        """Concurrent record_crash calls must not corrupt the death count."""
-        reg, _ = self._make_registry()
+    def test_record_crash_accumulates_count(self) -> None:
+        """Sequential record_crash calls accumulate death_count correctly.
+
+        record_crash is single-writer (watchdog-thread only) by contract —
+        it reads and increments from the class-owned _crash_records store,
+        then publishes via a pure lens write.  This test verifies the counter
+        accumulates without loss over many sequential calls.
+        """
+        reg, _ = self._make_registry(repos=["foo/bar"])
         n = 200
-
-        def crasher() -> None:
-            for _ in range(n):
-                reg.record_crash("foo/bar", "err")
-
-        threads = [threading.Thread(target=crasher) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
+        for _ in range(n):
+            reg.record_crash("foo/bar", "err")
 
         info = reg.get_crash_info("foo/bar")
         assert info is not None
-        assert info.death_count == 4 * n
+        assert info.death_count == n
 
     def test_worker_crash_dataclass_fields(self) -> None:
         import datetime as dt
@@ -607,6 +611,23 @@ class TestWorkerRegistry:
         assert crash.death_count == 3
         assert crash.last_error == "oops"
         assert crash.last_crash_time == ts
+
+    def test_crash_record_survives_start(self, tmp_path: Path) -> None:
+        """crash_record is preserved across start() so history accumulates."""
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        reg.record_crash("foo/bar", "boom")
+        # Simulate crash so the FSM accepts the second start
+        threads[0].is_alive.return_value = False
+        threads[0].was_stopped = False
+        reg.start(cfg)
+        info = reg.get_crash_info("foo/bar")
+        assert info is not None
+        assert info.death_count == 1
+        assert info.last_error == "boom"
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
