@@ -2120,7 +2120,7 @@ class TestWorkerExecuteTaskBranches:
     def test_thread_lineage_appends_related_comment_ids(self, tmp_path: Path) -> None:
         # worker.py:3061-3066 — lineage_comment_ids appends the
         # "Related thread comment_ids:" context line.
-        from fido.harness_commit import CommitSuccess
+        from fido.rocq.commit_result import CommitSuccess
 
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)

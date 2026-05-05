@@ -24,13 +24,7 @@ from fido import hooks, tasks
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
-from fido.harness_commit import (
-    CommitHookFailure,
-    CommitNothingStaged,
-    CommitSkipped,
-    CommitSuccess,
-    HarnessCommitter,
-)
+from fido.harness_commit import HarnessCommitter
 from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts, render_active_context
@@ -50,16 +44,20 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.rocq import ci_task_lifecycle as ci_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
+from fido.rocq.commit_result import (
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitSkipped,
+    CommitSuccess,
+)
+from fido.rocq.turn_outcome import CommitTaskComplete
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
-from fido.turn_outcome import (
-    CommitTaskComplete,
-    parse_turn_outcome,
-)
+from fido.turn_outcome import parse_turn_outcome
 from fido.types import (
     ActiveIssue,
     ActivePR,
@@ -1129,14 +1127,15 @@ def _missing_sentinel_nudge(
     task_id: str,
     work_dir: str,
     pr_number: int,
+    parse_error: str,
 ) -> str:
-    """Return a nudge prompt when the LLM output has no turn_outcome sentinel.
+    """Return a nudge prompt when the LLM output has no valid turn_outcome.
 
-    The LLM is reminded to end its final output line with a JSON sentinel so
-    the harness can stage and commit on its behalf.
+    The *parse_error* explains why the sentinel could not be parsed so the
+    LLM knows exactly what it did wrong and can fix it.
     """
     return (
-        "Your last response did not end with a turn_outcome sentinel.\n\n"
+        f"Parse error: {parse_error}\n\n"
         "Every turn must end with exactly one of these JSON objects on the "
         "final non-empty line:\n\n"
         '  {"turn_outcome":"commit-task-complete","summary":"<commit message>"}\n'
@@ -3172,18 +3171,22 @@ class Worker:
             return True
         # Sentinel loop: each iteration processes one provider turn's output.
         while True:
-            outcome = parse_turn_outcome(output)
-            if outcome is None:
-                # LLM did not emit a turn_outcome sentinel — nudge it.
+            try:
+                outcome = parse_turn_outcome(output)
+            except ValueError as exc:
+                # LLM did not emit a valid turn_outcome sentinel — nudge it.
                 nudge = _missing_sentinel_nudge(
                     task_title=task_title,
                     task_id=task["id"],
                     work_dir=str(self.work_dir),
                     pr_number=pr_number,
+                    parse_error=str(exc),
                 )
                 (fido_dir / "prompt").write_text(nudge)
                 log.info(
-                    "task output missing sentinel — nudging (session=%s)", session_id
+                    "task output invalid sentinel — nudging (session=%s): %s",
+                    session_id,
+                    exc,
                 )
             else:
                 commit_result = harness_committer.apply(outcome)

@@ -1,35 +1,43 @@
-"""Tests for fido.turn_outcome — sentinel types and parser."""
+"""Tests for fido.turn_outcome — sentinel parser."""
 
-from fido.turn_outcome import (
+import pytest
+
+from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
-    parse_turn_outcome,
 )
+from fido.turn_outcome import parse_turn_outcome
 
 
 class TestParseTurnOutcomeEmpty:
     def test_empty_string(self) -> None:
-        assert parse_turn_outcome("") is None
+        with pytest.raises(ValueError, match="No non-empty lines"):
+            parse_turn_outcome("")
 
     def test_whitespace_only(self) -> None:
-        assert parse_turn_outcome("   \n  \n  ") is None
+        with pytest.raises(ValueError, match="No non-empty lines"):
+            parse_turn_outcome("   \n  \n  ")
 
 
 class TestParseTurnOutcomeInvalidJson:
     def test_not_json(self) -> None:
-        assert parse_turn_outcome("Done, all tests pass!") is None
+        with pytest.raises(ValueError, match="not valid JSON"):
+            parse_turn_outcome("Done, all tests pass!")
 
     def test_json_array(self) -> None:
-        assert parse_turn_outcome('["commit-task-complete"]') is None
+        with pytest.raises(ValueError, match="not an object"):
+            parse_turn_outcome('["commit-task-complete"]')
 
 
 class TestParseTurnOutcomeUnrecognized:
     def test_no_turn_outcome_key(self) -> None:
-        assert parse_turn_outcome('{"status": "done"}') is None
+        with pytest.raises(ValueError, match='no "turn_outcome" key'):
+            parse_turn_outcome('{"status": "done"}')
 
     def test_unknown_turn_outcome_value(self) -> None:
-        assert parse_turn_outcome('{"turn_outcome": "do-the-thing"}') is None
+        with pytest.raises(ValueError, match="Unrecognised turn_outcome"):
+            parse_turn_outcome('{"turn_outcome": "do-the-thing"}')
 
 
 class TestParseTurnOutcomeCommitTaskComplete:
@@ -38,15 +46,18 @@ class TestParseTurnOutcomeCommitTaskComplete:
         assert parse_turn_outcome(line) == CommitTaskComplete(summary="Add foo")
 
     def test_missing_summary(self) -> None:
-        assert parse_turn_outcome('{"turn_outcome": "commit-task-complete"}') is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome('{"turn_outcome": "commit-task-complete"}')
 
     def test_summary_not_string(self) -> None:
         line = '{"turn_outcome": "commit-task-complete", "summary": 42}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
 
     def test_summary_empty(self) -> None:
         line = '{"turn_outcome": "commit-task-complete", "summary": ""}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
 
 
 class TestParseTurnOutcomeCommitTaskInProgress:
@@ -55,15 +66,18 @@ class TestParseTurnOutcomeCommitTaskInProgress:
         assert parse_turn_outcome(line) == CommitTaskInProgress(summary="WIP: Add bar")
 
     def test_missing_summary(self) -> None:
-        assert parse_turn_outcome('{"turn_outcome": "commit-task-in-progress"}') is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome('{"turn_outcome": "commit-task-in-progress"}')
 
     def test_summary_not_string(self) -> None:
         line = '{"turn_outcome": "commit-task-in-progress", "summary": null}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
 
     def test_summary_empty(self) -> None:
         line = '{"turn_outcome": "commit-task-in-progress", "summary": ""}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
 
 
 class TestParseTurnOutcomeSkipTaskWithReason:
@@ -74,15 +88,18 @@ class TestParseTurnOutcomeSkipTaskWithReason:
         )
 
     def test_missing_reason(self) -> None:
-        assert parse_turn_outcome('{"turn_outcome": "skip-task-with-reason"}') is None
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome('{"turn_outcome": "skip-task-with-reason"}')
 
     def test_reason_not_string(self) -> None:
         line = '{"turn_outcome": "skip-task-with-reason", "reason": false}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
 
     def test_reason_empty(self) -> None:
         line = '{"turn_outcome": "skip-task-with-reason", "reason": ""}'
-        assert parse_turn_outcome(line) is None
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
 
 
 class TestParseTurnOutcomeMultiLine:
@@ -101,7 +118,8 @@ class TestParseTurnOutcomeMultiLine:
             '{"turn_outcome": "commit-task-complete", "summary": "stale"}\n'
             "Some more text after"
         )
-        assert parse_turn_outcome(text) is None
+        with pytest.raises(ValueError, match="not valid JSON"):
+            parse_turn_outcome(text)
 
     def test_trailing_blank_lines_ignored(self) -> None:
         """Trailing blank lines are filtered out; the sentinel still parses."""

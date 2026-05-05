@@ -8,10 +8,9 @@ as structured results so the caller can nudge the LLM to fix them.
 The LLM declares intent; Python acts on it.  Git operations are never
 the LLM's responsibility.
 
-Type definitions (``CommitSuccess``, ``CommitHookFailure``,
-``CommitNothingStaged``, ``CommitSkipped``, ``CommitResult``) live in the
-Rocq-extracted module :mod:`fido.rocq.commit_result` and are re-exported
-here so importers get a single canonical source.
+Type definitions live in Rocq-extracted modules — importers should get
+``CommitResult`` types from :mod:`fido.rocq.commit_result` and
+``TurnOutcome`` types from :mod:`fido.rocq.turn_outcome` directly.
 """
 
 import logging
@@ -26,7 +25,7 @@ from fido.rocq.commit_result import (
     CommitSkipped,
     CommitSuccess,
 )
-from fido.turn_outcome import (
+from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
@@ -37,11 +36,6 @@ from fido.types import GitIdentity
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "CommitHookFailure",
-    "CommitNothingStaged",
-    "CommitResult",
-    "CommitSkipped",
-    "CommitSuccess",
     "HarnessCommitter",
 ]
 

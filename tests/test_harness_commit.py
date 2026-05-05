@@ -5,15 +5,15 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from fido.harness_commit import (
+from fido.harness_commit import HarnessCommitter
+from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
     CommitResult,
     CommitSkipped,
     CommitSuccess,
-    HarnessCommitter,
 )
-from fido.turn_outcome import (
+from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,

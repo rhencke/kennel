@@ -10,9 +10,8 @@ LLM's responsibility.
 
 Type definitions (``CommitTaskComplete``, ``CommitTaskInProgress``,
 ``SkipTaskWithReason``, ``TurnOutcome``) live in the Rocq-extracted module
-:mod:`fido.rocq.turn_outcome` and are re-exported here so importers get a
-single canonical source.  The parser (``parse_turn_outcome``) is a Python
-boundary adapter that stays in this module.
+:mod:`fido.rocq.turn_outcome`.  Importers should get types directly from
+that module.  This module owns only the parser boundary adapter.
 """
 
 import json
@@ -22,50 +21,62 @@ from fido.rocq.turn_outcome import (
     CommitTaskInProgress,
     SkipTaskWithReason,
     TurnOutcome,
-    TurnOutcomeT,
 )
 
 __all__ = [
-    "CommitTaskComplete",
-    "CommitTaskInProgress",
-    "SkipTaskWithReason",
-    "TurnOutcome",
-    "TurnOutcomeT",
     "parse_turn_outcome",
 ]
 
 
-def parse_turn_outcome(text: str) -> TurnOutcome | None:
+def parse_turn_outcome(text: str) -> TurnOutcome:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
     Only the final non-empty line is examined — stale sentinels earlier in
-    the response are ignored.  Returns ``None`` if the line is absent, not
-    valid JSON, not a recognised shape, or missing required fields.
+    the response are ignored.
+
+    Raises:
+        ValueError: If the line is absent, not valid JSON, not a recognised
+            shape, or missing required fields.  The message describes *why*
+            parsing failed so the nudge loop can relay it to the LLM.
     """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
-        return None
+        raise ValueError(
+            "No non-empty lines in output — expected a turn_outcome JSON "
+            "sentinel on the final line"
+        )
     last = lines[-1].strip()
     try:
         obj = json.loads(last)
     except json.JSONDecodeError:
-        return None
+        raise ValueError(f"Last non-empty line is not valid JSON: {last!r}") from None
     if not isinstance(obj, dict):
-        return None
+        raise ValueError(f"Last line parsed as JSON but is not an object: {last!r}")
     kind = obj.get("turn_outcome")
     if kind == "commit-task-complete":
         summary = obj.get("summary")
         if not isinstance(summary, str) or not summary:
-            return None
+            raise ValueError(
+                'turn_outcome "commit-task-complete" requires a non-empty '
+                f'"summary" string, got: {obj.get("summary")!r}'
+            )
         return CommitTaskComplete(summary=summary)
     if kind == "commit-task-in-progress":
         summary = obj.get("summary")
         if not isinstance(summary, str) or not summary:
-            return None
+            raise ValueError(
+                'turn_outcome "commit-task-in-progress" requires a non-empty '
+                f'"summary" string, got: {obj.get("summary")!r}'
+            )
         return CommitTaskInProgress(summary=summary)
     if kind == "skip-task-with-reason":
         reason = obj.get("reason")
         if not isinstance(reason, str) or not reason:
-            return None
+            raise ValueError(
+                'turn_outcome "skip-task-with-reason" requires a non-empty '
+                f'"reason" string, got: {obj.get("reason")!r}'
+            )
         return SkipTaskWithReason(reason=reason)
-    return None
+    if kind is None:
+        raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
+    raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")

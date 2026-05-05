@@ -16,12 +16,6 @@ import fido.worker as worker_module
 from fido import provider
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership
-from fido.harness_commit import (
-    CommitHookFailure,
-    CommitNothingStaged,
-    CommitSkipped,
-    CommitSuccess,
-)
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts
 from fido.provider import (
@@ -31,6 +25,12 @@ from fido.provider import (
     ProviderLimitWindow,
     ProviderModel,
     TurnSessionMode,
+)
+from fido.rocq.commit_result import (
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitSkipped,
+    CommitSuccess,
 )
 from fido.state import (
     State,
