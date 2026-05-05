@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -138,7 +138,7 @@ class RepoState:
     started_at: datetime
     activity: WorkerActivity
     crash_record: WorkerCrash
-    webhook_activities: tuple[WebhookActivity, ...] = field(default_factory=tuple)
+    webhook_activities: tuple[WebhookActivity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
