@@ -60,6 +60,11 @@ class TestParseTurnOutcomeCommitTaskComplete:
         with pytest.raises(ValueError, match="non-empty.*summary"):
             parse_turn_outcome(line)
 
+    def test_summary_whitespace_only(self) -> None:
+        line = '{"turn_outcome": "commit-task-complete", "summary": "   "}'
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
+
 
 class TestParseTurnOutcomeCommitTaskInProgress:
     def test_valid(self) -> None:
@@ -77,6 +82,11 @@ class TestParseTurnOutcomeCommitTaskInProgress:
 
     def test_summary_empty(self) -> None:
         line = '{"turn_outcome": "commit-task-in-progress", "summary": ""}'
+        with pytest.raises(ValueError, match="non-empty.*summary"):
+            parse_turn_outcome(line)
+
+    def test_summary_whitespace_only(self) -> None:
+        line = '{"turn_outcome": "commit-task-in-progress", "summary": "\\t\\n  "}'
         with pytest.raises(ValueError, match="non-empty.*summary"):
             parse_turn_outcome(line)
 
@@ -102,6 +112,11 @@ class TestParseTurnOutcomeSkipTaskWithReason:
         with pytest.raises(ValueError, match="non-empty.*reason"):
             parse_turn_outcome(line)
 
+    def test_reason_whitespace_only(self) -> None:
+        line = '{"turn_outcome": "skip-task-with-reason", "reason": "  \\n "}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
 
 class TestParseTurnOutcomeStuckOnTask:
     def test_valid(self) -> None:
@@ -119,6 +134,11 @@ class TestParseTurnOutcomeStuckOnTask:
 
     def test_reason_empty(self) -> None:
         line = '{"turn_outcome": "stuck-on-task", "reason": ""}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+    def test_reason_whitespace_only(self) -> None:
+        line = '{"turn_outcome": "stuck-on-task", "reason": " "}'
         with pytest.raises(ValueError, match="non-empty.*reason"):
             parse_turn_outcome(line)
 

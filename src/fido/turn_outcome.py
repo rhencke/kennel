@@ -71,7 +71,7 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
     kind = obj.get("turn_outcome")
     if kind == "commit-task-complete":
         summary = obj.get("summary")
-        if not isinstance(summary, str) or not summary:
+        if not isinstance(summary, str) or not summary.strip():
             raise ValueError(
                 'turn_outcome "commit-task-complete" requires a non-empty '
                 f'"summary" string, got: {obj.get("summary")!r}'
@@ -81,7 +81,7 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
         return result
     if kind == "commit-task-in-progress":
         summary = obj.get("summary")
-        if not isinstance(summary, str) or not summary:
+        if not isinstance(summary, str) or not summary.strip():
             raise ValueError(
                 'turn_outcome "commit-task-in-progress" requires a non-empty '
                 f'"summary" string, got: {obj.get("summary")!r}'
@@ -91,7 +91,7 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
         return result
     if kind == "skip-task-with-reason":
         reason = obj.get("reason")
-        if not isinstance(reason, str) or not reason:
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError(
                 'turn_outcome "skip-task-with-reason" requires a non-empty '
                 f'"reason" string, got: {obj.get("reason")!r}'
@@ -101,7 +101,7 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
         return result
     if kind == "stuck-on-task":
         reason = obj.get("reason")
-        if not isinstance(reason, str) or not reason:
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError(
                 'turn_outcome "stuck-on-task" requires a non-empty '
                 f'"reason" string, got: {obj.get("reason")!r}'
