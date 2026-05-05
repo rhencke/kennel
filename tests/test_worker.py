@@ -3637,23 +3637,25 @@ class TestProviderStart:
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = output
         mock_client.extract_session_id.return_value = "sess-abc"
-        result = provider_start(
+        session_id, raw_output = provider_start(
             fido_dir,
             agent=mock_client,
             model=mock_client.voice_model,
         )
-        assert result == "sess-abc"
+        assert session_id == "sess-abc"
+        assert raw_output == output
 
     def test_returns_empty_when_extract_fails(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        result = provider_start(
+        session_id, raw_output = provider_start(
             fido_dir,
             agent=mock_client,
             model=mock_client.voice_model,
         )
-        assert result == ""
+        assert session_id == ""
+        assert raw_output == ""
 
     def test_calls_print_prompt_from_file_with_correct_files(
         self, tmp_path: Path
@@ -3739,13 +3741,21 @@ class TestProviderStart:
 
     # ── Session path ──────────────────────────────────────────────────────
 
-    def test_session_path_returns_empty_string(self, tmp_path: Path) -> None:
+    def test_session_path_returns_empty_session_id(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
         client = _client()
         client.session = session
-        result = provider_start(fido_dir, agent=client, model=client.voice_model)
-        assert result == ""
+        session_id, _ = provider_start(fido_dir, agent=client, model=client.voice_model)
+        assert session_id == ""
+
+    def test_session_path_returns_run_turn_output(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = self._mock_session()
+        client = _client("the setup output text")
+        client.session = session
+        _, raw_output = provider_start(fido_dir, agent=client, model=client.voice_model)
+        assert raw_output == "the setup output text"
 
     def test_session_path_uses_agent_run_turn(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -4710,8 +4720,99 @@ class TestWritePrDescription:
 
     def test_requires_agent(self) -> None:
         gh = MagicMock()
-        with pytest.raises(ValueError, match="_write_pr_description requires agent"):
+        with pytest.raises(
+            ValueError, match="_write_pr_description requires agent or pre_baked"
+        ):
             _write_pr_description(Path("/tmp"), gh, "owner/repo", 99, 42, [])
+
+    def test_pre_baked_description_skips_provider(self, tmp_path: Path) -> None:
+        """When pre_baked_description is provided, the LLM call is skipped
+        and the supplied text is used directly."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        agent = MagicMock()
+        agent.print_prompt_from_file = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                agent=agent,
+                pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
+            )
+        agent.print_prompt_from_file.assert_not_called()
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "## Summary" in body
+        assert "- thing" in body
+        assert "Fixes #42." in body
+        assert "\n\n---\n\n" in body
+        assert "<!-- WORK_QUEUE_START -->" in body
+
+    def test_pre_baked_works_without_agent(self, tmp_path: Path) -> None:
+        """pre_baked_description alone (no agent) is sufficient."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                pre_baked_description="## Summary\n\nbody.",
+            )
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "body." in body
+        assert body.count("Fixes #42.") == 1
+
+    def test_pre_baked_strips_llm_emitted_fixes_trailer(self, tmp_path: Path) -> None:
+        """If the LLM included Fixes #N anyway, the harness strips it and
+        re-appends the canonical form so the body ends with exactly one."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
+            )
+        body = gh.edit_pr_body.call_args[0][2]
+        assert body.count("Fixes #42.") == 1
+        # The canonical trailer is the last line before the divider
+        before_divider = body.split("\n\n---\n\n")[0]
+        assert before_divider.rstrip().endswith("Fixes #42.")
+
+    def test_pre_baked_strips_period_less_fixes(self, tmp_path: Path) -> None:
+        """Fixes #N without trailing period also gets stripped + re-appended."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
+            )
+        body = gh.edit_pr_body.call_args[0][2]
+        before_divider = body.split("\n\n---\n\n")[0]
+        # No bare "Fixes #42" without period; exactly one canonical "Fixes #42."
+        assert before_divider.rstrip().endswith("Fixes #42.")
+        assert body.count("Fixes #42") == 1
 
 
 class TestFindOrCreatePr:
@@ -4798,7 +4899,7 @@ class TestFindOrCreatePr:
         gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value="sess-1")
+        mock_start = MagicMock(return_value=("sess-1", ""))
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
@@ -4831,7 +4932,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -4851,7 +4952,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "Issue title"
@@ -4880,7 +4981,7 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
@@ -4905,7 +5006,7 @@ class TestFindOrCreatePr:
                 "fido.worker.build_prompt",
                 side_effect=lambda *a: call_order.append("setup"),
             ),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -4928,7 +5029,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -5025,7 +5126,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5055,7 +5156,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="fido"),
@@ -5072,7 +5173,7 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value="s")
+        mock_start = MagicMock(return_value=("s", ""))
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
@@ -5103,7 +5204,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.worker.provider_start", return_value=("s", "")),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5123,7 +5224,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5158,7 +5259,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5198,7 +5299,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5223,7 +5324,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5252,7 +5353,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_reset_local_workspace"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
             patch("fido.tasks.Tasks.list", return_value=[]),
         ):
             result = worker.find_or_create_pr(
@@ -5279,7 +5380,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5309,7 +5410,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch.object(worker, "_post_retry_acknowledgement", mock_retry),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker.provider_start", return_value=("", "")),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5332,7 +5433,7 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(
@@ -5357,7 +5458,7 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
@@ -5376,7 +5477,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.worker.provider_start", return_value=("s", "")),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5401,7 +5502,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.worker.provider_start", return_value=("s", "")),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5430,7 +5531,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.worker.provider_start", return_value=("s", "")),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5459,7 +5560,7 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -5467,6 +5568,77 @@ class TestFindOrCreatePr:
         assert "## Prior attempts" in context
         assert "PR #88" in context
         assert "First attempt" in context
+
+
+class TestApplySetupOutcome:
+    """Tests for Worker._apply_setup_outcome — the sentinel-driven setup CRUD
+    that replaces the old ``./fido task add`` CLI flow (closes #1403)."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
+
+    def test_tasks_planned_creates_tasks_in_order(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        sentinel = (
+            '{"setup_outcome": "tasks-planned", "tasks": ['
+            '{"title": "Add foo"}, '
+            '{"title": "Add bar", "description": "with details"}'
+            "]}"
+        )
+        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        tasks = worker._tasks.list()  # type: ignore[attr-defined]
+        assert [t["title"] for t in tasks] == ["Add foo", "Add bar"]
+        assert all(t["status"] == "pending" for t in tasks)
+        assert all(t["type"] == "spec" for t in tasks)
+        assert tasks[0]["description"] == ""
+        assert tasks[1]["description"] == "with details"
+        assert result == ""
+
+    def test_pr_description_returned_when_present(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        sentinel = (
+            '{"setup_outcome": "tasks-planned", '
+            '"pr_description": "## Summary\\n\\n- bullet\\n\\nFixes #1.", '
+            '"tasks": [{"title": "task"}]}'
+        )
+        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert result == "## Summary\n\n- bullet\n\nFixes #1."
+
+    def test_no_tasks_needed_creates_no_tasks(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        sentinel = '{"setup_outcome": "no-tasks-needed", "reason": "already covered"}'
+        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert worker._tasks.list() == []  # type: ignore[attr-defined]
+        assert result == ""
+
+    def test_no_tasks_needed_returns_pr_description(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        sentinel = (
+            '{"setup_outcome": "no-tasks-needed", '
+            '"reason": "no-op", '
+            '"pr_description": "## Why\\n\\nNothing to do.\\n\\nFixes #2."}'
+        )
+        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert result == "## Why\n\nNothing to do.\n\nFixes #2."
+
+    def test_invalid_sentinel_creates_no_tasks(self, tmp_path: Path) -> None:
+        """Parse failure is non-fatal — log + return; existing no-tasks
+        finalize path takes over."""
+        worker = self._make_worker(tmp_path)
+        result = worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
+        assert worker._tasks.list() == []  # type: ignore[attr-defined]
+        assert result == ""
+
+    def test_sentinel_with_narration_above(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        text = (
+            "Looked at the issue.\n"
+            "Three small tasks should cover it.\n"
+            '{"setup_outcome": "tasks-planned", "tasks": [{"title": "Only"}]}'
+        )
+        worker._apply_setup_outcome(text)  # type: ignore[attr-defined]
+        tasks = worker._tasks.list()  # type: ignore[attr-defined]
+        assert [t["title"] for t in tasks] == ["Only"]
 
 
 class TestFinalizeSetupWithNoTasks:
