@@ -4,8 +4,12 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+import pytest
 
 from fido.harness_commit import HarnessCommitter
+from fido.rocq import harness_commit_decision as _hcd_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -443,3 +447,24 @@ class TestCommitResultTypes:
             CommitSkipped(reason="no-op"),
         ]
         assert len(results) == 4
+
+
+# ---------------------------------------------------------------------------
+# Tests: Rocq oracle assertion
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionOracle:
+    """Verify the oracle assertion fires on mismatch."""
+
+    def test_oracle_mismatch_raises(self, tmp_path: Path) -> None:
+        """If harness_commit_decision returns a different result, AssertionError fires."""
+        hc, _ = _committer(tmp_path, [])
+
+        # Monkeypatch the oracle to return the wrong thing
+        def bad_oracle(_o: object, _env: object) -> object:
+            return _hcd_mod.CommitSuccess("wrong_sha")
+
+        with patch.object(_hcd_mod, "harness_commit_decision", bad_oracle):
+            with pytest.raises(AssertionError, match="oracle mismatch"):
+                hc.commit(SkipTaskWithReason(reason="done"))

@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from fido.infra import ProcessRunner
+from fido.rocq import harness_commit_decision as _hcd_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -84,6 +85,51 @@ class HarnessCommitter:
         )
         return f"{summary}\n\n{trailers}"
 
+    def _assert_decision_oracle(
+        self,
+        outcome: TurnOutcome,
+        result: CommitResult,
+        *,
+        has_staged: bool = False,
+        commit_ok: bool = False,
+        commit_sha: str = "",
+        commit_output: str = "",
+    ) -> None:
+        """Assert that the Rocq-proven harness_commit_decision agrees.
+
+        The extracted function re-declares local copies of ``TurnOutcome``
+        and ``CommitResult`` (each extraction unit is self-contained), so
+        we translate at the boundary: build local-typed inputs, call the
+        oracle, and compare structurally via ``repr()``.
+        """
+        # Translate outcome to the oracle module's local TurnOutcome type.
+        match outcome:
+            case CommitTaskComplete(summary=s):
+                local_outcome = _hcd_mod.CommitTaskComplete(s)
+            case CommitTaskInProgress(summary=s):
+                local_outcome = _hcd_mod.CommitTaskInProgress(s)
+            case SkipTaskWithReason(reason=r):
+                local_outcome = _hcd_mod.SkipTaskWithReason(r)
+            case StuckOnTask(reason=r):
+                local_outcome = _hcd_mod.StuckOnTask(r)
+            case _:  # pragma: no cover
+                raise AssertionError(f"unexpected outcome: {outcome!r}")
+
+        env = _hcd_mod.MkGitEnv(
+            has_staged=has_staged,
+            commit_ok=commit_ok,
+            commit_sha=commit_sha,
+            commit_output=commit_output,
+        )
+        oracle = _hcd_mod.harness_commit_decision(local_outcome, env)
+        # Structural comparison via repr — both sides are frozen dataclasses
+        # with identical field names, just from different module namespaces.
+        if repr(result) != repr(oracle):
+            raise AssertionError(
+                f"harness_commit_decision oracle mismatch: "
+                f"oracle={oracle!r}, actual={result!r}"
+            )
+
     def hook_failure_nudge(self, failure: CommitHookFailure) -> str:
         """Format a nudge prompt for the LLM after a hook failure."""
         return (
@@ -116,19 +162,24 @@ class HarnessCommitter:
         """
         match outcome:
             case SkipTaskWithReason(reason=reason):
-                return CommitSkipped(reason=reason)
+                result = CommitSkipped(reason=reason)
+                self._assert_decision_oracle(outcome, result)
+                return result
             case StuckOnTask(reason=reason):
-                return CommitSkipped(reason=reason)
+                result = CommitSkipped(reason=reason)
+                self._assert_decision_oracle(outcome, result)
+                return result
             case (
                 CommitTaskComplete(summary=summary)
                 | CommitTaskInProgress(summary=summary)
             ):
-                return self._attempt_commit(summary, helped_by=helped_by)
+                return self._attempt_commit(outcome, summary, helped_by=helped_by)
             case _:  # pragma: no cover — unreachable; exhaustive above
                 raise ValueError(f"unexpected TurnOutcome variant: {outcome!r}")
 
     def _attempt_commit(
         self,
+        outcome: TurnOutcome,
         summary: str,
         *,
         helped_by: Sequence[GitIdentity] = (),
@@ -146,20 +197,34 @@ class HarnessCommitter:
             elif exc.stdout:
                 output += f"\n{exc.stdout.strip()}"
             log.warning("git add -u failed: %s", output[:200])
-            return CommitHookFailure(output=output)
+            result = CommitHookFailure(output=output)
+            self._assert_decision_oracle(
+                outcome, result, has_staged=True, commit_ok=False, commit_output=output
+            )
+            return result
 
         # If nothing was staged, report it rather than creating an empty commit.
         diff_cached = self._git(["diff", "--cached", "--quiet"], check=False)
         if diff_cached.returncode == 0:
-            return CommitNothingStaged()
+            result = CommitNothingStaged()
+            self._assert_decision_oracle(outcome, result, has_staged=False)
+            return result
 
         message = self._build_message(summary, helped_by=helped_by)
-        result = self._git(["commit", "-m", message], check=False)
-        if result.returncode != 0:
-            output = (result.stdout + "\n" + result.stderr).strip()
+        git_result = self._git(["commit", "-m", message], check=False)
+        if git_result.returncode != 0:
+            output = (git_result.stdout + "\n" + git_result.stderr).strip()
             log.warning("commit rejected (hook or error): %s", output[:200])
-            return CommitHookFailure(output=output)
+            result = CommitHookFailure(output=output)
+            self._assert_decision_oracle(
+                outcome, result, has_staged=True, commit_ok=False, commit_output=output
+            )
+            return result
 
         sha = self._git(["rev-parse", "HEAD"]).stdout.strip()
         log.info("harness commit: %s (%s)", sha[:12], summary[:60])
-        return CommitSuccess(sha=sha)
+        result = CommitSuccess(sha=sha)
+        self._assert_decision_oracle(
+            outcome, result, has_staged=True, commit_ok=True, commit_sha=sha
+        )
+        return result
