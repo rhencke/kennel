@@ -575,3 +575,139 @@ def test_on_force_release_swallows_kill_oserror(tmp_path: Path) -> None:
 
     assert fake_proc.kill_calls == 1
     assert isinstance(session._stream_state, stream_fsm.Idle)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end smoke: wedged holder is unblocked by force_release (#1377)
+# ---------------------------------------------------------------------------
+
+
+class _StreamingForeverProc:
+    """Hand-rolled subprocess that streams non-``result`` events forever.
+
+    Reproduces the wedge condition from #1377: ``iter_events`` keeps
+    receiving events, ``idle_timeout`` keeps getting reset, no
+    ``type=result`` ever arrives, the holder is parked in
+    ``consume_until_result`` indefinitely.
+
+    ``kill()`` flips an internal EOF flag so subsequent ``readline``
+    calls return ``""`` — that closes ``iter_events`` via its EOF
+    branch and the holder escapes ``consume_until_result``.
+    """
+
+    def __init__(self) -> None:
+        self.pid = 88888
+        self.returncode: int | None = None
+        self.stdin = MagicMock()
+        self.stdin.closed = False
+        self.kill_calls = 0
+        self._eof = threading.Event()
+        self._first_readline = threading.Event()
+        # Pretend stdout is the proc itself — the selector returns this
+        # object as "ready" and ``iter_events`` calls ``readline`` on it.
+        self.stdout = self
+        self.stderr = MagicMock()
+
+    def readline(self) -> str:
+        # Signal first readline so the test can synchronize on the
+        # holder being inside ``iter_events`` before firing the
+        # eviction.
+        self._first_readline.set()
+        if self._eof.is_set():
+            return ""
+        # Block briefly before returning the next event so the holder
+        # spends real time inside the loop — but stay responsive to
+        # eviction (kill flips _eof which we re-check).
+        if self._eof.wait(timeout=0.05):
+            return ""
+        return '{"type":"system","subtype":"streaming","session_id":"x"}\n'
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self._eof.set()
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+def test_force_release_unblocks_wedged_holder_end_to_end(tmp_path: Path) -> None:
+    """Full chain: a holder thread is parked in ``consume_until_result``
+    on a fake subprocess that streams events forever; the watchdog
+    fires ``force_release``; the kill propagates through
+    ``_on_force_release``; ``iter_events`` breaks on EOF; the holder's
+    ``__exit__`` runs and the ``_evicted_tids`` guard prevents the
+    double-release crash; the FSM lands in ``Free`` ready for a fresh
+    acquire — all within a generous 5 s budget.
+
+    This is the missing-Rocq-IO fix proved on real concurrency, not
+    just unit-by-unit: the holder thread is genuinely parked in
+    ``select()`` / ``readline``, the eviction comes from a different
+    thread, and the wedged thread escapes via the modeled chain.
+    """
+    from fido.rocq.transition import Free
+
+    session = _setup_session(tmp_path)
+    fake_proc = _StreamingForeverProc()
+    session._proc = fake_proc  # type: ignore[assignment]
+    # Selector: stdout always reported ready so iter_events keeps
+    # calling readline on the streaming proc.
+    session._selector = MagicMock(  # type: ignore[assignment]
+        return_value=([fake_proc.stdout], [], [])
+    )
+
+    holder_done = threading.Event()
+    holder_exception: list[BaseException] = []
+
+    def holder() -> None:
+        try:
+            with session:
+                session.consume_until_result()
+        except BaseException as exc:  # noqa: BLE001 — record everything
+            holder_exception.append(exc)
+        finally:
+            holder_done.set()
+
+    provider.set_thread_kind("worker")
+    try:
+        t = threading.Thread(target=holder, daemon=True)
+        t.start()
+        # Wait until the holder is genuinely inside ``iter_events`` —
+        # readline has been called at least once means the loop is hot.
+        assert fake_proc._first_readline.wait(timeout=5.0), (
+            "holder never entered iter_events readline"
+        )
+        # FSM must show the holder owning the lock at this point.
+        from fido.rocq.transition import OwnedByWorker
+
+        assert isinstance(session._fsm_state, OwnedByWorker)
+
+        # Watchdog (running on this main thread) evicts the wedged holder.
+        evicted = session.force_release(reason="end-to-end smoke")
+        assert evicted is True
+
+        # The holder must escape consume_until_result and finish its
+        # ``with`` block within a generous budget.
+        assert holder_done.wait(timeout=5.0), (
+            "wedged holder never escaped after force_release"
+        )
+
+        # No exception leaked from the holder thread — the
+        # ``_evicted_tids`` guard prevented the double-release crash.
+        assert holder_exception == [], (
+            f"holder thread raised unexpectedly: {holder_exception!r}"
+        )
+
+        # ``_on_force_release`` actually killed the subprocess.
+        assert fake_proc.kill_calls == 1
+        # Final FSM state is Free — ready for the next acquire with no
+        # stale holder slot.
+        assert isinstance(session._fsm_state, Free)
+    finally:
+        provider.set_thread_kind(None)
+        # Don't call session.stop — the proc is already in EOF state and
+        # ``stop`` would call wait/kill on the MagicMock'd default proc.
+        # Letting the daemon thread reap on process exit is sufficient.
