@@ -10808,8 +10808,10 @@ class TestExecuteTask:
         assert "nothing" in prompt_text.lower() or "staged" in prompt_text.lower()
 
     def test_stuck_on_task_posts_blocked_and_parks(self, tmp_path: Path) -> None:
-        """stuck-on-task sentinel posts a BLOCKED: comment and parks the task
-        without completing it."""
+        """stuck-on-task sentinel posts a BLOCKED: comment, marks the task
+        BLOCKED, and parks without completing it."""
+        from fido.types import TaskStatus
+
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Impossible task")
@@ -10824,11 +10826,14 @@ class TestExecuteTask:
             patch.object(worker, "_git", self._simple_git_mock()),
             patch("fido.worker.HarnessCommitter"),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.Tasks.update") as mock_update,
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
-        # Task was NOT completed — just parked.
+        # Task was NOT completed �� just parked.
         mock_complete.assert_not_called()
+        # Task was marked BLOCKED so the picker skips it.
+        mock_update.assert_any_call("t1", TaskStatus.BLOCKED)
         # BLOCKED comment was posted.
         worker.gh.comment_issue.assert_called_once()
         _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]

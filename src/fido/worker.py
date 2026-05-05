@@ -3295,7 +3295,10 @@ class Worker:
             else:
                 if isinstance(outcome, StuckOnTask):
                     # LLM is blocked — post BLOCKED comment, park the task.
+                    # Mark as BLOCKED so the picker skips it on subsequent
+                    # iterations (prevents infinite StuckOnTask spam loop).
                     log.info("task stuck: %s", outcome.reason)
+                    self._tasks.update(task["id"], TaskStatus.BLOCKED)
                     self.gh.comment_issue(
                         repo_ctx.repo,
                         pr_number,
