@@ -225,3 +225,156 @@ Proof. reflexivity. Qed.
 
 Python File Extraction harness_commit_decision
   "harness_commit_decision".
+
+(* ----------------------------------------------------------------------- *)
+(** * Consumer-side dispatch: CommitAction                                   *)
+(* ----------------------------------------------------------------------- *)
+
+(** [CommitAction] names the logical action the sentinel loop takes after
+    the harness observes a [CommitResult].  There is a 1:1 correspondence
+    between these constructors and the arms of the [match commit_result:]
+    block in [Worker._run_sentinel_loop] in [worker.py]:
+
+    [ActionSkip]               ↔ [case CommitSkipped]: complete, advance queue.
+    [ActionNudgeNothingStaged] ↔ [case CommitNothingStaged]: write nudge prompt.
+    [ActionNudgeHookFailure]   ↔ [case CommitHookFailure]: write hook nudge.
+    [ActionPushAndComplete]    ↔ [case CommitSuccess] + [CommitTaskComplete]:
+                                  push branch, complete task, advance queue.
+    [ActionContinueSession]    ↔ [case CommitSuccess] + [CommitTaskInProgress]:
+                                  partial commit accepted, loop for another turn. *)
+Inductive CommitAction : Type :=
+  | ActionSkip
+  | ActionNudgeNothingStaged
+  | ActionNudgeHookFailure
+  | ActionPushAndComplete
+  | ActionContinueSession.
+
+(** [outcome_is_complete] returns [true] only for [CommitTaskComplete].
+    Mirrors the [isinstance(outcome, CommitTaskComplete)] guard that
+    disambiguates the [CommitSuccess] arm in [worker.py]. *)
+Definition outcome_is_complete (o : TurnOutcome) : bool :=
+  match o with
+  | CommitTaskComplete _ => true
+  | _                    => false
+  end.
+
+(** [commit_result_action] maps a [(TurnOutcome, CommitResult)] pair to the
+    [CommitAction] the sentinel loop must take.
+
+    The [TurnOutcome] is only consulted for [CommitSuccess] — skip/stuck
+    outcomes cannot produce [CommitSuccess] (see [commit_outcome_never_skipped]),
+    so [outcome_is_complete] is [false] only for [CommitTaskInProgress] in
+    well-formed executions. *)
+Definition commit_result_action (o : TurnOutcome) (r : CommitResult) : CommitAction :=
+  match r with
+  | CommitSkipped _     => ActionSkip
+  | CommitNothingStaged => ActionNudgeNothingStaged
+  | CommitHookFailure _ => ActionNudgeHookFailure
+  | CommitSuccess _     =>
+      if outcome_is_complete o then ActionPushAndComplete
+      else ActionContinueSession
+  end.
+
+(* ----------------------------------------------------------------------- *)
+(** * Lemmas: action mapping is total and deterministic                      *)
+(* ----------------------------------------------------------------------- *)
+
+(** [CommitSkipped] always maps to [ActionSkip], regardless of outcome. *)
+Lemma skipped_maps_to_skip :
+  forall o reason,
+    commit_result_action o (CommitSkipped reason) = ActionSkip.
+Proof. reflexivity. Qed.
+
+(** [CommitNothingStaged] always maps to [ActionNudgeNothingStaged]. *)
+Lemma nothing_staged_maps_to_nudge :
+  forall o,
+    commit_result_action o CommitNothingStaged = ActionNudgeNothingStaged.
+Proof. reflexivity. Qed.
+
+(** [CommitHookFailure] always maps to [ActionNudgeHookFailure]. *)
+Lemma hook_failure_maps_to_nudge :
+  forall o output,
+    commit_result_action o (CommitHookFailure output) = ActionNudgeHookFailure.
+Proof. reflexivity. Qed.
+
+(** [CommitSuccess] with [CommitTaskComplete] maps to [ActionPushAndComplete]. *)
+Lemma success_complete_maps_to_push :
+  forall summary sha,
+    commit_result_action (CommitTaskComplete summary) (CommitSuccess sha)
+      = ActionPushAndComplete.
+Proof. reflexivity. Qed.
+
+(** [CommitSuccess] with [CommitTaskInProgress] maps to [ActionContinueSession]. *)
+Lemma success_in_progress_maps_to_continue :
+  forall summary sha,
+    commit_result_action (CommitTaskInProgress summary) (CommitSuccess sha)
+      = ActionContinueSession.
+Proof. reflexivity. Qed.
+
+(** [ActionPushAndComplete] arises exactly when the result is [CommitSuccess]
+    and the outcome is [CommitTaskComplete]. *)
+Lemma push_complete_iff :
+  forall o r,
+    commit_result_action o r = ActionPushAndComplete <->
+    exists sha, r = CommitSuccess sha /\ outcome_is_complete o = true.
+Proof.
+  intros o r. split.
+  - intros H.
+    destruct r as [sha | output | | reason]; simpl in H; try discriminate.
+    exists sha. split; [reflexivity|].
+    destruct (outcome_is_complete o) eqn:Hoc; [reflexivity | discriminate].
+  - intros [sha [Hr Hoc]].
+    subst r. unfold commit_result_action. rewrite Hoc. reflexivity.
+Qed.
+
+(** [ActionContinueSession] arises exactly when the result is [CommitSuccess]
+    and the outcome is not [CommitTaskComplete] — in well-formed executions,
+    only [CommitTaskInProgress] can reach this branch. *)
+Lemma continue_session_iff :
+  forall o r,
+    commit_result_action o r = ActionContinueSession <->
+    exists sha, r = CommitSuccess sha /\ outcome_is_complete o = false.
+Proof.
+  intros o r. split.
+  - intros H.
+    destruct r as [sha | output | | reason]; simpl in H; try discriminate.
+    exists sha. split; [reflexivity|].
+    destruct (outcome_is_complete o) eqn:Hoc; [discriminate | reflexivity].
+  - intros [sha [Hr Hoc]].
+    subst r. unfold commit_result_action. rewrite Hoc. reflexivity.
+Qed.
+
+(* ----------------------------------------------------------------------- *)
+(** * Examples: concrete action table                                         *)
+(* ----------------------------------------------------------------------- *)
+
+Example skip_action :
+  commit_result_action (SkipTaskWithReason "done") (CommitSkipped "done")
+    = ActionSkip.
+Proof. reflexivity. Qed.
+
+Example nothing_staged_action :
+  commit_result_action (CommitTaskComplete "Add feature") CommitNothingStaged
+    = ActionNudgeNothingStaged.
+Proof. reflexivity. Qed.
+
+Example hook_failure_action :
+  commit_result_action (CommitTaskComplete "Add feature")
+    (CommitHookFailure "ruff failed")
+    = ActionNudgeHookFailure.
+Proof. reflexivity. Qed.
+
+Example push_and_complete_action :
+  commit_result_action (CommitTaskComplete "Add feature")
+    (CommitSuccess "abc123def")
+    = ActionPushAndComplete.
+Proof. reflexivity. Qed.
+
+Example continue_session_action :
+  commit_result_action (CommitTaskInProgress "wip")
+    (CommitSuccess "abc123def")
+    = ActionContinueSession.
+Proof. reflexivity. Qed.
+
+Python File Extraction commit_result_action
+  "commit_result_action".

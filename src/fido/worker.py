@@ -3215,6 +3215,10 @@ class Worker:
                         state.pop("current_task_id", None)
                     return True
                 commit_result = harness_committer.commit(outcome)
+                # This dispatch corresponds 1:1 to commit_result_action in
+                # models/harness_commit_decision.v — each arm maps to one
+                # CommitAction constructor (ActionSkip, ActionNudgeNothingStaged,
+                # ActionNudgeHookFailure, ActionPushAndComplete, ActionContinueSession).
                 match commit_result:
                     case CommitSkipped(reason=reason):
                         # skip-task-with-reason: task is done without a commit.
