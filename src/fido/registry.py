@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -175,8 +175,6 @@ class WorkerRegistry:
         # etc.).  Python 3.14t has no GIL — dict reads and writes are not atomic.
         self._threads_lock = threading.Lock()
         self._factory = thread_factory
-        self._activities: dict[str, WorkerActivity] = {}
-        self._activity_lock = threading.Lock()
         self._status_lock = threading.Lock()
         self._crashes: dict[str, WorkerCrash] = {}
         self._crash_lock = threading.Lock()
@@ -354,11 +352,31 @@ class WorkerRegistry:
         *,
         _now: Callable[[], datetime] = _utcnow,
     ) -> None:
-        """Record what *repo_name*'s worker is currently doing."""
-        with self._activity_lock:
-            self._activities[repo_name] = WorkerActivity(
-                repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
-            )
+        """Record what *repo_name*'s worker is currently doing.
+
+        Lock-free: installs the new :class:`WorkerActivity` on the repo's
+        :class:`RepoState` via CAS-update on the :class:`FidoState` snapshot.
+        Creates a placeholder :class:`RepoState` if none exists for the repo
+        yet (e.g. called before :meth:`start`).
+        """
+        activity = WorkerActivity(
+            repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
+        )
+        _name = repo_name
+
+        def _fn(state: FidoState) -> FidoState:
+            existing = state.repos.get(_name)
+            if existing is not None:
+                new_repo = replace(existing, activity=activity)
+            else:
+                new_repo = RepoState(
+                    key=_name,
+                    started_at=activity.last_progress_at,
+                    activity=activity,
+                )
+            return replace(state, repos=frozendict({**state.repos, _name: new_repo}))
+
+        self._state.update(_fn)
 
     def is_stale(
         self,
@@ -369,20 +387,26 @@ class WorkerRegistry:
     ) -> bool:
         """Return True if *repo_name*'s last progress is older than *threshold* seconds.
 
+        Lock-free: reads from the current :class:`FidoState` snapshot.
+
         Returns False when no activity has been recorded for the repo (e.g. it
         has never reported in) — the caller can treat that as a fresh start
         rather than a stall.
         """
-        with self._activity_lock:
-            activity = self._activities.get(repo_name)
-        if activity is None:
+        repo_state = self._state.get().repos.get(repo_name)
+        if repo_state is None or repo_state.activity is None:
             return False
-        return (_now() - activity.last_progress_at).total_seconds() > threshold
+        return (
+            _now() - repo_state.activity.last_progress_at
+        ).total_seconds() > threshold
 
     def get_all_activities(self) -> list[WorkerActivity]:
-        """Return a snapshot of all registered workers' current activities."""
-        with self._activity_lock:
-            return list(self._activities.values())
+        """Return a snapshot of all registered workers' current activities.
+
+        Lock-free: reads from the current :class:`FidoState` snapshot.
+        """
+        repos = self._state.get().repos
+        return [rs.activity for rs in repos.values() if rs.activity is not None]
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.
