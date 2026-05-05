@@ -138,7 +138,7 @@ class RepoState:
     started_at: datetime
     activity: WorkerActivity
     crash_record: WorkerCrash
-    webhook_activities: tuple[WebhookActivity, ...] = ()
+    webhook_activities: tuple[WebhookActivity, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +345,7 @@ class WorkerRegistry:
             started_at=_now,
             activity=_zero_activity(_name),
             crash_record=crash_record,
+            webhook_activities=(),
         )
         self._state.update(lambda root: root.repos[_name], new_repo)
         thread.start()
