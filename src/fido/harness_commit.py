@@ -15,6 +15,7 @@ Type definitions live in Rocq-extracted modules — importers should get
 
 import logging
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from fido.infra import ProcessRunner
@@ -73,13 +74,15 @@ class HarnessCommitter:
         )
 
     def _build_message(
-        self, summary: str, *, helped_by: GitIdentity | None = None
+        self, summary: str, *, helped_by: Sequence[GitIdentity] = ()
     ) -> str:
-        """Build the full commit message with optional Helped-by trailer."""
-        if helped_by is None:
+        """Build the full commit message with optional Helped-by trailers."""
+        if not helped_by:
             return summary
-        trailer = f"Helped-by: {helped_by.name} <{helped_by.email}>"
-        return f"{summary}\n\n{trailer}"
+        trailers = "\n".join(
+            f"Helped-by: {identity.name} <{identity.email}>" for identity in helped_by
+        )
+        return f"{summary}\n\n{trailers}"
 
     def hook_failure_nudge(self, failure: CommitHookFailure) -> str:
         """Format a nudge prompt for the LLM after a hook failure."""
@@ -93,7 +96,7 @@ class HarnessCommitter:
         self,
         outcome: TurnOutcome,
         *,
-        helped_by: GitIdentity | None = None,
+        helped_by: Sequence[GitIdentity] = (),
     ) -> CommitResult:
         """Stage tracked changes and commit based on *outcome*.
 
@@ -107,9 +110,9 @@ class HarnessCommitter:
         Returns :class:`CommitHookFailure` if the pre-commit hook (or
         ``git commit`` itself) exits non-zero.
 
-        *helped_by* appends a ``Helped-by: Name <email>`` trailer to the
-        commit message for thread tasks — the reviewer who requested the
-        change gets attribution in the git log.
+        *helped_by* appends one ``Helped-by: Name <email>`` trailer per
+        identity to the commit message for thread tasks — reviewers who
+        requested the change get attribution in the git log.
         """
         if isinstance(outcome, SkipTaskWithReason):
             return CommitSkipped(reason=outcome.reason)

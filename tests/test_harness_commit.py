@@ -74,7 +74,7 @@ class TestApplySkip:
         hc, runner = _committer(tmp_path, [])
         result = hc.apply(
             SkipTaskWithReason(reason="nope"),
-            helped_by=GitIdentity(name="X", email="x@y"),
+            helped_by=[GitIdentity(name="X", email="x@y")],
         )
         assert isinstance(result, CommitSkipped)
         assert runner.calls == []
@@ -225,7 +225,7 @@ class TestHelpedByAttribution:
         identity = GitIdentity(name="Alice", email="alice@example.com")
         result = hc.apply(
             CommitTaskComplete(summary="Fix review feedback"),
-            helped_by=identity,
+            helped_by=[identity],
         )
         assert result == CommitSuccess(sha="sha1")
         # The commit message should include the Helped-by trailer
@@ -235,6 +235,35 @@ class TestHelpedByAttribution:
             "commit",
             "-m",
             "Fix review feedback\n\nHelped-by: Alice <alice@example.com>",
+        ]
+
+    def test_multiple_helped_by_trailers(self, tmp_path: Path) -> None:
+        hc, runner = _committer(
+            tmp_path,
+            [
+                _ok(),  # git add -u
+                _fail(),  # diff --cached → staged
+                _ok(),  # git commit
+                _ok(stdout="sha3\n"),  # rev-parse
+            ],
+        )
+        identities = [
+            GitIdentity(name="Alice", email="alice@example.com"),
+            GitIdentity(name="Bob", email="bob@example.com"),
+        ]
+        result = hc.apply(
+            CommitTaskComplete(summary="Address review feedback"),
+            helped_by=identities,
+        )
+        assert result == CommitSuccess(sha="sha3")
+        commit_cmd = runner.calls[2][0]
+        assert commit_cmd == [
+            "git",
+            "commit",
+            "-m",
+            "Address review feedback\n\n"
+            "Helped-by: Alice <alice@example.com>\n"
+            "Helped-by: Bob <bob@example.com>",
         ]
 
     def test_no_helped_by_plain_message(self, tmp_path: Path) -> None:
@@ -265,7 +294,7 @@ class TestHelpedByAttribution:
         identity = GitIdentity(name="Bob", email="bob@x.com")
         result = hc.apply(
             CommitTaskInProgress(summary="wip"),
-            helped_by=identity,
+            helped_by=[identity],
         )
         assert isinstance(result, CommitHookFailure)
         commit_cmd = runner.calls[2][0]

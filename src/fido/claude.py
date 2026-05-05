@@ -660,7 +660,11 @@ class ClaudeSession(OwnedSession):
         ]
         if self._tools is not None:
             cmd += ["--allowedTools", self._tools]
-        cmd += ["--disallowedTools", "Bash(git commit *) Bash(git push *)"]
+        cmd += [
+            "--disallowedTools",
+            "Bash(git commit *) Bash(git push *)"
+            " TaskCreate TaskUpdate TodoWrite TodoRead",
+        ]
         if self._session_id:
             cmd += ["--resume", self._session_id]
         proc = self._popen_fn(
