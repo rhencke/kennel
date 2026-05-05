@@ -6,11 +6,7 @@ Implement one task from the work queue. All context (PR, repo, branch, task titl
 1. Read CLAUDE.md for conventions, test commands, commit discipline.
 2. Implement the change described in the task title.
 3. Verify (CLAUDE.md test command; default: `make test`). If it fails, fix and retry — do not move on until tests pass.
-4. Commit with a descriptive message and push:
-   ```bash
-   git commit -m "<descriptive message>"
-   git push
-   ```
+4. End your turn with a `turn_outcome` sentinel (see below). Do not run `git commit` or `git push` — the harness owns commits.
 
 ### 2. If title starts with "PR comment:" (or is a link starting with "[PR comment:")
 The task description in tasks.json contains thread metadata (repo, pr, comment_id).
@@ -21,16 +17,6 @@ gh api repos/<owner>/<repo>/pulls/<pr>/comments \
   --jq '[.[] | select(.in_reply_to_id == <comment_id> or .id == <comment_id>)] | sort_by(.created_at) | .[] | "\(.user.login): \(.body)"'
 ```
 Implement based on the full thread, not just the task title. If the latest comment changes or narrows the requirement, honour it.
-
-**Committer attribution** — the commenter is the committer; Fido is the author. Look up and apply before committing:
-```bash
-_COMMENTER_NAME=$(gh api /users/<commenter_login> --jq '.name // .login')
-_COMMITTER_EMAIL=$(gh api /users/<commenter_login> --jq '.email // empty')
-: "${_COMMITTER_EMAIL:=<commenter_login>@users.noreply.github.com}"
-GIT_AUTHOR_NAME="$(git config user.name)" GIT_AUTHOR_EMAIL="$(git config user.email)" \
-GIT_COMMITTER_NAME="$_COMMENTER_NAME" GIT_COMMITTER_EMAIL="$_COMMITTER_EMAIL" \
-  git commit -m "<descriptive message>"
-```
 
 Post directly with `in_reply_to` — do not check for pending reviews first.
 
@@ -60,25 +46,57 @@ gh api repos/<owner>/<repo>/pulls/<pr>/comments \
 exec 6>&-  # release comment lock
 ```
 
+The harness handles committer attribution automatically for thread tasks — do not run `git commit` with `GIT_COMMITTER_*` env vars.
+
 Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools.
 Do NOT edit the PR body. The Fido server syncs it automatically.
 
-## Done when
-Task implemented, committed, and pushed.
+## Turn outcome sentinel
 
-**Stop immediately after completing this one task. Do not start the next task. Your job is exactly one task per invocation.**
+Every turn **must** end with a `turn_outcome` JSON object as the final non-empty line.  Choose exactly one:
+
+- **`commit-task-complete`** — implementation is done.  The harness stages all changes and commits with `summary` as the message, then marks the task completed.
+  ```json
+  {"turn_outcome": "commit-task-complete", "summary": "<git commit message>"}
+  ```
+- **`commit-task-in-progress`** — partial progress this turn; more work follows.  The harness commits the partial work so progress is durable, then re-enters the task on the next turn.
+  ```json
+  {"turn_outcome": "commit-task-in-progress", "summary": "<git commit message>"}
+  ```
+- **`skip-task-with-reason`** — nothing to commit.  Use when the task is already covered by a prior commit, turned out to be a no-op, or is infeasible.  Record the reason clearly.
+  ```json
+  {"turn_outcome": "skip-task-with-reason", "reason": "<why no commit>"}
+  ```
+- **`stuck-on-task`** — you are blocked and cannot make further progress without human guidance.  The harness posts a BLOCKED comment on the PR and parks the task until the human provides direction.
+  ```json
+  {"turn_outcome": "stuck-on-task", "reason": "<what you need from the human>"}
+  ```
+
+The sentinel must be the literal last non-empty line of your response — nothing after it.  Do not wrap it in a code fence or markdown block.
+
+## Done when
+Task implemented and sentinel emitted. The harness handles staging, committing, and pushing.
+
+**Stop immediately after emitting the sentinel. Do not start the next task. Your job is exactly one task per invocation.**
 
 ### If the work is already done
-If you discover the task's change is already present in the current branch (e.g. a prior commit on this branch already did it, or a rescope merged the work into another task), **just stop**. Do not commit, do not push, do not post anything.
+If you discover the task's change is already present in the current branch (e.g. a prior commit already did it), emit:
 
-Never post a top-level PR comment (`gh api .../issues/<n>/comments`) explaining you cannot mark the task complete. The worker handles task bookkeeping; your only job is the code. If there is nothing to change, leave no trace.
+```
+{"turn_outcome": "skip-task-with-reason", "reason": "already covered by commit <sha>"}
+```
 
-Never prefix any PR comment with `BLOCKED:`. Never ask a human or the queue manager to mark a task complete on your behalf. The Fido worker sees your empty-tree run and completes the task itself.
+Do not post any PR comment. Do not push anything. Leave no trace beyond the sentinel.
+
+Never post a top-level PR comment (`gh api .../issues/<n>/comments`) about task status. The worker handles task bookkeeping; your only job is the code and the sentinel.
+
+Never post a `BLOCKED:` comment yourself — emit `stuck-on-task` and the harness posts it.  Never ask a human or the queue manager to mark a task complete on your behalf.
 
 ## Constraints
-- **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
-- **Never** continue to another task after completing the current one. One task per invocation, period.
-- **Never** rebase, amend, or force-push. New commits only.
+- **Never** mark the PR as ready for review (`gh pr ready`). The harness handles this automatically when all tasks are done, comments are resolved, and CI passes.
+- **Never** continue to another task after emitting the sentinel. One task per invocation, period.
+- **Never** rebase, amend, force-push, `git reset`, or `git checkout`. Use `git restore` to undo working-tree changes. The harness creates new commits only.
+- **Never** run `git commit` or `git push` yourself — the harness owns commits.
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
 - **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `./fido task`.
 - **Never** edit the PR body directly. The Fido server owns PR body sync.

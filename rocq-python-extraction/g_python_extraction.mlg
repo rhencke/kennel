@@ -823,6 +823,26 @@ VERNAC COMMAND EXTEND ExtractionLanguagePython CLASSIFIED AS SIDEFF
   -> { python_mode := true }
 END
 
+(** [Python Import "fido.rocq.turn_outcome" TurnOutcome.] — register an
+    inductive type as externally available from a sibling extracted module.
+    When a subsequent extraction encounters this type, it emits a
+    [from M import ...] line instead of re-emitting the class hierarchy. *)
+VERNAC COMMAND EXTEND PythonImport CLASSIFIED AS SIDEFF
+| [ "Python" "Import" string(python_module) global(qid) ]
+  -> {
+    let gr = Smartlocate.global_with_alias qid in
+    let open GlobRef in
+    match gr with
+    | IndRef (mind, _) ->
+        let kn = MutInd.user mind in
+        Python.register_python_import kn python_module
+    | _ ->
+        CErrors.user_err
+          (Pp.str "Python Import expects an inductive type, got: " ++
+           Pp.str (Libnames.string_of_qualid qid))
+  }
+END
+
 (** [Python Extraction foo.] — extract [foo] to [foo.py]. *)
 VERNAC COMMAND EXTEND PythonExtraction CLASSIFIED AS QUERY STATE opaque_access
 | [ "Python" "Extraction" global(x) ]

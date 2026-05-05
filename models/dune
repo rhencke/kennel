@@ -26,4 +26,8 @@
   worker_registry_crash
   webhook_ingress_dedupe
   self_restart
-  handler_preemption))
+  handler_preemption
+  turn_outcome
+  commit_result
+  harness_commit_decision
+  nudge_kind))

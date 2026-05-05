@@ -1,0 +1,10 @@
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,18,0,19,8,turn_outcome.v,38,10,38,21,extraction,TurnOutcome,TurnOutcome
+open,24,0,25,16,turn_outcome.v,39,2,39,20,extraction,CommitTaskComplete,CommitTaskComplete
+open,30,0,31,16,turn_outcome.v,40,2,40,22,extraction,CommitTaskInProgress,CommitTaskInProgress
+open,36,0,37,15,turn_outcome.v,41,2,41,20,extraction,SkipTaskWithReason,SkipTaskWithReason
+open,42,0,43,15,turn_outcome.v,42,2,42,13,extraction,StuckOnTask,StuckOnTask
+open,51,0,62,38,turn_outcome.v,47,11,47,26,extraction,outcome_summary,outcome_summary
+open,65,0,76,38,turn_outcome.v,57,11,57,28,extraction,outcome_is_commit,outcome_is_commit
+open,79,0,90,38,turn_outcome.v,68,11,68,30,extraction,outcome_is_terminal,outcome_is_terminal
+open,93,0,95,17,turn_outcome.v,85,11,85,25,extraction,parse_sentinel,parse_sentinel
