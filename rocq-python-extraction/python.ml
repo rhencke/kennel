@@ -277,6 +277,26 @@ let empty_lowering_environment = {
   lowering_record_field_targets = [];
 }
 
+(** Python Import registry.
+
+    The [Python Import "module" Ind.] vernacular registers an inductive
+    type as externally available from a sibling extracted module.  When
+    [pp_ind_decl] encounters such a type, it emits a [from M import ...]
+    line instead of re-emitting the full class hierarchy.
+
+    Keyed on [KerName.t] (the user-facing kernel name of the mutual
+    inductive block).  Value is the Python module path string. *)
+let python_import_table : (KerName.t, string) Hashtbl.t = Hashtbl.create 8
+
+let register_python_import kn python_module =
+  Hashtbl.replace python_import_table kn python_module
+
+let lookup_python_import kn =
+  Hashtbl.find_opt python_import_table kn
+
+let clear_python_imports () =
+  Hashtbl.clear python_import_table
+
 type printer_state = {
   extraction_state : Common.State.t;
   lowering_environment : lowering_environment ref;
@@ -5282,6 +5302,30 @@ let pp_coinductive_wrapper state packet step_type_expr pp_tvar tvars =
   str "        return self._force()" ++ fnl () ++
   pp_iter
 
+(** Emit a [from M import Base, Con1, Con2, …, BaseT] line for an
+    imported inductive packet.  For Standard inductives with multiple
+    constructors, we import the base class, all constructors, and the
+    union type alias. *)
+let pp_import_line state python_module p =
+  let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
+  let n = Array.length p.ip_types in
+  let cons_names =
+    List.init n (fun j -> pp_global state Cons p.ip_consnames_ref.(j))
+  in
+  (* Import: base class, all constructors, union alias *)
+  let names = tname :: cons_names @ [tname ^ "T"] in
+  let joined = String.concat ", " names in
+  let line = "from " ^ python_module ^ " import " ^ joined in
+  if String.length line <= 88 then
+    str line ++ fnl ()
+  else
+    str ("from " ^ python_module ^ " import (") ++ fnl () ++
+    prlist_with_sep (fun () -> str "," ++ fnl ())
+      (fun name -> str "    " ++ str name)
+      names ++
+    str "," ++ fnl () ++
+    str ")" ++ fnl ()
+
 let pp_ind_decl state (ind : ml_ind) =
   match ind.ind_kind with
   | Singleton ->
@@ -5291,36 +5335,46 @@ let pp_ind_decl state (ind : ml_ind) =
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
         mt ()
-      else
-        str "# " ++ Id.print p.ip_typename ++
-        str ": singleton inductive, constructor was " ++
-        Id.print p.ip_consnames.(0) ++ fnl ()
+      else (
+        match lookup_python_import (kn_of_ind p.ip_typename_ref) with
+        | Some _ -> mt ()  (* Singletons are erased; nothing to import *)
+        | None ->
+            str "# " ++ Id.print p.ip_typename ++
+            str ": singleton inductive, constructor was " ++
+            Id.print p.ip_consnames.(0) ++ fnl ())
   | Record fields ->
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
         mt ()
-      else
-        let tvars = List.init ind.ind_nparams typevar_name in
-        (* Emit TypeVar declarations once, before the dataclass. *)
-        let pp_typevars = pp_typevar_decls (List.init ind.ind_nparams Fun.id) in
-        (* For a parameterised record, inherit [Generic[_A, _B, …]] so that
-           type-checkers can track type arguments.  Unparameterised records
-           keep the plain dataclass (no base class). *)
-        let base_opt =
-          if List.is_empty tvars then None
-          else
-            Some ("Generic[" ^ String.concat ", " tvars ^ "]")
-        in
-        pp_typevars ++
-        pp_one_cons state ~typevar_shift:2 p (Some fields) base_opt 0
+      else (
+        match lookup_python_import (kn_of_ind p.ip_typename_ref) with
+        | Some python_module ->
+            let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
+            str "from " ++ str python_module ++ str " import " ++ str tname ++ fnl ()
+        | None ->
+            let tvars = List.init ind.ind_nparams typevar_name in
+            (* Emit TypeVar declarations once, before the dataclass. *)
+            let pp_typevars = pp_typevar_decls (List.init ind.ind_nparams Fun.id) in
+            (* For a parameterised record, inherit [Generic[_A, _B, …]] so that
+               type-checkers can track type arguments.  Unparameterised records
+               keep the plain dataclass (no base class). *)
+            let base_opt =
+              if List.is_empty tvars then None
+              else
+                Some ("Generic[" ^ String.concat ", " tvars ^ "]")
+            in
+            pp_typevars ++
+            pp_one_cons state ~typevar_shift:2 p (Some fields) base_opt 0)
   | Standard ->
       let tvars = List.init ind.ind_nparams typevar_name in
       let packet_needs_typevars p =
         not p.ip_logical &&
         not (is_custom p.ip_typename_ref) &&
-        not (is_std_remapped_type_ref p.ip_typename_ref)
+        not (is_std_remapped_type_ref p.ip_typename_ref) &&
+        (match lookup_python_import (kn_of_ind p.ip_typename_ref) with
+         | Some _ -> false | None -> true)
       in
       (* TypeVar declarations are emitted once, before all packets, because
          mutual inductives share the same type parameters.  For example,
@@ -5336,7 +5390,10 @@ let pp_ind_decl state (ind : ml_ind) =
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
         else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
           mt ()
-        else
+        else (
+          match lookup_python_import (kn_of_ind p.ip_typename_ref) with
+          | Some python_module -> pp_import_line state python_module p
+          | None ->
           let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
           let n = Array.length p.ip_types in
           (* Shared base class.  For parameterised inductives it inherits
@@ -5402,7 +5459,7 @@ let pp_ind_decl state (ind : ml_ind) =
           in
           pp_base ++ fnl () ++ fnl () ++
           pp_cons ++ fnl () ++
-          (if List.is_empty tvars then fnl () ++ pp_union else mt ())
+          (if List.is_empty tvars then fnl () ++ pp_union else mt ()))
       in
       pp_typevars ++
       prlist_with_sep (fun () -> fnl () ++ fnl ())
@@ -5616,12 +5673,14 @@ let classified_term_decl_export_names state term_decl =
 let classified_ind_export_names state ind =
   let packet_names packet =
     if is_std_remapped_type_ref packet.ip_typename_ref then []
-    else
-      let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
-      let cnames =
-        Array.to_list packet.ip_consnames_ref |> List.map (pp_global state Cons)
-      in
-      tname :: cnames
+    else (match lookup_python_import (kn_of_ind packet.ip_typename_ref) with
+    | Some _ -> []
+    | None ->
+        let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+        let cnames =
+          Array.to_list packet.ip_consnames_ref |> List.map (pp_global state Cons)
+        in
+        tname :: cnames)
   in
   Array.to_list ind.ind_packets |> List.concat_map packet_names
 

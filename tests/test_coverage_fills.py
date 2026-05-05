@@ -2151,18 +2151,7 @@ class TestWorkerOracleAssertion:
 
 
 class TestCommitResultActionOracle:
-    """Cover _cra_oracle_outcome StuckOnTask branch and
-    _assert_commit_result_action error path."""
-
-    def test_stuck_outcome_maps_correctly(self) -> None:
-        from fido.rocq import commit_result_action as cra_oracle
-        from fido.rocq import turn_outcome as turn_outcome_mod
-        from fido.worker import _cra_oracle_outcome
-
-        runtime_stuck = turn_outcome_mod.StuckOnTask("blocked on human")
-        oracle_stuck = _cra_oracle_outcome(runtime_stuck)
-        assert isinstance(oracle_stuck, cra_oracle.StuckOnTask)
-        assert oracle_stuck.reason == "blocked on human"
+    """Cover _assert_commit_result_action error path."""
 
     def test_assert_raises_on_mismatch(self) -> None:
         from fido.rocq import commit_result as commit_result_mod
@@ -2181,27 +2170,7 @@ class TestCommitResultActionOracle:
 
 
 class TestNudgeKindOracle:
-    """Cover _nudge_oracle_result branches and _assert_nudge_kind error paths."""
-
-    def test_success_branch(self) -> None:
-        from fido.rocq import commit_result as commit_result_mod
-        from fido.rocq import nudge_kind as nudge_oracle
-        from fido.worker import _nudge_oracle_result
-
-        r = commit_result_mod.CommitSuccess("abc123")
-        mapped = _nudge_oracle_result(r)
-        assert isinstance(mapped, nudge_oracle.CommitSuccess)
-        assert mapped.sha == "abc123"
-
-    def test_skipped_branch(self) -> None:
-        from fido.rocq import commit_result as commit_result_mod
-        from fido.rocq import nudge_kind as nudge_oracle
-        from fido.worker import _nudge_oracle_result
-
-        r = commit_result_mod.CommitSkipped("already done")
-        mapped = _nudge_oracle_result(r)
-        assert isinstance(mapped, nudge_oracle.CommitSkipped)
-        assert mapped.reason == "already done"
+    """Cover _assert_nudge_kind error paths."""
 
     def test_assert_raises_when_no_nudge_expected(self) -> None:
         from fido.rocq import commit_result as commit_result_mod

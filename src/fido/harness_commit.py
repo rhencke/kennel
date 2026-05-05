@@ -95,36 +95,15 @@ class HarnessCommitter:
         commit_sha: str = "",
         commit_output: str = "",
     ) -> None:
-        """Assert that the Rocq-proven harness_commit_decision agrees.
-
-        The extracted function re-declares local copies of ``TurnOutcome``
-        and ``CommitResult`` (each extraction unit is self-contained), so
-        we translate at the boundary: build local-typed inputs, call the
-        oracle, and compare structurally via ``repr()``.
-        """
-        # Translate outcome to the oracle module's local TurnOutcome type.
-        match outcome:
-            case CommitTaskComplete(summary=s):
-                local_outcome = _hcd_mod.CommitTaskComplete(s)
-            case CommitTaskInProgress(summary=s):
-                local_outcome = _hcd_mod.CommitTaskInProgress(s)
-            case SkipTaskWithReason(reason=r):
-                local_outcome = _hcd_mod.SkipTaskWithReason(r)
-            case StuckOnTask(reason=r):
-                local_outcome = _hcd_mod.StuckOnTask(r)
-            case _:  # pragma: no cover
-                raise AssertionError(f"unexpected outcome: {outcome!r}")
-
+        """Assert that the Rocq-proven harness_commit_decision agrees."""
         env = _hcd_mod.MkGitEnv(
             has_staged=has_staged,
             commit_ok=commit_ok,
             commit_sha=commit_sha,
             commit_output=commit_output,
         )
-        oracle = _hcd_mod.harness_commit_decision(local_outcome, env)
-        # Structural comparison via repr — both sides are frozen dataclasses
-        # with identical field names, just from different module namespaces.
-        if repr(result) != repr(oracle):
+        oracle = _hcd_mod.harness_commit_decision(outcome, env)
+        if result != oracle:
             raise AssertionError(
                 f"harness_commit_decision oracle mismatch: "
                 f"oracle={oracle!r}, actual={result!r}"

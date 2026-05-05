@@ -1,9 +1,9 @@
 stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
-open,82,0,83,8,harness_commit_decision.v,245,10,245,22,extraction,CommitAction,CommitAction
-open,88,0,89,8,harness_commit_decision.v,246,4,246,14,extraction,ActionSkip,ActionSkip
-open,94,0,95,8,harness_commit_decision.v,247,4,247,28,extraction,ActionNudgeNothingStaged,ActionNudgeNothingStaged
-open,100,0,101,8,harness_commit_decision.v,248,4,248,26,extraction,ActionNudgeHookFailure,ActionNudgeHookFailure
-open,106,0,107,8,harness_commit_decision.v,249,4,249,25,extraction,ActionPushAndComplete,ActionPushAndComplete
-open,112,0,113,8,harness_commit_decision.v,250,4,250,25,extraction,ActionContinueSession,ActionContinueSession
-open,125,0,136,38,harness_commit_decision.v,255,11,255,30,extraction,outcome_is_complete,outcome_is_complete
-open,139,0,141,20,harness_commit_decision.v,268,11,268,31,extraction,commit_result_action,commit_result_action
+open,34,0,35,8,harness_commit_decision.v,248,10,248,22,extraction,CommitAction,CommitAction
+open,40,0,41,8,harness_commit_decision.v,249,4,249,14,extraction,ActionSkip,ActionSkip
+open,46,0,47,8,harness_commit_decision.v,250,4,250,28,extraction,ActionNudgeNothingStaged,ActionNudgeNothingStaged
+open,52,0,53,8,harness_commit_decision.v,251,4,251,26,extraction,ActionNudgeHookFailure,ActionNudgeHookFailure
+open,58,0,59,8,harness_commit_decision.v,252,4,252,25,extraction,ActionPushAndComplete,ActionPushAndComplete
+open,64,0,65,8,harness_commit_decision.v,253,4,253,25,extraction,ActionContinueSession,ActionContinueSession
+open,77,0,88,38,harness_commit_decision.v,258,11,258,30,extraction,outcome_is_complete,outcome_is_complete
+open,91,0,93,20,harness_commit_decision.v,271,11,271,31,extraction,commit_result_action,commit_result_action

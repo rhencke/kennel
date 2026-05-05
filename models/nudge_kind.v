@@ -118,5 +118,7 @@ Example hook_failure_example :
   commit_result_nudge (CommitHookFailure "ruff check failed") = Some NudgeHookFailure.
 Proof. reflexivity. Qed.
 
+Python Import "fido.rocq.commit_result" CommitResult.
+
 Python File Extraction nudge_kind
   "commit_result_nudge".

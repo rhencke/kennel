@@ -13,37 +13,14 @@ from typing import (
     cast,
     final,
 )
-
-
-class CommitResult:
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class CommitSuccess(CommitResult):
-    sha: str
-
-
-@final
-@dataclass(frozen=True)
-class CommitHookFailure(CommitResult):
-    output: str
-
-
-@final
-@dataclass(frozen=True)
-class CommitNothingStaged(CommitResult):
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class CommitSkipped(CommitResult):
-    reason: str
-
-
-CommitResultT = CommitSuccess | CommitHookFailure | CommitNothingStaged | CommitSkipped
+from fido.rocq.commit_result import (
+    CommitResult,
+    CommitSuccess,
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitSkipped,
+    CommitResultT,
+)
 
 
 class NudgeKind:

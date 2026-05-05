@@ -223,6 +223,9 @@ Example in_progress_staged_fail_produces_hook_failure :
     = CommitHookFailure "ruff check failed".
 Proof. reflexivity. Qed.
 
+Python Import "fido.rocq.turn_outcome" TurnOutcome.
+Python Import "fido.rocq.commit_result" CommitResult.
+
 Python File Extraction harness_commit_decision
   "harness_commit_decision".
 
@@ -375,6 +378,9 @@ Example continue_session_action :
     (CommitSuccess "abc123def")
     = ActionContinueSession.
 Proof. reflexivity. Qed.
+
+Python Import "fido.rocq.turn_outcome" TurnOutcome.
+Python Import "fido.rocq.commit_result" CommitResult.
 
 Python File Extraction commit_result_action
   "commit_result_action".

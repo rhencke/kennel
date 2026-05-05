@@ -44,18 +44,21 @@ from fido.provider import (
 )
 from fido.provider_factory import DefaultProviderFactory
 from fido.rocq import ci_task_lifecycle as ci_oracle
-from fido.rocq import commit_result as commit_result_mod
 from fido.rocq import commit_result_action as cra_oracle
 from fido.rocq import nudge_kind as nudge_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
-from fido.rocq import turn_outcome as turn_outcome_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
+    CommitResult,
     CommitSkipped,
     CommitSuccess,
 )
-from fido.rocq.turn_outcome import CommitTaskComplete, StuckOnTask
+from fido.rocq.turn_outcome import (
+    CommitTaskComplete,
+    StuckOnTask,
+    TurnOutcome,
+)
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -904,49 +907,13 @@ def _assert_ci_failure_matches_oracle(
         )
 
 
-def _cra_oracle_outcome(
-    o: turn_outcome_mod.TurnOutcome,
-) -> cra_oracle.TurnOutcome:
-    """Map a runtime TurnOutcome to the oracle module's structurally identical type."""
-    match o:
-        case turn_outcome_mod.CommitTaskComplete(summary=s):
-            return cra_oracle.CommitTaskComplete(s)
-        case turn_outcome_mod.CommitTaskInProgress(summary=s):
-            return cra_oracle.CommitTaskInProgress(s)
-        case turn_outcome_mod.SkipTaskWithReason(reason=r):
-            return cra_oracle.SkipTaskWithReason(r)
-        case turn_outcome_mod.StuckOnTask(reason=r):
-            return cra_oracle.StuckOnTask(r)
-        case _:  # pragma: no cover
-            raise TypeError(f"unexpected TurnOutcome variant: {o!r}")
-
-
-def _cra_oracle_result(
-    r: commit_result_mod.CommitResult,
-) -> cra_oracle.CommitResult:
-    """Map a runtime CommitResult to the oracle module's structurally identical type."""
-    match r:
-        case commit_result_mod.CommitSuccess(sha=sha):
-            return cra_oracle.CommitSuccess(sha)
-        case commit_result_mod.CommitHookFailure(output=output):
-            return cra_oracle.CommitHookFailure(output)
-        case commit_result_mod.CommitNothingStaged():
-            return cra_oracle.CommitNothingStaged()
-        case commit_result_mod.CommitSkipped(reason=reason):
-            return cra_oracle.CommitSkipped(reason)
-        case _:  # pragma: no cover
-            raise TypeError(f"unexpected CommitResult variant: {r!r}")
-
-
 def _assert_commit_result_action(
-    outcome: turn_outcome_mod.TurnOutcome,
-    result: commit_result_mod.CommitResult,
+    outcome: TurnOutcome,
+    result: CommitResult,
     actual_action: cra_oracle.CommitAction,
 ) -> None:
     """Assert that the sentinel loop arm matches the proven Rocq oracle."""
-    oracle_outcome = _cra_oracle_outcome(outcome)
-    oracle_result = _cra_oracle_result(result)
-    expected = cra_oracle.commit_result_action(oracle_outcome, oracle_result)
+    expected = cra_oracle.commit_result_action(outcome, result)
     if type(expected) is not type(actual_action):
         raise AssertionError(
             f"commit_result_action oracle: expected {type(expected).__name__}, "
@@ -954,30 +921,12 @@ def _assert_commit_result_action(
         )
 
 
-def _nudge_oracle_result(
-    r: commit_result_mod.CommitResult,
-) -> nudge_oracle.CommitResult:
-    """Map a runtime CommitResult to the nudge oracle module's type."""
-    match r:
-        case commit_result_mod.CommitSuccess(sha=sha):
-            return nudge_oracle.CommitSuccess(sha)
-        case commit_result_mod.CommitHookFailure(output=output):
-            return nudge_oracle.CommitHookFailure(output)
-        case commit_result_mod.CommitNothingStaged():
-            return nudge_oracle.CommitNothingStaged()
-        case commit_result_mod.CommitSkipped(reason=reason):
-            return nudge_oracle.CommitSkipped(reason)
-        case _:  # pragma: no cover
-            raise TypeError(f"unexpected CommitResult variant: {r!r}")
-
-
 def _assert_nudge_kind(
-    result: commit_result_mod.CommitResult,
+    result: CommitResult,
     actual_kind: nudge_oracle.NudgeKind,
 ) -> None:
     """Assert the sentinel loop's nudge selection matches the Rocq oracle."""
-    oracle_result = _nudge_oracle_result(result)
-    expected = nudge_oracle.commit_result_nudge(oracle_result)
+    expected = nudge_oracle.commit_result_nudge(result)
     if expected is None:
         raise AssertionError(
             f"nudge_kind oracle: expected no nudge for {type(result).__name__}, "

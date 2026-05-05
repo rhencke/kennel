@@ -13,70 +13,22 @@ from typing import (
     cast,
     final,
 )
-
-
-class TurnOutcome:
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class CommitTaskComplete(TurnOutcome):
-    summary: str
-
-
-@final
-@dataclass(frozen=True)
-class CommitTaskInProgress(TurnOutcome):
-    summary: str
-
-
-@final
-@dataclass(frozen=True)
-class SkipTaskWithReason(TurnOutcome):
-    reason: str
-
-
-@final
-@dataclass(frozen=True)
-class StuckOnTask(TurnOutcome):
-    reason: str
-
-
-TurnOutcomeT = (
-    CommitTaskComplete | CommitTaskInProgress | SkipTaskWithReason | StuckOnTask
+from fido.rocq.turn_outcome import (
+    TurnOutcome,
+    CommitTaskComplete,
+    CommitTaskInProgress,
+    SkipTaskWithReason,
+    StuckOnTask,
+    TurnOutcomeT,
 )
-
-
-class CommitResult:
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class CommitSuccess(CommitResult):
-    sha: str
-
-
-@final
-@dataclass(frozen=True)
-class CommitHookFailure(CommitResult):
-    output: str
-
-
-@final
-@dataclass(frozen=True)
-class CommitNothingStaged(CommitResult):
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class CommitSkipped(CommitResult):
-    reason: str
-
-
-CommitResultT = CommitSuccess | CommitHookFailure | CommitNothingStaged | CommitSkipped
+from fido.rocq.commit_result import (
+    CommitResult,
+    CommitSuccess,
+    CommitHookFailure,
+    CommitNothingStaged,
+    CommitSkipped,
+    CommitResultT,
+)
 
 
 class CommitAction:
