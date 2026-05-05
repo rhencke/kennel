@@ -31,9 +31,13 @@ from fido.rocq.commit_result import (
 )
 
 
+class GitEnv:
+    pass
+
+
 @final
 @dataclass(frozen=True)
-class MkGitEnv:
+class MkGitEnv(GitEnv):
     has_staged: bool
     commit_ok: bool
     commit_sha: str

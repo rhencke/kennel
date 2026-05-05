@@ -5357,15 +5357,42 @@ let pp_ind_decl state (ind : ml_ind) =
             let tvars = List.init ind.ind_nparams typevar_name in
             (* Emit TypeVar declarations once, before the dataclass. *)
             let pp_typevars = pp_typevar_decls (List.init ind.ind_nparams Fun.id) in
-            (* For a parameterised record, inherit [Generic[_A, _B, …]] so that
-               type-checkers can track type arguments.  Unparameterised records
-               keep the plain dataclass (no base class). *)
-            let base_opt =
-              if List.is_empty tvars then None
+            (* When the Record has a named constructor (e.g. [Record GitEnv :=
+               mkGitEnv { … }]), the extracted class will be [MkGitEnv] — a
+               different name from the type.  Emit a base class [class GitEnv:
+               pass] so function signatures can reference the type name.
+               Anonymous constructors ([Build_X]) get mapped to the type name
+               by the extraction, so the dataclass IS the type — no base. *)
+            let tname_id = Id.to_string p.ip_typename in
+            let cname_id = Id.to_string p.ip_consnames.(0) in
+            let has_named_ctor = cname_id <> "Build_" ^ tname_id in
+            let tname =
+              if has_named_ctor then
+                capitalize_first (pp_global state Term p.ip_typename_ref)
+              else ""
+            in
+            let pp_base =
+              if not has_named_ctor then mt ()
+              else if List.is_empty tvars then
+                str "class " ++ str tname ++ str ":" ++ fnl () ++
+                str "    pass" ++ fnl () ++ fnl ()
               else
-                Some ("Generic[" ^ String.concat ", " tvars ^ "]")
+                str "class " ++ str tname ++
+                str "(Generic[" ++
+                prlist_with_sep (fun () -> str ", ") str tvars ++
+                str "]):" ++ fnl () ++
+                str "    pass" ++ fnl () ++ fnl ()
+            in
+            let base_opt =
+              if not has_named_ctor then
+                if List.is_empty tvars then None
+                else Some ("Generic[" ^ String.concat ", " tvars ^ "]")
+              else if List.is_empty tvars then Some tname
+              else
+                Some (tname ^ "[" ^ String.concat ", " tvars ^ "]")
             in
             pp_typevars ++
+            pp_base ++
             pp_one_cons state ~typevar_shift:2 p (Some fields) base_opt 0)
   | Standard ->
       let tvars = List.init ind.ind_nparams typevar_name in
