@@ -73,5 +73,77 @@ Definition outcome_is_terminal (o : TurnOutcome) : bool :=
   | StuckOnTask          _ => true
   end.
 
+(** [parse_sentinel] models the dispatch logic of the Python
+    [parse_turn_outcome] parser.  Given the [turn_outcome] kind string
+    and the payload string (the "summary" or "reason" value), it
+    returns [Some] of the matching constructor when the kind is
+    recognised and the payload is non-empty, or [None] otherwise.
+
+    The Python parser handles JSON decoding, field extraction, and error
+    messages — this function captures only the pure dispatch invariant
+    that the oracle asserts at runtime. *)
+Definition parse_sentinel (kind : string) (payload : string) : option TurnOutcome :=
+  if String.eqb payload "" then None
+  else if String.eqb kind "commit-task-complete" then
+    Some (CommitTaskComplete payload)
+  else if String.eqb kind "commit-task-in-progress" then
+    Some (CommitTaskInProgress payload)
+  else if String.eqb kind "skip-task-with-reason" then
+    Some (SkipTaskWithReason payload)
+  else if String.eqb kind "stuck-on-task" then
+    Some (StuckOnTask payload)
+  else None.
+
+(** [parse_sentinel] is total: every recognised kind with a non-empty
+    payload produces a result. *)
+Lemma parse_sentinel_known_kinds :
+  forall payload,
+    payload <> ""%string ->
+    parse_sentinel "commit-task-complete" payload = Some (CommitTaskComplete payload) /\
+    parse_sentinel "commit-task-in-progress" payload = Some (CommitTaskInProgress payload) /\
+    parse_sentinel "skip-task-with-reason" payload = Some (SkipTaskWithReason payload) /\
+    parse_sentinel "stuck-on-task" payload = Some (StuckOnTask payload).
+Proof.
+  intros payload Hne.
+  unfold parse_sentinel.
+  destruct (String.eqb payload "") eqn:Heq.
+  - apply String.eqb_eq in Heq. contradiction.
+  - repeat split; reflexivity.
+Qed.
+
+(** Empty payload always yields [None], regardless of kind. *)
+Lemma parse_sentinel_empty_payload :
+  forall kind, parse_sentinel kind "" = None.
+Proof.
+  intros kind. unfold parse_sentinel. simpl. reflexivity.
+Qed.
+
+(** When [parse_sentinel] returns [Some o], [outcome_is_commit o] agrees
+    with the kind being one of the two commit kinds. *)
+Lemma parse_sentinel_commit_iff :
+  forall kind payload o,
+    parse_sentinel kind payload = Some o ->
+    outcome_is_commit o = true <->
+    (String.eqb kind "commit-task-complete" = true \/
+     String.eqb kind "commit-task-in-progress" = true).
+Proof.
+  intros kind payload o Hparse.
+  unfold parse_sentinel in Hparse.
+  destruct (String.eqb payload "") eqn:Hempty; [discriminate|].
+  destruct (String.eqb kind "commit-task-complete") eqn:Hctc.
+  - injection Hparse as <-. simpl. split; intros; auto.
+  - destruct (String.eqb kind "commit-task-in-progress") eqn:Hcip.
+    + injection Hparse as <-. simpl. split; intros; auto.
+    + destruct (String.eqb kind "skip-task-with-reason") eqn:Hskip.
+      * injection Hparse as <-. simpl. split.
+        -- intros Habs; discriminate.
+        -- intros [H1 | H2]; discriminate.
+      * destruct (String.eqb kind "stuck-on-task") eqn:Hstuck.
+        -- injection Hparse as <-. simpl. split.
+           ++ intros Habs; discriminate.
+           ++ intros [H1 | H2]; discriminate.
+        -- discriminate.
+Qed.
+
 Python File Extraction turn_outcome
-  "outcome_summary outcome_is_commit outcome_is_terminal".
+  "outcome_summary outcome_is_commit outcome_is_terminal parse_sentinel".

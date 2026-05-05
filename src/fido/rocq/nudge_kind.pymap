@@ -1,0 +1,6 @@
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,49,0,50,8,nudge_kind.v,28,10,28,19,extraction,NudgeKind,NudgeKind
+open,55,0,56,8,nudge_kind.v,29,2,29,22,extraction,NudgeMissingSentinel,NudgeMissingSentinel
+open,61,0,62,8,nudge_kind.v,30,2,30,20,extraction,NudgeNothingStaged,NudgeNothingStaged
+open,67,0,68,8,nudge_kind.v,31,2,31,18,extraction,NudgeHookFailure,NudgeHookFailure
+open,74,0,85,38,nudge_kind.v,36,11,36,30,extraction,commit_result_nudge,commit_result_nudge

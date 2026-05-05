@@ -7,3 +7,4 @@ open,42,0,43,15,turn_outcome.v,42,2,42,13,extraction,StuckOnTask,StuckOnTask
 open,51,0,62,38,turn_outcome.v,47,11,47,26,extraction,outcome_summary,outcome_summary
 open,65,0,76,38,turn_outcome.v,57,11,57,28,extraction,outcome_is_commit,outcome_is_commit
 open,79,0,90,38,turn_outcome.v,68,11,68,30,extraction,outcome_is_terminal,outcome_is_terminal
+open,93,0,95,17,turn_outcome.v,85,11,85,25,extraction,parse_sentinel,parse_sentinel

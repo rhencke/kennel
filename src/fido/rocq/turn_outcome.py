@@ -88,3 +88,20 @@ def outcome_is_terminal(o: TurnOutcome) -> bool:
             return True
         case __impossible:
             assert_never(__impossible)
+
+
+def parse_sentinel(
+    kind: str,
+    payload: str,
+) -> TurnOutcome | None:
+    if payload == "":
+        return None
+    if kind == "commit-task-complete":
+        return CommitTaskComplete(payload)
+    if kind == "commit-task-in-progress":
+        return CommitTaskInProgress(payload)
+    if kind == "skip-task-with-reason":
+        return SkipTaskWithReason(payload)
+    if kind == "stuck-on-task":
+        return StuckOnTask(payload)
+    return None
