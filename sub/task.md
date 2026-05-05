@@ -93,9 +93,9 @@ Never post a top-level PR comment (`gh api .../issues/<n>/comments`) about task 
 Never post a `BLOCKED:` comment yourself — emit `stuck-on-task` and the harness posts it.  Never ask a human or the queue manager to mark a task complete on your behalf.
 
 ## Constraints
-- **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
+- **Never** mark the PR as ready for review (`gh pr ready`). The harness handles this automatically when all tasks are done, comments are resolved, and CI passes.
 - **Never** continue to another task after emitting the sentinel. One task per invocation, period.
-- **Never** rebase, amend, or force-push. The harness creates new commits only.
+- **Never** rebase, amend, force-push, `git reset`, `git checkout --`, or `git clean`. Use `git restore` to undo working-tree changes. The harness creates new commits only.
 - **Never** run `git commit` or `git push` yourself — the harness owns commits.
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
 - **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `./fido task`.

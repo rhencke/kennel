@@ -663,6 +663,8 @@ class ClaudeSession(OwnedSession):
         cmd += [
             "--disallowedTools",
             "Bash(git commit *) Bash(git push *)"
+            " Bash(git rebase *) Bash(git reset *)"
+            " Bash(git checkout -- *) Bash(git clean *)"
             " TaskCreate TaskUpdate TodoWrite TodoRead",
         ]
         if self._session_id:
