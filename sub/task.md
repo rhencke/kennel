@@ -72,6 +72,19 @@ Every turn **must** end with a `turn_outcome` JSON object as the final non-empty
   {"turn_outcome": "stuck-on-task", "reason": "<what you need from the human>"}
   ```
 
+### Optional fields on any sentinel
+
+The harness files GitHub issues on your behalf when the sentinel includes either of these arrays.  You **never** call `gh issue create` yourself — the harness owns issue creation.
+
+- **`insights`** — surprising invariants, design lessons, or root-cause observations worth preserving.  Each entry becomes an issue with the `Insight` label.
+- **`out_of_scope_asks`** — requests that arrived during this task but are out of scope for the current PR.  Each entry becomes a normal tracked issue so the work isn't lost while keeping this PR focused.
+
+Combined example:
+
+```json
+{"turn_outcome": "commit-task-complete", "summary": "Migrate webhook activities to FidoState", "insights": [{"title": "Snapshot ownership belongs to the writer class", "body": "When CAS read-modify-write breaks down, the right fix is moving ownership of the value out of the snapshot."}], "out_of_scope_asks": [{"title": "Webhook redelivery dedup window", "body": "Saw a duplicate `pull_request_review` arrive 10s apart from GitHub. Worth a dedup window in webhook ingest."}]}
+```
+
 The sentinel must be the literal last non-empty line of your response — nothing after it.  Do not wrap it in a code fence or markdown block.
 
 ## Done when
@@ -100,4 +113,5 @@ Never post a `BLOCKED:` comment yourself — emit `stuck-on-task` and the harnes
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
 - **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `./fido task`.
 - **Never** edit the PR body directly. The Fido server owns PR body sync.
-- **Never** fix unrelated bugs in this PR. If you encounter a bug that is not directly related to the current task title, file a GitHub issue for it (`gh issue create`) — do NOT fix it here. One PR, one purpose. Scope creep breaks reviewability.
+- **Never** fix unrelated bugs in this PR. If you encounter a bug that is not directly related to the current task title, declare it via the sentinel's `out_of_scope_asks` array (the harness files the issue) — do NOT fix it here, and do NOT call `gh issue create` directly. One PR, one purpose. Scope creep breaks reviewability.
+- **Never** call `gh issue create` yourself. The harness creates issues on your behalf via the sentinel's `insights` and `out_of_scope_asks` arrays — your tool set does not permit direct issue creation under any phase.

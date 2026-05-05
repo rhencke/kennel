@@ -251,6 +251,46 @@ class ProviderPressureStatus:
         return self.level == "paused"
 
 
+# Per-call tool policy constants (closes #1413).
+#
+# Every LLM call site declares its phase's tool policy via the
+# ``allowed_tools`` kwarg.  Default is :data:`READ_ONLY_ALLOWED_TOOLS` —
+# the safe shape that suits synthesis / rescope / setup / status / voice
+# rewrite / reply drafting (the LLM emits structured text or JSON; the
+# harness applies all state changes).  Task implementation passes
+# ``allowed_tools=None`` explicitly to permit edits and arbitrary Bash.
+#
+# :data:`GLOBAL_DISALLOWED_TOOLS` is applied unconditionally to every spawn,
+# every phase.  Tools listed here are never legitimate under any phase: the
+# harness owns commit/push/branch ops, and bypass-prone tools (``Agent``,
+# ``Skill``, the ``TaskCreate``/``Update``/``List``/``Todo*`` family) are
+# always denied.
+
+READ_ONLY_ALLOWED_TOOLS = (
+    "Read"
+    " Grep"
+    " Glob"
+    " Bash(git log *,git show *,git diff *,git status *,"
+    "git rev-parse *,git describe *,git tag *,git ls-files *,"
+    "git blame *,git shortlog *,git cat-file *,"
+    "git rev-list *,"
+    "gh issue view *,gh issue list *,"
+    "gh pr view *,gh pr list *,gh pr diff *)"
+)
+
+GLOBAL_DISALLOWED_TOOLS = (
+    "Bash(git commit *)"
+    " Bash(git push *)"
+    " Bash(git rebase *)"
+    " Bash(git reset *)"
+    " Bash(git checkout *)"
+    " Bash(./fido task *)"
+    " Agent"
+    " Skill"
+    " TaskCreate TaskUpdate TaskList TodoWrite TodoRead"
+)
+
+
 class PromptSession(Protocol):
     """Persistent prompt/session collaborator owned by a repo worker thread."""
 
@@ -295,10 +335,19 @@ class PromptSession(Protocol):
     def prompt(
         self,
         content: str,
+        *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
     ) -> str:
-        """Run a single prompt turn and return the final assistant text."""
+        """Run a single prompt turn and return the final assistant text.
+
+        ``allowed_tools`` defaults to :data:`READ_ONLY_ALLOWED_TOOLS` (closes
+        #1413) — the safe shape for synthesis / rescope / setup / status /
+        voice rewrite / reply drafting.  Task implementation must pass
+        ``allowed_tools=None`` explicitly to permit edits and arbitrary Bash.
+        :data:`GLOBAL_DISALLOWED_TOOLS` applies on top regardless.
+        """
         ...
 
     def send(self, content: str) -> None:
@@ -317,19 +366,6 @@ class PromptSession(Protocol):
     def switch_model(self, model: ProviderModel) -> None:
         """Switch the live session to *model* in-place without kill, respawn,
         or session-state loss."""
-        ...
-
-    def switch_tools(self, tools: str | None) -> None:
-        """Restrict or restore available tools for the continued session.
-
-        *tools* is passed as ``--allowedTools`` to the subprocess on respawn
-        while preserving ``--resume`` so conversation context carries across
-        the mode boundary.  ``None`` = no restriction (worker mode); a
-        non-empty string = the triage allowlist (handler mode, typically
-        :data:`~fido.claude.HANDLER_ALLOWED_TOOLS`, enforcing #1042).
-        No-op if unchanged.  Called automatically by
-        :meth:`OwnedSession.hold_for_handler`.
-        """
         ...
 
     def recover(self) -> None:
@@ -622,11 +658,6 @@ class OwnedSession:
     # otherwise crash on ``release_only_by_owner`` because the FSM has
     # already moved past the holder's state).  Guarded by ``_fsm_cond``.
     _evicted_tids: set[int]
-    # Allowed-tools value passed to :meth:`switch_tools` on handler entry.
-    # ``None`` means no restriction (default for CopilotCLISession whose
-    # switch_tools is a no-op; ClaudeSession sets this to
-    # :data:`~fido.claude.HANDLER_ALLOWED_TOOLS` in its constructor).
-    _handler_tools: str | None
 
     def _init_handler_reentry(self) -> None:
         """Subclasses call this from their ``__init__`` to set up the
@@ -647,9 +678,6 @@ class OwnedSession:
         # consults this set under ``_fsm_cond`` and skips the normal
         # ``_fsm_release`` so the double-release does not raise.
         self._evicted_tids: set[int] = set()
-        # Tool restriction applied on handler entry via switch_tools().
-        # ClaudeSession overrides to HANDLER_ALLOWED_TOOLS in its constructor.
-        self._handler_tools: str | None = None
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at
@@ -943,20 +971,6 @@ class OwnedSession:
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
 
-    def switch_tools(self, tools: str | None) -> None:
-        """Restrict or restore the subprocess tool allowlist.
-
-        Subclasses that wrap a persistent Claude Code subprocess (e.g.
-        :class:`~fido.claude.ClaudeSession`) override this to respawn with
-        ``--allowedTools <value>`` so handler turns get a triage tool set
-        and worker turns get the full set back.  Subclasses that do not
-        support tool switching (e.g. CopilotCLISession) override with a no-op.
-
-        Called automatically by :meth:`hold_for_handler` on entry
-        (``tools = self._handler_tools``) and on exit (``tools = None``).
-        """
-        raise NotImplementedError  # pragma: no cover — abstract hook
-
     def preempt_worker(self) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
         the session.
@@ -1007,16 +1021,15 @@ class OwnedSession:
         worker currently holds the session, see #637).  No opt-in flag
         is needed here.
 
-        Switches the session to triage handler mode (via
-        :meth:`switch_tools` with :attr:`_handler_tools`) on entry, then
-        restores the unrestricted worker tool set on exit (#1042).
+        Tool restriction is now per-call (closes #1413): every
+        :meth:`PromptSession.prompt` (or wrapper) declares its own
+        ``allowed_tools`` policy.  This context manager no longer switches
+        tools on enter/exit — the previous FSM-dispatch dance was a no-op
+        for the actual triage work because synthesis runs *after* this
+        context exits, with tools already restored.
         """
         with self:  # type: ignore[attr-defined]
-            self.switch_tools(self._handler_tools)
-            try:
-                yield self
-            finally:
-                self.switch_tools(None)
+            yield self
 
 
 class ProviderAgent(Protocol):
@@ -1109,11 +1122,16 @@ class ProviderAgent(Protocol):
         content: str,
         *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
         session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     ) -> str:
-        """Run one interactive turn through the persistent session and return text."""
+        """Run one interactive turn through the persistent session and return text.
+
+        ``allowed_tools`` defaults to :data:`READ_ONLY_ALLOWED_TOOLS` (closes
+        #1413).  Task implementation must pass ``None`` explicitly.
+        """
         ...
 
     def print_prompt_from_file(
@@ -1124,6 +1142,8 @@ class ProviderAgent(Protocol):
         timeout: int = 30,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Run a one-shot prompt sourced from files and return raw provider output."""
         ...
@@ -1136,6 +1156,8 @@ class ProviderAgent(Protocol):
         timeout: int = 300,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Resume a prior one-shot provider session and return raw output."""
         ...
@@ -1145,6 +1167,8 @@ class ProviderAgent(Protocol):
         prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 30,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Generate a short natural-language reply for a GitHub comment flow."""
         ...
@@ -1154,6 +1178,8 @@ class ProviderAgent(Protocol):
         prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 15,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Generate a git branch-name slug from *prompt*."""
         ...
@@ -1163,6 +1189,8 @@ class ProviderAgent(Protocol):
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Generate a two-line GitHub status message."""
         ...
@@ -1172,6 +1200,8 @@ class ProviderAgent(Protocol):
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Generate a single emoji suitable for a GitHub status."""
         ...
@@ -1206,6 +1236,7 @@ def safe_voice_turn(
     content: str,
     *,
     model: ProviderModel | None = None,
+    allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     system_prompt: str | None = None,
     log_prefix: str = "safe_voice_turn",
 ) -> str:
@@ -1215,10 +1246,14 @@ def safe_voice_turn(
     site automatically retries when a session preemption returns an empty
     result.  If the result is still empty after retries, raises
     ``ValueError`` — the session reconnect layer handles recovery.
+
+    ``allowed_tools`` defaults to :data:`READ_ONLY_ALLOWED_TOOLS` (voice
+    turns are text rewriting; the harness applies all state changes).
     """
     result = agent.run_turn(
         content,
         model=model,
+        allowed_tools=allowed_tools,
         system_prompt=system_prompt,
         retry_on_preempt=True,
     )

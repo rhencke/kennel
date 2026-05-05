@@ -12,6 +12,7 @@ import json
 import logging
 from typing import Any
 
+from fido.claude import READ_ONLY_ALLOWED_TOOLS
 from fido.prompts import Prompts
 from fido.provider import ProviderAgent
 from fido.synthesis import (
@@ -203,7 +204,11 @@ def call_synthesis(
         user_prompt = (
             base_user_prompt if attempt == 0 else base_user_prompt + _RETRY_SUFFIX
         )
-        raw = agent.run_turn(user_prompt, system_prompt=system_prompt)
+        raw = agent.run_turn(
+            user_prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=system_prompt,
+        )
         log.debug(
             "synthesis attempt %d/%d raw output: %r", attempt + 1, MAX_RETRIES, raw
         )
@@ -260,7 +265,10 @@ def call_failure_explanation(
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
         suffix = _FAILURE_EXPLANATION_RETRY_SUFFIX if attempt > 0 else ""
-        raw = agent.run_turn(user_prompt + suffix)
+        raw = agent.run_turn(
+            user_prompt + suffix,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
         log.debug(
             "failure-explanation attempt %d/%d raw output: %r",
             attempt + 1,

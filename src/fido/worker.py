@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.claude import ClaudeCode
+from fido.claude import READ_ONLY_ALLOWED_TOOLS, ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
@@ -64,7 +64,7 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
-from fido.turn_outcome import parse_turn_outcome
+from fido.turn_outcome import TurnOutcomeBundle, parse_turn_outcome
 from fido.types import (
     ActiveIssue,
     ActivePR,
@@ -457,6 +457,7 @@ def provider_start(
         output = agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
             retry_on_preempt=True,
             session_mode=session_mode,
         )
@@ -464,7 +465,12 @@ def provider_start(
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
-        system_file, prompt_file, model, timeout, cwd=cwd
+        system_file,
+        prompt_file,
+        model,
+        timeout,
+        cwd=cwd,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
     )
     return agent.extract_session_id(output), output
 
@@ -513,6 +519,8 @@ def provider_run(
         output = agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
+            # Task implementation: implicit ``*`` minus GLOBAL_DISALLOWED_TOOLS.
+            allowed_tools=None,
             retry_on_preempt=retry_on_preempt,
             session_mode=session_mode,
         )
@@ -520,7 +528,13 @@ def provider_run(
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
-        system_file, prompt_file, model, timeout, cwd=cwd
+        system_file,
+        prompt_file,
+        model,
+        timeout,
+        cwd=cwd,
+        # Task implementation: implicit ``*`` minus GLOBAL_DISALLOWED_TOOLS.
+        allowed_tools=None,
     )
     new_session_id = agent.extract_session_id(output)
     return new_session_id, output
@@ -1093,7 +1107,11 @@ def _write_pr_description(
         assert agent is not None
         prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
         raw = safe_voice_turn(
-            agent, prompt, model=agent.voice_model, log_prefix="_write_pr_description"
+            agent,
+            prompt,
+            model=agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            log_prefix="_write_pr_description",
         )
         new_desc = _extract_body(raw)
         if not new_desc:
@@ -1448,6 +1466,7 @@ class Worker:
             raw = self._provider_agent.run_turn(
                 prompts.status_prompt(activities),
                 model=self._provider_agent.voice_model,
+                allowed_tools=READ_ONLY_ALLOWED_TOOLS,
                 system_prompt=prompts.status_system_prompt(),
             )
             text, emoji = _parse_status_nudge(raw)
@@ -1817,7 +1836,9 @@ class Worker:
         prompts = self._get_prompts()
         prompt = prompts.pickup_retry_comment_prompt(issue_title, closed_prs)
         msg = self._provider_agent.generate_reply(
-            prompt, self._provider_agent.voice_model
+            prompt,
+            self._provider_agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         )
         if not msg:
             pr_list = ", ".join(f"#{n}" for n in closed_prs)
@@ -1961,6 +1982,7 @@ class Worker:
             " No explanation, no punctuation, just the branch name."
             f"\n\nRequest: {request}",
             self._provider_agent.brief_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         )
         slug = _sanitize_slug(raw_slug, request)
         log.info("new branch: %s", slug)
@@ -2788,6 +2810,34 @@ class Worker:
                     pr_number,
                 )
 
+    def _file_aux_issues_from_bundle(
+        self,
+        bundle: TurnOutcomeBundle,
+        repo_ctx: RepoContext,
+        pr_number: int,
+    ) -> None:
+        """File any ``insights`` and ``out_of_scope_asks`` declared in the
+        turn_outcome sentinel as GitHub issues on behalf of Fido (closes
+        #1413).  Called after a successful harness commit so the LLM's
+        side-channel observations don't depend on the LLM's permission set
+        — the harness owns issue creation, the LLM only declares intent.
+        """
+        for insight in bundle.insights:
+            self.gh.create_issue(
+                repo_ctx.repo,
+                f"Insight: {insight.title}",
+                f"{insight.body}\n\nSource: {repo_ctx.repo}#{pr_number}",
+                labels=["Insight"],
+            )
+            log.info("filed insight from turn sentinel: %s", insight.title[:60])
+        for ask in bundle.out_of_scope_asks:
+            self.gh.create_issue(
+                repo_ctx.repo,
+                ask.title,
+                f"{ask.body}\n\nOut-of-scope from: {repo_ctx.repo}#{pr_number}",
+            )
+            log.info("filed out-of-scope ask from turn sentinel: %s", ask.title[:60])
+
     def _finish_task(
         self,
         task: dict[str, Any],
@@ -3278,7 +3328,8 @@ class Worker:
         # Sentinel loop: each iteration processes one provider turn's output.
         while True:
             try:
-                outcome = parse_turn_outcome(output)
+                bundle = parse_turn_outcome(output)
+                outcome = bundle.outcome
             except ValueError as exc:
                 # LLM did not emit a valid turn_outcome sentinel — nudge it.
                 nudge = self._nudges.missing_sentinel(
@@ -3372,6 +3423,13 @@ class Worker:
                         # Task complete: push and advance the queue.
                         pushed = self._push_with_retry("origin", slug)
                         if pushed:
+                            # File any LLM-declared insights / out-of-scope
+                            # asks before advancing — the harness owns issue
+                            # creation; the LLM's tool set never includes
+                            # ``gh issue create`` (closes #1413).
+                            self._file_aux_issues_from_bundle(
+                                bundle, repo_ctx, pr_number
+                            )
                             self._finish_task(
                                 task, fido_dir, repo_ctx, pr_number, leak_before_ids
                             )
@@ -3400,6 +3458,11 @@ class Worker:
                         return True
                     case cra_oracle.ActionContinueSession():
                         assert isinstance(commit_result, CommitSuccess)
+                        # File any LLM-declared aux issues alongside the
+                        # partial commit (closes #1413).  The harness owns
+                        # issue creation across all turn types, not only
+                        # task-complete turns.
+                        self._file_aux_issues_from_bundle(bundle, repo_ctx, pr_number)
                         # CommitTaskInProgress: partial commit — continue.
                         log.info(
                             "task in-progress commit %s — continuing session",
@@ -3539,7 +3602,9 @@ class Worker:
         prompts = self._get_prompts()
         prompt = prompts.pickup_comment_prompt(issue_title)
         msg = self._provider_agent.generate_reply(
-            prompt, self._provider_agent.voice_model
+            prompt,
+            self._provider_agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         )
         if not msg:
             msg = f"Picking up issue: {issue_title}"

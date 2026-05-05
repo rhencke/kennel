@@ -6,7 +6,12 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from fido.provider import PromptSession, ProviderModel, TurnSessionMode
+from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
+    PromptSession,
+    ProviderModel,
+    TurnSessionMode,
+)
 
 log = logging.getLogger(__name__)
 
@@ -191,6 +196,7 @@ class SessionBackedAgent:
         content: str,
         *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
         session_mode: TurnSessionMode = TurnSessionMode.REUSE,
@@ -205,6 +211,7 @@ class SessionBackedAgent:
                 session,
                 content,
                 model=model,
+                allowed_tools=allowed_tools,
                 system_prompt=system_prompt,
             )
             if (
@@ -229,6 +236,8 @@ class SessionBackedAgent:
         prompt: str,
         key: str,
         model: ProviderModel,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
     ) -> str:
         json_instruction = (
@@ -240,7 +249,12 @@ class SessionBackedAgent:
             if system_prompt
             else json_instruction
         )
-        raw = self.run_turn(prompt, model=model, system_prompt=full_system)
+        raw = self.run_turn(
+            prompt,
+            model=model,
+            allowed_tools=allowed_tools,
+            system_prompt=full_system,
+        )
         if not raw:
             return ""
         for candidate in self._json_parse_candidates(raw):
@@ -286,13 +300,17 @@ class SessionBackedAgent:
         content: str,
         *,
         model: ProviderModel | None,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None,
     ) -> str:
         recovered = False
         while True:
             try:
                 result = session.prompt(
-                    content, model=model, system_prompt=system_prompt
+                    content,
+                    model=model,
+                    allowed_tools=allowed_tools,
+                    system_prompt=system_prompt,
                 )
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):
@@ -328,6 +346,7 @@ class SessionBackedAgent:
         content: str,
         *,
         model: ProviderModel,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
     ) -> tuple[str, str]:
         # Route through _prompt_with_recovery so a stale subprocess (BrokenPipe
@@ -338,7 +357,11 @@ class SessionBackedAgent:
             session_mode=TurnSessionMode.REUSE,
         )
         text = self._prompt_with_recovery(
-            session, content, model=model, system_prompt=system_prompt
+            session,
+            content,
+            model=model,
+            allowed_tools=allowed_tools,
+            system_prompt=system_prompt,
         )
         session_id = getattr(session, "session_id", None)
         return text, session_id if isinstance(session_id, str) else ""
@@ -360,10 +383,13 @@ class SessionBackedAgent:
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         return self.run_turn(
             prompt,
             model=self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )
 
@@ -372,11 +398,14 @@ class SessionBackedAgent:
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         return self._run_turn_json_value(
             prompt,
             "emoji",
             self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )
 
@@ -385,11 +414,14 @@ class SessionBackedAgent:
         prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 30,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         del timeout
         text, _ = self._run_shared_turn(
             prompt,
             model=self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
         )
         return text.strip()
 
@@ -398,11 +430,14 @@ class SessionBackedAgent:
         prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 15,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         del timeout
         text, _ = self._run_shared_turn(
             prompt,
             model=self.brief_model if model is None else model,
+            allowed_tools=allowed_tools,
         )
         stripped = text.strip()
         return stripped.splitlines()[0] if stripped else ""
@@ -413,11 +448,14 @@ class SessionBackedAgent:
         system_prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 15,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> tuple[str, str]:
         del timeout
         text, session_id = self._run_shared_turn(
             prompt,
             model=self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )
         return text.strip(), session_id
@@ -428,10 +466,13 @@ class SessionBackedAgent:
         prompt: str,
         model: ProviderModel | None = None,
         timeout: int = 15,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         del timeout
         session = self._require_matching_session(session_id)
         return session.prompt(
             prompt,
             model=self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
         ).strip()

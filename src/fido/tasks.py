@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
-from fido.claude import ClaudeClient
+from fido.claude import READ_ONLY_ALLOWED_TOOLS, ClaudeClient
 from fido.github import GitHub
 from fido.prompts import Prompts
 from fido.provider import ProviderAgent
@@ -944,7 +944,11 @@ def reorder_tasks(
         prior_attempts=prior_attempts,
         intents=intents,
     )
-    raw = agent.run_turn(prompt, model=agent.voice_model)
+    raw = agent.run_turn(
+        prompt,
+        model=agent.voice_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+    )
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return
@@ -975,7 +979,11 @@ def reorder_tasks(
         nudge = prompts.rescope_duplicate_nudge(
             duplicates, attempts_remaining=attempts_remaining
         )
-        nudge_raw = agent.run_turn(nudge, model=agent.voice_model)
+        nudge_raw = agent.run_turn(
+            nudge,
+            model=agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
         if not nudge_raw:
             log.warning(
                 "reorder_tasks: empty response after duplicate nudge — "

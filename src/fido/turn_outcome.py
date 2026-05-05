@@ -8,6 +8,10 @@ pending for another turn, or skip the commit and record a reason.
 The LLM declares intent; Python acts on it.  Git operations are never the
 LLM's responsibility.
 
+Optional ``insights`` and ``out_of_scope_asks`` arrays let the LLM declare
+auxiliary issues for the harness to file on its behalf.  Both default to
+empty arrays and may appear alongside any ``turn_outcome`` value.
+
 Type definitions (``CommitTaskComplete``, ``CommitTaskInProgress``,
 ``SkipTaskWithReason``, ``TurnOutcome``) live in the Rocq-extracted module
 :mod:`fido.rocq.turn_outcome`.  Importers should get types directly from
@@ -16,6 +20,7 @@ that module.  This module owns only the parser boundary adapter.
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
@@ -27,8 +32,43 @@ from fido.rocq.turn_outcome import (
 )
 
 __all__ = [
+    "Insight",
+    "OutOfScopeAsk",
+    "TurnOutcomeBundle",
     "parse_turn_outcome",
 ]
+
+
+@dataclass(frozen=True)
+class Insight:
+    """A bug-or-design observation the LLM declared in its turn output;
+    filed by the harness as a GitHub issue with the ``Insight`` label.
+
+    Mirrors :class:`fido.synthesis.Insight` but is the task-phase variant
+    consumed via the turn_outcome sentinel."""
+
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class OutOfScopeAsk:
+    """A request that arrived during task work but is out of scope for
+    the current task; filed by the harness as a tracked GitHub issue so
+    the work isn't lost but doesn't bloat the current PR."""
+
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class TurnOutcomeBundle:
+    """Full result of parsing a turn_outcome sentinel: the dispatch outcome
+    plus any auxiliary issues the LLM declared for harness-side filing."""
+
+    outcome: TurnOutcome
+    insights: tuple[Insight, ...]
+    out_of_scope_asks: tuple[OutOfScopeAsk, ...]
 
 
 def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
@@ -93,11 +133,43 @@ def _parse_outcome_field(
     return result
 
 
-def parse_turn_outcome(text: str) -> TurnOutcome:
+def _parse_aux_issues(
+    obj: dict[str, object], field: str, factory: Callable[[str, str], object]
+) -> tuple[object, ...]:
+    """Parse an optional auxiliary-issue array (``insights`` or
+    ``out_of_scope_asks``) from *obj*.
+
+    Returns an empty tuple when the field is absent or ``None``.  Raises
+    ``ValueError`` when present but malformed (non-list, items missing
+    required fields, etc.).
+    """
+    raw = obj.get(field)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f'turn_outcome "{field}" must be a JSON array, got: {raw!r}')
+    out: list[object] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"{field}[{i}] is not a JSON object: {item!r}")
+        title = item.get("title")
+        body = item.get("body")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f'{field}[{i}] requires a non-empty "title" string')
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError(f'{field}[{i}] requires a non-empty "body" string')
+        out.append(factory(title.strip(), body))
+    return tuple(out)
+
+
+def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
     Only the final non-empty line is examined — stale sentinels earlier in
     the response are ignored.
+
+    Returns a :class:`TurnOutcomeBundle` with the dispatch ``outcome`` plus
+    any optional ``insights`` and ``out_of_scope_asks`` declared by the LLM.
 
     Raises:
         ValueError: If the line is absent, not valid JSON, not a recognised
@@ -120,19 +192,19 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
     kind = obj.get("turn_outcome")
     match kind:
         case "commit-task-complete":
-            return _parse_outcome_field(
+            outcome: TurnOutcome = _parse_outcome_field(
                 obj, kind, "summary", lambda s: CommitTaskComplete(summary=s)
             )
         case "commit-task-in-progress":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "summary", lambda s: CommitTaskInProgress(summary=s)
             )
         case "skip-task-with-reason":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "reason", lambda s: SkipTaskWithReason(reason=s)
             )
         case "stuck-on-task":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "reason", lambda s: StuckOnTask(reason=s)
             )
         case None:
@@ -143,3 +215,18 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
             # unknown kind regardless of payload content.
             _assert_reject_oracle(kind, "x")
             raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
+    insights = _parse_aux_issues(
+        obj, "insights", lambda title, body: Insight(title=title, body=body)
+    )
+    asks = _parse_aux_issues(
+        obj,
+        "out_of_scope_asks",
+        lambda title, body: OutOfScopeAsk(title=title, body=body),
+    )
+    # mypy/pyright: tuple element types are object[]; cast the homogeneous
+    # tuples for the bundle type signature.
+    return TurnOutcomeBundle(
+        outcome=outcome,
+        insights=tuple(i for i in insights if isinstance(i, Insight)),
+        out_of_scope_asks=tuple(a for a in asks if isinstance(a, OutOfScopeAsk)),
+    )

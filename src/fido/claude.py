@@ -51,22 +51,17 @@ _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
 
-# Handler tool allowlist for handler turns (#1042).  Handler prompts
-# (triage, reply, status, rescope) must never perform implementation work —
-# they may *inspect* the codebase and perform triage actions (file issues,
-# create tasks) but not edit source files.  Passed as ``--allowedTools`` to
-# the claude subprocess when switching into handler mode.
-# Format: space-separated tool specs per ``claude --help``.
-HANDLER_ALLOWED_TOOLS = (
-    "Read"
-    " Grep"
-    " Glob"
-    " Bash(git log *,git show *,git diff *,git status *,"
-    "git rev-parse *,git describe *,git tag *,git ls-files *,"
-    "git blame *,git shortlog *,git cat-file *,"
-    "git rev-list *,"
-    "gh issue create *,gh issue list *,gh issue view *,"
-    "gh pr view *,gh pr list *)"
+# Tool policy constants now live in :mod:`fido.provider` so the protocol
+# signatures can reference them as defaults without importing claude (closes
+# #1413).  Re-exported here for back-compat with existing call sites.
+from fido.provider import (  # noqa: E402  (re-export at top of module)
+    GLOBAL_DISALLOWED_TOOLS,
+    READ_ONLY_ALLOWED_TOOLS,
+)
+
+__all_tools__ = (
+    "GLOBAL_DISALLOWED_TOOLS",
+    "READ_ONLY_ALLOWED_TOOLS",
 )
 
 
@@ -510,7 +505,7 @@ class ClaudeSession(OwnedSession):
         # Allowed-tools restriction passed as ``--allowedTools`` to the
         # subprocess.  ``None`` = no restriction (worker mode, default);
         # any string = triage allowlist (handler mode, typically
-        # :data:`HANDLER_ALLOWED_TOOLS`).  Changed via :meth:`switch_tools`,
+        # :data:`READ_ONLY_ALLOWED_TOOLS`).  Changed via :meth:`switch_tools`,
         # which respawns the subprocess while keeping ``--resume`` so
         # conversation context survives the mode transition (#1042).
         self._tools: str | None = tools
@@ -536,12 +531,6 @@ class ClaudeSession(OwnedSession):
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
         self._init_handler_reentry()
-        # Activate the triage allowlist for handler turns: override the
-        # OwnedSession default (None = no restriction) with the Claude Code
-        # handler allowlist so hold_for_handler automatically switches the
-        # subprocess into triage mode on entry and back to full tools on
-        # exit (#1042).
-        self._handler_tools = HANDLER_ALLOWED_TOOLS
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
         # blocking wait in iter_events() so the cancel signal is noticed
         # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
@@ -660,14 +649,11 @@ class ClaudeSession(OwnedSession):
         ]
         if self._tools is not None:
             cmd += ["--allowedTools", self._tools]
-        cmd += [
-            "--disallowedTools",
-            "Bash(git commit *) Bash(git push *)"
-            " Bash(git rebase *) Bash(git reset *)"
-            " Bash(git checkout *)"
-            " Bash(./fido task *)"
-            " TaskCreate TaskUpdate TaskList TodoWrite TodoRead",
-        ]
+        # GLOBAL_DISALLOWED_TOOLS applies to every spawn regardless of
+        # which phase's allowlist is active — these are tools no phase can
+        # legitimately use (harness owns commit/push, bypass-prone Agent /
+        # Skill / Task* family always denied).
+        cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         if self._session_id:
             cmd += ["--resume", self._session_id]
         proc = self._popen_fn(
@@ -1110,16 +1096,24 @@ class ClaudeSession(OwnedSession):
     def prompt(
         self,
         content: str,
+        *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
     ) -> str:
         """Send *content* as a user message on the persistent session and
         return the result.
 
         Acquires the session lock and runs one turn: optional
-        :meth:`switch_model`, :meth:`send` (which drains any lingering
-        boundary events from a prior aborted turn), and
+        :meth:`switch_model`, :meth:`switch_tools`, :meth:`send` (which
+        drains any lingering boundary events from a prior aborted turn), and
         :meth:`consume_until_result`.
+
+        ``allowed_tools`` defaults to :data:`READ_ONLY_ALLOWED_TOOLS` (closes
+        #1413) — the safe shape for synthesis / rescope / setup / status /
+        voice rewrite / reply drafting.  Task implementation passes ``None``
+        explicitly to permit edits and arbitrary Bash.
+        :data:`GLOBAL_DISALLOWED_TOOLS` is applied unconditionally on top.
 
         Preemption (cancelling a running worker turn so a webhook handler can
         acquire the lock promptly) is handled upstream: the HTTP handler fires
@@ -1138,6 +1132,7 @@ class ClaudeSession(OwnedSession):
             )
             if model is not None:
                 self.switch_model(model)
+            self.switch_tools(allowed_tools)
             if system_prompt:
                 body = f"{system_prompt}\n\n---\n\n{content}"
             else:
@@ -1193,7 +1188,7 @@ class ClaudeSession(OwnedSession):
         ``--allowedTools`` value.
 
         When *tools* is a non-None string (typically
-        :data:`HANDLER_ALLOWED_TOOLS`), the subprocess is spawned with
+        :data:`READ_ONLY_ALLOWED_TOOLS`), the subprocess is spawned with
         ``--allowedTools <value>`` so only triage tools are available —
         this is the handler mode that enforces the invariant from #1042:
         webhook handlers may inspect the codebase and perform triage actions
@@ -1769,11 +1764,14 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Ask claude to generate a GitHub status (two lines: emoji + text)."""
         return self.run_turn(
             prompt,
             model=self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )
 
@@ -1782,12 +1780,15 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         prompt: str,
         system_prompt: str,
         model: ProviderModel | None = None,
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Ask claude to choose a single emoji for a GitHub status."""
         return self._run_turn_json_value(
             prompt,
             "emoji",
             self.voice_model if model is None else model,
+            allowed_tools=allowed_tools,
             system_prompt=system_prompt,
         )
 
@@ -1801,8 +1802,11 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 30,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Run claude --print reading system prompt and user prompt from files."""
+        del timeout
         cmd = [
             "claude",
             "--model",
@@ -1815,6 +1819,9 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             str(system_file),
             "--print",
         ]
+        if allowed_tools is not None:
+            cmd += ["--allowedTools", allowed_tools]
+        cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()
@@ -1829,8 +1836,11 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 300,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Continue an existing claude session by ID, feeding prompt_file on stdin."""
+        del timeout
         cmd = [
             "claude",
             "--model",
@@ -1843,6 +1853,9 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             session_id,
             "--print",
         ]
+        if allowed_tools is not None:
+            cmd += ["--allowedTools", allowed_tools]
+        cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
         ).strip()

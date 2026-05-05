@@ -737,9 +737,16 @@ class CodexSession(OwnedSession):
     def prompt(
         self,
         content: str,
+        *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = None,  # see comment below
         system_prompt: str | None = None,
     ) -> str:
+        # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
+        # #1413), but Codex's runtime has no equivalent of ``--allowedTools``
+        # so the kwarg is informational here.  Default differs from the
+        # protocol's READ_ONLY default because there's nothing to enforce.
+        del allowed_tools
         with self:
             if model is not None:
                 self.switch_model(model)
@@ -842,9 +849,6 @@ class CodexSession(OwnedSession):
 
     def switch_model(self, model: ProviderModel | str) -> None:
         self._model = coerce_provider_model(model)
-
-    def switch_tools(self, tools: str | None) -> None:
-        del tools
 
     def recover(self) -> None:
         with self._turn_lock:
@@ -1185,8 +1189,10 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 30,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = None,  # informational; Codex has no equivalent
     ) -> str:
-        del idle_timeout
+        del idle_timeout, allowed_tools
         prompt = _combine_prompt(prompt_file.read_text(), system_file.read_text(), None)
         return run_codex_exec(
             prompt,
@@ -1204,8 +1210,10 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 300,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = None,  # informational; Codex has no equivalent
     ) -> str:
-        del idle_timeout
+        del idle_timeout, allowed_tools
         return run_codex_exec_resume(
             session_id,
             prompt_file.read_text(),

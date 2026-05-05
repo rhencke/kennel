@@ -976,14 +976,6 @@ class TestCodexSessionLeafBranches:
         session = self._session(tmp_path, repo_name=None)
         assert session.owner is None  # type: ignore[union-attr]
 
-    def test_switch_tools_is_a_noop(self, tmp_path: Path) -> None:
-        """codex.py:847 — Codex doesn't support per-session tool flags;
-        ``switch_tools`` accepts the call and discards the value."""
-        session = self._session(tmp_path)
-        # Should not raise; nothing observable to assert.
-        session.switch_tools("triage")  # type: ignore[union-attr]
-        session.switch_tools(None)  # type: ignore[union-attr]
-
     def test_reset_with_explicit_model(self, tmp_path: Path) -> None:
         """codex.py:863 — reset(model=...) coerces the new model."""
         from fido.provider import ProviderModel
