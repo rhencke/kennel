@@ -31,6 +31,33 @@ def _utcnow() -> datetime:
 
 
 @dataclass(frozen=True)
+class WorkerActivity:
+    """Snapshot of what one worker is currently doing.
+
+    Frozen so instances can be stored inside frozen :class:`RepoState`
+    without breaking the immutability guarantee of the atomic snapshot.
+    """
+
+    repo_name: str
+    what: str
+    busy: bool
+    last_progress_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkerCrash:
+    """Running record of unexpected worker deaths for one repo.
+
+    Frozen so instances can be stored inside frozen :class:`RepoState`
+    without breaking the immutability guarantee of the atomic snapshot.
+    """
+
+    death_count: int
+    last_error: str
+    last_crash_time: datetime
+
+
+@dataclass(frozen=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -40,14 +67,24 @@ class RepoState:
     *started_at* is the UTC timestamp when the most recent
     :class:`~fido.worker.WorkerThread` for this repo was started.
 
+    *activity* is the current :class:`WorkerActivity` for this repo, or
+    ``None`` if the worker has not yet reported any activity.  Migrated from
+    ``WorkerRegistry._activities`` / ``_activity_lock`` in PR 2/6.
+
+    *crash_record* is the accumulated :class:`WorkerCrash` history for this
+    repo, or ``None`` if the worker has never crashed.  Migrated from
+    ``WorkerRegistry._crashes`` / ``_crash_lock`` in PR 2/6.
+
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
-    :class:`WorkerRegistry`, those fields grow here (e.g. ``activity``,
-    ``crash_record``, ``rescoping``).  Each migration removes the
-    corresponding lock and dict from ``WorkerRegistry.__init__``.
+    :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
+    Each migration removes the corresponding lock and dict from
+    ``WorkerRegistry.__init__``.
     """
 
     key: str
     started_at: datetime
+    activity: WorkerActivity | None = None
+    crash_record: WorkerCrash | None = None
 
 
 @dataclass(frozen=True)
@@ -78,25 +115,6 @@ class FidoState:
 
 
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())
-
-
-@dataclass
-class WorkerActivity:
-    """Snapshot of what one worker is currently doing."""
-
-    repo_name: str
-    what: str
-    busy: bool
-    last_progress_at: datetime
-
-
-@dataclass
-class WorkerCrash:
-    """Running record of unexpected worker deaths for one repo."""
-
-    death_count: int
-    last_error: str
-    last_crash_time: datetime
 
 
 @dataclass
