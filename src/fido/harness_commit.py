@@ -114,14 +114,27 @@ class HarnessCommitter:
         identity to the commit message for thread tasks — reviewers who
         requested the change get attribution in the git log.
         """
-        if isinstance(outcome, SkipTaskWithReason):
-            return CommitSkipped(reason=outcome.reason)
+        match outcome:
+            case SkipTaskWithReason(reason=reason):
+                return CommitSkipped(reason=reason)
+            case StuckOnTask(reason=reason):
+                return CommitSkipped(reason=reason)
+            case (
+                CommitTaskComplete(summary=summary)
+                | CommitTaskInProgress(summary=summary)
+            ):
+                return self._attempt_commit(summary, helped_by=helped_by)
+            case _:  # pragma: no cover — unreachable; exhaustive above
+                raise ValueError(f"unexpected TurnOutcome variant: {outcome!r}")
 
-        if isinstance(outcome, StuckOnTask):
-            return CommitSkipped(reason=outcome.reason)
-
-        assert isinstance(outcome, CommitTaskComplete | CommitTaskInProgress)
-
+    def _attempt_commit(
+        self,
+        summary: str,
+        *,
+        helped_by: Sequence[GitIdentity] = (),
+    ) -> CommitResult:
+        """Stage tracked files and commit.  Pure I/O — the decision to call
+        this has already been made by the match dispatch above."""
         # Stage tracked files only — never sweep untracked files like
         # .coverage artifacts, editor scratch files, or build outputs.
         self._git(["add", "-u"])
@@ -131,7 +144,7 @@ class HarnessCommitter:
         if diff_cached.returncode == 0:
             return CommitNothingStaged()
 
-        message = self._build_message(outcome.summary, helped_by=helped_by)
+        message = self._build_message(summary, helped_by=helped_by)
         result = self._git(["commit", "-m", message], check=False)
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
@@ -139,5 +152,5 @@ class HarnessCommitter:
             return CommitHookFailure(output=output)
 
         sha = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        log.info("harness commit: %s (%s)", sha[:12], outcome.summary[:60])
+        log.info("harness commit: %s (%s)", sha[:12], summary[:60])
         return CommitSuccess(sha=sha)

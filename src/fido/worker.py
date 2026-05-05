@@ -3215,80 +3215,90 @@ class Worker:
                         state.pop("current_task_id", None)
                     return True
                 commit_result = harness_committer.apply(outcome)
-                if isinstance(commit_result, CommitSkipped):
-                    # skip-task-with-reason: task is done without a commit.
-                    log.info("task skipped without commit: %s", commit_result.reason)
-                    config = self._config
-                    allowed_bots = (
-                        config.allowed_bots if config is not None else frozenset()
-                    )
-                    self._tasks.complete_with_resolve(
-                        task["id"],
-                        self.gh,
-                        collaborators=repo_ctx.collaborators,
-                        allowed_bots=allowed_bots,
-                    )
-                    with State(fido_dir).modify() as state:
-                        state.pop("current_task_id", None)
-                    tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-                    self._delete_leaked_task_comments(
-                        repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
-                    )
-                    return True
-                if isinstance(commit_result, CommitNothingStaged):
-                    # Sentinel declared a commit but nothing was staged.
-                    nudge = _nothing_staged_nudge(
-                        task_title=task_title,
-                        task_id=task["id"],
-                        work_dir=str(self.work_dir),
-                        pr_number=pr_number,
-                    )
-                    (fido_dir / "prompt").write_text(nudge)
-                    log.info(
-                        "task sentinel declared commit but nothing staged — nudging"
-                    )
-                elif isinstance(commit_result, CommitHookFailure):
-                    # Pre-commit hook rejected the commit — nudge LLM to fix it.
-                    header = _nudge_context_header(
-                        task_title=task_title,
-                        task_id=task["id"],
-                        work_dir=str(self.work_dir),
-                        pr_number=pr_number,
-                    )
-                    hook_nudge = harness_committer.hook_failure_nudge(commit_result)
-                    nudge = f"{header}\n\n{hook_nudge}"
-                    (fido_dir / "prompt").write_text(nudge)
-                    log.info("task pre-commit hook rejected commit — nudging")
-                else:
-                    assert isinstance(commit_result, CommitSuccess)
-                    if isinstance(outcome, CommitTaskComplete):
-                        # Task complete: push and advance the queue.
-                        pushed = self.ensure_pushed("origin", slug)
-                        if pushed is not False:
-                            config = self._config
-                            allowed_bots = (
-                                config.allowed_bots
-                                if config is not None
-                                else frozenset()
-                            )
-                            self._tasks.complete_with_resolve(
-                                task["id"],
-                                self.gh,
-                                collaborators=repo_ctx.collaborators,
-                                allowed_bots=allowed_bots,
-                            )
-                            with State(fido_dir).modify() as state:
-                                state.pop("current_task_id", None)
-                            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                match commit_result:
+                    case CommitSkipped(reason=reason):
+                        # skip-task-with-reason: task is done without a commit.
+                        log.info("task skipped without commit: %s", reason)
+                        config = self._config
+                        allowed_bots = (
+                            config.allowed_bots if config is not None else frozenset()
+                        )
+                        self._tasks.complete_with_resolve(
+                            task["id"],
+                            self.gh,
+                            collaborators=repo_ctx.collaborators,
+                            allowed_bots=allowed_bots,
+                        )
+                        with State(fido_dir).modify() as state:
+                            state.pop("current_task_id", None)
+                        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
                         self._delete_leaked_task_comments(
-                            repo_ctx.repo, pr_number, repo_ctx.gh_user, leak_before_ids
+                            repo_ctx.repo,
+                            pr_number,
+                            repo_ctx.gh_user,
+                            leak_before_ids,
                         )
                         return True
-                    # CommitTaskInProgress: partial commit — continue in same session.
-                    log.info(
-                        "task in-progress commit %s — continuing session",
-                        commit_result.sha[:12],
-                    )
+                    case CommitNothingStaged():
+                        # Sentinel declared a commit but nothing was staged.
+                        nudge = _nothing_staged_nudge(
+                            task_title=task_title,
+                            task_id=task["id"],
+                            work_dir=str(self.work_dir),
+                            pr_number=pr_number,
+                        )
+                        (fido_dir / "prompt").write_text(nudge)
+                        log.info(
+                            "task sentinel declared commit but nothing staged — nudging"
+                        )
+                    case CommitHookFailure() as failure:
+                        # Pre-commit hook rejected — nudge LLM to fix.
+                        header = _nudge_context_header(
+                            task_title=task_title,
+                            task_id=task["id"],
+                            work_dir=str(self.work_dir),
+                            pr_number=pr_number,
+                        )
+                        hook_nudge = harness_committer.hook_failure_nudge(failure)
+                        nudge = f"{header}\n\n{hook_nudge}"
+                        (fido_dir / "prompt").write_text(nudge)
+                        log.info("task pre-commit hook rejected commit — nudging")
+                    case CommitSuccess(sha=sha):
+                        if isinstance(outcome, CommitTaskComplete):
+                            # Task complete: push and advance the queue.
+                            pushed = self.ensure_pushed("origin", slug)
+                            if pushed is not False:
+                                config = self._config
+                                allowed_bots = (
+                                    config.allowed_bots
+                                    if config is not None
+                                    else frozenset()
+                                )
+                                self._tasks.complete_with_resolve(
+                                    task["id"],
+                                    self.gh,
+                                    collaborators=repo_ctx.collaborators,
+                                    allowed_bots=allowed_bots,
+                                )
+                                with State(fido_dir).modify() as state:
+                                    state.pop("current_task_id", None)
+                                tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                            self._delete_leaked_task_comments(
+                                repo_ctx.repo,
+                                pr_number,
+                                repo_ctx.gh_user,
+                                leak_before_ids,
+                            )
+                            return True
+                        # CommitTaskInProgress: partial commit — continue.
+                        log.info(
+                            "task in-progress commit %s — continuing session",
+                            sha[:12],
+                        )
+                    case _:  # pragma: no cover — unreachable; exhaustive above
+                        raise ValueError(
+                            f"unexpected CommitResult variant: {commit_result!r}"
+                        )
             # Yield so untriaged webhook handlers get a turn (#1067).
             self._yield_for_untriaged()
             if self._abort_task.is_active_for(task["id"]):
