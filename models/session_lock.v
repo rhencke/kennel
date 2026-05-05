@@ -9,11 +9,12 @@
     functional step function extracted to Python and run as a
     runtime-asserted oracle on every real state change.
 
-    Six invariants are proved by computation ([reflexivity]) or simple
+    Seven invariants are proved by computation ([reflexivity]) or simple
     case analysis:
       [no_dual_ownership]            — acquiring an already-owned session fails.
       [release_only_by_owner]        — voluntary releases only succeed for the owner.
-      [force_release_to_free]        — [ForceRelease] always lands in [Free].
+      [force_release_to_free]        — [ForceRelease] always lands in [Free]
+                                       from any single state.
       [unconditional_liveness]       — strong liveness: there exists a *single*
                                        event ([ForceRelease]) that drives every
                                        state to [Free].  The watchdog fires this
@@ -25,6 +26,12 @@
       [owned_state_exit_paths]       — the only events that move out of an owned state
                                        are the corresponding [*Release], [Preempt]
                                        (worker only), and [ForceRelease].
+      [trace_force_release_to_free]  — trace-level: from *any* starting state,
+                                       after *any* sequence of prior events,
+                                       firing [ForceRelease] lands in [Free].
+                                       Matches the runtime: the watchdog fires
+                                       without inspecting either current state
+                                       or prior trace.
 
     Liveness is the property the model previously lacked: every transition
     out of an owned state required the holder to *voluntarily* fire its
@@ -41,6 +48,8 @@
     visible in the traceback. *)
 
 From FidoModels Require Import preamble.
+From Coq Require Import List.
+Import ListNotations.
 
 (** * State
 
@@ -219,4 +228,52 @@ Lemma owned_handler_exit_paths :
     (ev = ForceRelease   /\ s' = Free).
 Proof.
   intros ev s' H; destruct ev; simpl in H; inversion H; auto.
+Qed.
+
+(** * Trace-level liveness
+
+    The lemmas above all reason about a single transition step.  The
+    runtime watchdog, however, fires [ForceRelease] without first
+    reading the FSM state — and the state it fires *into* is whatever
+    the FSM has reached through some prior sequence of events
+    (acquires, releases, preempts, and even prior force-releases).
+
+    The trace-level theorem [trace_force_release_to_free] proves the
+    watchdog's runtime guarantee directly: regardless of which event
+    sequence got us here, [ForceRelease] lands in [Free].  Combined
+    with [force_release_to_free] (the single-step shape) and
+    [unconditional_liveness] (the existence shape), this completes
+    the safety-net story: no matter what the prior trace looked like,
+    no matter how many acquires/releases/preempts interleaved, the
+    next [ForceRelease] is guaranteed to recover. *)
+
+(** Step a state through a list of events, applying only the
+    successful transitions (skipping rejected events the way the
+    runtime FSM does — a rejected event is a no-op for state, the
+    runtime treats [None] as "stay where you are").  Pure helper, no
+    side effects, used as a fold-like driver in trace-level proofs. *)
+Fixpoint walk (s : State) (events : list Event) : State :=
+  match events with
+  | nil       => s
+  | ev :: rest =>
+      match transition s ev with
+      | Some s' => walk s' rest
+      | None    => walk s rest
+      end
+  end.
+
+(** [trace_force_release_to_free]: the strongest form of the watchdog
+    invariant.  Take any starting state, walk through any event
+    sequence, then fire [ForceRelease] — the result is always [Free].
+
+    This is what the runtime watchdog does in practice: it fires
+    [ForceRelease] without inspecting the FSM, so the prior trace is
+    arbitrary.  The proof composes [force_release_to_free] with the
+    closure property that [walk] only ever produces a valid state
+    (which [force_release_to_free] then handles for any state). *)
+Theorem trace_force_release_to_free :
+  forall s events,
+    transition (walk s events) ForceRelease = Some Free.
+Proof.
+  intros s events; apply force_release_to_free.
 Qed.
