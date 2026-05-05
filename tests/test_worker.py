@@ -4765,10 +4765,54 @@ class TestWritePrDescription:
                 99,
                 42,
                 [{"title": "x", "status": "pending"}],
-                pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
+                pre_baked_description="## Summary\n\nbody.",
             )
         body = gh.edit_pr_body.call_args[0][2]
         assert "body." in body
+        assert body.count("Fixes #42.") == 1
+
+    def test_pre_baked_strips_llm_emitted_fixes_trailer(self, tmp_path: Path) -> None:
+        """If the LLM included Fixes #N anyway, the harness strips it and
+        re-appends the canonical form so the body ends with exactly one."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
+            )
+        body = gh.edit_pr_body.call_args[0][2]
+        assert body.count("Fixes #42.") == 1
+        # The canonical trailer is the last line before the divider
+        before_divider = body.split("\n\n---\n\n")[0]
+        assert before_divider.rstrip().endswith("Fixes #42.")
+
+    def test_pre_baked_strips_period_less_fixes(self, tmp_path: Path) -> None:
+        """Fixes #N without trailing period also gets stripped + re-appended."""
+        from contextlib import nullcontext
+
+        gh = MagicMock()
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
+            _write_pr_description(
+                tmp_path,
+                gh,
+                "owner/repo",
+                99,
+                42,
+                [{"title": "x", "status": "pending"}],
+                pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
+            )
+        body = gh.edit_pr_body.call_args[0][2]
+        before_divider = body.split("\n\n---\n\n")[0]
+        # No bare "Fixes #42" without period; exactly one canonical "Fixes #42."
+        assert before_divider.rstrip().endswith("Fixes #42.")
+        assert body.count("Fixes #42") == 1
 
 
 class TestFindOrCreatePr:

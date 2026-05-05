@@ -1105,10 +1105,14 @@ def _write_pr_description(
             )
             return
 
-    # Ensure "Fixes #N" is always present (the agent preserves it for rewrites via
-    # prompt rules; for initial writes we append it here).
-    if f"Fixes #{issue}" not in new_desc:
-        new_desc = f"{new_desc.rstrip()}\n\nFixes #{issue}."
+    # The harness owns the "Fixes #N" trailer — the LLM is told not to write it
+    # (sub/setup.md, rewrite_description_prompt) since we know the issue number.
+    # Strip any straggler the LLM emitted anyway (with or without trailing period)
+    # and append the canonical form.
+    new_desc = re.sub(
+        rf"\s*Fixes\s+#{issue}\.?\s*$", "", new_desc, flags=re.IGNORECASE
+    ).rstrip()
+    new_desc = f"{new_desc}\n\nFixes #{issue}."
 
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
