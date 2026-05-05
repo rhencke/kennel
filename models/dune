@@ -7,6 +7,7 @@
   preamble
   seed
   session_lock
+  session_lock_io
   payload_text
   retry_budget
   coord_index

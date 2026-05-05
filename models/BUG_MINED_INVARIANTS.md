@@ -448,6 +448,48 @@ three transition arms (`Free | OwnedByWorker | OwnedByHandler` →
 `Free`).  The new lemma set complements the original safety pair —
 sibling property of `no_dual_ownership`, not a replacement.
 
+**IO substrate.** `session_lock_io.v` — separate reference model
+(no Python extraction; OS provides the actual transitions).
+Captures the subprocess lifecycle (`Spawned | Killed | Reaped`) and
+couples it with the lock FSM via two composite events:
+
+- `WatchdogPreempt` — cooperative preemption.  Webhook fires
+  `_fire_worker_cancel`, worker drains its turn, lock transfers via
+  the existing `Preempt` event.  Subprocess stays alive — the new
+  holder uses it without a respawn.
+- `WatchdogEvict` — forcible eviction.  Watchdog fires both
+  `ForceRelease` on the lock and `IssueKill` on the subprocess.
+  Lock advances to `Free`, subprocess advances to `Killed`.  The
+  wedged holder's `select` returns EOF when the OS closes stdout
+  (`OsCloseStdout`).
+
+Headline theorems:
+
+- `kill_eof_chain_terminates`: from `Spawned`, `IssueKill` then
+  `StdoutEof` always reaches `Reaped`.  IO-side liveness analogue
+  of `force_release_to_free`.
+- `evict_releases_lock`: for any prior lock state and a `Spawned`
+  subprocess, `WatchdogEvict` lands the coupled state at
+  `(Free, Killed)`.  The full coordination handshake in one step.
+- `evict_then_eof_reaps`: `WatchdogEvict` followed by `OsCloseStdout`
+  reaches `(Free, Reaped)` — the *complete* recovery: lock available,
+  subprocess fully torn down, stdout closed, holder unblocked.
+- `preempt_does_not_kill_subprocess`: cooperative preemption
+  transfers ownership without touching the subprocess.
+- `evict_kills_subprocess` + `preempt_and_evict_distinct_outcomes`:
+  the two paths produce structurally different coupled states —
+  the model proves the cooperative-vs-forcible distinction at the
+  IO layer, not just in the docstring.
+
+This is the "Rocq IO" piece — formalises the chain (1) watchdog
+fires kill → (2) OS propagates EOF → (3) holder's `iter_events`
+sees EOF and breaks → (4) holder's `__exit__` runs → (5)
+`_evicted_tids` guard skips `_fsm_release` — at the substrate level.
+Steps (3)–(5) are runtime implementation guarded by unit + smoke
+tests; (1)–(2) are now first-class theorems.  The model also pins
+down that webhook preemption *honors* the worker thread by
+preserving subprocess state, separate from the eviction path.
+
 **Status.** Runtime implementation live: `OwnedSession.force_release`
 fires the modeled event through the existing oracle wrapper,
 `_evicted_tids` carries cross-thread eviction state so the wedged
