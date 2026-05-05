@@ -337,15 +337,6 @@ class WorkerRegistry:
         thread.start()
         log.info("started WorkerThread for %s", repo_cfg.name)
 
-    def thread_started_at(self, repo_name: str) -> datetime | None:
-        """Return when the worker thread for *repo_name* was started, or None.
-
-        Lock-free: reads from the current :class:`FidoState` snapshot without
-        acquiring any lock.
-        """
-        repo_state = self._state.get().repos.get(repo_name)
-        return repo_state.started_at if repo_state is not None else None
-
     def wake(self, repo_name: str) -> None:
         """Wake the thread for *repo_name* so it checks for work immediately.
 
@@ -399,28 +390,6 @@ class WorkerRegistry:
         _name = repo_name
         self._state.update(lambda root: root.repos[_name].activity, activity)
 
-    def is_stale(
-        self,
-        repo_name: str,
-        threshold: float,
-        *,
-        _now: Callable[[], datetime] = _utcnow,
-    ) -> bool:
-        """Return True if *repo_name*'s last progress is older than *threshold* seconds.
-
-        Lock-free: reads from the current :class:`FidoState` snapshot.
-
-        Returns False when the repo is unknown or still on its zero-sentinel
-        activity (``what=""``) — the caller can treat that as a fresh start
-        rather than a stall.
-        """
-        repo_state = self._state.get().repos.get(repo_name)
-        if repo_state is None or repo_state.activity.what == "":
-            return False
-        return (
-            _now() - repo_state.activity.last_progress_at
-        ).total_seconds() > threshold
-
     def get_all_activities(self) -> list[WorkerActivity]:
         """Return a snapshot of all registered workers' current activities.
 
@@ -429,6 +398,10 @@ class WorkerRegistry:
         """
         repos = self._state.get().repos
         return [rs.activity for rs in repos.values() if rs.activity.what != ""]
+
+    def get_state(self) -> FidoState:
+        """Return the current FidoState snapshot.  Lock-free."""
+        return self._state.get()
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.
@@ -449,17 +422,6 @@ class WorkerRegistry:
         self._crash_records[repo_name] = new_crash
         _name = repo_name
         self._state.update(lambda root: root.repos[_name].crash_record, new_crash)
-
-    def get_crash_info(self, repo_name: str) -> WorkerCrash | None:
-        """Return crash history for *repo_name*, or None if it has never crashed.
-
-        Lock-free: reads from the current :class:`FidoState` snapshot.
-        Returns ``None`` when the repo is unknown or has ``death_count == 0``.
-        """
-        repo_state = self._state.get().repos.get(repo_name)
-        if repo_state is None or repo_state.crash_record.death_count == 0:
-            return None
-        return repo_state.crash_record
 
     @contextmanager
     def webhook_activity(
