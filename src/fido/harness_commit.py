@@ -137,7 +137,16 @@ class HarnessCommitter:
         this has already been made by the match dispatch above."""
         # Stage tracked files only — never sweep untracked files like
         # .coverage artifacts, editor scratch files, or build outputs.
-        self._git(["add", "-u"])
+        try:
+            self._git(["add", "-u"])
+        except subprocess.CalledProcessError as exc:
+            output = f"git add -u failed (exit {exc.returncode})"
+            if exc.stderr:
+                output += f"\n{exc.stderr.strip()}"
+            elif exc.stdout:
+                output += f"\n{exc.stdout.strip()}"
+            log.warning("git add -u failed: %s", output[:200])
+            return CommitHookFailure(output=output)
 
         # If nothing was staged, report it rather than creating an empty commit.
         diff_cached = self._git(["diff", "--cached", "--quiet"], check=False)

@@ -353,6 +353,60 @@ class TestGitPlumbing:
 
 
 # ---------------------------------------------------------------------------
+# Tests: git add -u failure handling
+# ---------------------------------------------------------------------------
+
+
+class _RaisingRunner:
+    """ProcessRunner fake that raises CalledProcessError on the first call."""
+
+    def __init__(self, stderr: str = "", stdout: str = "") -> None:
+        self._stderr = stderr
+        self._stdout = stdout
+
+    def run(
+        self, cmd: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            128, cmd, output=self._stdout, stderr=self._stderr
+        )
+
+
+class TestGitAddFailure:
+    """git add -u CalledProcessError is caught and returned as CommitHookFailure."""
+
+    def test_returns_hook_failure_with_stderr(self, tmp_path: Path) -> None:
+        runner = _RaisingRunner(stderr="fatal: unable to read tree")
+        hc = HarnessCommitter(tmp_path, runner)
+        result = hc.commit(CommitTaskComplete(summary="whatever"))
+        assert isinstance(result, CommitHookFailure)
+        assert "git add -u failed" in result.output
+        assert "fatal: unable to read tree" in result.output
+
+    def test_returns_hook_failure_with_stdout_fallback(self, tmp_path: Path) -> None:
+        runner = _RaisingRunner(stdout="error: some output")
+        hc = HarnessCommitter(tmp_path, runner)
+        result = hc.commit(CommitTaskComplete(summary="whatever"))
+        assert isinstance(result, CommitHookFailure)
+        assert "git add -u failed" in result.output
+        assert "error: some output" in result.output
+
+    def test_returns_hook_failure_with_no_output(self, tmp_path: Path) -> None:
+        runner = _RaisingRunner()
+        hc = HarnessCommitter(tmp_path, runner)
+        result = hc.commit(CommitTaskInProgress(summary="wip"))
+        assert isinstance(result, CommitHookFailure)
+        assert "git add -u failed (exit 128)" in result.output
+
+    def test_includes_exit_code(self, tmp_path: Path) -> None:
+        runner = _RaisingRunner(stderr="bad")
+        hc = HarnessCommitter(tmp_path, runner)
+        result = hc.commit(CommitTaskComplete(summary="x"))
+        assert isinstance(result, CommitHookFailure)
+        assert "exit 128" in result.output
+
+
+# ---------------------------------------------------------------------------
 # Tests: hook_failure_nudge
 # ---------------------------------------------------------------------------
 
