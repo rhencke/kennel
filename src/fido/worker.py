@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -2765,6 +2766,27 @@ class Worker:
             return False
         return True
 
+    _PUSH_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
+
+    def _push_with_retry(self, remote: str, slug: str) -> bool:
+        """Push with exponential backoff, returning True on success.
+
+        First attempt is via :meth:`ensure_pushed` (which short-circuits if
+        already in sync).  On failure, retries up to ``_PUSH_RETRY_DELAYS``
+        times with increasing sleep intervals.  Returns False only if all
+        attempts fail.
+        """
+        result = self.ensure_pushed(remote, slug)
+        if result is not False:
+            return True
+        for delay in self._PUSH_RETRY_DELAYS:
+            log.info("push retry in %.0fs for %s/%s", delay, remote, slug)
+            time.sleep(delay)
+            result = self.ensure_pushed(remote, slug)
+            if result is not False:
+                return True
+        return False
+
     def _push_committed_work_before_yield(self, head_before: str, slug: str) -> None:
         """Push any commits that landed during the turn before yielding.
 
@@ -3381,8 +3403,8 @@ class Worker:
                                 cra_oracle.ActionPushAndComplete(),
                             )
                             # Task complete: push and advance the queue.
-                            pushed = self.ensure_pushed("origin", slug)
-                            if pushed is not False:
+                            pushed = self._push_with_retry("origin", slug)
+                            if pushed:
                                 config = self._config
                                 allowed_bots = (
                                     config.allowed_bots
@@ -3398,6 +3420,21 @@ class Worker:
                                 with State(fido_dir).modify() as state:
                                     state.pop("current_task_id", None)
                                 tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                            else:
+                                # Push persistently failed — mark BLOCKED.
+                                log.warning(
+                                    "push failed after retries for task %s",
+                                    task["id"],
+                                )
+                                self._tasks.update(task["id"], TaskStatus.BLOCKED)
+                                self.gh.comment_issue(
+                                    repo_ctx.repo,
+                                    pr_number,
+                                    "BLOCKED: push to remote failed after "
+                                    "retries — manual intervention needed.",
+                                )
+                                with State(fido_dir).modify() as state:
+                                    state.pop("current_task_id", None)
                             self._delete_leaked_task_comments(
                                 repo_ctx.repo,
                                 pr_number,

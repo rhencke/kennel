@@ -9270,6 +9270,70 @@ class TestEnsurePushed:
         assert push_call == ["push", "-u", "fork", "feature-branch"]
 
 
+class TestPushWithRetry:
+    """Tests for Worker._push_with_retry."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
+
+    def test_returns_true_on_first_success(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(worker, "ensure_pushed", return_value=True):
+            assert worker._push_with_retry("origin", "br") is True
+
+    def test_returns_true_when_already_in_sync(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(worker, "ensure_pushed", return_value=None):
+            assert worker._push_with_retry("origin", "br") is True
+
+    def test_retries_on_failure_then_succeeds(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker, "ensure_pushed", side_effect=[False, False, True]
+            ) as mock_push,
+            patch("fido.worker.time.sleep") as mock_sleep,
+        ):
+            assert worker._push_with_retry("origin", "br") is True
+        # First call + 2 retries
+        assert mock_push.call_count == 3
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_any_call(5.0)
+        mock_sleep.assert_any_call(15.0)
+
+    def test_returns_false_after_all_retries_exhausted(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(worker, "ensure_pushed", return_value=False) as mock_push,
+            patch("fido.worker.time.sleep"),
+        ):
+            assert worker._push_with_retry("origin", "br") is False
+        # 1 initial + 3 retries = 4
+        assert mock_push.call_count == 4
+
+    def test_none_on_retry_counts_as_success(self, tmp_path: Path) -> None:
+        """ensure_pushed returning None (already in sync) on a retry is success."""
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(worker, "ensure_pushed", side_effect=[False, None]),
+            patch("fido.worker.time.sleep"),
+        ):
+            assert worker._push_with_retry("origin", "br") is True
+
+    def test_uses_exponential_delays(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("fido.worker.time.sleep") as mock_sleep,
+        ):
+            worker._push_with_retry("origin", "br")
+        assert mock_sleep.call_args_list == [
+            ((5.0,),),
+            ((15.0,),),
+            ((30.0,),),
+        ]
+
+
 class TestAbortHandle:
     """Tests for the per-task abort signal (closes #1193)."""
 
@@ -9727,9 +9791,10 @@ class TestExecuteTask:
             ),
             patch.object(worker, "_git", self._simple_git_mock()),
             patch("fido.worker.HarnessCommitter") as mock_hc_cls,
-            patch.object(worker, "ensure_pushed", return_value=False),
+            patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.update"),
         ):
             mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -9749,9 +9814,10 @@ class TestExecuteTask:
             ),
             patch.object(worker, "_git", self._simple_git_mock()),
             patch("fido.worker.HarnessCommitter") as mock_hc_cls,
-            patch.object(worker, "ensure_pushed", return_value=False),
+            patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.update"),
         ):
             mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -9771,13 +9837,74 @@ class TestExecuteTask:
             ),
             patch.object(worker, "_git", self._simple_git_mock()),
             patch("fido.worker.HarnessCommitter") as mock_hc_cls,
-            patch.object(worker, "ensure_pushed", return_value=False),
+            patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.update"),
         ):
             mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
+
+    def test_push_failure_marks_task_blocked(self, tmp_path: Path) -> None:
+        """Persistent push failure marks the task BLOCKED and posts a comment."""
+        from fido.types import TaskStatus
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "_push_with_retry", return_value=False),
+            patch("fido.tasks.Tasks.update") as mock_update,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_update.assert_any_call(task["id"], TaskStatus.BLOCKED)
+        gh.comment_issue.assert_called_once()
+        _, _, body = gh.comment_issue.call_args[0]
+        assert "BLOCKED" in body
+        assert "push" in body.lower()
+
+    def test_push_failure_clears_current_task_id(self, tmp_path: Path) -> None:
+        """Persistent push failure clears current_task_id from state."""
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        # Set up a current_task_id in state
+        from fido.state import State
+
+        with State(fido_dir).modify() as state:
+            state["current_task_id"] = task["id"]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "_push_with_retry", return_value=False),
+            patch("fido.tasks.Tasks.update"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        with State(fido_dir).modify() as state:
+            assert "current_task_id" not in state
 
     def test_completes_when_already_in_sync(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -10006,10 +10133,11 @@ class TestExecuteTask:
         assert captured.get("issue") == 5
         assert captured.get("current_task_id") == "t-111"
 
-    def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:
+    def test_current_task_id_cleared_when_push_fails(self, tmp_path: Path) -> None:
+        """Push failure marks BLOCKED and clears current_task_id."""
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        State(fido_dir).save({"issue": 1})
+        State(fido_dir).save({"issue": 1, "current_task_id": "task-push-fail"})
         task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
@@ -10021,13 +10149,14 @@ class TestExecuteTask:
             ),
             patch.object(worker, "_git", self._simple_git_mock()),
             patch("fido.worker.HarnessCommitter") as mock_hc_cls,
-            patch.object(worker, "ensure_pushed", return_value=False),
+            patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.Tasks.update"),
             patch("fido.tasks.sync_tasks"),
         ):
             mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert State(fido_dir).load().get("current_task_id") == "task-push-fail"
+        assert "current_task_id" not in State(fido_dir).load()
 
     @staticmethod
     def _git_same_sha() -> object:
