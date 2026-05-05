@@ -167,6 +167,8 @@ class TestCommitSuccess:
 
 class TestCommitHookFailure:
     def test_hook_failure_captures_output(self, tmp_path: Path) -> None:
+        # Both stdout and stderr are merged into stdout via stderr=STDOUT,
+        # so the fake result puts the combined chronological output in stdout.
         hc, _ = _committer(
             tmp_path,
             [
@@ -174,9 +176,8 @@ class TestCommitHookFailure:
                 _fail(),  # diff --cached → staged
                 _fail(
                     returncode=1,
-                    stdout="ruff check failed\n",
-                    stderr="error: hook returned non-zero\n",
-                ),  # git commit fails
+                    stdout="ruff check failed\nerror: hook returned non-zero\n",
+                ),  # git commit fails — combined output in stdout
             ],
         )
         result = hc.commit(CommitTaskComplete(summary="Add feature"))
@@ -185,12 +186,13 @@ class TestCommitHookFailure:
         assert "hook returned non-zero" in result.output
 
     def test_hook_failure_strips_whitespace(self, tmp_path: Path) -> None:
+        # Combined output is in stdout (stderr merged via stderr=STDOUT).
         hc, _ = _committer(
             tmp_path,
             [
                 _ok(),
                 _fail(),
-                _fail(stdout="", stderr="  oops  "),
+                _fail(stdout="  oops  "),
             ],
         )
         result = hc.commit(CommitTaskComplete(summary="x"))
@@ -324,11 +326,25 @@ class TestGitPlumbing:
         for _cmd, kwargs in runner.calls:
             assert kwargs["cwd"] == tmp_path
 
-    def test_capture_output_and_text(self, tmp_path: Path) -> None:
-        """commit passes capture_output=True and text=True."""
-        hc, runner = _committer(tmp_path, [_ok(), _ok()])
+    def test_git_add_and_commit_use_merged_stderr(self, tmp_path: Path) -> None:
+        """git add -u and git commit use stdout=PIPE+stderr=STDOUT for interleaved output."""
+        hc, runner = _committer(tmp_path, [_ok(), _fail(), _ok(), _ok(stdout="sha\n")])
         hc.commit(CommitTaskComplete(summary="x"))
-        for _, kwargs in runner.calls:
+        # call[0] = git add -u, call[2] = git commit
+        for i in [0, 2]:
+            _, kwargs = runner.calls[i]
+            assert kwargs.get("stdout") is subprocess.PIPE
+            assert kwargs.get("stderr") is subprocess.STDOUT
+            assert "capture_output" not in kwargs
+            assert kwargs["text"] is True
+
+    def test_other_calls_use_capture_output_and_text(self, tmp_path: Path) -> None:
+        """git diff --cached and git rev-parse use capture_output=True and text=True."""
+        hc, runner = _committer(tmp_path, [_ok(), _fail(), _ok(), _ok(stdout="sha\n")])
+        hc.commit(CommitTaskComplete(summary="x"))
+        # call[1] = git diff --cached, call[3] = git rev-parse
+        for i in [1, 3]:
+            _, kwargs = runner.calls[i]
             assert kwargs["capture_output"] is True
             assert kwargs["text"] is True
 
@@ -378,17 +394,23 @@ class _RaisingRunner:
 
 
 class TestGitAddFailure:
-    """git add -u CalledProcessError is caught and returned as CommitHookFailure."""
+    """git add -u CalledProcessError is caught and returned as CommitHookFailure.
 
-    def test_returns_hook_failure_with_stderr(self, tmp_path: Path) -> None:
-        runner = _RaisingRunner(stderr="fatal: unable to read tree")
+    With merge_stderr=True, all git add output (stdout+stderr interleaved)
+    arrives via exc.stdout — exc.stderr is None.  Fakes simulate this by
+    putting output in the stdout argument.
+    """
+
+    def test_returns_hook_failure_with_output(self, tmp_path: Path) -> None:
+        # Simulates merged stdout+stderr arriving via exc.stdout.
+        runner = _RaisingRunner(stdout="fatal: unable to read tree")
         hc = HarnessCommitter(tmp_path, runner)
         result = hc.commit(CommitTaskComplete(summary="whatever"))
         assert isinstance(result, CommitHookFailure)
         assert "git add -u failed" in result.output
         assert "fatal: unable to read tree" in result.output
 
-    def test_returns_hook_failure_with_stdout_fallback(self, tmp_path: Path) -> None:
+    def test_returns_hook_failure_with_stdout(self, tmp_path: Path) -> None:
         runner = _RaisingRunner(stdout="error: some output")
         hc = HarnessCommitter(tmp_path, runner)
         result = hc.commit(CommitTaskComplete(summary="whatever"))
@@ -404,7 +426,7 @@ class TestGitAddFailure:
         assert "git add -u failed (exit 128)" in result.output
 
     def test_includes_exit_code(self, tmp_path: Path) -> None:
-        runner = _RaisingRunner(stderr="bad")
+        runner = _RaisingRunner(stdout="bad")
         hc = HarnessCommitter(tmp_path, runner)
         result = hc.commit(CommitTaskComplete(summary="x"))
         assert isinstance(result, CommitHookFailure)

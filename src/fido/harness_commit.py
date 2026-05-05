@@ -65,8 +65,24 @@ class HarnessCommitter:
         self,
         args: list[str],
         check: bool = True,
+        merge_stderr: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        """Run a git command in the workspace."""
+        """Run a git command in the workspace.
+
+        When *merge_stderr* is True, stderr is redirected into stdout via
+        ``stderr=subprocess.STDOUT`` so that pre-commit hook output is captured
+        in chronological order (as the OS produced it) rather than as two
+        separate streams concatenated after the fact.
+        """
+        if merge_stderr:
+            return self._runner.run(
+                ["git", *args],
+                check=check,
+                cwd=self._work_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
         return self._runner.run(
             ["git", *args],
             check=check,
@@ -182,13 +198,13 @@ class HarnessCommitter:
         this has already been made by the match dispatch above."""
         # Stage tracked files only — never sweep untracked files like
         # .coverage artifacts, editor scratch files, or build outputs.
+        # merge_stderr=True so any error messages are captured in chronological
+        # order via exc.stdout.
         try:
-            self._git(["add", "-u"])
+            self._git(["add", "-u"], merge_stderr=True)
         except subprocess.CalledProcessError as exc:
             output = f"git add -u failed (exit {exc.returncode})"
-            if exc.stderr:
-                output += f"\n{exc.stderr.strip()}"
-            elif exc.stdout:
+            if exc.stdout:
                 output += f"\n{exc.stdout.strip()}"
             log.warning("git add -u failed: %s", output[:200])
             result = CommitHookFailure(output=output)
@@ -205,9 +221,14 @@ class HarnessCommitter:
             return result
 
         message = self._build_message(summary, helped_by=helped_by)
-        git_result = self._git(["commit", "-m", message], check=False)
+        # merge_stderr=True so pre-commit hook output is captured in
+        # chronological order — the LLM sees the same interleaving a human
+        # would see in the terminal.
+        git_result = self._git(
+            ["commit", "-m", message], check=False, merge_stderr=True
+        )
         if git_result.returncode != 0:
-            output = (git_result.stdout + "\n" + git_result.stderr).strip()
+            output = git_result.stdout.strip()
             log.warning("commit rejected (hook or error): %s", output[:200])
             result = CommitHookFailure(output=output)
             self._assert_decision_oracle(
