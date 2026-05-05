@@ -44,6 +44,21 @@ def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
         )
 
 
+def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
+    """Extract and validate a required non-empty string field from *obj*.
+
+    Raises ValueError with a descriptive message if the field is missing,
+    not a string, empty, or whitespace-only.
+    """
+    value = obj.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f'turn_outcome "{kind}" requires a non-empty '
+            f'"{field}" string, got: {value!r}'
+        )
+    return value
+
+
 def parse_turn_outcome(text: str) -> TurnOutcome:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
@@ -69,46 +84,28 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
     if not isinstance(obj, dict):
         raise ValueError(f"Last line parsed as JSON but is not an object: {last!r}")
     kind = obj.get("turn_outcome")
-    if kind == "commit-task-complete":
-        summary = obj.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ValueError(
-                'turn_outcome "commit-task-complete" requires a non-empty '
-                f'"summary" string, got: {obj.get("summary")!r}'
-            )
-        result = CommitTaskComplete(summary=summary)
-        _assert_parse_oracle(kind, summary, result)
-        return result
-    if kind == "commit-task-in-progress":
-        summary = obj.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ValueError(
-                'turn_outcome "commit-task-in-progress" requires a non-empty '
-                f'"summary" string, got: {obj.get("summary")!r}'
-            )
-        result = CommitTaskInProgress(summary=summary)
-        _assert_parse_oracle(kind, summary, result)
-        return result
-    if kind == "skip-task-with-reason":
-        reason = obj.get("reason")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError(
-                'turn_outcome "skip-task-with-reason" requires a non-empty '
-                f'"reason" string, got: {obj.get("reason")!r}'
-            )
-        result = SkipTaskWithReason(reason=reason)
-        _assert_parse_oracle(kind, reason, result)
-        return result
-    if kind == "stuck-on-task":
-        reason = obj.get("reason")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError(
-                'turn_outcome "stuck-on-task" requires a non-empty '
-                f'"reason" string, got: {obj.get("reason")!r}'
-            )
-        result = StuckOnTask(reason=reason)
-        _assert_parse_oracle(kind, reason, result)
-        return result
-    if kind is None:
-        raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
-    raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
+    match kind:
+        case "commit-task-complete":
+            summary = _require_nonempty_str(obj, "summary", kind)
+            result = CommitTaskComplete(summary=summary)
+            _assert_parse_oracle(kind, summary, result)
+            return result
+        case "commit-task-in-progress":
+            summary = _require_nonempty_str(obj, "summary", kind)
+            result = CommitTaskInProgress(summary=summary)
+            _assert_parse_oracle(kind, summary, result)
+            return result
+        case "skip-task-with-reason":
+            reason = _require_nonempty_str(obj, "reason", kind)
+            result = SkipTaskWithReason(reason=reason)
+            _assert_parse_oracle(kind, reason, result)
+            return result
+        case "stuck-on-task":
+            reason = _require_nonempty_str(obj, "reason", kind)
+            result = StuckOnTask(reason=reason)
+            _assert_parse_oracle(kind, reason, result)
+            return result
+        case None:
+            raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
+        case _:
+            raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
