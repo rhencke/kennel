@@ -174,6 +174,10 @@ class HarnessCommitter:
                 self._assert_decision_oracle(outcome, result)
                 return result
             case StuckOnTask(reason=reason):
+                # Unreachable from production: the worker handles StuckOnTask at
+                # the BLOCKED transition before commit() is ever called.  Present
+                # here for oracle completeness so direct-call tests can exercise
+                # the assertion paths.
                 self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=False)
                 result = CommitSkipped(reason=reason)
                 self._assert_decision_oracle(outcome, result)
