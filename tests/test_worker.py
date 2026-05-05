@@ -9292,7 +9292,7 @@ class TestPushWithRetry:
             patch.object(
                 worker, "ensure_pushed", side_effect=[False, False, True]
             ) as mock_push,
-            patch("fido.worker.time.sleep") as mock_sleep,
+            patch.object(worker, "_sleep") as mock_sleep,
         ):
             assert worker._push_with_retry("origin", "br") is True
         # First call + 2 retries
@@ -9305,7 +9305,7 @@ class TestPushWithRetry:
         worker = self._make_worker(tmp_path)
         with (
             patch.object(worker, "ensure_pushed", return_value=False) as mock_push,
-            patch("fido.worker.time.sleep"),
+            patch.object(worker, "_sleep"),
         ):
             assert worker._push_with_retry("origin", "br") is False
         # 1 initial + 3 retries = 4
@@ -9316,7 +9316,7 @@ class TestPushWithRetry:
         worker = self._make_worker(tmp_path)
         with (
             patch.object(worker, "ensure_pushed", side_effect=[False, None]),
-            patch("fido.worker.time.sleep"),
+            patch.object(worker, "_sleep"),
         ):
             assert worker._push_with_retry("origin", "br") is True
 
@@ -9324,13 +9324,13 @@ class TestPushWithRetry:
         worker = self._make_worker(tmp_path)
         with (
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("fido.worker.time.sleep") as mock_sleep,
+            patch.object(worker, "_sleep") as mock_sleep,
         ):
             worker._push_with_retry("origin", "br")
         assert mock_sleep.call_args_list == [
-            ((5.0,),),
-            ((15.0,),),
-            ((30.0,),),
+            call(5.0),
+            call(15.0),
+            call(30.0),
         ]
 
 

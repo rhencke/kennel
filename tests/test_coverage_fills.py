@@ -3023,3 +3023,33 @@ class TestParseOracleAssertions:
             _assert_parse_oracle(
                 "commit-task-complete", "hello", SkipTaskWithReason("hello")
             )
+
+
+# ---------------------------------------------------------------------------
+# worker.py — Worker._sleep delegates to time.sleep
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerSleep:
+    """Cover the Worker._sleep implementation (worker.py).
+
+    Every TestPushWithRetry test patches _sleep at the instance level, so
+    the real body — ``time.sleep(seconds)`` — is only reachable from here.
+    """
+
+    def test_sleep_calls_time_sleep(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from fido.worker import Worker as _Worker
+
+        # Pass provider= directly so the factory is not invoked.
+        worker = _Worker(
+            tmp_path,
+            MagicMock(),
+            provider=MagicMock(),
+            issue_cache=MagicMock(),
+            dispatcher=MagicMock(),
+        )
+        with patch("fido.worker.time.sleep") as mock_sleep:
+            worker._sleep(0.001)
+        mock_sleep.assert_called_once_with(0.001)

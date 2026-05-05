@@ -2700,6 +2700,12 @@ class Worker:
 
     _PUSH_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
 
+    def _sleep(self, seconds: float) -> None:
+        """Sleep for *seconds*.  Extracted as an instance method so tests can
+        patch it via ``patch.object`` without touching the global
+        ``time.sleep``."""
+        time.sleep(seconds)
+
     def _push_with_retry(self, remote: str, slug: str) -> bool:
         """Push with exponential backoff, returning True on success.
 
@@ -2713,7 +2719,7 @@ class Worker:
             return True
         for delay in self._PUSH_RETRY_DELAYS:
             log.info("push retry in %.0fs for %s/%s", delay, remote, slug)
-            time.sleep(delay)
+            self._sleep(delay)
             result = self.ensure_pushed(remote, slug)
             if result is not False:
                 return True
