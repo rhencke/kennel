@@ -74,7 +74,20 @@ class Preempt(Event):
     pass
 
 
-EventT = WorkerAcquire | HandlerAcquire | WorkerRelease | HandlerRelease | Preempt
+@final
+@dataclass(frozen=True)
+class ForceRelease(Event):
+    pass
+
+
+EventT = (
+    WorkerAcquire
+    | HandlerAcquire
+    | WorkerRelease
+    | HandlerRelease
+    | Preempt
+    | ForceRelease
+)
 
 
 def transition(
@@ -94,6 +107,8 @@ def transition(
                     return None
                 case Preempt():
                     return None
+                case ForceRelease():
+                    return Free()
                 case __impossible:
                     assert_never(__impossible)
         case OwnedByWorker():
@@ -108,6 +123,8 @@ def transition(
                     return None
                 case Preempt():
                     return OwnedByHandler()
+                case ForceRelease():
+                    return Free()
                 case __impossible:
                     assert_never(__impossible)
         case OwnedByHandler():
@@ -122,6 +139,8 @@ def transition(
                     return Free()
                 case Preempt():
                     return None
+                case ForceRelease():
+                    return Free()
                 case __impossible:
                     assert_never(__impossible)
         case __impossible:

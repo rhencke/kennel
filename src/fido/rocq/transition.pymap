@@ -1,2 +1,2 @@
 stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
-open,80,0,82,18,session_lock.v,55,11,55,21,extraction,transition,transition
+open,93,0,95,18,session_lock.v,96,11,96,21,extraction,transition,transition

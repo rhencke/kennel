@@ -408,6 +408,107 @@ demand modeling and enqueue-time wiring are tracked by
 
 ---
 
+## R. Session-lock liveness — bounded hold time + force-release escape
+
+**Invariant.** No FSM lock acquire can wait forever for a holder that
+will never release.  The original `session_lock.v` model proved
+**safety** (`no_dual_ownership`, `release_only_by_owner`) but every
+transition out of an owned state required the holder to *voluntarily*
+fire its release event — a property no real-world IO substrate can
+guarantee.  Liveness adds the dual property: from every state, at
+least one event drives the FSM to `Free`, and the watchdog's
+escape-hatch event is accepted in every state.
+
+Formally proved in `session_lock.v`:
+- `force_release_to_free`: ∀s, transition(s, ForceRelease) = Some Free.
+- `unconditional_liveness`: ∃ev, ∀s, transition(s, ev) = Some Free —
+  strong liveness, with `ForceRelease` as the witness.  The watchdog
+  fires that single event without first inspecting FSM state and is
+  guaranteed `Free` regardless of where the holder was.
+- `every_state_reaches_free`: ∀s, ∃ev, transition(s, ev) = Some Free —
+  weaker form, named to document the *primary* path: voluntary
+  release for owned states, ForceRelease only for `Free` (idempotent
+  self-loop) and the unhappy case.  Strictly weaker than
+  `unconditional_liveness`; both are kept for pedagogical clarity.
+- `owned_state_exit_paths` (worker + handler): the only events that
+  produce `Some _` from an owned state are the corresponding
+  voluntary `*Release`, `Preempt` (worker only), and `ForceRelease`.
+  Confirms adding `ForceRelease` did not open any other accidental
+  exit edges.
+
+**Bugs.** [#1377](https://github.com/FidoCanCode/home/issues/1377)
+(handler thread wedged inside `consume_until_result` on a
+streaming-forever subprocess; FSM lock leaked indefinitely; webhooks
+queued at HandlerAcquire positions 1, 2, … forever; no exception
+ever raised because `idle_timeout` kept getting reset by streamed
+events).
+
+**Model.** `session_lock.v` extended with `ForceRelease : Event` and
+three transition arms (`Free | OwnedByWorker | OwnedByHandler` →
+`Free`).  The new lemma set complements the original safety pair —
+sibling property of `no_dual_ownership`, not a replacement.
+
+**IO substrate.** `session_lock_io.v` — separate reference model
+(no Python extraction; OS provides the actual transitions).
+Captures the subprocess lifecycle (`Spawned | Killed | Reaped`) and
+couples it with the lock FSM via two composite events:
+
+- `WatchdogPreempt` — cooperative preemption.  Webhook fires
+  `_fire_worker_cancel`, worker drains its turn, lock transfers via
+  the existing `Preempt` event.  Subprocess stays alive — the new
+  holder uses it without a respawn.
+- `WatchdogEvict` — forcible eviction.  Watchdog fires both
+  `ForceRelease` on the lock and `IssueKill` on the subprocess.
+  Lock advances to `Free`, subprocess advances to `Killed`.  The
+  wedged holder's `select` returns EOF when the OS closes stdout
+  (`OsCloseStdout`).
+
+Headline theorems:
+
+- `kill_eof_chain_terminates`: from `Spawned`, `IssueKill` then
+  `StdoutEof` always reaches `Reaped`.  IO-side liveness analogue
+  of `force_release_to_free`.
+- `evict_releases_lock`: for any prior lock state and a `Spawned`
+  subprocess, `WatchdogEvict` lands the coupled state at
+  `(Free, Killed)`.  The full coordination handshake in one step.
+- `evict_then_eof_reaps`: `WatchdogEvict` followed by `OsCloseStdout`
+  reaches `(Free, Reaped)` — the *complete* recovery: lock available,
+  subprocess fully torn down, stdout closed, holder unblocked.
+- `preempt_does_not_kill_subprocess`: cooperative preemption
+  transfers ownership without touching the subprocess.
+- `evict_kills_subprocess` + `preempt_and_evict_distinct_outcomes`:
+  the two paths produce structurally different coupled states —
+  the model proves the cooperative-vs-forcible distinction at the
+  IO layer, not just in the docstring.
+
+This is the "Rocq IO" piece — formalises the chain (1) watchdog
+fires kill → (2) OS propagates EOF → (3) holder's `iter_events`
+sees EOF and breaks → (4) holder's `__exit__` runs → (5)
+`_evicted_tids` guard skips `_fsm_release` — at the substrate level.
+Steps (3)–(5) are runtime implementation guarded by unit + smoke
+tests; (1)–(2) are now first-class theorems.  The model also pins
+down that webhook preemption *honors* the worker thread by
+preserving subprocess state, separate from the eviction path.
+
+**Status.** Runtime implementation live: `OwnedSession.force_release`
+fires the modeled event through the existing oracle wrapper,
+`_evicted_tids` carries cross-thread eviction state so the wedged
+holder's eventual `__exit__` skips the now-incorrect normal release,
+`ClaudeSession._on_force_release` kills the subprocess so the parked
+`select()` returns EOF and the holder escapes
+`consume_until_result`, and `SessionLockWatchdog` is the daemon that
+fires `force_release` when a holder has held past
+`hold_deadline_seconds` (default 900 s).  Started from `server.run`
+alongside the existing `Watchdog` and `ReconcileWatchdog`.
+
+The wiring deliberately models the queued-handler transfer as two
+oracle calls (`ForceRelease → Free` then `HandlerAcquire → OwnedByHandler`)
+rather than the single-step direct mutation that `_fsm_release` does
+for the same case — a small precedent toward closing that earlier
+shortcut.
+
+---
+
 ## Summary
 
 | Cluster | Invariant focus | Bugs | Already covered | Action |
@@ -429,6 +530,7 @@ demand modeling and enqueue-time wiring are tracked by
 | O | Build cache | 1 | (CI, not coordination) | standard fix |
 | P | Worker registry slot lifecycle + crash recovery | lockfile race, provider orphan | ✓ worker_registry_crash.v live (#1056) | — |
 | Q | Handler preemption — product demand admission | 1 (#1067) | ✓ handler_preemption.v live (#1134) | — |
+| R | Session-lock liveness — bounded hold + force release | 1 (#1377) | ✓ session_lock.v ForceRelease live | — |
 
 **New issues filed (as of this survey):**
 - [#1041](https://github.com/FidoCanCode/home/issues/1041) — claude_session.v model (cluster B, 4 bugs of motivation) — **closed** ([#1052](https://github.com/FidoCanCode/home/pull/1052))
