@@ -15,6 +15,7 @@ that module.  This module owns only the parser boundary adapter.
 """
 
 import json
+from collections.abc import Callable
 
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
@@ -59,6 +60,19 @@ def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
     return value
 
 
+def _parse_outcome_field(
+    obj: dict[str, object],
+    kind: str,
+    field: str,
+    make: Callable[[str], TurnOutcome],
+) -> TurnOutcome:
+    """Validate *field* in *obj*, construct the outcome via *make*, assert the oracle."""
+    payload = _require_nonempty_str(obj, field, kind)
+    result = make(payload)
+    _assert_parse_oracle(kind, payload, result)
+    return result
+
+
 def parse_turn_outcome(text: str) -> TurnOutcome:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
@@ -86,25 +100,21 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
     kind = obj.get("turn_outcome")
     match kind:
         case "commit-task-complete":
-            summary = _require_nonempty_str(obj, "summary", kind)
-            result = CommitTaskComplete(summary=summary)
-            _assert_parse_oracle(kind, summary, result)
-            return result
+            return _parse_outcome_field(
+                obj, kind, "summary", lambda s: CommitTaskComplete(summary=s)
+            )
         case "commit-task-in-progress":
-            summary = _require_nonempty_str(obj, "summary", kind)
-            result = CommitTaskInProgress(summary=summary)
-            _assert_parse_oracle(kind, summary, result)
-            return result
+            return _parse_outcome_field(
+                obj, kind, "summary", lambda s: CommitTaskInProgress(summary=s)
+            )
         case "skip-task-with-reason":
-            reason = _require_nonempty_str(obj, "reason", kind)
-            result = SkipTaskWithReason(reason=reason)
-            _assert_parse_oracle(kind, reason, result)
-            return result
+            return _parse_outcome_field(
+                obj, kind, "reason", lambda s: SkipTaskWithReason(reason=s)
+            )
         case "stuck-on-task":
-            reason = _require_nonempty_str(obj, "reason", kind)
-            result = StuckOnTask(reason=reason)
-            _assert_parse_oracle(kind, reason, result)
-            return result
+            return _parse_outcome_field(
+                obj, kind, "reason", lambda s: StuckOnTask(reason=s)
+            )
         case None:
             raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
         case _:
