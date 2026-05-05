@@ -12,9 +12,8 @@ import json
 import logging
 from typing import Any
 
-from fido.claude import READ_ONLY_ALLOWED_TOOLS
 from fido.prompts import Prompts
-from fido.provider import ProviderAgent
+from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent
 from fido.synthesis import (
     VALID_REACTIONS,
     CommentResponse,

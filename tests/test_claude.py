@@ -13,7 +13,6 @@ from fido import provider
 from fido.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
-    READ_ONLY_ALLOWED_TOOLS,
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
@@ -34,6 +33,7 @@ from fido.claude import (
     raise_for_provider_error_output,
 )
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,

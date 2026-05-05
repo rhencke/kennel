@@ -12,10 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
-from fido.claude import READ_ONLY_ALLOWED_TOOLS, ClaudeClient
+from fido.claude import ClaudeClient
 from fido.github import GitHub
 from fido.prompts import Prompts
-from fido.provider import ProviderAgent
+from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent
 from fido.rocq import pr_body_task_store as task_store_oracle
 from fido.rocq import task_queue_rescope as rescope_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle

@@ -14,11 +14,12 @@ import pytest
 
 import fido.worker as worker_module
 from fido import provider
-from fido.claude import READ_ONLY_ALLOWED_TOOLS, ClaudeClient
+from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ContextOverflowError,
     ProviderID,
     ProviderLimitSnapshot,

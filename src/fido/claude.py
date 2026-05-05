@@ -20,6 +20,8 @@ import requests as _requests
 from fido import provider
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
+    GLOBAL_DISALLOWED_TOOLS,
+    READ_ONLY_ALLOWED_TOOLS,
     OwnedSession,
     PromptSession,
     Provider,
@@ -50,19 +52,6 @@ _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
-
-# Tool policy constants now live in :mod:`fido.provider` so the protocol
-# signatures can reference them as defaults without importing claude (closes
-# #1413).  Re-exported here for back-compat with existing call sites.
-from fido.provider import (  # noqa: E402  (re-export at top of module)
-    GLOBAL_DISALLOWED_TOOLS,
-    READ_ONLY_ALLOWED_TOOLS,
-)
-
-__all_tools__ = (
-    "GLOBAL_DISALLOWED_TOOLS",
-    "READ_ONLY_ALLOWED_TOOLS",
-)
 
 
 class _Trunc:

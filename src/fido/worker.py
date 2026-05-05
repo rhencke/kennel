@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.claude import READ_ONLY_ALLOWED_TOOLS, ClaudeCode
+from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
@@ -31,6 +31,7 @@ from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ContextOverflowError,
     PromptSession,
     Provider,

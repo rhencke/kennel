@@ -10,11 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fido.claude import READ_ONLY_ALLOWED_TOOLS
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ProviderAgent,
     safe_voice_turn,
     set_thread_kind,
