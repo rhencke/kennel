@@ -83,7 +83,7 @@ class HarnessCommitter:
         trailers = "\n".join(
             f"Helped-by: {identity.name} <{identity.email}>" for identity in helped_by
         )
-        return f"{summary}\n\n{trailers}"
+        return f"{summary}\n\n{trailers}".rstrip()
 
     def _assert_decision_oracle(
         self,
