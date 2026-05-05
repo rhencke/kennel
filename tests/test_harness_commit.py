@@ -434,26 +434,6 @@ class TestGitAddFailure:
 
 
 # ---------------------------------------------------------------------------
-# Tests: hook_failure_nudge
-# ---------------------------------------------------------------------------
-
-
-class TestHookFailureNudge:
-    def test_contains_output(self, tmp_path: Path) -> None:
-        hc, _ = _committer(tmp_path, [])
-        failure = CommitHookFailure(output="ruff found 3 errors")
-        nudge = hc.hook_failure_nudge(failure)
-        assert "ruff found 3 errors" in nudge
-        assert "turn_outcome" in nudge
-
-    def test_contains_instruction(self, tmp_path: Path) -> None:
-        hc, _ = _committer(tmp_path, [])
-        nudge = hc.hook_failure_nudge(CommitHookFailure(output="x"))
-        assert "pre-commit hook rejected" in nudge.lower()
-        assert "fix" in nudge.lower()
-
-
-# ---------------------------------------------------------------------------
 # Tests: CommitResult union exhaustiveness
 # ---------------------------------------------------------------------------
 

@@ -28,6 +28,7 @@ from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
 from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueNode, IssueTreeCache
+from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
 from fido.provider import (
     ContextOverflowError,
@@ -1145,71 +1146,6 @@ class AbortHandle:
             self._event.clear()
 
 
-def _nudge_context_header(
-    task_title: str,
-    task_id: str,
-    work_dir: str,
-    pr_number: int,
-) -> str:
-    """Return the task-context block that opens every nudge prompt.
-
-    Every nudge starts with context so the LLM knows which task it is working
-    on and where.  Callers append their specific instruction after this header.
-    """
-    return f"Task: {task_title} (id: {task_id})\nPR: {pr_number}\nWork dir: {work_dir}"
-
-
-def _missing_sentinel_nudge(
-    task_title: str,
-    task_id: str,
-    work_dir: str,
-    pr_number: int,
-    parse_error: str,
-) -> str:
-    """Return a nudge prompt when the LLM output has no valid turn_outcome.
-
-    The *parse_error* explains why the sentinel could not be parsed so the
-    LLM knows exactly what it did wrong and can fix it.
-    """
-    header = _nudge_context_header(task_title, task_id, work_dir, pr_number)
-    return (
-        f"{header}\n\n"
-        f"Parse error: {parse_error}\n\n"
-        "Every turn must end with exactly one JSON object on the final "
-        "non-empty line.  If the task is complete, emit "
-        '{"turn_outcome":"commit-task-complete","summary":"<commit message>"}. '
-        "If you need another turn, emit "
-        '{"turn_outcome":"commit-task-in-progress","summary":"<wip message>"}. '
-        "If no code change is needed, emit "
-        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}. '
-        "If you are blocked and need human guidance, emit "
-        '{"turn_outcome":"stuck-on-task","reason":"<what you need>"}.'
-    )
-
-
-def _nothing_staged_nudge(
-    task_title: str,
-    task_id: str,
-    work_dir: str,
-    pr_number: int,
-) -> str:
-    """Return a nudge prompt when a commit sentinel was emitted but nothing staged.
-
-    The harness ran ``git add -u`` after the sentinel but found nothing to
-    commit — the working tree has no tracked changes.
-    """
-    header = _nudge_context_header(task_title, task_id, work_dir, pr_number)
-    return (
-        f"{header}\n\n"
-        "Your turn_outcome sentinel declared a commit, but ``git add -u`` "
-        "found nothing staged — the working tree has no tracked changes.\n\n"
-        "Either make the necessary file changes and emit a commit sentinel, "
-        "or emit "
-        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"} '
-        "if no code change is actually needed."
-    )
-
-
 class Worker:
     """Fido worker for a single repository.
 
@@ -1236,6 +1172,7 @@ class Worker:
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
+        nudges: Nudges | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -1261,6 +1198,7 @@ class Worker:
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
+        self._nudges = nudges if nudges is not None else Nudges()
         self._dispatcher = dispatcher
         self._provider_factory = (
             DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
@@ -3273,7 +3211,7 @@ class Worker:
                 outcome = parse_turn_outcome(output)
             except ValueError as exc:
                 # LLM did not emit a valid turn_outcome sentinel — nudge it.
-                nudge = _missing_sentinel_nudge(
+                nudge = self._nudges.missing_sentinel(
                     task_title=task_title,
                     task_id=task["id"],
                     work_dir=str(self.work_dir),
@@ -3334,7 +3272,7 @@ class Worker:
                             commit_result, nudge_oracle.NudgeNothingStaged()
                         )
                         # Sentinel declared a commit but nothing was staged.
-                        nudge = _nothing_staged_nudge(
+                        nudge = self._nudges.nothing_staged(
                             task_title=task_title,
                             task_id=task["id"],
                             work_dir=str(self.work_dir),
@@ -3350,14 +3288,13 @@ class Worker:
                             commit_result, nudge_oracle.NudgeHookFailure()
                         )
                         # Pre-commit hook rejected — nudge LLM to fix.
-                        header = _nudge_context_header(
+                        nudge = self._nudges.hook_failure(
                             task_title=task_title,
                             task_id=task["id"],
                             work_dir=str(self.work_dir),
                             pr_number=pr_number,
+                            failure=commit_result,
                         )
-                        hook_nudge = harness_committer.hook_failure_nudge(commit_result)
-                        nudge = f"{header}\n\n{hook_nudge}"
                         (fido_dir / "prompt").write_text(nudge)
                         log.info("task pre-commit hook rejected commit — nudging")
                     case cra_oracle.ActionPushAndComplete():

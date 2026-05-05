@@ -137,14 +137,6 @@ class HarnessCommitter:
                 f"oracle={oracle!r}, dispatched_to_commit={dispatched_to_commit!r}"
             )
 
-    def hook_failure_nudge(self, failure: CommitHookFailure) -> str:
-        """Format a nudge prompt for the LLM after a hook failure."""
-        return (
-            "The pre-commit hook rejected the commit. Fix the issues below "
-            "and emit a new turn_outcome sentinel.\n\n"
-            f"Hook output:\n{failure.output}"
-        )
-
     def commit(
         self,
         outcome: TurnOutcome,
