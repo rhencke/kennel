@@ -21,6 +21,7 @@ that module.  This module owns only the parser boundary adapter.
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
@@ -30,6 +31,9 @@ from fido.rocq.turn_outcome import (
     TurnOutcome,
     parse_sentinel,
 )
+from fido.synthesis import Insight
+
+_T = TypeVar("_T")
 
 __all__ = [
     "Insight",
@@ -37,18 +41,6 @@ __all__ = [
     "TurnOutcomeBundle",
     "parse_turn_outcome",
 ]
-
-
-@dataclass(frozen=True)
-class Insight:
-    """A bug-or-design observation the LLM declared in its turn output;
-    filed by the harness as a GitHub issue with the ``Insight`` label.
-
-    Mirrors :class:`fido.synthesis.Insight` but is the task-phase variant
-    consumed via the turn_outcome sentinel."""
-
-    title: str
-    body: str
 
 
 @dataclass(frozen=True)
@@ -133,33 +125,60 @@ def _parse_outcome_field(
     return result
 
 
+def _require_aux_str(item: dict[str, object], field: str, label: str) -> str:
+    """Pull a required non-empty string field out of an aux-issue item dict."""
+    value = item.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{label} requires a non-empty "{field}" string')
+    return value
+
+
 def _parse_aux_issues(
-    obj: dict[str, object], field: str, factory: Callable[[str, str], object]
-) -> tuple[object, ...]:
+    obj: dict[str, object],
+    field: str,
+    item_parser: Callable[[dict[str, object], str], _T],
+) -> tuple[_T, ...]:
     """Parse an optional auxiliary-issue array (``insights`` or
     ``out_of_scope_asks``) from *obj*.
 
-    Returns an empty tuple when the field is absent or ``None``.  Raises
-    ``ValueError`` when present but malformed (non-list, items missing
-    required fields, etc.).
+    *item_parser* receives the raw item dict and a label like ``"insights[2]"``
+    suitable for error messages, and returns the typed dataclass.  Returns an
+    empty tuple when *field* is absent or ``None``; raises ``ValueError`` when
+    present but malformed (non-list, missing required keys, etc.).
     """
     raw = obj.get(field)
     if raw is None:
         return ()
     if not isinstance(raw, list):
         raise ValueError(f'turn_outcome "{field}" must be a JSON array, got: {raw!r}')
-    out: list[object] = []
+    out: list[_T] = []
     for i, item in enumerate(raw):
+        label = f"{field}[{i}]"
         if not isinstance(item, dict):
-            raise ValueError(f"{field}[{i}] is not a JSON object: {item!r}")
-        title = item.get("title")
-        body = item.get("body")
-        if not isinstance(title, str) or not title.strip():
-            raise ValueError(f'{field}[{i}] requires a non-empty "title" string')
-        if not isinstance(body, str) or not body.strip():
-            raise ValueError(f'{field}[{i}] requires a non-empty "body" string')
-        out.append(factory(title.strip(), body))
+            raise ValueError(f"{label} is not a JSON object: {item!r}")
+        out.append(item_parser(item, label))
     return tuple(out)
+
+
+def _parse_insight(item: dict[str, object], label: str) -> Insight:
+    """Parse one entry from the sentinel's ``insights`` array.
+
+    Schema matches :class:`fido.synthesis.Insight` so the comment-driven
+    and task-driven insight pipelines share one type and one filing shape.
+    """
+    return Insight(
+        title=_require_aux_str(item, "title", label).strip(),
+        hook=_require_aux_str(item, "hook", label),
+        why=_require_aux_str(item, "why", label),
+    )
+
+
+def _parse_out_of_scope_ask(item: dict[str, object], label: str) -> "OutOfScopeAsk":
+    """Parse one entry from the sentinel's ``out_of_scope_asks`` array."""
+    return OutOfScopeAsk(
+        title=_require_aux_str(item, "title", label).strip(),
+        body=_require_aux_str(item, "body", label),
+    )
 
 
 def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
@@ -215,18 +234,10 @@ def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
             # unknown kind regardless of payload content.
             _assert_reject_oracle(kind, "x")
             raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
-    insights = _parse_aux_issues(
-        obj, "insights", lambda title, body: Insight(title=title, body=body)
-    )
-    asks = _parse_aux_issues(
-        obj,
-        "out_of_scope_asks",
-        lambda title, body: OutOfScopeAsk(title=title, body=body),
-    )
-    # mypy/pyright: tuple element types are object[]; cast the homogeneous
-    # tuples for the bundle type signature.
     return TurnOutcomeBundle(
         outcome=outcome,
-        insights=tuple(i for i in insights if isinstance(i, Insight)),
-        out_of_scope_asks=tuple(a for a in asks if isinstance(a, OutOfScopeAsk)),
+        insights=_parse_aux_issues(obj, "insights", _parse_insight),
+        out_of_scope_asks=_parse_aux_issues(
+            obj, "out_of_scope_asks", _parse_out_of_scope_ask
+        ),
     )

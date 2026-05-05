@@ -4073,8 +4073,16 @@ class TestFileAuxIssuesFromBundle:
         bundle = TurnOutcomeBundle(
             outcome=CommitTaskComplete(summary="x"),
             insights=(
-                Insight(title="Snapshot ownership", body="When CAS breaks down…"),
-                Insight(title="Webhook ordering", body="Two events 10s apart"),
+                Insight(
+                    title="Snapshot ownership",
+                    hook="CAS broke down on the snapshot.",
+                    why="The fix was to move ownership of the value out.",
+                ),
+                Insight(
+                    title="Webhook ordering",
+                    hook="Two pull_request_review events 10s apart.",
+                    why="Worth a dedup window in webhook ingest.",
+                ),
             ),
             out_of_scope_asks=(),
         )
@@ -4083,13 +4091,17 @@ class TestFileAuxIssuesFromBundle:
             (
                 "alice/myrepo",
                 "Insight: Snapshot ownership",
-                "When CAS breaks down…\n\nSource: alice/myrepo#99",
+                "CAS broke down on the snapshot.\n\n"
+                "The fix was to move ownership of the value out.\n\n"
+                "Source: alice/myrepo#99",
                 ["Insight"],
             ),
             (
                 "alice/myrepo",
                 "Insight: Webhook ordering",
-                "Two events 10s apart\n\nSource: alice/myrepo#99",
+                "Two pull_request_review events 10s apart.\n\n"
+                "Worth a dedup window in webhook ingest.\n\n"
+                "Source: alice/myrepo#99",
                 ["Insight"],
             ),
         ]
@@ -4137,7 +4149,7 @@ class TestFileAuxIssuesFromBundle:
         worker = Worker(tmp_path, _Failing(), registry=MagicMock(spec=ActivityReporter))
         bundle = TurnOutcomeBundle(
             outcome=CommitTaskComplete(summary="x"),
-            insights=(Insight(title="T", body="B"),),
+            insights=(Insight(title="T", hook="H", why="W"),),
             out_of_scope_asks=(),
         )
         with pytest.raises(RuntimeError, match="api down"):

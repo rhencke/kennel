@@ -1795,6 +1795,9 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Run claude --print reading system prompt and user prompt from files."""
+        # `timeout` is on the protocol because codex/copilot use a wall-clock
+        # cap; the persistent-session path here applies idle_timeout via
+        # _streaming_runner instead, so the wall-clock cap is unused.
         del timeout
         cmd = [
             "claude",
@@ -1829,6 +1832,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
     ) -> str:
         """Continue an existing claude session by ID, feeding prompt_file on stdin."""
+        # See note on print_prompt_from_file: claude uses idle_timeout, not timeout.
         del timeout
         cmd = [
             "claude",

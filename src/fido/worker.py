@@ -2822,12 +2822,17 @@ class Worker:
         #1413).  Called after a successful harness commit so the LLM's
         side-channel observations don't depend on the LLM's permission set
         — the harness owns issue creation, the LLM only declares intent.
+
+        On a mid-bundle ``create_issue`` failure we propagate; the partial
+        filing is intentional — duplicate-on-retry is preferable to lost
+        insights, and GitHub has no native dedup for issue creation.
         """
+        source = f"{repo_ctx.repo}#{pr_number}"
         for insight in bundle.insights:
             self.gh.create_issue(
                 repo_ctx.repo,
                 f"Insight: {insight.title}",
-                f"{insight.body}\n\nSource: {repo_ctx.repo}#{pr_number}",
+                f"{insight.hook}\n\n{insight.why}\n\nSource: {source}",
                 labels=["Insight"],
             )
             log.info("filed insight from turn sentinel: %s", insight.title[:60])
@@ -2835,7 +2840,7 @@ class Worker:
             self.gh.create_issue(
                 repo_ctx.repo,
                 ask.title,
-                f"{ask.body}\n\nOut-of-scope from: {repo_ctx.repo}#{pr_number}",
+                f"{ask.body}\n\nOut-of-scope from: {source}",
             )
             log.info("filed out-of-scope ask from turn sentinel: %s", ask.title[:60])
 

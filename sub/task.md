@@ -76,13 +76,13 @@ Every turn **must** end with a `turn_outcome` JSON object as the final non-empty
 
 The harness files GitHub issues on your behalf when the sentinel includes either of these arrays.  You **never** call `gh issue create` yourself — the harness owns issue creation.
 
-- **`insights`** — surprising invariants, design lessons, or root-cause observations worth preserving.  Each entry becomes an issue with the `Insight` label.
-- **`out_of_scope_asks`** — requests that arrived during this task but are out of scope for the current PR.  Each entry becomes a normal tracked issue so the work isn't lost while keeping this PR focused.
+- **`insights`** — surprising invariants, design lessons, or root-cause observations worth preserving.  Each entry has `title`, `hook` (one-sentence lede), and `why` (2–3 sentences on what broader lesson it carries).  Each entry becomes an issue with the `Insight` label.
+- **`out_of_scope_asks`** — requests that arrived during this task but are out of scope for the current PR.  Each entry has `title` and `body`.  Each entry becomes a normal tracked issue so the work isn't lost while keeping this PR focused.
 
 Combined example:
 
 ```json
-{"turn_outcome": "commit-task-complete", "summary": "Migrate webhook activities to FidoState", "insights": [{"title": "Snapshot ownership belongs to the writer class", "body": "When CAS read-modify-write breaks down, the right fix is moving ownership of the value out of the snapshot."}], "out_of_scope_asks": [{"title": "Webhook redelivery dedup window", "body": "Saw a duplicate `pull_request_review` arrive 10s apart from GitHub. Worth a dedup window in webhook ingest."}]}
+{"turn_outcome": "commit-task-complete", "summary": "Migrate webhook activities to FidoState", "insights": [{"title": "Snapshot ownership belongs to the writer class", "hook": "CAS read-modify-write broke down on the snapshot.", "why": "The right fix was moving ownership of the value out of the snapshot. Generalises to any place a reader and writer share a struct that needs serial mutation."}], "out_of_scope_asks": [{"title": "Webhook redelivery dedup window", "body": "Saw a duplicate `pull_request_review` arrive 10s apart from GitHub. Worth a dedup window in webhook ingest."}]}
 ```
 
 The sentinel must be the literal last non-empty line of your response — nothing after it.  Do not wrap it in a code fence or markdown block.

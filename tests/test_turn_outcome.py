@@ -207,12 +207,14 @@ class TestParseTurnOutcomeAuxIssues:
     def test_insights_parsed(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": [{"title": "T1", "body": "B1"}, {"title": "T2", "body": "B2"}]}'
+            '"insights": ['
+            '{"title": "T1", "hook": "H1", "why": "W1"}, '
+            '{"title": "T2", "hook": "H2", "why": "W2"}]}'
         )
         bundle = parse_turn_outcome(line)
         assert bundle.insights == (
-            Insight(title="T1", body="B1"),
-            Insight(title="T2", body="B2"),
+            Insight(title="T1", hook="H1", why="W1"),
+            Insight(title="T2", hook="H2", why="W2"),
         )
         assert bundle.out_of_scope_asks == ()
 
@@ -228,7 +230,7 @@ class TestParseTurnOutcomeAuxIssues:
     def test_insights_must_be_array(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": {"title": "T", "body": "B"}}'
+            '"insights": {"title": "T", "hook": "H", "why": "W"}}'
         )
         with pytest.raises(ValueError, match="must be a JSON array"):
             parse_turn_outcome(line)
@@ -244,31 +246,47 @@ class TestParseTurnOutcomeAuxIssues:
     def test_insight_missing_title(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": [{"body": "B"}]}'
+            '"insights": [{"hook": "H", "why": "W"}]}'
         )
         with pytest.raises(ValueError, match=r'requires a non-empty "title"'):
             parse_turn_outcome(line)
 
-    def test_insight_missing_body(self) -> None:
+    def test_insight_missing_hook(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": [{"title": "T"}]}'
+            '"insights": [{"title": "T", "why": "W"}]}'
         )
-        with pytest.raises(ValueError, match=r'requires a non-empty "body"'):
+        with pytest.raises(ValueError, match=r'requires a non-empty "hook"'):
+            parse_turn_outcome(line)
+
+    def test_insight_missing_why(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"title": "T", "hook": "H"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "why"'):
             parse_turn_outcome(line)
 
     def test_insight_title_whitespace_only(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": [{"title": "   ", "body": "B"}]}'
+            '"insights": [{"title": "   ", "hook": "H", "why": "W"}]}'
         )
         with pytest.raises(ValueError, match=r'requires a non-empty "title"'):
             parse_turn_outcome(line)
 
-    def test_insight_body_whitespace_only(self) -> None:
+    def test_insight_hook_whitespace_only(self) -> None:
         line = (
             '{"turn_outcome": "commit-task-complete", "summary": "x", '
-            '"insights": [{"title": "T", "body": "  "}]}'
+            '"insights": [{"title": "T", "hook": "  ", "why": "W"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "hook"'):
+            parse_turn_outcome(line)
+
+    def test_out_of_scope_ask_missing_body(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"out_of_scope_asks": [{"title": "Ask"}]}'
         )
         with pytest.raises(ValueError, match=r'requires a non-empty "body"'):
             parse_turn_outcome(line)
