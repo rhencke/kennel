@@ -11081,6 +11081,139 @@ class TestExecuteTask:
         # Second call: empty string → None (fresh session)
         assert resume_sessions[1] is None
 
+    def test_thread_task_passes_helped_by_to_commit(self, tmp_path: Path) -> None:
+        """Thread tasks resolve the author login to GitIdentity for helped_by."""
+        from fido.types import GitIdentity
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "Fix review feedback",
+            "status": "pending",
+            "type": "thread",
+            "thread": {
+                "comment_id": 123,
+                "author": "rhencke",
+                "pr": 1,
+                "url": "https://github.com/owner/repo/pull/1#comment-123",
+            },
+        }
+        expected_identity = GitIdentity(
+            name="Rob Hencke",
+            email="12345+rhencke@users.noreply.github.com",
+        )
+        gh.get_user_identity.return_value = expected_identity
+        gh.find_closed_prs_as_context.return_value = []
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(
+                worker, "_snapshot_fido_issue_comment_ids", return_value=set()
+            ),
+            patch("fido.worker.build_prompt"),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            patch.object(worker, "_delete_leaked_task_comments"),
+            patch.object(worker, "_git", self._simple_git_mock()),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+            mock_hc_cls.return_value.commit.assert_called_once()
+            _, kwargs = mock_hc_cls.return_value.commit.call_args
+            assert kwargs["helped_by"] == [expected_identity]
+        gh.get_user_identity.assert_called_once_with("rhencke")
+
+    def test_non_thread_task_passes_empty_helped_by(self, tmp_path: Path) -> None:
+        """Non-thread tasks pass an empty helped_by list."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Implement feature")
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(
+                worker, "_snapshot_fido_issue_comment_ids", return_value=set()
+            ),
+            patch("fido.worker.build_prompt"),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            patch.object(worker, "_delete_leaked_task_comments"),
+            patch.object(worker, "_git", self._simple_git_mock()),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+            _, kwargs = mock_hc_cls.return_value.commit.call_args
+            assert kwargs["helped_by"] == []
+        gh.get_user_identity.assert_not_called()
+
+    def test_thread_task_graceful_on_identity_resolution_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """If get_user_identity fails, the commit proceeds without helped_by."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = {
+            "id": "t1",
+            "title": "Fix review feedback",
+            "status": "pending",
+            "type": "thread",
+            "thread": {
+                "comment_id": 123,
+                "author": "ghost-user",
+                "pr": 1,
+                "url": "https://github.com/owner/repo/pull/1#comment-123",
+            },
+        }
+        gh.get_user_identity.side_effect = Exception("404 Not Found")
+        gh.find_closed_prs_as_context.return_value = []
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(
+                worker, "_snapshot_fido_issue_comment_ids", return_value=set()
+            ),
+            patch("fido.worker.build_prompt"),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            patch.object(worker, "_delete_leaked_task_comments"),
+            patch.object(worker, "_git", self._simple_git_mock()),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+            _, kwargs = mock_hc_cls.return_value.commit.call_args
+            assert kwargs["helped_by"] == []
+
 
 class TestYieldForUntriaged:
     """Tests for Worker._yield_for_untriaged and its two call sites in

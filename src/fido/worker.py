@@ -3278,7 +3278,22 @@ class Worker:
                     with State(fido_dir).modify() as state:
                         state.pop("current_task_id", None)
                     return True
-                commit_result = harness_committer.commit(outcome)
+                helped_by_identities: list[GitIdentity] = []
+                thread_author = thread.get("author")
+                if thread_author:
+                    try:
+                        helped_by_identities.append(
+                            self.gh.get_user_identity(thread_author)
+                        )
+                    except Exception:
+                        log.warning(
+                            "failed to resolve identity for %s — "
+                            "commit will omit Helped-by trailer",
+                            thread_author,
+                        )
+                commit_result = harness_committer.commit(
+                    outcome, helped_by=helped_by_identities
+                )
                 match commit_result:
                     case CommitSkipped(reason=reason):
                         _assert_commit_result_action(

@@ -636,6 +636,21 @@ class GitHub:
             email=f"{uid}+{login}@users.noreply.github.com",
         )
 
+    def get_user_identity(self, login: str) -> GitIdentity:
+        """Return the git commit identity for an arbitrary GitHub user by login.
+
+        Name: the account's display name, falling back to ``login`` when unset.
+        Email: the GitHub noreply form
+        ``{id}+{login}@users.noreply.github.com`` — never the real email.
+        """
+        data = self._get(f"/users/{login}")
+        uid = data["id"]
+        name = data.get("name") or login
+        return GitIdentity(
+            name=name,
+            email=f"{uid}+{login}@users.noreply.github.com",
+        )
+
     def get_collaborators(self, repo: str) -> list[str]:
         """Return logins of collaborators with write+ permission on *repo*.
 

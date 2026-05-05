@@ -1224,6 +1224,35 @@ class TestGitHubClass:
         assert "real.person@example.com" not in identity.email
         assert identity.email == "42+fido@users.noreply.github.com"
 
+    def test_get_user_identity_builds_noreply_email(self) -> None:
+        from fido.types import GitIdentity
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "login": "rhencke",
+            "id": 12345,
+            "name": "Rob Hencke",
+        }
+        mock_s.get.return_value = mock_resp
+        assert gh.get_user_identity("rhencke") == GitIdentity(
+            name="Rob Hencke",
+            email="12345+rhencke@users.noreply.github.com",
+        )
+        url = mock_s.get.call_args.args[0]
+        assert url.endswith("/users/rhencke")
+
+    def test_get_user_identity_falls_back_to_login_when_name_missing(self) -> None:
+        from fido.types import GitIdentity
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"login": "ghost", "id": 99, "name": None}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_user_identity("ghost") == GitIdentity(
+            name="ghost", email="99+ghost@users.noreply.github.com"
+        )
+
     def test_get_collaborators_filters_by_permission(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
