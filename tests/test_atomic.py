@@ -85,57 +85,6 @@ class TestAtomicReferenceCompareAndSet:
         assert ref.get() is a
 
 
-class TestAtomicReferenceUpdate:
-    def test_applies_function_to_current_value(self) -> None:
-        ref: AtomicReference[_State] = AtomicReference(_State(10))
-        result = ref.update(lambda s: _State(s.n + 5))
-        assert result == _State(15)
-        assert ref.get() == _State(15)
-
-    def test_returns_installed_value(self) -> None:
-        ref: AtomicReference[_State] = AtomicReference(_State(0))
-        installed = ref.update(lambda s: _State(s.n + 1))
-        assert installed is ref.get()
-
-    def test_retries_after_concurrent_modification(self) -> None:
-        """update() retries when a writer sneaks in between get() and CAS."""
-        ref: AtomicReference[_State] = AtomicReference(_State(0))
-        injected = [False]
-
-        def fn(s: _State) -> _State:
-            if not injected[0]:
-                injected[0] = True
-                # Race: overwrite the ref before update() can CAS.
-                ref.set(_State(100))
-            return _State(s.n + 1)
-
-        result = ref.update(fn)
-        # Iteration 1: s=State(0), ref sneaked to State(100), returns State(1).
-        #   CAS(State(0), State(1)) fails — identities differ.
-        # Iteration 2: s=State(100), returns State(101).
-        #   CAS(State(100), State(101)) succeeds.
-        assert result == _State(101)
-        assert ref.get() == _State(101)
-
-    def test_concurrent_updates_all_applied(self) -> None:
-        """Many concurrent update() calls; no increments are lost."""
-        ref: AtomicReference[_State] = AtomicReference(_State(0))
-        n_threads = 20
-        increments_per_thread = 50
-
-        def run() -> None:
-            for _ in range(increments_per_thread):
-                ref.update(lambda s: _State(s.n + 1))
-
-        threads = [threading.Thread(target=run) for _ in range(n_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert ref.get() == _State(n_threads * increments_per_thread)
-
-
 @dataclass(frozen=True)
 class _Item:
     val: int
@@ -146,12 +95,12 @@ class _Container:
     items: frozendict[str, _Item]
 
 
-class TestAtomicReferenceLensUpdate:
+class TestAtomicReferenceUpdate:
     def test_installs_value_at_path(self) -> None:
         state = _Container(items=frozendict({"a": _Item(1)}))
         ref: AtomicReference[_Container] = AtomicReference(state)
         new_item = _Item(99)
-        result = ref.lens_update(lambda root: root.items["a"], new_item)
+        result = ref.update(lambda root: root.items["a"], new_item)
         assert result.items["a"] is new_item
         assert ref.get().items["a"] is new_item
 
@@ -160,14 +109,14 @@ class TestAtomicReferenceLensUpdate:
             _Container(items=frozendict())
         )
         new_item = _Item(7)
-        ref.lens_update(lambda root: root.items["new"], new_item)
+        ref.update(lambda root: root.items["new"], new_item)
         assert ref.get().items["new"] is new_item
 
     def test_returns_installed_root(self) -> None:
         ref: AtomicReference[_Container] = AtomicReference(
             _Container(items=frozendict({"x": _Item(0)}))
         )
-        result = ref.lens_update(lambda root: root.items["x"], _Item(5))
+        result = ref.update(lambda root: root.items["x"], _Item(5))
         assert result is ref.get()
 
     def test_selector_receives_lens(self) -> None:
@@ -181,7 +130,7 @@ class TestAtomicReferenceLensUpdate:
         ref: AtomicReference[_Container] = AtomicReference(
             _Container(items=frozendict({"a": _Item(1)}))
         )
-        ref.lens_update(selector, _Item(2))
+        ref.update(selector, _Item(2))
         assert isinstance(received[0], Lens)
 
     def test_preserves_sibling_keys(self) -> None:
@@ -190,5 +139,49 @@ class TestAtomicReferenceLensUpdate:
         ref: AtomicReference[_Container] = AtomicReference(
             _Container(items=frozendict({"a": a, "b": b}))
         )
-        ref.lens_update(lambda root: root.items["a"], _Item(99))
+        ref.update(lambda root: root.items["a"], _Item(99))
         assert ref.get().items["b"] is b
+
+    def test_retries_after_concurrent_modification(self) -> None:
+        """update() retries when a concurrent writer sneaks in between get() and CAS."""
+        ref: AtomicReference[_Container] = AtomicReference(
+            _Container(items=frozendict({"a": _Item(0)}))
+        )
+        injected = [False]
+
+        def selector(root: Lens[_Container]) -> Lens[_Container]:
+            if not injected[0]:
+                injected[0] = True
+                # Race: overwrite the ref before update() can CAS.
+                ref.set(_Container(items=frozendict({"a": _Item(100)})))
+            return root.items["a"]
+
+        result = ref.update(selector, _Item(42))
+        # Iteration 1: selector runs on old root (a=0), sneaks in a=100,
+        #   produces root with a=42.  CAS fails because ref changed.
+        # Iteration 2: selector runs on new root (a=100), produces root
+        #   with a=42.  CAS succeeds.
+        assert result.items["a"] == _Item(42)
+        assert ref.get().items["a"] == _Item(42)
+
+    def test_concurrent_updates_no_lost_writes(self) -> None:
+        """Many concurrent update() calls on disjoint keys; no writes lost."""
+        n_threads = 20
+        items = frozendict({f"k{i}": _Item(0) for i in range(n_threads)})
+        ref: AtomicReference[_Container] = AtomicReference(_Container(items=items))
+
+        def run(key: str) -> None:
+            for v in range(1, 51):
+                ref.update(lambda root: root.items[key], _Item(v))
+
+        threads = [
+            threading.Thread(target=run, args=(f"k{i}",)) for i in range(n_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        final = ref.get()
+        for i in range(n_threads):
+            assert final.items[f"k{i}"] == _Item(50)

@@ -8,12 +8,14 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from frozendict import frozendict
 
 from fido import provider
 from fido.claude import ClaudeClient
@@ -26,11 +28,53 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
+from fido.registry import FidoState, RepoState, WorkerActivity, WorkerCrash
 from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
 from tests.fakes import _FakeDispatcher
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _zero_crash() -> WorkerCrash:
+    return WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH)
+
+
+def _repo_state(
+    repo_name: str,
+    what: str = "Working on: #1",
+    busy: bool = True,
+    crash_count: int = 0,
+    last_error: str = "",
+    stale: bool = False,
+    started_at: datetime | None = None,
+) -> RepoState:
+    progress_at = (
+        datetime(2020, 1, 1, tzinfo=timezone.utc)
+        if stale
+        else datetime.now(tz=timezone.utc)
+    )
+    return RepoState(
+        key=repo_name,
+        started_at=started_at or _EPOCH,
+        activity=WorkerActivity(
+            repo_name=repo_name,
+            what=what,
+            busy=busy,
+            last_progress_at=progress_at,
+        ),
+        crash_record=WorkerCrash(
+            death_count=crash_count,
+            last_error=last_error,
+            last_crash_time=_EPOCH,
+        ),
+    )
+
+
+def _fido_state(*repo_states: RepoState) -> FidoState:
+    return FidoState(repos=frozendict({rs.key: rs for rs in repo_states}))
 
 
 class RepoConfig(_RepoConfig):
@@ -238,22 +282,10 @@ class TestGetEndpoint:
         assert b"fido is running" in resp.read()
 
     def test_status_endpoint_returns_activities(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -273,7 +305,7 @@ class TestGetEndpoint:
         assert entry["crash_count"] == 0
         assert entry["last_crash_error"] is None
         assert entry["is_stuck"] is False
-        assert entry["worker_uptime_seconds"] is None
+        assert isinstance(entry["worker_uptime_seconds"], float)
         assert entry["webhook_activities"] == []
         assert entry["session_owner"] is None
         assert entry["session_dropped_count"] == 0
@@ -281,22 +313,10 @@ class TestGetEndpoint:
         assert entry["session_received_count"] == 0
 
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
         WebhookHandler.registry.get_session_alive.return_value = True
@@ -313,22 +333,10 @@ class TestGetEndpoint:
         assert data["activities"][0]["session_received_count"] == 8
 
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="idle",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="idle", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True
@@ -340,26 +348,16 @@ class TestGetEndpoint:
         assert data["activities"][0]["session_owner"] is None
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity, WorkerCrash
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state(
+                "owner/repo",
                 what="Napping",
                 busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
-            death_count=3,
-            last_error="RuntimeError: boom",
-            last_crash_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                crash_count=3,
+                last_error="RuntimeError: boom",
+            )
         )
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -372,7 +370,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
         assert json.loads(resp.read()) == {
@@ -383,27 +381,26 @@ class TestGetEndpoint:
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.headers.get("Content-Type") == "application/json"
 
-    def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
+    def test_status_endpoint_skips_zero_sentinel_repos(self, server: tuple) -> None:
+        """Repos whose activity is still the zero sentinel (what='') are excluded."""
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = True
-        WebhookHandler.registry.thread_started_at.return_value = None
+        # A repo in the snapshot with what="" — prepopulated but never active.
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="")
+        )
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data["activities"] == []
+
+    def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", stale=True)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -414,22 +411,10 @@ class TestGetEndpoint:
         assert data["activities"][0]["is_stuck"] is True
 
     def test_status_endpoint_includes_rescoping_flag(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -445,23 +430,12 @@ class TestGetEndpoint:
         """A real ``RateLimitMonitor`` with a refreshed snapshot serializes
         into ``/status.json`` under the top-level ``rate_limit`` key
         (closes #812 follow-up)."""
-        from datetime import datetime, timezone
-
         from fido.rate_limit import RateLimitMonitor
-        from fido.registry import WorkerActivity
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="idle",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="idle", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -492,22 +466,10 @@ class TestGetEndpoint:
         self, server: tuple
     ) -> None:
         """No monitor instance attached → ``rate_limit`` is ``None``."""
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="idle",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="idle", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -523,23 +485,12 @@ class TestGetEndpoint:
         self, server: tuple
     ) -> None:
         """Monitor present but ``latest()`` returns None → rate_limit None."""
-        from datetime import datetime, timezone
-
         from fido.rate_limit import RateLimitMonitor
-        from fido.registry import WorkerActivity
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="idle",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="idle", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -560,23 +511,12 @@ class TestGetEndpoint:
         and verify the /status.json payload includes the cache snapshot
         (closes #812 status half).
         """
-        from datetime import datetime, timezone
-
         from fido.issue_cache import IssueTreeCache
-        from fido.registry import WorkerActivity
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -616,22 +556,10 @@ class TestGetEndpoint:
         from ``get_issue_cache``; ``_serialize_issue_cache`` must reject
         it as non-cache and emit ``None`` rather than raise.
         """
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -644,22 +572,10 @@ class TestGetEndpoint:
         assert data["activities"][0]["issue_cache"] is None
 
     def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
-        from datetime import UTC, datetime
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=UTC),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -673,7 +589,7 @@ class TestGetEndpoint:
                     window_name="five_hour",
                     pressure=0.96,
                     percent_used=96,
-                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
                     unavailable_reason=None,
                     level="paused",
                     warning=False,
@@ -688,22 +604,10 @@ class TestGetEndpoint:
         assert data["activities"][0]["provider_status"]["percent_used"] == 96
 
     def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Napping",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="Napping", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -717,22 +621,10 @@ class TestGetEndpoint:
         self, server: tuple
     ) -> None:
         """With no state.json or tasks.json on disk, fido_state fields default."""
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -760,10 +652,6 @@ class TestGetEndpoint:
         self, server: tuple, tmp_path: Path
     ) -> None:
         """state.json and tasks.json on disk are surfaced in the activity entry."""
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         # Write state.json
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -804,17 +692,9 @@ class TestGetEndpoint:
         tasks_path.write_text(json.dumps(tasks))
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #42",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="Working on: #42")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -842,23 +722,11 @@ class TestGetEndpoint:
         self, server: tuple
     ) -> None:
         """When a repo has no config entry, fido_state fields are all defaults."""
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
         # Report an activity for a repo not in config
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="unknown/repo",
-                what="idle",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("unknown/repo", what="idle", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1136,7 +1004,7 @@ class TestRepoStatus:
 class TestStatusXml:
     def test_status_returns_namespaced_xml_with_xslt_pi(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert resp.headers.get("Content-Type") == "application/xml; charset=utf-8"
@@ -1146,22 +1014,10 @@ class TestStatusXml:
         assert 'xmlns="https://fidocancode.dog/fido"' in body
 
     def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #1",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1176,7 +1032,7 @@ class TestStatusXml:
 
     def test_status_xml_empty_fido(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert 'xmlns="https://fidocancode.dog/fido"' in body
@@ -1184,10 +1040,7 @@ class TestStatusXml:
         assert "/>" in body
 
     def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
         from fido.provider import SessionTalker
-        from fido.registry import WorkerActivity
 
         url, _ = server
         talker = SessionTalker(
@@ -1198,17 +1051,9 @@ class TestStatusXml:
             claude_pid=9999,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="working",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="working")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1221,22 +1066,10 @@ class TestStatusXml:
         assert "<claude_pid>9999</claude_pid>" in body
 
     def test_status_xml_includes_provider_status(self, server: tuple) -> None:
-        from datetime import UTC, datetime
-
-        from fido.registry import WorkerActivity
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="working",
-                busy=False,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=UTC),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="working", busy=False)
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1250,7 +1083,7 @@ class TestStatusXml:
                     window_name="five_hour",
                     pressure=0.96,
                     percent_used=96,
-                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
                     unavailable_reason=None,
                     level="paused",
                     warning=False,
@@ -1265,22 +1098,12 @@ class TestStatusXml:
         assert "<percent_used>96</percent_used>" in body
 
     def test_status_xml_includes_webhooks(self, server: tuple) -> None:
-        from datetime import datetime, timezone
-
-        from fido.registry import WebhookActivity, WorkerActivity
+        from fido.registry import WebhookActivity
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="working",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="working")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = [
             WebhookActivity(
                 handle_id=1,
@@ -1300,10 +1123,8 @@ class TestStatusXml:
 
     def test_status_xml_includes_fido_uptime(self, server: tuple) -> None:
         """<fido_uptime_seconds> appears in the root element when fido_started_at is set."""
-        from datetime import datetime, timezone
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
@@ -1314,7 +1135,7 @@ class TestStatusXml:
     def test_status_xml_no_fido_uptime_when_not_started(self, server: tuple) -> None:
         """<fido_uptime_seconds> is absent when fido_started_at is None (default)."""
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
@@ -1322,8 +1143,6 @@ class TestStatusXml:
 
     def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
         """<rate_limit> with nested windows appears in the root element when available."""
-        from datetime import UTC, datetime
-
         from fido.rate_limit import (
             RateLimitMonitor,
             RateLimitSnapshot,
@@ -1331,21 +1150,21 @@ class TestStatusXml:
         )
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         snap = RateLimitSnapshot(
             rest=RateLimitWindow(
                 name="rest",
                 used=100,
                 limit=5000,
-                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=UTC),
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
             ),
             graphql=RateLimitWindow(
                 name="graphql",
                 used=5,
                 limit=5000,
-                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=UTC),
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
             ),
-            fetched_at=datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
+            fetched_at=datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc),
         )
         monitor = MagicMock(spec=RateLimitMonitor)
         monitor.latest.return_value = snap
@@ -1360,10 +1179,8 @@ class TestStatusXml:
 
     def test_status_json_includes_fido_uptime(self, server: tuple) -> None:
         """fido_uptime_seconds appears in /status.json when fido_started_at is set."""
-        from datetime import datetime, timezone
-
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
@@ -1375,7 +1192,7 @@ class TestStatusXml:
     def test_status_json_fido_uptime_null_when_not_started(self, server: tuple) -> None:
         """fido_uptime_seconds is null in /status.json when fido_started_at is None."""
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = []
+        WebhookHandler.registry.get_state.return_value = _fido_state()
         assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -1390,10 +1207,6 @@ class TestStatusXml:
         non-completed list is reported — so the counter can show "2/3" rather
         than always "1/N".
         """
-        from datetime import datetime, timezone
-
-        from fido.registry import WorkerActivity
-
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         tasks = [
@@ -1429,17 +1242,9 @@ class TestStatusXml:
         (fido_dir / "tasks.json").write_text(json.dumps(tasks))
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="Working on: #10",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="Working on: #10")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1455,23 +1260,12 @@ class TestStatusXml:
         self, server: tuple
     ) -> None:
         """issue_cache dict is emitted as nested XML children, not as str(dict)."""
-        from datetime import datetime, timezone
-
         from fido.issue_cache import IssueTreeCache
-        from fido.registry import WorkerActivity
 
         url, _ = server
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="working",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="working")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -1994,10 +1788,7 @@ class TestProcessAction:
 
     def test_status_endpoint_includes_claude_talker(self, server: tuple) -> None:
         """Active SessionTalker appears in /status as a structured object."""
-        from datetime import datetime, timezone
-
         from fido.provider import SessionTalker
-        from fido.registry import WorkerActivity
 
         url, _ = server
         talker = SessionTalker(
@@ -2008,17 +1799,9 @@ class TestProcessAction:
             claude_pid=12345,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
-        WebhookHandler.registry.get_all_activities.return_value = [
-            WorkerActivity(
-                repo_name="owner/repo",
-                what="running",
-                busy=True,
-                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
-        ]
-        WebhookHandler.registry.get_crash_info.return_value = None
-        WebhookHandler.registry.is_stale.return_value = False
-        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="running")
+        )
         WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True

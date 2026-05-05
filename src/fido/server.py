@@ -1278,21 +1278,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
             list(self.config.repos.values()),
             _provider_factory=self.provider_factory,
         )
-        for a in self.registry.get_all_activities():
-            crash = self.registry.get_crash_info(a.repo_name)
-            started_at = self.registry.thread_started_at(a.repo_name)
-            repo_cfg = self.config.repos.get(a.repo_name)
-            dropped_count = int(self.registry.get_session_dropped_count(a.repo_name))
-            worker_uptime = (
-                (now - started_at).total_seconds() if started_at is not None else None
-            )
+        snapshot = self.registry.get_state()
+        for repo_state in snapshot.repos.values():
+            a = repo_state.activity
+            if a.what == "":
+                continue  # zero sentinel — not yet active
+            crash_record = repo_state.crash_record
+            started_at = repo_state.started_at
+            repo_cfg = self.config.repos.get(repo_state.key)
+            dropped_count = int(self.registry.get_session_dropped_count(repo_state.key))
+            worker_uptime = (now - started_at).total_seconds()
             webhooks = [
                 {
                     "description": w.description,
                     "elapsed_seconds": (now - w.started_at).total_seconds(),
                     "thread_id": w.thread_id,
                 }
-                for w in self.registry.get_webhook_activities(a.repo_name)
+                for w in self.registry.get_webhook_activities(repo_state.key)
             ]
             fido_state = (
                 _collect_fido_state(repo_cfg.work_dir, now)
@@ -1316,9 +1318,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "repo_name": a.repo_name,
                     "what": a.what,
                     "busy": a.busy,
-                    "crash_count": crash.death_count if crash else 0,
-                    "last_crash_error": crash.last_error if crash else None,
-                    "is_stuck": self.registry.is_stale(a.repo_name, _STALE_THRESHOLD),
+                    "crash_count": crash_record.death_count
+                    if crash_record.death_count > 0
+                    else 0,
+                    "last_crash_error": crash_record.last_error
+                    if crash_record.death_count > 0
+                    else None,
+                    "is_stuck": (now - a.last_progress_at).total_seconds()
+                    > _STALE_THRESHOLD,
                     "worker_uptime_seconds": worker_uptime,
                     "webhook_activities": webhooks,
                     "provider": repo_cfg.provider if repo_cfg is not None else None,
@@ -1327,22 +1334,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         if repo_cfg is not None
                         else None
                     ),
-                    "session_owner": self.registry.get_session_owner(a.repo_name),
-                    "session_alive": self.registry.get_session_alive(a.repo_name),
-                    "session_pid": self.registry.get_session_pid(a.repo_name),
+                    "session_owner": self.registry.get_session_owner(repo_state.key),
+                    "session_alive": self.registry.get_session_alive(repo_state.key),
+                    "session_pid": self.registry.get_session_pid(repo_state.key),
                     "session_dropped_count": dropped_count,
                     "session_sent_count": int(
-                        self.registry.get_session_sent_count(a.repo_name)
+                        self.registry.get_session_sent_count(repo_state.key)
                     ),
                     "session_received_count": int(
-                        self.registry.get_session_received_count(a.repo_name)
+                        self.registry.get_session_received_count(repo_state.key)
                     ),
                     "claude_talker": _serialize_talker(
                         provider.get_talker(a.repo_name)
                     ),
-                    "rescoping": self.registry.is_rescoping(a.repo_name),
+                    "rescoping": self.registry.is_rescoping(repo_state.key),
                     "issue_cache": _serialize_issue_cache(
-                        self.registry.get_issue_cache(a.repo_name)
+                        self.registry.get_issue_cache(repo_state.key)
                     ),
                     **fido_state,
                 }
