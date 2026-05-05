@@ -29,6 +29,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    StuckOnTask,
     TurnOutcome,
 )
 from fido.types import GitIdentity
@@ -111,6 +112,9 @@ class HarnessCommitter:
         change gets attribution in the git log.
         """
         if isinstance(outcome, SkipTaskWithReason):
+            return CommitSkipped(reason=outcome.reason)
+
+        if isinstance(outcome, StuckOnTask):
             return CommitSkipped(reason=outcome.reason)
 
         assert isinstance(outcome, CommitTaskComplete | CommitTaskInProgress)

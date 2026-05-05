@@ -59,11 +59,13 @@ Every turn **must** end with a `turn_outcome` JSON object as the final non-empty
 {"turn_outcome": "commit-task-complete", "summary": "<git commit message>"}
 {"turn_outcome": "commit-task-in-progress", "summary": "<git commit message>"}
 {"turn_outcome": "skip-task-with-reason", "reason": "<why no commit>"}
+{"turn_outcome": "stuck-on-task", "reason": "<what you need from the human>"}
 ```
 
 - **`commit-task-complete`** — implementation is done.  The harness stages all changes and commits with `summary` as the message, then marks the task completed.
 - **`commit-task-in-progress`** — partial progress this turn; more work follows.  The harness commits the partial work so progress is durable, then re-enters the task on the next turn.
 - **`skip-task-with-reason`** — nothing to commit.  Use when the task is already covered by a prior commit, turned out to be a no-op, or is infeasible.  Record the reason clearly.
+- **`stuck-on-task`** — you are blocked and cannot make further progress without human guidance.  The harness posts a BLOCKED comment on the PR and parks the task until the human provides direction.
 
 The sentinel must be the literal last non-empty line of your response — nothing after it.  Do not wrap it in a code fence or markdown block.
 
@@ -83,7 +85,7 @@ Do not post any PR comment. Do not push anything. Leave no trace beyond the sent
 
 Never post a top-level PR comment (`gh api .../issues/<n>/comments`) about task status. The worker handles task bookkeeping; your only job is the code and the sentinel.
 
-Never prefix any PR comment with `BLOCKED:`. Never ask a human or the queue manager to mark a task complete on your behalf.
+Never post a `BLOCKED:` comment yourself — emit `stuck-on-task` and the harness posts it.  Never ask a human or the queue manager to mark a task complete on your behalf.
 
 ## Constraints
 - **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.

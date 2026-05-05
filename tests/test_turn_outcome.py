@@ -6,6 +6,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    StuckOnTask,
 )
 from fido.turn_outcome import parse_turn_outcome
 
@@ -98,6 +99,26 @@ class TestParseTurnOutcomeSkipTaskWithReason:
 
     def test_reason_empty(self) -> None:
         line = '{"turn_outcome": "skip-task-with-reason", "reason": ""}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+
+class TestParseTurnOutcomeStuckOnTask:
+    def test_valid(self) -> None:
+        line = '{"turn_outcome": "stuck-on-task", "reason": "need API credentials"}'
+        assert parse_turn_outcome(line) == StuckOnTask(reason="need API credentials")
+
+    def test_missing_reason(self) -> None:
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome('{"turn_outcome": "stuck-on-task"}')
+
+    def test_reason_not_string(self) -> None:
+        line = '{"turn_outcome": "stuck-on-task", "reason": 123}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+    def test_reason_empty(self) -> None:
+        line = '{"turn_outcome": "stuck-on-task", "reason": ""}'
         with pytest.raises(ValueError, match="non-empty.*reason"):
             parse_turn_outcome(line)
 

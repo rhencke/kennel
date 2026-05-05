@@ -17,6 +17,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    StuckOnTask,
 )
 from fido.types import GitIdentity
 
@@ -76,6 +77,13 @@ class TestApplySkip:
             helped_by=GitIdentity(name="X", email="x@y"),
         )
         assert isinstance(result, CommitSkipped)
+        assert runner.calls == []
+
+    def test_stuck_on_task_returns_commit_skipped(self, tmp_path: Path) -> None:
+        """StuckOnTask is treated like SkipTaskWithReason in harness_commit."""
+        hc, runner = _committer(tmp_path, [])
+        result = hc.apply(StuckOnTask(reason="need human input"))
+        assert result == CommitSkipped(reason="need human input")
         assert runner.calls == []
 
 

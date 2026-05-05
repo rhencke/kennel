@@ -20,6 +20,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    StuckOnTask,
     TurnOutcome,
 )
 
@@ -77,6 +78,14 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
                 f'"reason" string, got: {obj.get("reason")!r}'
             )
         return SkipTaskWithReason(reason=reason)
+    if kind == "stuck-on-task":
+        reason = obj.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(
+                'turn_outcome "stuck-on-task" requires a non-empty '
+                f'"reason" string, got: {obj.get("reason")!r}'
+            )
+        return StuckOnTask(reason=reason)
     if kind is None:
         raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
     raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")

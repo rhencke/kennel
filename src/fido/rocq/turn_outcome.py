@@ -37,7 +37,15 @@ class SkipTaskWithReason(TurnOutcome):
     reason: str
 
 
-TurnOutcomeT = CommitTaskComplete | CommitTaskInProgress | SkipTaskWithReason
+@final
+@dataclass(frozen=True)
+class StuckOnTask(TurnOutcome):
+    reason: str
+
+
+TurnOutcomeT = (
+    CommitTaskComplete | CommitTaskInProgress | SkipTaskWithReason | StuckOnTask
+)
 
 
 def outcome_summary(o: TurnOutcome) -> str:
@@ -47,6 +55,8 @@ def outcome_summary(o: TurnOutcome) -> str:
         case CommitTaskInProgress(s):
             return s
         case SkipTaskWithReason(reason):
+            return ""
+        case StuckOnTask(reason):
             return ""
         case __impossible:
             assert_never(__impossible)
@@ -60,6 +70,8 @@ def outcome_is_commit(o: TurnOutcome) -> bool:
             return True
         case SkipTaskWithReason(reason):
             return False
+        case StuckOnTask(reason):
+            return False
         case __impossible:
             assert_never(__impossible)
 
@@ -71,6 +83,8 @@ def outcome_is_terminal(o: TurnOutcome) -> bool:
         case CommitTaskInProgress(summary):
             return False
         case SkipTaskWithReason(reason):
+            return True
+        case StuckOnTask(reason):
             return True
         case __impossible:
             assert_never(__impossible)

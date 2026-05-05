@@ -9363,6 +9363,11 @@ class TestExecuteTask:
         """JSON sentinel for commit-task-in-progress."""
         return f'{{"turn_outcome":"commit-task-in-progress","summary":"{summary}"}}'
 
+    @staticmethod
+    def _stuck_output(reason: str = "need API credentials") -> str:
+        """JSON sentinel for stuck-on-task."""
+        return f'{{"turn_outcome":"stuck-on-task","reason":"{reason}"}}'
+
     def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -10801,6 +10806,34 @@ class TestExecuteTask:
         assert result is True
         prompt_text = (fido_dir / "prompt").read_text()
         assert "nothing" in prompt_text.lower() or "staged" in prompt_text.lower()
+
+    def test_stuck_on_task_posts_blocked_and_parks(self, tmp_path: Path) -> None:
+        """stuck-on-task sentinel posts a BLOCKED: comment and parks the task
+        without completing it."""
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Impossible task")
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._stuck_output("need API credentials")),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        # Task was NOT completed — just parked.
+        mock_complete.assert_not_called()
+        # BLOCKED comment was posted.
+        worker.gh.comment_issue.assert_called_once()
+        _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]
+        assert "BLOCKED:" in comment_body
+        assert "need API credentials" in comment_body
 
     def test_commit_in_progress_continues_session(self, tmp_path: Path) -> None:
         """commit-task-in-progress sentinel causes the loop to continue with

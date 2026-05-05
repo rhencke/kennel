@@ -50,7 +50,7 @@ from fido.rocq.commit_result import (
     CommitSkipped,
     CommitSuccess,
 )
-from fido.rocq.turn_outcome import CommitTaskComplete
+from fido.rocq.turn_outcome import CommitTaskComplete, StuckOnTask
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -1158,7 +1158,9 @@ def _missing_sentinel_nudge(
         "If you need another turn, emit "
         '{"turn_outcome":"commit-task-in-progress","summary":"<wip message>"}. '
         "If no code change is needed, emit "
-        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}.'
+        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}. '
+        "If you are blocked and need human guidance, emit "
+        '{"turn_outcome":"stuck-on-task","reason":"<what you need>"}.'
     )
 
 
@@ -3201,6 +3203,17 @@ class Worker:
                     exc,
                 )
             else:
+                if isinstance(outcome, StuckOnTask):
+                    # LLM is blocked — post BLOCKED comment, park the task.
+                    log.info("task stuck: %s", outcome.reason)
+                    self.gh.comment_issue(
+                        repo_ctx.repo,
+                        pr_number,
+                        f"BLOCKED: {outcome.reason}",
+                    )
+                    with State(fido_dir).modify() as state:
+                        state.pop("current_task_id", None)
+                    return True
                 commit_result = harness_committer.apply(outcome)
                 if isinstance(commit_result, CommitSkipped):
                     # skip-task-with-reason: task is done without a commit.
