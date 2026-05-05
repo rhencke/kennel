@@ -35,7 +35,7 @@ def _utcnow() -> datetime:
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkerActivity:
     """Snapshot of what one worker is currently doing.
 
@@ -49,7 +49,7 @@ class WorkerActivity:
     last_progress_at: datetime
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkerCrash:
     """Running record of unexpected worker deaths for one repo.
 
@@ -79,7 +79,7 @@ def _zero_activity(repo_name: str) -> WorkerActivity:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WebhookActivity:
     """One in-flight webhook handler running alongside the worker.
 
@@ -104,7 +104,7 @@ class WebhookActivity:
     thread_id: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -142,7 +142,7 @@ class RepoState:
     webhook_activities: tuple[WebhookActivity, ...] = field(default_factory=tuple)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FidoState:
     """Atomically-swapped coordination snapshot owned by :class:`WorkerRegistry`.
 
@@ -172,7 +172,7 @@ class FidoState:
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WebhookActivityHandle:
     """Opaque handle for updating one in-flight webhook activity safely."""
 
