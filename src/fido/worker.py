@@ -3214,7 +3214,7 @@ class Worker:
                     with State(fido_dir).modify() as state:
                         state.pop("current_task_id", None)
                     return True
-                commit_result = harness_committer.apply(outcome)
+                commit_result = harness_committer.commit(outcome)
                 match commit_result:
                     case CommitSkipped(reason=reason):
                         # skip-task-with-reason: task is done without a commit.

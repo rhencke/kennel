@@ -2123,7 +2123,7 @@ class TestWorkerExecuteTaskBranches:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Related thread comment_ids" in context

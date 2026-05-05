@@ -62,17 +62,17 @@ def _committer(
 # ---------------------------------------------------------------------------
 
 
-class TestApplySkip:
+class TestCommitSkip:
     def test_returns_commit_skipped(self, tmp_path: Path) -> None:
         hc, runner = _committer(tmp_path, [])
-        result = hc.apply(SkipTaskWithReason(reason="already done"))
+        result = hc.commit(SkipTaskWithReason(reason="already done"))
         assert result == CommitSkipped(reason="already done")
         assert runner.calls == []
 
     def test_skip_ignores_committer(self, tmp_path: Path) -> None:
         """Committer arg is irrelevant for skip outcomes."""
         hc, runner = _committer(tmp_path, [])
-        result = hc.apply(
+        result = hc.commit(
             SkipTaskWithReason(reason="nope"),
             helped_by=[GitIdentity(name="X", email="x@y")],
         )
@@ -82,7 +82,7 @@ class TestApplySkip:
     def test_stuck_on_task_returns_commit_skipped(self, tmp_path: Path) -> None:
         """StuckOnTask is treated like SkipTaskWithReason in harness_commit."""
         hc, runner = _committer(tmp_path, [])
-        result = hc.apply(StuckOnTask(reason="need human input"))
+        result = hc.commit(StuckOnTask(reason="need human input"))
         assert result == CommitSkipped(reason="need human input")
         assert runner.calls == []
 
@@ -92,7 +92,7 @@ class TestApplySkip:
 # ---------------------------------------------------------------------------
 
 
-class TestApplyNothingStaged:
+class TestCommitNothingStaged:
     def test_commit_complete_nothing_staged(self, tmp_path: Path) -> None:
         hc, runner = _committer(
             tmp_path,
@@ -101,7 +101,7 @@ class TestApplyNothingStaged:
                 _ok(),  # git diff --cached --quiet → returncode 0 = clean
             ],
         )
-        result = hc.apply(CommitTaskComplete(summary="Add feature"))
+        result = hc.commit(CommitTaskComplete(summary="Add feature"))
         assert result == CommitNothingStaged()
         assert len(runner.calls) == 2
         assert runner.calls[0][0] == ["git", "add", "-u"]
@@ -115,7 +115,7 @@ class TestApplyNothingStaged:
                 _ok(),  # git diff --cached --quiet
             ],
         )
-        result = hc.apply(CommitTaskInProgress(summary="wip"))
+        result = hc.commit(CommitTaskInProgress(summary="wip"))
         assert result == CommitNothingStaged()
 
 
@@ -124,7 +124,7 @@ class TestApplyNothingStaged:
 # ---------------------------------------------------------------------------
 
 
-class TestApplyCommitSuccess:
+class TestCommitSuccess:
     def test_commit_complete_success(self, tmp_path: Path) -> None:
         hc, runner = _committer(
             tmp_path,
@@ -135,7 +135,7 @@ class TestApplyCommitSuccess:
                 _ok(stdout="abc123def\n"),  # git rev-parse HEAD
             ],
         )
-        result = hc.apply(CommitTaskComplete(summary="Add feature"))
+        result = hc.commit(CommitTaskComplete(summary="Add feature"))
         assert result == CommitSuccess(sha="abc123def")
         # Verify commit message was passed correctly
         commit_call = runner.calls[2]
@@ -151,7 +151,7 @@ class TestApplyCommitSuccess:
                 _ok(stdout="def456\n"),  # rev-parse
             ],
         )
-        result = hc.apply(CommitTaskInProgress(summary="wip: part 1"))
+        result = hc.commit(CommitTaskInProgress(summary="wip: part 1"))
         assert result == CommitSuccess(sha="def456")
 
 
@@ -160,7 +160,7 @@ class TestApplyCommitSuccess:
 # ---------------------------------------------------------------------------
 
 
-class TestApplyHookFailure:
+class TestCommitHookFailure:
     def test_hook_failure_captures_output(self, tmp_path: Path) -> None:
         hc, _ = _committer(
             tmp_path,
@@ -174,7 +174,7 @@ class TestApplyHookFailure:
                 ),  # git commit fails
             ],
         )
-        result = hc.apply(CommitTaskComplete(summary="Add feature"))
+        result = hc.commit(CommitTaskComplete(summary="Add feature"))
         assert isinstance(result, CommitHookFailure)
         assert "ruff check failed" in result.output
         assert "hook returned non-zero" in result.output
@@ -188,7 +188,7 @@ class TestApplyHookFailure:
                 _fail(stdout="", stderr="  oops  "),
             ],
         )
-        result = hc.apply(CommitTaskComplete(summary="x"))
+        result = hc.commit(CommitTaskComplete(summary="x"))
         assert isinstance(result, CommitHookFailure)
         assert result.output == "oops"
 
@@ -201,7 +201,7 @@ class TestApplyHookFailure:
                 _fail(stdout="", stderr=""),
             ],
         )
-        result = hc.apply(CommitTaskComplete(summary="x"))
+        result = hc.commit(CommitTaskComplete(summary="x"))
         assert isinstance(result, CommitHookFailure)
         assert result.output == ""
 
@@ -223,7 +223,7 @@ class TestHelpedByAttribution:
             ],
         )
         identity = GitIdentity(name="Alice", email="alice@example.com")
-        result = hc.apply(
+        result = hc.commit(
             CommitTaskComplete(summary="Fix review feedback"),
             helped_by=[identity],
         )
@@ -251,7 +251,7 @@ class TestHelpedByAttribution:
             GitIdentity(name="Alice", email="alice@example.com"),
             GitIdentity(name="Bob", email="bob@example.com"),
         ]
-        result = hc.apply(
+        result = hc.commit(
             CommitTaskComplete(summary="Address review feedback"),
             helped_by=identities,
         )
@@ -276,7 +276,7 @@ class TestHelpedByAttribution:
                 _ok(stdout="sha2\n"),  # rev-parse
             ],
         )
-        hc.apply(CommitTaskComplete(summary="Regular commit"))
+        hc.commit(CommitTaskComplete(summary="Regular commit"))
         # The commit message should just be the summary
         commit_cmd = runner.calls[2][0]
         assert commit_cmd == ["git", "commit", "-m", "Regular commit"]
@@ -292,7 +292,7 @@ class TestHelpedByAttribution:
             ],
         )
         identity = GitIdentity(name="Bob", email="bob@x.com")
-        result = hc.apply(
+        result = hc.commit(
             CommitTaskInProgress(summary="wip"),
             helped_by=[identity],
         )
@@ -307,22 +307,22 @@ class TestHelpedByAttribution:
 
 
 # ---------------------------------------------------------------------------
-# Tests: git command plumbing (verified through apply)
+# Tests: git command plumbing (verified through commit)
 # ---------------------------------------------------------------------------
 
 
 class TestGitPlumbing:
     def test_cwd_is_work_dir(self, tmp_path: Path) -> None:
-        """apply passes work_dir as cwd to every git command."""
+        """commit passes work_dir as cwd to every git command."""
         hc, runner = _committer(tmp_path, [_ok(), _ok()])
-        hc.apply(CommitTaskComplete(summary="x"))
+        hc.commit(CommitTaskComplete(summary="x"))
         for _cmd, kwargs in runner.calls:
             assert kwargs["cwd"] == tmp_path
 
     def test_capture_output_and_text(self, tmp_path: Path) -> None:
-        """apply passes capture_output=True and text=True."""
+        """commit passes capture_output=True and text=True."""
         hc, runner = _committer(tmp_path, [_ok(), _ok()])
-        hc.apply(CommitTaskComplete(summary="x"))
+        hc.commit(CommitTaskComplete(summary="x"))
         for _, kwargs in runner.calls:
             assert kwargs["capture_output"] is True
             assert kwargs["text"] is True
@@ -330,14 +330,14 @@ class TestGitPlumbing:
     def test_add_uses_check_true(self, tmp_path: Path) -> None:
         """git add -u should use check=True (fail-fast on errors)."""
         hc, runner = _committer(tmp_path, [_ok(), _ok()])
-        hc.apply(CommitTaskComplete(summary="x"))
+        hc.commit(CommitTaskComplete(summary="x"))
         add_kwargs = runner.calls[0][1]
         assert add_kwargs["check"] is True
 
     def test_diff_cached_uses_check_false(self, tmp_path: Path) -> None:
         """git diff --cached --quiet uses check=False (non-zero is normal)."""
         hc, runner = _committer(tmp_path, [_ok(), _ok()])
-        hc.apply(CommitTaskComplete(summary="x"))
+        hc.commit(CommitTaskComplete(summary="x"))
         diff_kwargs = runner.calls[1][1]
         assert diff_kwargs["check"] is False
 
@@ -347,7 +347,7 @@ class TestGitPlumbing:
             tmp_path,
             [_ok(), _fail(), _ok(), _ok(stdout="sha\n")],
         )
-        hc.apply(CommitTaskComplete(summary="x"))
+        hc.commit(CommitTaskComplete(summary="x"))
         commit_kwargs = runner.calls[2][1]
         assert commit_kwargs["check"] is False
 

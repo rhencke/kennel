@@ -92,7 +92,7 @@ class HarnessCommitter:
             f"Hook output:\n{failure.output}"
         )
 
-    def apply(
+    def commit(
         self,
         outcome: TurnOutcome,
         *,

@@ -9393,7 +9393,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
 
@@ -9452,7 +9452,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_status.assert_called_once_with("Working on: Write the tests")
 
@@ -9497,7 +9497,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             assert worker.execute_task(fido_dir, self._repo_ctx(), 7, "branch") is True
 
         # The pre-existing comment 100 stays; only the improvised 200 is deleted.
@@ -9521,7 +9521,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
         _, skill, _ = mock_bp.call_args[0]
         assert skill == "task"
@@ -9544,7 +9544,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
         _, _, context = mock_bp.call_args[0]
         assert "PR: 42" in context
@@ -9570,7 +9570,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
         assert "Task title: The special task" in context
@@ -9603,7 +9603,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
         _, _, context = mock_bp.call_args[0]
         assert "comment_id: 12345" in context
@@ -9628,7 +9628,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
         assert "comment_id" not in context
@@ -9652,7 +9652,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(
             fido_dir,
@@ -9682,7 +9682,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
         mock_push.assert_called_once_with("origin", "my-slug")
 
@@ -9704,7 +9704,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(
             task["id"],
@@ -9731,7 +9731,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
 
@@ -9753,7 +9753,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
 
@@ -9775,7 +9775,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks") as mock_sync,
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
 
@@ -9797,7 +9797,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(
             task["id"],
@@ -9824,7 +9824,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
 
@@ -9846,7 +9846,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks") as mock_sync,
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
@@ -9868,7 +9868,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks") as mock_sync,
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
@@ -9895,7 +9895,7 @@ class TestExecuteTask:
             patch("fido.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="fido"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "Log me please" in caplog.text
 
@@ -9922,7 +9922,7 @@ class TestExecuteTask:
             patch("fido.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="fido"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "my-session" in caplog.text
 
@@ -9950,7 +9950,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert captured.get("current_task_id") == "task-99"
 
@@ -9973,7 +9973,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "current_task_id" not in State(fido_dir).load()
 
@@ -10001,7 +10001,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
         assert captured.get("issue") == 5
         assert captured.get("current_task_id") == "t-111"
@@ -10025,7 +10025,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert State(fido_dir).load().get("current_task_id") == "task-push-fail"
 
@@ -10359,7 +10359,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         # The stale abort was for a different task — t-next must NOT have
         # been auto-cleaned up.  provider_run runs.  git_clean and
@@ -10508,7 +10508,7 @@ class TestExecuteTask:
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "branch")
 
         gh.resolve_thread.assert_called_once_with("thread-node-xyz")
@@ -10539,7 +10539,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Repro steps here." in context
@@ -10569,7 +10569,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "branch")
         _, _, context = mock_build.call_args.args
         assert "PR #42" in context
@@ -10603,7 +10603,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Implement the feature" in context
@@ -10643,7 +10643,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
@@ -10655,7 +10655,7 @@ class TestExecuteTask:
     def test_commit_complete_sentinel_pushes_and_completes(
         self, tmp_path: Path
     ) -> None:
-        """commit-task-complete sentinel causes HarnessCommitter.apply, push,
+        """commit-task-complete sentinel causes HarnessCommitter.commit, push,
         and task completion."""
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -10674,10 +10674,10 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
-        mock_hc_cls.return_value.apply.assert_called_once()
+        mock_hc_cls.return_value.commit.assert_called_once()
         mock_push.assert_called_once_with("origin", "branch")
         mock_complete.assert_called_once()
 
@@ -10700,7 +10700,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSkipped(
+            mock_hc_cls.return_value.commit.return_value = CommitSkipped(
                 reason="already done"
             )
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
@@ -10731,7 +10731,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         # Nudge was written to the prompt file
@@ -10761,7 +10761,7 @@ class TestExecuteTask:
             patch("fido.tasks.sync_tasks"),
         ):
             mock_hc = mock_hc_cls.return_value
-            mock_hc.apply.side_effect = [
+            mock_hc.commit.side_effect = [
                 CommitHookFailure(output="ruff: 3 errors"),
                 CommitSuccess(sha="abc123"),
             ]
@@ -10798,7 +10798,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.side_effect = [
+            mock_hc_cls.return_value.commit.side_effect = [
                 CommitNothingStaged(),
                 CommitSuccess(sha="abc123"),
             ]
@@ -10865,7 +10865,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.side_effect = [
+            mock_hc_cls.return_value.commit.side_effect = [
                 CommitSuccess(sha="aaa111"),
                 CommitSuccess(sha="bbb222"),
             ]
@@ -10903,7 +10903,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         # First call: session=None (fresh start)
         assert resume_sessions[0] is None
@@ -10942,7 +10942,7 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         # Second call: empty string → None (fresh session)
         assert resume_sessions[1] is None
@@ -11068,7 +11068,7 @@ class TestYieldForUntriaged:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         registry.wait_for_inbox_drain.assert_any_call("owner/repo", timeout=30.0)
@@ -11097,7 +11097,7 @@ class TestYieldForUntriaged:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         registry.wait_for_inbox_drain.assert_not_called()
@@ -11131,7 +11131,7 @@ class TestYieldForUntriaged:
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.apply.side_effect = [
+            mock_hc_cls.return_value.commit.side_effect = [
                 CommitSuccess(sha="aaa111"),  # in-progress commit
                 CommitSuccess(sha="bbb222"),  # final commit
             ]
@@ -11384,7 +11384,7 @@ class TestAdmitWorkerTurn:
                 ),
             ),
         ):
-            mock_hc_cls.return_value.apply.return_value = CommitSuccess(sha="abc123")
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(
                 fido_dir,
                 RepoContext(
