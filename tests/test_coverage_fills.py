@@ -1996,7 +1996,6 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_yield_for_untriaged"),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
             # Empty output → no sentinel → nudge → yield → admit → abort check
@@ -2052,7 +2051,6 @@ class TestWorkerExecuteTaskBranches:
             ),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
             # Empty output → no sentinel → nudge → yield → admit returns False
             patch("fido.worker.provider_run", return_value=("sid", "")),
@@ -2080,7 +2078,6 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_yield_for_untriaged"),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
             # Empty output → no sentinel → nudge → yield → admit → abort check
@@ -2108,7 +2105,6 @@ class TestWorkerExecuteTaskBranches:
                 side_effect=lambda _fd, _tid: next(current_responses),
             ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
             # Empty output → no sentinel → nudge → yield → admit → task check
             patch("fido.worker.provider_run", return_value=("sid", "")),
