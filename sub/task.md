@@ -56,19 +56,19 @@ Do NOT edit the PR body. The Fido server syncs it automatically.
 Every turn **must** end with a `turn_outcome` JSON object as the final non-empty line.  Choose exactly one:
 
 - **`commit-task-complete`** — implementation is done.  The harness stages all changes and commits with `summary` as the message, then marks the task completed.
-  ```jsonc
+  ```json
   {"turn_outcome": "commit-task-complete", "summary": "<git commit message>"}
   ```
 - **`commit-task-in-progress`** — partial progress this turn; more work follows.  The harness commits the partial work so progress is durable, then re-enters the task on the next turn.
-  ```jsonc
+  ```json
   {"turn_outcome": "commit-task-in-progress", "summary": "<git commit message>"}
   ```
 - **`skip-task-with-reason`** — nothing to commit.  Use when the task is already covered by a prior commit, turned out to be a no-op, or is infeasible.  Record the reason clearly.
-  ```jsonc
+  ```json
   {"turn_outcome": "skip-task-with-reason", "reason": "<why no commit>"}
   ```
 - **`stuck-on-task`** — you are blocked and cannot make further progress without human guidance.  The harness posts a BLOCKED comment on the PR and parks the task until the human provides direction.
-  ```jsonc
+  ```json
   {"turn_outcome": "stuck-on-task", "reason": "<what you need from the human>"}
   ```
 
