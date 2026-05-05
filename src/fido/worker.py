@@ -2821,6 +2821,40 @@ class Worker:
                     pr_number,
                 )
 
+    def _finish_task(
+        self,
+        task: dict[str, Any],
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        leak_before_ids: set[int],
+    ) -> None:
+        """Shared task-completion sequence for the sentinel loop.
+
+        Called from both the ``ActionSkip`` (skip-task-with-reason) and the
+        ``ActionPushAndComplete`` (push succeeded) arms of the oracle-dispatch
+        match.  Completes the task, clears ``current_task_id`` from durable
+        state, syncs the PR body, and deletes any comments the LLM leaked
+        during the turn.
+        """
+        config = self._config
+        allowed_bots = config.allowed_bots if config is not None else frozenset()
+        self._tasks.complete_with_resolve(
+            task["id"],
+            self.gh,
+            collaborators=repo_ctx.collaborators,
+            allowed_bots=allowed_bots,
+        )
+        with State(fido_dir).modify() as state:
+            state.pop("current_task_id", None)
+        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._delete_leaked_task_comments(
+            repo_ctx.repo,
+            pr_number,
+            repo_ctx.gh_user,
+            leak_before_ids,
+        )
+
     def _finalize_setup_with_no_tasks(
         self,
         repo_ctx: RepoContext,
@@ -3291,24 +3325,8 @@ class Worker:
                         log.info(
                             "task skipped without commit: %s", commit_result.reason
                         )
-                        config = self._config
-                        allowed_bots = (
-                            config.allowed_bots if config is not None else frozenset()
-                        )
-                        self._tasks.complete_with_resolve(
-                            task["id"],
-                            self.gh,
-                            collaborators=repo_ctx.collaborators,
-                            allowed_bots=allowed_bots,
-                        )
-                        with State(fido_dir).modify() as state:
-                            state.pop("current_task_id", None)
-                        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-                        self._delete_leaked_task_comments(
-                            repo_ctx.repo,
-                            pr_number,
-                            repo_ctx.gh_user,
-                            leak_before_ids,
+                        self._finish_task(
+                            task, fido_dir, repo_ctx, pr_number, leak_before_ids
                         )
                         return True
                     case cra_oracle.ActionNudgeNothingStaged():
@@ -3347,23 +3365,12 @@ class Worker:
                         # Task complete: push and advance the queue.
                         pushed = self._push_with_retry("origin", slug)
                         if pushed:
-                            config = self._config
-                            allowed_bots = (
-                                config.allowed_bots
-                                if config is not None
-                                else frozenset()
+                            self._finish_task(
+                                task, fido_dir, repo_ctx, pr_number, leak_before_ids
                             )
-                            self._tasks.complete_with_resolve(
-                                task["id"],
-                                self.gh,
-                                collaborators=repo_ctx.collaborators,
-                                allowed_bots=allowed_bots,
-                            )
-                            with State(fido_dir).modify() as state:
-                                state.pop("current_task_id", None)
-                            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
                         else:
                             # Push persistently failed — mark BLOCKED.
+                            # (Diverges from the happy path: no complete, no sync.)
                             log.warning(
                                 "push failed after retries for task %s",
                                 task["id"],
@@ -3377,12 +3384,12 @@ class Worker:
                             )
                             with State(fido_dir).modify() as state:
                                 state.pop("current_task_id", None)
-                        self._delete_leaked_task_comments(
-                            repo_ctx.repo,
-                            pr_number,
-                            repo_ctx.gh_user,
-                            leak_before_ids,
-                        )
+                            self._delete_leaked_task_comments(
+                                repo_ctx.repo,
+                                pr_number,
+                                repo_ctx.gh_user,
+                                leak_before_ids,
+                            )
                         return True
                     case cra_oracle.ActionContinueSession():
                         assert isinstance(commit_result, CommitSuccess)
