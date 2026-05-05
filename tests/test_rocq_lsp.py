@@ -30,6 +30,16 @@ def _line_containing(path: Path, fragment: str) -> int:
     raise AssertionError(f"{fragment!r} not found in {path}")
 
 
+# Hard-coded line numbers in this file used to break every time
+# ``models/session_lock.v`` grew (for example when adding ``ForceRelease`` for
+# #1377).  Look the position up dynamically so the tests track the model
+# without manual editing.
+SESSION_LOCK_PATH = REPO / "models" / "session_lock.v"
+TRANSITION_LINE_0BASED = _line_containing(SESSION_LOCK_PATH, "Definition transition")
+TRANSITION_LINE_1BASED = TRANSITION_LINE_0BASED + 1
+TRANSITION_LINE_1BASED_STR = str(TRANSITION_LINE_1BASED)
+
+
 def test_location_and_diagnostic_json_shapes() -> None:
     location = Location(
         REPO / "models" / "session_lock.v",
@@ -54,7 +64,9 @@ def test_index_finds_transition_symbol_and_python_signature() -> None:
     index = RocqIndex(REPO)
     index.refresh()
 
-    symbol = index.symbol_at(REPO / "models" / "session_lock.v", 54, 11)
+    symbol = index.symbol_at(
+        REPO / "models" / "session_lock.v", TRANSITION_LINE_0BASED, 11
+    )
 
     assert symbol is not None
     assert symbol.name == "transition"
@@ -74,19 +86,31 @@ def test_index_finds_transition_symbol_and_python_signature() -> None:
 def test_service_hover_definition_references_symbols_and_diagnostics() -> None:
     service = RocqLanguageService(REPO)
 
-    hover = service.hover(Path("models/session_lock.v"), 54, 11)
-    definitions = service.definition(Path("models/session_lock.v"), 54, 11)
-    references = service.references(Path("models/session_lock.v"), 54, 11)
-    callers = service.callers(Path("models/session_lock.v"), 54, 11)
+    hover = service.hover(Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11)
+    definitions = service.definition(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
+    references = service.references(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
+    callers = service.callers(Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11)
     symbols = service.symbols(Path("models/session_lock.v"))
     tokens = service.semantic_tokens(Path("models/session_lock.v"))
     lenses = service.code_lens(Path("models/session_lock.v"))
     graph = service.dependency_graph()
-    signature = service.signature_help(Path("models/session_lock.v"), 54, 11)
-    completions = service.completion(Path("models/session_lock.v"), 54, 14)
-    explanation = service.explain(Path("models/session_lock.v"), 54, 11)
+    signature = service.signature_help(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
+    completions = service.completion(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 14
+    )
+    explanation = service.explain(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
     code_actions = service.code_actions(Path("models/session_lock.v"))
-    rename = service.rename(Path("models/session_lock.v"), 54, 11, "step")
+    rename = service.rename(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11, "step"
+    )
 
     assert hover is not None
     assert (
@@ -107,7 +131,7 @@ def test_service_hover_definition_references_symbols_and_diagnostics() -> None:
         }
     ]
     assert {
-        "line": 54,
+        "line": TRANSITION_LINE_0BASED,
         "start": 11,
         "length": 10,
         "type": "function",
@@ -143,15 +167,23 @@ def test_lsp_shapes() -> None:
     service = RocqLanguageService(REPO)
     uri = (REPO / "models" / "session_lock.v").resolve().as_uri()
 
-    definitions = service.lsp_definition(Path("models/session_lock.v"), 54, 11)
-    references = service.lsp_references(Path("models/session_lock.v"), 54, 11)
+    definitions = service.lsp_definition(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
+    references = service.lsp_references(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
     document_symbols = service.lsp_document_symbols(Path("models/session_lock.v"))
     workspace_symbols = service.lsp_workspace_symbols("trans")
     diagnostics = service.lsp_diagnostics(Path("models/session_lock.v"))
     semantic_tokens = service.lsp_semantic_tokens_full(Path("models/session_lock.v"))
     code_lens = service.lsp_code_lens(Path("models/session_lock.v"))
-    signature = service.lsp_signature_help(Path("models/session_lock.v"), 54, 11)
-    completions = service.lsp_completion(Path("models/session_lock.v"), 54, 14)
+    signature = service.lsp_signature_help(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 11
+    )
+    completions = service.lsp_completion(
+        Path("models/session_lock.v"), TRANSITION_LINE_0BASED, 14
+    )
     actions = service.lsp_code_actions(Path("models/session_lock.v"))
 
     assert definitions[0]["uri"] == uri
@@ -221,12 +253,20 @@ def test_index_maps_runtime_marker_symbols_to_runtime_python_methods() -> None:
 
 def test_cli_outputs_json_for_each_command() -> None:
     for argv in (
-        ["hover", "models/session_lock.v", "--line", "55", "--column", "12", "--json"],
+        [
+            "hover",
+            "models/session_lock.v",
+            "--line",
+            TRANSITION_LINE_1BASED_STR,
+            "--column",
+            "12",
+            "--json",
+        ],
         [
             "definition",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--json",
@@ -235,7 +275,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "references",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--json",
@@ -244,7 +284,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "callers",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--json",
@@ -253,7 +293,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "signature",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--json",
@@ -262,7 +302,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "completion",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "15",
             "--json",
@@ -271,7 +311,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "explain",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--json",
@@ -286,7 +326,7 @@ def test_cli_outputs_json_for_each_command() -> None:
             "rename",
             "models/session_lock.v",
             "--line",
-            "55",
+            TRANSITION_LINE_1BASED_STR,
             "--column",
             "12",
             "--new-name",
@@ -328,7 +368,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/hover",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
             },
         },
         {
@@ -337,7 +377,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/definition",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
             },
         },
         {
@@ -346,7 +386,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/references",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
             },
         },
         {
@@ -367,7 +407,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/signatureHelp",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
             },
         },
         {
@@ -376,7 +416,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/completion",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 14},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 14},
             },
         },
         {
@@ -403,7 +443,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/prepareRename",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
             },
         },
         {
@@ -412,7 +452,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
             "method": "textDocument/rename",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 54, "character": 11},
+                "position": {"line": TRANSITION_LINE_0BASED, "character": 11},
                 "newName": "step",
             },
         },
@@ -457,7 +497,7 @@ def test_lsp_server_handles_requests_notifications_errors_and_eof() -> None:
     assert responses[8]["result"][0]["title"] == "Refresh Rocq extraction"
     assert responses[9]["result"][0]["data"]["symbol"] == "transition"
     assert len(responses[10]["result"]["data"]) % 5 == 0
-    assert responses[11]["result"]["start"]["line"] == 54
+    assert responses[11]["result"]["start"]["line"] == TRANSITION_LINE_0BASED
     assert responses[12]["result"]["changes"]
     assert responses[14]["result"] is None
     assert responses[15]["error"]["code"] == -32603
