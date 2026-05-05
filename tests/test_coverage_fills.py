@@ -2180,6 +2180,50 @@ class TestCommitResultActionOracle:
             )
 
 
+class TestNudgeKindOracle:
+    """Cover _nudge_oracle_result branches and _assert_nudge_kind error paths."""
+
+    def test_success_branch(self) -> None:
+        from fido.rocq import commit_result as commit_result_mod
+        from fido.rocq import nudge_kind as nudge_oracle
+        from fido.worker import _nudge_oracle_result
+
+        r = commit_result_mod.CommitSuccess("abc123")
+        mapped = _nudge_oracle_result(r)
+        assert isinstance(mapped, nudge_oracle.CommitSuccess)
+        assert mapped.sha == "abc123"
+
+    def test_skipped_branch(self) -> None:
+        from fido.rocq import commit_result as commit_result_mod
+        from fido.rocq import nudge_kind as nudge_oracle
+        from fido.worker import _nudge_oracle_result
+
+        r = commit_result_mod.CommitSkipped("already done")
+        mapped = _nudge_oracle_result(r)
+        assert isinstance(mapped, nudge_oracle.CommitSkipped)
+        assert mapped.reason == "already done"
+
+    def test_assert_raises_when_no_nudge_expected(self) -> None:
+        from fido.rocq import commit_result as commit_result_mod
+        from fido.rocq import nudge_kind as nudge_oracle
+        from fido.worker import _assert_nudge_kind
+
+        # CommitSuccess should not produce a nudge — assertion fires.
+        result = commit_result_mod.CommitSuccess("abc123")
+        with pytest.raises(AssertionError, match="expected no nudge"):
+            _assert_nudge_kind(result, nudge_oracle.NudgeNothingStaged())
+
+    def test_assert_raises_on_kind_mismatch(self) -> None:
+        from fido.rocq import commit_result as commit_result_mod
+        from fido.rocq import nudge_kind as nudge_oracle
+        from fido.worker import _assert_nudge_kind
+
+        # CommitNothingStaged should produce NudgeNothingStaged, not NudgeHookFailure.
+        result = commit_result_mod.CommitNothingStaged()
+        with pytest.raises(AssertionError, match="nudge_kind oracle"):
+            _assert_nudge_kind(result, nudge_oracle.NudgeHookFailure())
+
+
 class TestClaudeIterEventsCancelPaths:
     """Cover the cancel-path BrokenPipeError fallback in iter_events
     (claude.py:1283-1287)."""

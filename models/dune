@@ -28,4 +28,5 @@
   handler_preemption
   turn_outcome
   commit_result
-  harness_commit_decision))
+  harness_commit_decision
+  nudge_kind))

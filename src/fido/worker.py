@@ -45,6 +45,7 @@ from fido.provider_factory import DefaultProviderFactory
 from fido.rocq import ci_task_lifecycle as ci_oracle
 from fido.rocq import commit_result as commit_result_mod
 from fido.rocq import commit_result_action as cra_oracle
+from fido.rocq import nudge_kind as nudge_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import turn_outcome as turn_outcome_mod
 from fido.rocq.commit_result import (
@@ -949,6 +950,42 @@ def _assert_commit_result_action(
         raise AssertionError(
             f"commit_result_action oracle: expected {type(expected).__name__}, "
             f"got {type(actual_action).__name__}"
+        )
+
+
+def _nudge_oracle_result(
+    r: commit_result_mod.CommitResult,
+) -> nudge_oracle.CommitResult:
+    """Map a runtime CommitResult to the nudge oracle module's type."""
+    match r:
+        case commit_result_mod.CommitSuccess(sha=sha):
+            return nudge_oracle.CommitSuccess(sha)
+        case commit_result_mod.CommitHookFailure(output=output):
+            return nudge_oracle.CommitHookFailure(output)
+        case commit_result_mod.CommitNothingStaged():
+            return nudge_oracle.CommitNothingStaged()
+        case commit_result_mod.CommitSkipped(reason=reason):
+            return nudge_oracle.CommitSkipped(reason)
+        case _:  # pragma: no cover
+            raise TypeError(f"unexpected CommitResult variant: {r!r}")
+
+
+def _assert_nudge_kind(
+    result: commit_result_mod.CommitResult,
+    actual_kind: nudge_oracle.NudgeKind,
+) -> None:
+    """Assert the sentinel loop's nudge selection matches the Rocq oracle."""
+    oracle_result = _nudge_oracle_result(result)
+    expected = nudge_oracle.commit_result_nudge(oracle_result)
+    if expected is None:
+        raise AssertionError(
+            f"nudge_kind oracle: expected no nudge for {type(result).__name__}, "
+            f"but Python selected {type(actual_kind).__name__}"
+        )
+    if type(expected) is not type(actual_kind):
+        raise AssertionError(
+            f"nudge_kind oracle: expected {type(expected).__name__}, "
+            f"got {type(actual_kind).__name__}"
         )
 
 
@@ -3301,6 +3338,9 @@ class Worker:
                             commit_result,
                             cra_oracle.ActionNudgeNothingStaged(),
                         )
+                        _assert_nudge_kind(
+                            commit_result, nudge_oracle.NudgeNothingStaged()
+                        )
                         # Sentinel declared a commit but nothing was staged.
                         nudge = _nothing_staged_nudge(
                             task_title=task_title,
@@ -3315,6 +3355,9 @@ class Worker:
                     case CommitHookFailure() as failure:
                         _assert_commit_result_action(
                             outcome, commit_result, cra_oracle.ActionNudgeHookFailure()
+                        )
+                        _assert_nudge_kind(
+                            commit_result, nudge_oracle.NudgeHookFailure()
                         )
                         # Pre-commit hook rejected — nudge LLM to fix.
                         header = _nudge_context_header(
