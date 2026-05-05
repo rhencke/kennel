@@ -1122,6 +1122,20 @@ class AbortHandle:
             self._event.clear()
 
 
+def _nudge_context_header(
+    task_title: str,
+    task_id: str,
+    work_dir: str,
+    pr_number: int,
+) -> str:
+    """Return the task-context block that opens every nudge prompt.
+
+    Every nudge starts with context so the LLM knows which task it is working
+    on and where.  Callers append their specific instruction after this header.
+    """
+    return f"Task: {task_title} (id: {task_id})\nPR: {pr_number}\nWork dir: {work_dir}"
+
+
 def _missing_sentinel_nudge(
     task_title: str,
     task_id: str,
@@ -1134,19 +1148,17 @@ def _missing_sentinel_nudge(
     The *parse_error* explains why the sentinel could not be parsed so the
     LLM knows exactly what it did wrong and can fix it.
     """
+    header = _nudge_context_header(task_title, task_id, work_dir, pr_number)
     return (
+        f"{header}\n\n"
         f"Parse error: {parse_error}\n\n"
-        "Every turn must end with exactly one of these JSON objects on the "
-        "final non-empty line:\n\n"
-        '  {"turn_outcome":"commit-task-complete","summary":"<commit message>"}\n'
-        '  {"turn_outcome":"commit-task-in-progress","summary":"<wip message>"}\n'
-        '  {"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}\n\n'
-        f"Task: {task_title} (id: {task_id})\n"
-        f"PR: {pr_number}\n"
-        f"Work dir: {work_dir}\n\n"
-        "If the task is complete, emit commit-task-complete. If you need "
-        "another turn, emit commit-task-in-progress with a summary of partial "
-        "progress. If no code change is needed, emit skip-task-with-reason."
+        "Every turn must end with exactly one JSON object on the final "
+        "non-empty line.  If the task is complete, emit "
+        '{"turn_outcome":"commit-task-complete","summary":"<commit message>"}. '
+        "If you need another turn, emit "
+        '{"turn_outcome":"commit-task-in-progress","summary":"<wip message>"}. '
+        "If no code change is needed, emit "
+        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"}.'
     )
 
 
@@ -1161,15 +1173,15 @@ def _nothing_staged_nudge(
     The harness ran ``git add -u`` after the sentinel but found nothing to
     commit — the working tree has no tracked changes.
     """
+    header = _nudge_context_header(task_title, task_id, work_dir, pr_number)
     return (
+        f"{header}\n\n"
         "Your turn_outcome sentinel declared a commit, but ``git add -u`` "
         "found nothing staged — the working tree has no tracked changes.\n\n"
-        "Either:\n"
-        "  - Make the necessary file changes, then emit a commit sentinel, or\n"
-        "  - Emit skip-task-with-reason if no code change is actually needed.\n\n"
-        f"Task: {task_title} (id: {task_id})\n"
-        f"PR: {pr_number}\n"
-        f"Work dir: {work_dir}"
+        "Either make the necessary file changes and emit a commit sentinel, "
+        "or emit "
+        '{"turn_outcome":"skip-task-with-reason","reason":"<explanation>"} '
+        "if no code change is actually needed."
     )
 
 
@@ -3224,7 +3236,14 @@ class Worker:
                     )
                 elif isinstance(commit_result, CommitHookFailure):
                     # Pre-commit hook rejected the commit — nudge LLM to fix it.
-                    nudge = harness_committer.hook_failure_nudge(commit_result)
+                    header = _nudge_context_header(
+                        task_title=task_title,
+                        task_id=task["id"],
+                        work_dir=str(self.work_dir),
+                        pr_number=pr_number,
+                    )
+                    hook_nudge = harness_committer.hook_failure_nudge(commit_result)
+                    nudge = f"{header}\n\n{hook_nudge}"
                     (fido_dir / "prompt").write_text(nudge)
                     log.info("task pre-commit hook rejected commit — nudging")
                 else:
