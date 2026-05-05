@@ -15,7 +15,6 @@ from fido.atomic import AtomicReference
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
-from fido.lens import Lens
 from fido.provider import PromptSession, Provider
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -123,8 +122,8 @@ class RepoState:
     :meth:`start`; the watchdog replaces it on each crash.
 
     *webhook_activities* is the tuple of in-flight webhook handlers for this
-    repo.  Managed via CAS-update by
-    :meth:`~WorkerRegistry._modify_webhook_activities`; starts empty.
+    repo.  Published from the authoritative ``_webhook_activities`` dict on
+    :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
 
     No field is ``None`` — the full tree is prepopulated by :meth:`start`
     with zero values so lens-path writes never encounter missing keys.
@@ -240,6 +239,12 @@ class WorkerRegistry:
         # start(), which is called sequentially during startup and from the
         # single watchdog daemon thread during crash recovery — no lock needed.
         self._registry_fsm_states: dict[str, registry_fsm.State] = {}
+        # Per-repo in-flight webhook activities.  _webhook_activities is the
+        # authoritative store; mutations update it under _webhook_lock and then
+        # publish the frozen tuple to FidoState via _publish_webhook_activities
+        # so the snapshot is always up to date.
+        self._webhook_activities: dict[str, list[WebhookActivity]] = {}
+        self._webhook_lock = threading.Lock()
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -431,50 +436,21 @@ class WorkerRegistry:
         _name = repo_name
         self._state.update(lambda root: root.repos[_name].crash_record, new_crash)
 
-    def _modify_webhook_activities(
-        self,
-        repo_name: str,
-        transform: Callable[
-            [tuple[WebhookActivity, ...]], tuple[WebhookActivity, ...] | None
-        ],
-    ) -> None:
-        """Apply *transform* to the webhook-activity tuple for *repo_name* via CAS loop.
+    def _publish_webhook_activities(self, repo_name: str) -> None:
+        """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
 
-        *transform* receives the current tuple and returns the new tuple to
-        install, or ``None`` to skip the update (early-exit / no-op).  The
-        loop retries on contention; *transform* must be pure and may be called
-        more than once.
+        Reads the current list from ``_webhook_activities``, builds the frozen
+        tuple, and installs it at ``repos[name].webhook_activities`` via a
+        single lens write.  No-op if *repo_name* is not yet in the snapshot
+        (only possible in tests that bypass :meth:`start`).
 
-        If *repo_name* is not yet registered in the snapshot (e.g. during
-        tests that call :meth:`webhook_activity` before :meth:`start`), a
-        zero-value :class:`RepoState` is bootstrapped inline so the tuple has
-        somewhere to live.  In production :meth:`start` always runs first and
-        the bootstrap path is never taken.
+        Must be called under ``_webhook_lock``.
         """
+        acts = tuple(self._webhook_activities.get(repo_name, []))
+        if repo_name not in self._state.get().repos:
+            return
         _name = repo_name
-        old = self._state.get()
-        while True:
-            if _name in old.repos:
-                old_acts = old.repos[_name].webhook_activities
-                new_acts = transform(old_acts)
-                if new_acts is None:
-                    return
-                new_state = Lens(old).repos[_name].webhook_activities.set(new_acts)
-            else:
-                new_acts = transform(())
-                if new_acts is None:
-                    return
-                stub = RepoState(
-                    key=_name,
-                    started_at=_EPOCH,
-                    activity=_zero_activity(_name),
-                    crash_record=_ZERO_CRASH,
-                    webhook_activities=new_acts,
-                )
-                new_state = Lens(old).repos[_name].set(stub)
-            success, old = self._state.compare_and_set(old, new_state)
-            if success:
-                return
+        self._state.update(lambda root: root.repos[_name].webhook_activities, acts)
 
     @contextmanager
     def webhook_activity(
@@ -494,8 +470,9 @@ class WorkerRegistry:
         Appears in ``fido status`` as a sub-bullet under the repo.  Entries
         self-unregister on block exit (both success and exception paths).
 
-        Entry and exit each perform a CAS-update retry loop on
-        :class:`FidoState` — enter appends, exit removes.
+        The authoritative activity list is kept in ``_webhook_activities``
+        (protected by ``_webhook_lock``); each mutation publishes a fresh
+        frozen tuple to :class:`FidoState` via :meth:`_publish_webhook_activities`.
         """
         activity = WebhookActivity(
             handle_id=id(object()),  # cheap unique id per call
@@ -504,49 +481,48 @@ class WorkerRegistry:
             thread_id=threading.get_ident(),
         )
         handle = WebhookActivityHandle(repo_name, activity.handle_id, self)
-        self._modify_webhook_activities(repo_name, lambda acts: acts + (activity,))
+        with self._webhook_lock:
+            self._webhook_activities.setdefault(repo_name, []).append(activity)
+            self._publish_webhook_activities(repo_name)
         try:
             yield handle
         finally:
-            _handle_id = activity.handle_id
-            self._modify_webhook_activities(
-                repo_name,
-                lambda acts: tuple(a for a in acts if a.handle_id != _handle_id),
-            )
+            with self._webhook_lock:
+                acts = self._webhook_activities.get(repo_name, [])
+                self._webhook_activities[repo_name] = [
+                    a for a in acts if a.handle_id != activity.handle_id
+                ]
+                self._publish_webhook_activities(repo_name)
 
     def set_webhook_description(
         self, repo_name: str, handle_id: int, description: str
     ) -> None:
         """Replace one webhook activity entry with an updated description.
 
-        Lock-free: uses a CAS-update retry loop on :class:`FidoState`.
-        No-op if *handle_id* is not present for *repo_name*.
+        Updates the authoritative ``_webhook_activities`` dict and publishes the
+        new frozen tuple to :class:`FidoState`.  No-op if *handle_id* is not
+        present for *repo_name*.
         """
-
-        def _update(
-            acts: tuple[WebhookActivity, ...],
-        ) -> tuple[WebhookActivity, ...] | None:
+        with self._webhook_lock:
+            acts = self._webhook_activities.get(repo_name, [])
             if not any(a.handle_id == handle_id for a in acts):
-                return None  # no-op — handle already removed or never registered
-            return tuple(
+                return
+            self._webhook_activities[repo_name] = [
                 dc_replace(a, description=description)
                 if a.handle_id == handle_id
                 else a
                 for a in acts
-            )
-
-        self._modify_webhook_activities(repo_name, _update)
+            ]
+            self._publish_webhook_activities(repo_name)
 
     def get_webhook_activities(self, repo_name: str) -> list[WebhookActivity]:
         """Return a snapshot of in-flight webhook activities for *repo_name*.
 
-        Lock-free: reads from the current :class:`FidoState` snapshot.
-        Returns an empty list if *repo_name* is not registered.
+        Reads from the authoritative ``_webhook_activities`` dict.  Returns an
+        empty list if *repo_name* is not registered.
         """
-        repos = self._state.get().repos
-        if repo_name not in repos:
-            return []
-        return list(repos[repo_name].webhook_activities)
+        with self._webhook_lock:
+            return list(self._webhook_activities.get(repo_name, []))
 
     @contextmanager
     def status_update(self) -> Generator[None, None, None]:

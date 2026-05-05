@@ -807,6 +807,26 @@ class TestWebhookActivity:
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
 
+    def test_publishes_to_fido_state_when_repo_started(self, tmp_path: Path) -> None:
+        """webhook_activity publishes activities into FidoState when start() has run."""
+        reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
+        with reg.webhook_activity("foo/bar", "handling"):
+            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            assert len(acts) == 1
+            assert acts[0].description == "handling"
+        assert reg.get_state().repos["foo/bar"].webhook_activities == ()
+
+    def test_publishes_description_update_to_fido_state(self, tmp_path: Path) -> None:
+        """set_webhook_description publishes the update into FidoState."""
+        reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
+        with reg.webhook_activity("foo/bar", "original") as handle:
+            handle.set_description("updated")
+            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            assert len(acts) == 1
+            assert acts[0].description == "updated"
+
 
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:
