@@ -49,15 +49,12 @@ from fido.rocq import nudge_kind as nudge_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq.commit_result import (
     CommitHookFailure,
-    CommitNothingStaged,
     CommitResult,
     CommitSkipped,
     CommitSuccess,
 )
 from fido.rocq.turn_outcome import (
-    CommitTaskComplete,
     StuckOnTask,
-    TurnOutcome,
 )
 from fido.state import (
     State,
@@ -904,20 +901,6 @@ def _assert_ci_failure_matches_oracle(
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
-        )
-
-
-def _assert_commit_result_action(
-    outcome: TurnOutcome,
-    result: CommitResult,
-    actual_action: cra_oracle.CommitAction,
-) -> None:
-    """Assert that the sentinel loop arm matches the proven Rocq oracle."""
-    expected = cra_oracle.commit_result_action(outcome, result)
-    if type(expected) is not type(actual_action):
-        raise AssertionError(
-            f"commit_result_action oracle: expected {type(expected).__name__}, "
-            f"got {type(actual_action).__name__}"
         )
 
 
@@ -3294,13 +3277,14 @@ class Worker:
                 commit_result = harness_committer.commit(
                     outcome, helped_by=helped_by_identities
                 )
-                match commit_result:
-                    case CommitSkipped(reason=reason):
-                        _assert_commit_result_action(
-                            outcome, commit_result, cra_oracle.ActionSkip()
-                        )
+                action = cra_oracle.commit_result_action(outcome, commit_result)
+                match action:
+                    case cra_oracle.ActionSkip():
+                        assert isinstance(commit_result, CommitSkipped)
                         # skip-task-with-reason: task is done without a commit.
-                        log.info("task skipped without commit: %s", reason)
+                        log.info(
+                            "task skipped without commit: %s", commit_result.reason
+                        )
                         config = self._config
                         allowed_bots = (
                             config.allowed_bots if config is not None else frozenset()
@@ -3321,12 +3305,7 @@ class Worker:
                             leak_before_ids,
                         )
                         return True
-                    case CommitNothingStaged():
-                        _assert_commit_result_action(
-                            outcome,
-                            commit_result,
-                            cra_oracle.ActionNudgeNothingStaged(),
-                        )
+                    case cra_oracle.ActionNudgeNothingStaged():
                         _assert_nudge_kind(
                             commit_result, nudge_oracle.NudgeNothingStaged()
                         )
@@ -3341,10 +3320,8 @@ class Worker:
                         log.info(
                             "task sentinel declared commit but nothing staged — nudging"
                         )
-                    case CommitHookFailure() as failure:
-                        _assert_commit_result_action(
-                            outcome, commit_result, cra_oracle.ActionNudgeHookFailure()
-                        )
+                    case cra_oracle.ActionNudgeHookFailure():
+                        assert isinstance(commit_result, CommitHookFailure)
                         _assert_nudge_kind(
                             commit_result, nudge_oracle.NudgeHookFailure()
                         )
@@ -3355,69 +3332,61 @@ class Worker:
                             work_dir=str(self.work_dir),
                             pr_number=pr_number,
                         )
-                        hook_nudge = harness_committer.hook_failure_nudge(failure)
+                        hook_nudge = harness_committer.hook_failure_nudge(commit_result)
                         nudge = f"{header}\n\n{hook_nudge}"
                         (fido_dir / "prompt").write_text(nudge)
                         log.info("task pre-commit hook rejected commit — nudging")
-                    case CommitSuccess(sha=sha):
-                        if isinstance(outcome, CommitTaskComplete):
-                            _assert_commit_result_action(
-                                outcome,
-                                commit_result,
-                                cra_oracle.ActionPushAndComplete(),
+                    case cra_oracle.ActionPushAndComplete():
+                        assert isinstance(commit_result, CommitSuccess)
+                        # Task complete: push and advance the queue.
+                        pushed = self._push_with_retry("origin", slug)
+                        if pushed:
+                            config = self._config
+                            allowed_bots = (
+                                config.allowed_bots
+                                if config is not None
+                                else frozenset()
                             )
-                            # Task complete: push and advance the queue.
-                            pushed = self._push_with_retry("origin", slug)
-                            if pushed:
-                                config = self._config
-                                allowed_bots = (
-                                    config.allowed_bots
-                                    if config is not None
-                                    else frozenset()
-                                )
-                                self._tasks.complete_with_resolve(
-                                    task["id"],
-                                    self.gh,
-                                    collaborators=repo_ctx.collaborators,
-                                    allowed_bots=allowed_bots,
-                                )
-                                with State(fido_dir).modify() as state:
-                                    state.pop("current_task_id", None)
-                                tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
-                            else:
-                                # Push persistently failed — mark BLOCKED.
-                                log.warning(
-                                    "push failed after retries for task %s",
-                                    task["id"],
-                                )
-                                self._tasks.update(task["id"], TaskStatus.BLOCKED)
-                                self.gh.comment_issue(
-                                    repo_ctx.repo,
-                                    pr_number,
-                                    "BLOCKED: push to remote failed after "
-                                    "retries — manual intervention needed.",
-                                )
-                                with State(fido_dir).modify() as state:
-                                    state.pop("current_task_id", None)
-                            self._delete_leaked_task_comments(
+                            self._tasks.complete_with_resolve(
+                                task["id"],
+                                self.gh,
+                                collaborators=repo_ctx.collaborators,
+                                allowed_bots=allowed_bots,
+                            )
+                            with State(fido_dir).modify() as state:
+                                state.pop("current_task_id", None)
+                            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+                        else:
+                            # Push persistently failed — mark BLOCKED.
+                            log.warning(
+                                "push failed after retries for task %s",
+                                task["id"],
+                            )
+                            self._tasks.update(task["id"], TaskStatus.BLOCKED)
+                            self.gh.comment_issue(
                                 repo_ctx.repo,
                                 pr_number,
-                                repo_ctx.gh_user,
-                                leak_before_ids,
+                                "BLOCKED: push to remote failed after "
+                                "retries — manual intervention needed.",
                             )
-                            return True
-                        # CommitTaskInProgress: partial commit — continue.
-                        _assert_commit_result_action(
-                            outcome, commit_result, cra_oracle.ActionContinueSession()
+                            with State(fido_dir).modify() as state:
+                                state.pop("current_task_id", None)
+                        self._delete_leaked_task_comments(
+                            repo_ctx.repo,
+                            pr_number,
+                            repo_ctx.gh_user,
+                            leak_before_ids,
                         )
+                        return True
+                    case cra_oracle.ActionContinueSession():
+                        assert isinstance(commit_result, CommitSuccess)
+                        # CommitTaskInProgress: partial commit — continue.
                         log.info(
                             "task in-progress commit %s — continuing session",
-                            sha[:12],
+                            commit_result.sha[:12],
                         )
                     case _:  # pragma: no cover — unreachable; exhaustive above
-                        raise ValueError(
-                            f"unexpected CommitResult variant: {commit_result!r}"
-                        )
+                        raise ValueError(f"unexpected CommitAction variant: {action!r}")
             # Yield so untriaged webhook handlers get a turn (#1067).
             self._yield_for_untriaged()
             if self._abort_task.is_active_for(task["id"]):

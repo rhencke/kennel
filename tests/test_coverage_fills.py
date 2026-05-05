@@ -2150,25 +2150,6 @@ class TestWorkerOracleAssertion:
                 )
 
 
-class TestCommitResultActionOracle:
-    """Cover _assert_commit_result_action error path."""
-
-    def test_assert_raises_on_mismatch(self) -> None:
-        from fido.rocq import commit_result as commit_result_mod
-        from fido.rocq import commit_result_action as cra_oracle
-        from fido.rocq import turn_outcome as turn_outcome_mod
-        from fido.worker import _assert_commit_result_action
-
-        # CommitSuccess + CommitTaskComplete should map to ActionPushAndComplete.
-        # If we pass ActionContinueSession, the oracle should fire.
-        outcome = turn_outcome_mod.CommitTaskComplete("feature done")
-        result = commit_result_mod.CommitSuccess("abc123")
-        with pytest.raises(AssertionError, match="commit_result_action oracle"):
-            _assert_commit_result_action(
-                outcome, result, cra_oracle.ActionContinueSession()
-            )
-
-
 class TestNudgeKindOracle:
     """Cover _assert_nudge_kind error paths."""
 
