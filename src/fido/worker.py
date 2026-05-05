@@ -43,7 +43,10 @@ from fido.provider import (
 )
 from fido.provider_factory import DefaultProviderFactory
 from fido.rocq import ci_task_lifecycle as ci_oracle
+from fido.rocq import commit_result as commit_result_mod
+from fido.rocq import commit_result_action as cra_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
+from fido.rocq import turn_outcome as turn_outcome_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -896,6 +899,56 @@ def _assert_ci_failure_matches_oracle(
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
+        )
+
+
+def _cra_oracle_outcome(
+    o: turn_outcome_mod.TurnOutcome,
+) -> cra_oracle.TurnOutcome:
+    """Map a runtime TurnOutcome to the oracle module's structurally identical type."""
+    match o:
+        case turn_outcome_mod.CommitTaskComplete(summary=s):
+            return cra_oracle.CommitTaskComplete(s)
+        case turn_outcome_mod.CommitTaskInProgress(summary=s):
+            return cra_oracle.CommitTaskInProgress(s)
+        case turn_outcome_mod.SkipTaskWithReason(reason=r):
+            return cra_oracle.SkipTaskWithReason(r)
+        case turn_outcome_mod.StuckOnTask(reason=r):
+            return cra_oracle.StuckOnTask(r)
+        case _:  # pragma: no cover
+            raise TypeError(f"unexpected TurnOutcome variant: {o!r}")
+
+
+def _cra_oracle_result(
+    r: commit_result_mod.CommitResult,
+) -> cra_oracle.CommitResult:
+    """Map a runtime CommitResult to the oracle module's structurally identical type."""
+    match r:
+        case commit_result_mod.CommitSuccess(sha=sha):
+            return cra_oracle.CommitSuccess(sha)
+        case commit_result_mod.CommitHookFailure(output=output):
+            return cra_oracle.CommitHookFailure(output)
+        case commit_result_mod.CommitNothingStaged():
+            return cra_oracle.CommitNothingStaged()
+        case commit_result_mod.CommitSkipped(reason=reason):
+            return cra_oracle.CommitSkipped(reason)
+        case _:  # pragma: no cover
+            raise TypeError(f"unexpected CommitResult variant: {r!r}")
+
+
+def _assert_commit_result_action(
+    outcome: turn_outcome_mod.TurnOutcome,
+    result: commit_result_mod.CommitResult,
+    actual_action: cra_oracle.CommitAction,
+) -> None:
+    """Assert that the sentinel loop arm matches the proven Rocq oracle."""
+    oracle_outcome = _cra_oracle_outcome(outcome)
+    oracle_result = _cra_oracle_result(result)
+    expected = cra_oracle.commit_result_action(oracle_outcome, oracle_result)
+    if type(expected) is not type(actual_action):
+        raise AssertionError(
+            f"commit_result_action oracle: expected {type(expected).__name__}, "
+            f"got {type(actual_action).__name__}"
         )
 
 
@@ -3215,12 +3268,11 @@ class Worker:
                         state.pop("current_task_id", None)
                     return True
                 commit_result = harness_committer.commit(outcome)
-                # This dispatch corresponds 1:1 to commit_result_action in
-                # models/harness_commit_decision.v — each arm maps to one
-                # CommitAction constructor (ActionSkip, ActionNudgeNothingStaged,
-                # ActionNudgeHookFailure, ActionPushAndComplete, ActionContinueSession).
                 match commit_result:
                     case CommitSkipped(reason=reason):
+                        _assert_commit_result_action(
+                            outcome, commit_result, cra_oracle.ActionSkip()
+                        )
                         # skip-task-with-reason: task is done without a commit.
                         log.info("task skipped without commit: %s", reason)
                         config = self._config
@@ -3244,6 +3296,11 @@ class Worker:
                         )
                         return True
                     case CommitNothingStaged():
+                        _assert_commit_result_action(
+                            outcome,
+                            commit_result,
+                            cra_oracle.ActionNudgeNothingStaged(),
+                        )
                         # Sentinel declared a commit but nothing was staged.
                         nudge = _nothing_staged_nudge(
                             task_title=task_title,
@@ -3256,6 +3313,9 @@ class Worker:
                             "task sentinel declared commit but nothing staged — nudging"
                         )
                     case CommitHookFailure() as failure:
+                        _assert_commit_result_action(
+                            outcome, commit_result, cra_oracle.ActionNudgeHookFailure()
+                        )
                         # Pre-commit hook rejected — nudge LLM to fix.
                         header = _nudge_context_header(
                             task_title=task_title,
@@ -3269,6 +3329,11 @@ class Worker:
                         log.info("task pre-commit hook rejected commit — nudging")
                     case CommitSuccess(sha=sha):
                         if isinstance(outcome, CommitTaskComplete):
+                            _assert_commit_result_action(
+                                outcome,
+                                commit_result,
+                                cra_oracle.ActionPushAndComplete(),
+                            )
                             # Task complete: push and advance the queue.
                             pushed = self.ensure_pushed("origin", slug)
                             if pushed is not False:
@@ -3295,6 +3360,9 @@ class Worker:
                             )
                             return True
                         # CommitTaskInProgress: partial commit — continue.
+                        _assert_commit_result_action(
+                            outcome, commit_result, cra_oracle.ActionContinueSession()
+                        )
                         log.info(
                             "task in-progress commit %s — continuing session",
                             sha[:12],

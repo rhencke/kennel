@@ -2150,6 +2150,36 @@ class TestWorkerOracleAssertion:
                 )
 
 
+class TestCommitResultActionOracle:
+    """Cover _cra_oracle_outcome StuckOnTask branch and
+    _assert_commit_result_action error path."""
+
+    def test_stuck_outcome_maps_correctly(self) -> None:
+        from fido.rocq import commit_result_action as cra_oracle
+        from fido.rocq import turn_outcome as turn_outcome_mod
+        from fido.worker import _cra_oracle_outcome
+
+        runtime_stuck = turn_outcome_mod.StuckOnTask("blocked on human")
+        oracle_stuck = _cra_oracle_outcome(runtime_stuck)
+        assert isinstance(oracle_stuck, cra_oracle.StuckOnTask)
+        assert oracle_stuck.reason == "blocked on human"
+
+    def test_assert_raises_on_mismatch(self) -> None:
+        from fido.rocq import commit_result as commit_result_mod
+        from fido.rocq import commit_result_action as cra_oracle
+        from fido.rocq import turn_outcome as turn_outcome_mod
+        from fido.worker import _assert_commit_result_action
+
+        # CommitSuccess + CommitTaskComplete should map to ActionPushAndComplete.
+        # If we pass ActionContinueSession, the oracle should fire.
+        outcome = turn_outcome_mod.CommitTaskComplete("feature done")
+        result = commit_result_mod.CommitSuccess("abc123")
+        with pytest.raises(AssertionError, match="commit_result_action oracle"):
+            _assert_commit_result_action(
+                outcome, result, cra_oracle.ActionContinueSession()
+            )
+
+
 class TestClaudeIterEventsCancelPaths:
     """Cover the cancel-path BrokenPipeError fallback in iter_events
     (claude.py:1283-1287)."""
