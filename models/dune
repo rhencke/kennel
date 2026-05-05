@@ -27,4 +27,5 @@
   self_restart
   handler_preemption
   turn_outcome
-  commit_result))
+  commit_result
+  harness_commit_decision))

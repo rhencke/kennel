@@ -1,0 +1,7 @@
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
+open,1,0,1,0,harness_commit_decision.v,41,7,41,13,extraction,GitEnv,GitEnv
+open,85,4,85,20,harness_commit_decision.v,42,2,42,12,extraction,has_staged,has_staged
+open,86,4,86,19,harness_commit_decision.v,43,2,43,11,extraction,commit_ok,commit_ok
+open,87,4,87,19,harness_commit_decision.v,44,2,44,12,extraction,commit_sha,commit_sha
+open,88,4,88,22,harness_commit_decision.v,45,2,45,15,extraction,commit_output,commit_output
+open,91,0,93,16,harness_commit_decision.v,55,11,55,34,extraction,harness_commit_decision,harness_commit_decision
