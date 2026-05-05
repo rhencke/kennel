@@ -664,8 +664,9 @@ class ClaudeSession(OwnedSession):
             "--disallowedTools",
             "Bash(git commit *) Bash(git push *)"
             " Bash(git rebase *) Bash(git reset *)"
-            " Bash(git checkout -- *) Bash(git clean *)"
-            " TaskCreate TaskUpdate TodoWrite TodoRead",
+            " Bash(git checkout *)"
+            " Bash(./fido task *)"
+            " TaskCreate TaskUpdate TaskList TodoWrite TodoRead",
         ]
         if self._session_id:
             cmd += ["--resume", self._session_id]
