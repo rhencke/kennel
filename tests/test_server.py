@@ -28,7 +28,13 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
-from fido.registry import FidoState, RepoState, WorkerActivity, WorkerCrash
+from fido.registry import (
+    FidoState,
+    RepoState,
+    WebhookActivity,
+    WorkerActivity,
+    WorkerCrash,
+)
 from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
 from fido.store import FidoStore
 from fido.tasks import Tasks
@@ -50,6 +56,7 @@ def _repo_state(
     last_error: str = "",
     stale: bool = False,
     started_at: datetime | None = None,
+    webhook_activities: tuple[WebhookActivity, ...] = (),
 ) -> RepoState:
     progress_at = (
         datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -70,6 +77,7 @@ def _repo_state(
             last_error=last_error,
             last_crash_time=_EPOCH,
         ),
+        webhook_activities=webhook_activities,
     )
 
 
@@ -286,7 +294,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -317,7 +324,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -337,7 +343,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -358,7 +363,6 @@ class TestGetEndpoint:
                 last_error="RuntimeError: boom",
             )
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -401,7 +405,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", stale=True)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -415,7 +418,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -436,7 +438,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -470,7 +471,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -491,7 +491,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -517,7 +516,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -560,7 +558,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -576,7 +573,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -608,7 +604,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="Napping", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -625,7 +620,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -695,7 +689,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #42")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -727,7 +720,6 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("unknown/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1018,7 +1010,6 @@ class TestStatusXml:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1054,7 +1045,6 @@ class TestStatusXml:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1070,7 +1060,6 @@ class TestStatusXml:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="working", busy=False)
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1098,20 +1087,21 @@ class TestStatusXml:
         assert "<percent_used>96</percent_used>" in body
 
     def test_status_xml_includes_webhooks(self, server: tuple) -> None:
-        from fido.registry import WebhookActivity
-
         url, _ = server
         WebhookHandler.registry.get_state.return_value = _fido_state(
-            _repo_state("owner/repo", what="working")
+            _repo_state(
+                "owner/repo",
+                what="working",
+                webhook_activities=(
+                    WebhookActivity(
+                        handle_id=1,
+                        description="replying to review",
+                        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        thread_id=789,
+                    ),
+                ),
+            )
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = [
-            WebhookActivity(
-                handle_id=1,
-                description="replying to review",
-                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                thread_id=789,
-            ),
-        ]
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1245,7 +1235,6 @@ class TestStatusXml:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #10")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1266,7 +1255,6 @@ class TestStatusXml:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1802,7 +1790,6 @@ class TestProcessAction:
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="running")
         )
-        WebhookHandler.registry.get_webhook_activities.return_value = []
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
@@ -1916,6 +1903,7 @@ class TestProcessAction:
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
         handler.registry = WorkerRegistry(MagicMock())
+        handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []

@@ -741,8 +741,9 @@ class TestMakeRegistry:
 
 
 class TestWebhookActivity:
-    def test_registers_and_unregisters(self) -> None:
+    def test_registers_and_unregisters(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_webhook_activities("foo/bar") == []
         with reg.webhook_activity("foo/bar", "triaging"):
             activities = reg.get_webhook_activities("foo/bar")
@@ -750,17 +751,19 @@ class TestWebhookActivity:
             assert activities[0].description == "triaging"
         assert reg.get_webhook_activities("foo/bar") == []
 
-    def test_unregisters_on_exception(self) -> None:
+    def test_unregisters_on_exception(self, tmp_path: Path) -> None:
         import pytest as _pytest
 
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         with _pytest.raises(RuntimeError):
             with reg.webhook_activity("foo/bar", "oops"):
                 raise RuntimeError("boom")
         assert reg.get_webhook_activities("foo/bar") == []
 
-    def test_multiple_concurrent_activities(self) -> None:
+    def test_multiple_concurrent_activities(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "first"):
             with reg.webhook_activity("foo/bar", "second"):
                 descs = sorted(
@@ -769,8 +772,10 @@ class TestWebhookActivity:
                 assert descs == ["first", "second"]
         assert reg.get_webhook_activities("foo/bar") == []
 
-    def test_activities_isolated_per_repo(self) -> None:
+    def test_activities_isolated_per_repo(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("a/b", tmp_path))
+        reg.start(_repo("c/d", tmp_path))
         with reg.webhook_activity("a/b", "work-ab"):
             with reg.webhook_activity("c/d", "work-cd"):
                 a = reg.get_webhook_activities("a/b")
@@ -782,22 +787,25 @@ class TestWebhookActivity:
         reg = WorkerRegistry(MagicMock())
         assert reg.get_webhook_activities("ghost/repo") == []
 
-    def test_handle_can_update_description(self) -> None:
+    def test_handle_can_update_description(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
             activity.set_description("triaging")
             assert reg.get_webhook_activities("foo/bar")[0].description == "triaging"
 
-    def test_handle_update_after_exit_is_noop(self) -> None:
+    def test_handle_update_after_exit_is_noop(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             pass
         activity.set_description("triaging")
         assert reg.get_webhook_activities("foo/bar") == []
 
-    def test_unknown_handle_update_is_noop(self) -> None:
+    def test_unknown_handle_update_is_noop(self, tmp_path: Path) -> None:
         reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             reg.set_webhook_description("foo/bar", -1, "triaging")
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
@@ -806,6 +814,26 @@ class TestWebhookActivity:
         reg = WorkerRegistry(MagicMock())
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
+
+    def test_publishes_to_fido_state_when_repo_started(self, tmp_path: Path) -> None:
+        """webhook_activity publishes activities into FidoState when start() has run."""
+        reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
+        with reg.webhook_activity("foo/bar", "handling"):
+            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            assert len(acts) == 1
+            assert acts[0].description == "handling"
+        assert reg.get_state().repos["foo/bar"].webhook_activities == ()
+
+    def test_publishes_description_update_to_fido_state(self, tmp_path: Path) -> None:
+        """set_webhook_description publishes the update into FidoState."""
+        reg = WorkerRegistry(MagicMock())
+        reg.start(_repo("foo/bar", tmp_path))
+        with reg.webhook_activity("foo/bar", "original") as handle:
+            handle.set_description("updated")
+            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            assert len(acts) == 1
+            assert acts[0].description == "updated"
 
 
 class TestRescoping:

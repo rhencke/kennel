@@ -5,6 +5,7 @@ import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -33,7 +34,7 @@ def _utcnow() -> datetime:
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkerActivity:
     """Snapshot of what one worker is currently doing.
 
@@ -47,7 +48,7 @@ class WorkerActivity:
     last_progress_at: datetime
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkerCrash:
     """Running record of unexpected worker deaths for one repo.
 
@@ -77,7 +78,32 @@ def _zero_activity(repo_name: str) -> WorkerActivity:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class WebhookActivity:
+    """One in-flight webhook handler running alongside the worker.
+
+    Created when ``_process_action`` starts handling a webhook action; removed
+    when that handler returns (success or failure).  Surfaced in ``fido
+    status`` as a sub-bullet under the repo so we can see what's being
+    handled beyond the worker's own task.
+
+    *thread_id* is :func:`threading.get_ident` captured at context entry so
+    status display can match this webhook to the active
+    :class:`~fido.provider.SessionTalker` (whose ``thread_id`` field is from
+    the same call) — letting the CLI attach claude stats to the specific
+    webhook line that's driving claude.
+
+    Frozen so instances can be stored inside frozen :class:`RepoState`
+    without breaking the immutability guarantee of the atomic snapshot.
+    """
+
+    handle_id: int
+    description: str
+    started_at: datetime
+    thread_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -95,6 +121,10 @@ class RepoState:
     repo.  Initialised to ``_ZERO_CRASH`` (``death_count=0``) by
     :meth:`start`; the watchdog replaces it on each crash.
 
+    *webhook_activities* is the tuple of in-flight webhook handlers for this
+    repo.  Published from the authoritative ``_webhook_activities`` dict on
+    :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
+
     No field is ``None`` — the full tree is prepopulated by :meth:`start`
     with zero values so lens-path writes never encounter missing keys.
 
@@ -108,9 +138,10 @@ class RepoState:
     started_at: datetime
     activity: WorkerActivity
     crash_record: WorkerCrash
+    webhook_activities: tuple[WebhookActivity, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FidoState:
     """Atomically-swapped coordination snapshot owned by :class:`WorkerRegistry`.
 
@@ -140,29 +171,7 @@ class FidoState:
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())
 
 
-@dataclass
-class WebhookActivity:
-    """One in-flight webhook handler running alongside the worker.
-
-    Created when ``_process_action`` starts handling a webhook action; removed
-    when that handler returns (success or failure).  Surfaced in ``fido
-    status`` as a sub-bullet under the repo so we can see what's being
-    handled beyond the worker's own task.
-
-    *thread_id* is :func:`threading.get_ident` captured at context entry so
-    status display can match this webhook to the active
-    :class:`~fido.provider.SessionTalker` (whose ``thread_id`` field is from
-    the same call) — letting the CLI attach claude stats to the specific
-    webhook line that's driving claude.
-    """
-
-    handle_id: int
-    description: str
-    started_at: datetime
-    thread_id: int
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WebhookActivityHandle:
     """Opaque handle for updating one in-flight webhook activity safely."""
 
@@ -209,8 +218,6 @@ class WorkerRegistry:
         # (also on the watchdog thread after startup).  No lock needed —
         # single-writer per repo.
         self._crash_records: dict[str, WorkerCrash] = {}
-        self._webhook_activities: dict[str, list[WebhookActivity]] = {}
-        self._webhook_lock = threading.Lock()
         self._rescoping: dict[str, bool] = {}
         self._rescoping_lock = threading.Lock()
         # Per-repo untriaged-webhook inbox (#1067).  Counts model-needing
@@ -232,6 +239,12 @@ class WorkerRegistry:
         # start(), which is called sequentially during startup and from the
         # single watchdog daemon thread during crash recovery — no lock needed.
         self._registry_fsm_states: dict[str, registry_fsm.State] = {}
+        # Per-repo in-flight webhook activities.  _webhook_activities is the
+        # authoritative store; mutations update it under _webhook_lock and then
+        # publish the frozen tuple to FidoState via _publish_webhook_activities
+        # so the snapshot is always up to date.
+        self._webhook_activities: dict[str, list[WebhookActivity]] = {}
+        self._webhook_lock = threading.Lock()
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -332,6 +345,7 @@ class WorkerRegistry:
             started_at=_now,
             activity=_zero_activity(_name),
             crash_record=crash_record,
+            webhook_activities=(),
         )
         self._state.update(lambda root: root.repos[_name], new_repo)
         thread.start()
@@ -423,6 +437,20 @@ class WorkerRegistry:
         _name = repo_name
         self._state.update(lambda root: root.repos[_name].crash_record, new_crash)
 
+    def _publish_webhook_activities(self, repo_name: str) -> None:
+        """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
+
+        Reads the current list from ``_webhook_activities``, builds the frozen
+        tuple, and installs it at ``repos[name].webhook_activities`` via a
+        single lens write.  The repo must have been :meth:`start`-ed first —
+        crashes (``KeyError``) if it is not yet in the snapshot.
+
+        Must be called under ``_webhook_lock``.
+        """
+        acts = tuple(self._webhook_activities.get(repo_name, []))
+        _name = repo_name
+        self._state.update(lambda root: root.repos[_name].webhook_activities, acts)
+
     @contextmanager
     def webhook_activity(
         self,
@@ -440,6 +468,10 @@ class WorkerRegistry:
 
         Appears in ``fido status`` as a sub-bullet under the repo.  Entries
         self-unregister on block exit (both success and exception paths).
+
+        The authoritative activity list is kept in ``_webhook_activities``
+        (protected by ``_webhook_lock``); each mutation publishes a fresh
+        frozen tuple to :class:`FidoState` via :meth:`_publish_webhook_activities`.
         """
         activity = WebhookActivity(
             handle_id=id(object()),  # cheap unique id per call
@@ -450,37 +482,44 @@ class WorkerRegistry:
         handle = WebhookActivityHandle(repo_name, activity.handle_id, self)
         with self._webhook_lock:
             self._webhook_activities.setdefault(repo_name, []).append(activity)
+            self._publish_webhook_activities(repo_name)
         try:
             yield handle
         finally:
             with self._webhook_lock:
-                items = self._webhook_activities.get(repo_name)
-                if items is not None:
-                    self._webhook_activities[repo_name] = [
-                        a for a in items if a.handle_id != activity.handle_id
-                    ]
+                acts = self._webhook_activities.get(repo_name, [])
+                self._webhook_activities[repo_name] = [
+                    a for a in acts if a.handle_id != activity.handle_id
+                ]
+                self._publish_webhook_activities(repo_name)
 
     def set_webhook_description(
         self, repo_name: str, handle_id: int, description: str
     ) -> None:
-        """Replace one webhook activity entry with an updated description."""
+        """Replace one webhook activity entry with an updated description.
+
+        Updates the authoritative ``_webhook_activities`` dict and publishes the
+        new frozen tuple to :class:`FidoState`.  No-op if *handle_id* is not
+        present for *repo_name*.
+        """
         with self._webhook_lock:
-            items = self._webhook_activities.get(repo_name)
-            if items is None:
+            acts = self._webhook_activities.get(repo_name, [])
+            if not any(a.handle_id == handle_id for a in acts):
                 return
-            for i, activity in enumerate(items):
-                if activity.handle_id != handle_id:
-                    continue
-                items[i] = WebhookActivity(
-                    handle_id=activity.handle_id,
-                    description=description,
-                    started_at=activity.started_at,
-                    thread_id=activity.thread_id,
-                )
-                return
+            self._webhook_activities[repo_name] = [
+                dc_replace(a, description=description)
+                if a.handle_id == handle_id
+                else a
+                for a in acts
+            ]
+            self._publish_webhook_activities(repo_name)
 
     def get_webhook_activities(self, repo_name: str) -> list[WebhookActivity]:
-        """Return a snapshot of in-flight webhook activities for *repo_name*."""
+        """Return a snapshot of in-flight webhook activities for *repo_name*.
+
+        Reads from the authoritative ``_webhook_activities`` dict.  Returns an
+        empty list if *repo_name* is not registered.
+        """
         with self._webhook_lock:
             return list(self._webhook_activities.get(repo_name, []))
 
