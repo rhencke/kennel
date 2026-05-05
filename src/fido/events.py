@@ -14,6 +14,7 @@ from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ProviderAgent,
     safe_voice_turn,
     set_thread_kind,
@@ -1774,7 +1775,11 @@ def needs_more_context(
         "Reply with exactly YES or NO."
     )
     log.info("needs-more-context check: requesting haiku")
-    answer = agent.run_turn(prompt, model=agent.brief_model).upper()
+    answer = agent.run_turn(
+        prompt,
+        model=agent.brief_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+    ).upper()
     log.info(
         "needs-more-context check: returned %d chars (answer=%r)",
         len(answer),
@@ -2133,6 +2138,7 @@ def _notify_thread_change(
         agent,
         prompts.persona_wrap(instruction),
         model=agent.voice_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         system_prompt=prompts.reply_system_prompt(),
         log_prefix="_notify_thread_change",
     )

@@ -19,6 +19,7 @@ from fido.config import Config, RepoConfig, RepoMembership
 from fido.issue_cache import IssueNode, IssueTreeCache
 from fido.prompts import Prompts
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ContextOverflowError,
     ProviderID,
     ProviderLimitSnapshot,
@@ -3677,6 +3678,7 @@ class TestProviderStart:
             "claude-opus-4-6",
             300,
             cwd=".",
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         )
 
     def test_passes_custom_model(self, tmp_path: Path) -> None:
@@ -3787,6 +3789,7 @@ class TestProviderStart:
         client.run_turn.assert_called_once_with(
             "setup instructions\n\n---\n\nthe task prompt",
             model=client.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
             retry_on_preempt=True,
             session_mode=TurnSessionMode.REUSE,
         )
@@ -3870,6 +3873,7 @@ class TestProviderRun:
             "claude-sonnet-4-6",
             300,
             cwd=".",
+            allowed_tools=None,
         )
 
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
@@ -3957,6 +3961,7 @@ class TestProviderRun:
         client.run_turn.assert_called_once_with(
             "task instructions\n\n---\n\nrun this task",
             model=client.work_model,
+            allowed_tools=None,
             retry_on_preempt=True,
             session_mode=TurnSessionMode.REUSE,
         )
@@ -3975,6 +3980,7 @@ class TestProviderRun:
         client.run_turn.assert_called_once_with(
             "skill\n\n---\n\nprompt",
             model=client.work_model,
+            allowed_tools=None,
             retry_on_preempt=False,
             session_mode=TurnSessionMode.REUSE,
         )
@@ -4003,6 +4009,151 @@ class TestProviderRun:
         provider_run(fido_dir, agent=client, model=client.work_model)
         session.__enter__.assert_not_called()
         session.__exit__.assert_not_called()
+
+
+class _RecordingGh:
+    """Hand-rolled fake GitHub client that records ``create_issue`` calls.
+
+    Matches the production ``GitHub.create_issue`` signature exactly so the
+    fake is a drop-in for the worker call site (#1413).  Returns a stable
+    URL per call so callers that propagate the URL don't blow up.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str, list[str] | None]] = []
+
+    def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> str:
+        self.calls.append((repo, title, body, labels))
+        return f"https://github.com/{repo}/issues/{len(self.calls)}"
+
+
+class TestFileAuxIssuesFromBundle:
+    """Worker._file_aux_issues_from_bundle dispatches sentinel ``insights``
+    and ``out_of_scope_asks`` arrays to ``gh.create_issue`` so the LLM never
+    needs the ``gh issue create`` permission itself (closes #1413)."""
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="alice/myrepo",
+            owner="alice",
+            repo_name="myrepo",
+            gh_user="bot",
+            default_branch="main",
+        )
+
+    def _make_worker(self, tmp_path: Path, gh: _RecordingGh) -> Worker:
+        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
+
+    def test_empty_bundle_files_nothing(self, tmp_path: Path) -> None:
+        from fido.rocq.turn_outcome import CommitTaskComplete
+        from fido.turn_outcome import TurnOutcomeBundle
+
+        gh = _RecordingGh()
+        worker = self._make_worker(tmp_path, gh)
+        bundle = TurnOutcomeBundle(
+            outcome=CommitTaskComplete(summary="x"),
+            insights=(),
+            out_of_scope_asks=(),
+        )
+        worker._file_aux_issues_from_bundle(bundle, self._repo_ctx(), pr_number=42)
+        assert gh.calls == []
+
+    def test_files_each_insight_with_label_and_source(self, tmp_path: Path) -> None:
+        from fido.rocq.turn_outcome import CommitTaskComplete
+        from fido.turn_outcome import Insight, TurnOutcomeBundle
+
+        gh = _RecordingGh()
+        worker = self._make_worker(tmp_path, gh)
+        bundle = TurnOutcomeBundle(
+            outcome=CommitTaskComplete(summary="x"),
+            insights=(
+                Insight(
+                    title="Snapshot ownership",
+                    hook="CAS broke down on the snapshot.",
+                    why="The fix was to move ownership of the value out.",
+                ),
+                Insight(
+                    title="Webhook ordering",
+                    hook="Two pull_request_review events 10s apart.",
+                    why="Worth a dedup window in webhook ingest.",
+                ),
+            ),
+            out_of_scope_asks=(),
+        )
+        worker._file_aux_issues_from_bundle(bundle, self._repo_ctx(), pr_number=99)
+        assert gh.calls == [
+            (
+                "alice/myrepo",
+                "Insight: Snapshot ownership",
+                "CAS broke down on the snapshot.\n\n"
+                "The fix was to move ownership of the value out.\n\n"
+                "Source: alice/myrepo#99",
+                ["Insight"],
+            ),
+            (
+                "alice/myrepo",
+                "Insight: Webhook ordering",
+                "Two pull_request_review events 10s apart.\n\n"
+                "Worth a dedup window in webhook ingest.\n\n"
+                "Source: alice/myrepo#99",
+                ["Insight"],
+            ),
+        ]
+
+    def test_files_each_out_of_scope_ask_without_label(self, tmp_path: Path) -> None:
+        from fido.rocq.turn_outcome import CommitTaskComplete
+        from fido.turn_outcome import OutOfScopeAsk, TurnOutcomeBundle
+
+        gh = _RecordingGh()
+        worker = self._make_worker(tmp_path, gh)
+        bundle = TurnOutcomeBundle(
+            outcome=CommitTaskComplete(summary="x"),
+            insights=(),
+            out_of_scope_asks=(
+                OutOfScopeAsk(title="Dedup window", body="Worth investigating"),
+            ),
+        )
+        worker._file_aux_issues_from_bundle(bundle, self._repo_ctx(), pr_number=7)
+        assert gh.calls == [
+            (
+                "alice/myrepo",
+                "Dedup window",
+                "Worth investigating\n\nOut-of-scope from: alice/myrepo#7",
+                None,
+            ),
+        ]
+
+    def test_create_issue_failure_propagates(self, tmp_path: Path) -> None:
+        """Failures are not swallowed — defensive try/except hid bugs.  When
+        issue filing fails the watchdog surfaces it on next tick."""
+        from fido.rocq.turn_outcome import CommitTaskComplete
+        from fido.turn_outcome import Insight, TurnOutcomeBundle
+
+        class _Failing:
+            def create_issue(
+                self,
+                repo: str,
+                title: str,
+                body: str,
+                labels: list[str] | None = None,
+            ) -> str:
+                del repo, title, body, labels
+                raise RuntimeError("api down")
+
+        worker = Worker(tmp_path, _Failing(), registry=MagicMock(spec=ActivityReporter))
+        bundle = TurnOutcomeBundle(
+            outcome=CommitTaskComplete(summary="x"),
+            insights=(Insight(title="T", hook="H", why="W"),),
+            out_of_scope_asks=(),
+        )
+        with pytest.raises(RuntimeError, match="api down"):
+            worker._file_aux_issues_from_bundle(bundle, self._repo_ctx(), pr_number=1)
 
 
 class TestSanitizeSlug:

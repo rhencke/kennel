@@ -9,7 +9,7 @@ from pathlib import Path
 from fido.claude import ClaudeClient
 from fido.config import RepoConfig, default_sub_dir
 from fido.github import GitHub
-from fido.provider import ProviderAgent, safe_voice_turn
+from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent, safe_voice_turn
 from fido.provider_factory import DefaultProviderFactory
 from fido.status import running_repo_configs
 
@@ -92,6 +92,7 @@ def generate_persona_status(
         provider,
         f"Rewrite this status in Fido's voice: {message}",
         model=provider.voice_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         system_prompt=system,
         log_prefix="generate_persona_status",
     )
@@ -110,6 +111,7 @@ def generate_persona_emoji(
         f"Pick an emoji for this status: {status_text}",
         system,
         model=provider.voice_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
     )
     if not result:
         raise ValueError("generate_persona_emoji: generate_status_emoji returned empty")

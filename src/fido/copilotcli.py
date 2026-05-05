@@ -1025,9 +1025,17 @@ class CopilotCLISession(OwnedSession):
     def prompt(
         self,
         content: str,
+        *,
         model: ProviderModel | None = None,
+        allowed_tools: str | None = None,  # see comment below
         system_prompt: str | None = None,
     ) -> str:
+        # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
+        # #1413), but Copilot CLI's ACP runtime has no equivalent of
+        # ``--allowedTools`` so the kwarg is informational here.  Default
+        # differs from the protocol's READ_ONLY default because there's
+        # nothing to enforce.
+        del allowed_tools
         with self:
             return self._prompt_locked(
                 content, model=model, system_prompt=system_prompt
@@ -1047,11 +1055,6 @@ class CopilotCLISession(OwnedSession):
         normalized = coerce_provider_model(model)
         self._session_id = self._runtime.ensure_session(self._session_id, normalized)
         self._model = normalized
-
-    def switch_tools(self, tools: str | None) -> None:
-        """No-op for Copilot CLI — the ACP protocol does not support a
-        per-session tool restriction flag equivalent to ``--tools``."""
-        del tools
 
     def recover(self) -> None:
         self._session_id = self._runtime.recover_session(self._session_id, self._model)
@@ -1351,8 +1354,10 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 30,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = None,  # informational; Copilot has no equivalent
     ) -> str:
-        del idle_timeout
+        del idle_timeout, allowed_tools
         prompt = _combine_prompt(
             prompt_file.read_text(),
             base_system_prompt=system_file.read_text(),
@@ -1367,8 +1372,10 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         timeout: int = 300,
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
+        *,
+        allowed_tools: str | None = None,  # informational; Copilot has no equivalent
     ) -> str:
-        del idle_timeout
+        del idle_timeout, allowed_tools
         return self._run_cli_prompt(
             prompt_file.read_text(),
             model=model,

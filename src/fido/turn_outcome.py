@@ -8,6 +8,10 @@ pending for another turn, or skip the commit and record a reason.
 The LLM declares intent; Python acts on it.  Git operations are never the
 LLM's responsibility.
 
+Optional ``insights`` and ``out_of_scope_asks`` arrays let the LLM declare
+auxiliary issues for the harness to file on its behalf.  Both default to
+empty arrays and may appear alongside any ``turn_outcome`` value.
+
 Type definitions (``CommitTaskComplete``, ``CommitTaskInProgress``,
 ``SkipTaskWithReason``, ``TurnOutcome``) live in the Rocq-extracted module
 :mod:`fido.rocq.turn_outcome`.  Importers should get types directly from
@@ -16,6 +20,8 @@ that module.  This module owns only the parser boundary adapter.
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeVar
 
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
@@ -25,10 +31,36 @@ from fido.rocq.turn_outcome import (
     TurnOutcome,
     parse_sentinel,
 )
+from fido.synthesis import Insight
+
+_T = TypeVar("_T")
 
 __all__ = [
+    "Insight",
+    "OutOfScopeAsk",
+    "TurnOutcomeBundle",
     "parse_turn_outcome",
 ]
+
+
+@dataclass(frozen=True)
+class OutOfScopeAsk:
+    """A request that arrived during task work but is out of scope for
+    the current task; filed by the harness as a tracked GitHub issue so
+    the work isn't lost but doesn't bloat the current PR."""
+
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class TurnOutcomeBundle:
+    """Full result of parsing a turn_outcome sentinel: the dispatch outcome
+    plus any auxiliary issues the LLM declared for harness-side filing."""
+
+    outcome: TurnOutcome
+    insights: tuple[Insight, ...]
+    out_of_scope_asks: tuple[OutOfScopeAsk, ...]
 
 
 def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
@@ -93,11 +125,70 @@ def _parse_outcome_field(
     return result
 
 
-def parse_turn_outcome(text: str) -> TurnOutcome:
+def _require_aux_str(item: dict[str, object], field: str, label: str) -> str:
+    """Pull a required non-empty string field out of an aux-issue item dict."""
+    value = item.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{label} requires a non-empty "{field}" string')
+    return value
+
+
+def _parse_aux_issues(
+    obj: dict[str, object],
+    field: str,
+    item_parser: Callable[[dict[str, object], str], _T],
+) -> tuple[_T, ...]:
+    """Parse an optional auxiliary-issue array (``insights`` or
+    ``out_of_scope_asks``) from *obj*.
+
+    *item_parser* receives the raw item dict and a label like ``"insights[2]"``
+    suitable for error messages, and returns the typed dataclass.  Returns an
+    empty tuple when *field* is absent or ``None``; raises ``ValueError`` when
+    present but malformed (non-list, missing required keys, etc.).
+    """
+    raw = obj.get(field)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f'turn_outcome "{field}" must be a JSON array, got: {raw!r}')
+    out: list[_T] = []
+    for i, item in enumerate(raw):
+        label = f"{field}[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{label} is not a JSON object: {item!r}")
+        out.append(item_parser(item, label))
+    return tuple(out)
+
+
+def _parse_insight(item: dict[str, object], label: str) -> Insight:
+    """Parse one entry from the sentinel's ``insights`` array.
+
+    Schema matches :class:`fido.synthesis.Insight` so the comment-driven
+    and task-driven insight pipelines share one type and one filing shape.
+    """
+    return Insight(
+        title=_require_aux_str(item, "title", label).strip(),
+        hook=_require_aux_str(item, "hook", label),
+        why=_require_aux_str(item, "why", label),
+    )
+
+
+def _parse_out_of_scope_ask(item: dict[str, object], label: str) -> "OutOfScopeAsk":
+    """Parse one entry from the sentinel's ``out_of_scope_asks`` array."""
+    return OutOfScopeAsk(
+        title=_require_aux_str(item, "title", label).strip(),
+        body=_require_aux_str(item, "body", label),
+    )
+
+
+def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
     Only the final non-empty line is examined — stale sentinels earlier in
     the response are ignored.
+
+    Returns a :class:`TurnOutcomeBundle` with the dispatch ``outcome`` plus
+    any optional ``insights`` and ``out_of_scope_asks`` declared by the LLM.
 
     Raises:
         ValueError: If the line is absent, not valid JSON, not a recognised
@@ -120,19 +211,19 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
     kind = obj.get("turn_outcome")
     match kind:
         case "commit-task-complete":
-            return _parse_outcome_field(
+            outcome: TurnOutcome = _parse_outcome_field(
                 obj, kind, "summary", lambda s: CommitTaskComplete(summary=s)
             )
         case "commit-task-in-progress":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "summary", lambda s: CommitTaskInProgress(summary=s)
             )
         case "skip-task-with-reason":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "reason", lambda s: SkipTaskWithReason(reason=s)
             )
         case "stuck-on-task":
-            return _parse_outcome_field(
+            outcome = _parse_outcome_field(
                 obj, kind, "reason", lambda s: StuckOnTask(reason=s)
             )
         case None:
@@ -143,3 +234,10 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
             # unknown kind regardless of payload content.
             _assert_reject_oracle(kind, "x")
             raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
+    return TurnOutcomeBundle(
+        outcome=outcome,
+        insights=_parse_aux_issues(obj, "insights", _parse_insight),
+        out_of_scope_asks=_parse_aux_issues(
+            obj, "out_of_scope_asks", _parse_out_of_scope_ask
+        ),
+    )

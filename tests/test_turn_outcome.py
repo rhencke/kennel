@@ -11,7 +11,7 @@ from fido.rocq.turn_outcome import (
     SkipTaskWithReason,
     StuckOnTask,
 )
-from fido.turn_outcome import parse_turn_outcome
+from fido.turn_outcome import Insight, OutOfScopeAsk, parse_turn_outcome
 
 
 class TestParseTurnOutcomeEmpty:
@@ -47,7 +47,7 @@ class TestParseTurnOutcomeUnrecognized:
 class TestParseTurnOutcomeCommitTaskComplete:
     def test_valid(self) -> None:
         line = '{"turn_outcome": "commit-task-complete", "summary": "Add foo"}'
-        assert parse_turn_outcome(line) == CommitTaskComplete(summary="Add foo")
+        assert parse_turn_outcome(line).outcome == CommitTaskComplete(summary="Add foo")
 
     def test_missing_summary(self) -> None:
         with pytest.raises(ValueError, match="non-empty.*summary"):
@@ -72,7 +72,9 @@ class TestParseTurnOutcomeCommitTaskComplete:
 class TestParseTurnOutcomeCommitTaskInProgress:
     def test_valid(self) -> None:
         line = '{"turn_outcome": "commit-task-in-progress", "summary": "WIP: Add bar"}'
-        assert parse_turn_outcome(line) == CommitTaskInProgress(summary="WIP: Add bar")
+        assert parse_turn_outcome(line).outcome == CommitTaskInProgress(
+            summary="WIP: Add bar"
+        )
 
     def test_missing_summary(self) -> None:
         with pytest.raises(ValueError, match="non-empty.*summary"):
@@ -97,7 +99,7 @@ class TestParseTurnOutcomeCommitTaskInProgress:
 class TestParseTurnOutcomeSkipTaskWithReason:
     def test_valid(self) -> None:
         line = '{"turn_outcome": "skip-task-with-reason", "reason": "already done in abc1234"}'
-        assert parse_turn_outcome(line) == SkipTaskWithReason(
+        assert parse_turn_outcome(line).outcome == SkipTaskWithReason(
             reason="already done in abc1234"
         )
 
@@ -124,7 +126,9 @@ class TestParseTurnOutcomeSkipTaskWithReason:
 class TestParseTurnOutcomeStuckOnTask:
     def test_valid(self) -> None:
         line = '{"turn_outcome": "stuck-on-task", "reason": "need API credentials"}'
-        assert parse_turn_outcome(line) == StuckOnTask(reason="need API credentials")
+        assert parse_turn_outcome(line).outcome == StuckOnTask(
+            reason="need API credentials"
+        )
 
     def test_missing_reason(self) -> None:
         with pytest.raises(ValueError, match="non-empty.*reason"):
@@ -153,7 +157,9 @@ class TestParseTurnOutcomeMultiLine:
             "All tests pass.\n"
             '{"turn_outcome": "commit-task-complete", "summary": "Implement thing"}'
         )
-        assert parse_turn_outcome(text) == CommitTaskComplete(summary="Implement thing")
+        assert parse_turn_outcome(text).outcome == CommitTaskComplete(
+            summary="Implement thing"
+        )
 
     def test_stale_sentinel_in_middle_non_json_at_end(self) -> None:
         """A valid-looking sentinel buried in the middle is invisible — only the
@@ -168,16 +174,122 @@ class TestParseTurnOutcomeMultiLine:
     def test_trailing_blank_lines_ignored(self) -> None:
         """Trailing blank lines are filtered out; the sentinel still parses."""
         text = '{"turn_outcome": "skip-task-with-reason", "reason": "no-op"}\n\n\n  \n'
-        assert parse_turn_outcome(text) == SkipTaskWithReason(reason="no-op")
+        assert parse_turn_outcome(text).outcome == SkipTaskWithReason(reason="no-op")
 
     def test_in_progress_on_last_line(self) -> None:
         text = (
             "Staged the first batch of changes.\n"
             '{"turn_outcome": "commit-task-in-progress", "summary": "wip: part 1 of 3"}'
         )
-        assert parse_turn_outcome(text) == CommitTaskInProgress(
+        assert parse_turn_outcome(text).outcome == CommitTaskInProgress(
             summary="wip: part 1 of 3"
         )
+
+
+class TestParseTurnOutcomeAuxIssues:
+    """Optional ``insights`` and ``out_of_scope_asks`` arrays on any sentinel."""
+
+    def test_no_aux_arrays_default_empty(self) -> None:
+        bundle = parse_turn_outcome(
+            '{"turn_outcome": "commit-task-complete", "summary": "x"}'
+        )
+        assert bundle.insights == ()
+        assert bundle.out_of_scope_asks == ()
+
+    def test_explicit_null_aux_arrays_default_empty(self) -> None:
+        bundle = parse_turn_outcome(
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": null, "out_of_scope_asks": null}'
+        )
+        assert bundle.insights == ()
+        assert bundle.out_of_scope_asks == ()
+
+    def test_insights_parsed(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": ['
+            '{"title": "T1", "hook": "H1", "why": "W1"}, '
+            '{"title": "T2", "hook": "H2", "why": "W2"}]}'
+        )
+        bundle = parse_turn_outcome(line)
+        assert bundle.insights == (
+            Insight(title="T1", hook="H1", why="W1"),
+            Insight(title="T2", hook="H2", why="W2"),
+        )
+        assert bundle.out_of_scope_asks == ()
+
+    def test_out_of_scope_asks_parsed(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"out_of_scope_asks": [{"title": "Ask", "body": "Body"}]}'
+        )
+        bundle = parse_turn_outcome(line)
+        assert bundle.out_of_scope_asks == (OutOfScopeAsk(title="Ask", body="Body"),)
+        assert bundle.insights == ()
+
+    def test_insights_must_be_array(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": {"title": "T", "hook": "H", "why": "W"}}'
+        )
+        with pytest.raises(ValueError, match="must be a JSON array"):
+            parse_turn_outcome(line)
+
+    def test_insight_item_must_be_object(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": ["not an object"]}'
+        )
+        with pytest.raises(ValueError, match=r"insights\[0\] is not a JSON object"):
+            parse_turn_outcome(line)
+
+    def test_insight_missing_title(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"hook": "H", "why": "W"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "title"'):
+            parse_turn_outcome(line)
+
+    def test_insight_missing_hook(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"title": "T", "why": "W"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "hook"'):
+            parse_turn_outcome(line)
+
+    def test_insight_missing_why(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"title": "T", "hook": "H"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "why"'):
+            parse_turn_outcome(line)
+
+    def test_insight_title_whitespace_only(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"title": "   ", "hook": "H", "why": "W"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "title"'):
+            parse_turn_outcome(line)
+
+    def test_insight_hook_whitespace_only(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"insights": [{"title": "T", "hook": "  ", "why": "W"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "hook"'):
+            parse_turn_outcome(line)
+
+    def test_out_of_scope_ask_missing_body(self) -> None:
+        line = (
+            '{"turn_outcome": "commit-task-complete", "summary": "x", '
+            '"out_of_scope_asks": [{"title": "Ask"}]}'
+        )
+        with pytest.raises(ValueError, match=r'requires a non-empty "body"'):
+            parse_turn_outcome(line)
 
 
 class TestOracleDivergenceDetection:

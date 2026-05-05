@@ -13,7 +13,6 @@ from fido import provider
 from fido.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
-    HANDLER_ALLOWED_TOOLS,
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
@@ -34,6 +33,7 @@ from fido.claude import (
     raise_for_provider_error_output,
 )
 from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -1716,8 +1716,8 @@ class TestClaudeSessionSwitchTools:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_tools(HANDLER_ALLOWED_TOOLS)
-        assert session._tools == HANDLER_ALLOWED_TOOLS
+            session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
+        assert session._tools == READ_ONLY_ALLOWED_TOOLS
         mock_respawn.assert_called_once()
         kwargs = mock_respawn.call_args.kwargs
         assert kwargs["clear_session_id"] is False
@@ -1728,7 +1728,7 @@ class TestClaudeSessionSwitchTools:
         """Switching from restricted back to None respawns with resume."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._tools = HANDLER_ALLOWED_TOOLS  # pretend handler mode
+        session._tools = READ_ONLY_ALLOWED_TOOLS  # pretend handler mode
         with patch.object(session, "_respawn") as mock_respawn:
             session.switch_tools(None)
         assert session._tools is None
@@ -1743,7 +1743,7 @@ class TestClaudeSessionSwitchTools:
         boom = OSError("kill failed")
         with patch.object(session, "_respawn", side_effect=boom):
             with pytest.raises(OSError, match="kill failed"):
-                session.switch_tools(HANDLER_ALLOWED_TOOLS)
+                session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
 
 
 class TestClaudeSessionSpawnTools:
@@ -1774,11 +1774,11 @@ class TestClaudeSessionSpawnTools:
             system_file,
             popen=fake_popen,
             selector=fake_selector,
-            tools=HANDLER_ALLOWED_TOOLS,
+            tools=READ_ONLY_ALLOWED_TOOLS,
         )
         cmd = fake_popen.call_args.args[0]
         assert "--allowedTools" in cmd
-        assert cmd[cmd.index("--allowedTools") + 1] == HANDLER_ALLOWED_TOOLS
+        assert cmd[cmd.index("--allowedTools") + 1] == READ_ONLY_ALLOWED_TOOLS
 
     def test_allowed_tools_flag_appears_before_resume(self, tmp_path: Path) -> None:
         """``--allowedTools`` is placed before ``--resume`` in the command."""
@@ -1791,7 +1791,7 @@ class TestClaudeSessionSpawnTools:
             system_file,
             popen=fake_popen,
             selector=fake_selector,
-            tools=HANDLER_ALLOWED_TOOLS,
+            tools=READ_ONLY_ALLOWED_TOOLS,
             session_id="sess-123",
         )
         cmd = fake_popen.call_args.args[0]
@@ -2068,60 +2068,6 @@ class TestClaudeSessionLock:
         finally:
             provider.set_thread_kind(None)
             session.stop()
-
-    def test_hold_for_handler_switches_to_triage_tools_and_restores(
-        self, tmp_path: Path
-    ) -> None:
-        """hold_for_handler calls switch_tools(HANDLER_ALLOWED_TOOLS) on entry
-        and switch_tools(None) on exit so handler turns are automatically
-        restricted to the triage allowlist (#1042)."""
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        calls: list[str | None] = []
-        original_switch = session.switch_tools
-
-        def recording_switch(tools: str | None) -> None:
-            calls.append(tools)
-            original_switch(tools)
-
-        session.switch_tools = recording_switch  # type: ignore[method-assign]
-        provider.set_thread_kind("webhook")
-        try:
-            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
-                with session.hold_for_handler():
-                    pass
-        finally:
-            provider.set_thread_kind(None)
-            session.stop()
-
-        assert len(calls) == 2
-        assert calls[0] == HANDLER_ALLOWED_TOOLS  # restricted on entry
-        assert calls[1] is None  # restored on exit
-
-    def test_hold_for_handler_restores_tools_on_exception(self, tmp_path: Path) -> None:
-        """hold_for_handler restores tools even when the body raises."""
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        calls: list[str | None] = []
-        original_switch = session.switch_tools
-
-        def recording_switch(tools: str | None) -> None:
-            calls.append(tools)
-            original_switch(tools)
-
-        session.switch_tools = recording_switch  # type: ignore[method-assign]
-        provider.set_thread_kind("webhook")
-        try:
-            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
-                with pytest.raises(RuntimeError, match="boom"):
-                    with session.hold_for_handler():
-                        raise RuntimeError("boom")
-        finally:
-            provider.set_thread_kind(None)
-            session.stop()
-
-        assert calls[0] == HANDLER_ALLOWED_TOOLS
-        assert calls[-1] is None  # always restored
 
     def test_enter_uses_thread_kind_not_shared_attribute(self, tmp_path: Path) -> None:
         """Regression for #981: __enter__ must read the talker kind from
@@ -2641,7 +2587,10 @@ class TestClaudeClientRunTurn:
         client = ClaudeClient(session_fn=lambda: session)
         assert client.run_turn("hi", model="claude-opus-4-6") == "hello"
         session.prompt.assert_called_once_with(
-            "hi", model="claude-opus-4-6", system_prompt=None
+            "hi",
+            model="claude-opus-4-6",
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=None,
         )
 
     def test_passes_system_prompt(self) -> None:
@@ -3212,7 +3161,10 @@ class TestClaudeClientGenerateStatus:
             == "🐶\ncoding up a storm"
         )
         session.prompt.assert_called_once_with(
-            "working on #42", model="claude-opus-4-6", system_prompt="be fido"
+            "working on #42",
+            model="claude-opus-4-6",
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt="be fido",
         )
 
     def test_custom_model(self) -> None:
@@ -3232,6 +3184,7 @@ class TestClaudeClientGenerateStatusEmojiDelegation:
         session.prompt.assert_called_once_with(
             "pick emoji",
             model="claude-opus-4-6",
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
             system_prompt=(
                 "be fido\n\nRespond with ONLY a JSON object in the form "
                 '{"emoji": "your answer"}. No other text before or after the JSON.'
