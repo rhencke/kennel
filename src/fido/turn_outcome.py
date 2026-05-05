@@ -45,6 +45,21 @@ def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
         )
 
 
+def _assert_reject_oracle(kind: str, payload: str) -> None:
+    """Assert that the Rocq-proven parse_sentinel also rejects this input.
+
+    Called on ValueError paths where the parser refuses to produce a
+    TurnOutcome.  If the model accepts an input the parser rejects,
+    this crashes — surfacing the divergence immediately.
+    """
+    oracle = parse_sentinel(kind, payload)
+    if oracle is not None:
+        raise AssertionError(
+            f"parse_sentinel oracle accepted input the parser rejects: "
+            f"kind={kind!r} payload={payload!r} => {oracle!r}"
+        )
+
+
 def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
     """Extract and validate a required non-empty string field from *obj*.
 
@@ -53,6 +68,11 @@ def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
     """
     value = obj.get(field)
     if not isinstance(value, str) or not value.strip():
+        # When the value IS a string (but empty/whitespace), assert the model
+        # also rejects.  Python normalizes by stripping — the model rejects
+        # empty payloads — so we pass the stripped form.
+        if isinstance(value, str):
+            _assert_reject_oracle(kind, value.strip())
         raise ValueError(
             f'turn_outcome "{kind}" requires a non-empty '
             f'"{field}" string, got: {value!r}'
@@ -118,4 +138,8 @@ def parse_turn_outcome(text: str) -> TurnOutcome:
         case None:
             raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
         case _:
+            # The kind is unrecognised — assert the model also rejects it.
+            # Use a non-empty probe payload: the model returns None for any
+            # unknown kind regardless of payload content.
+            _assert_reject_oracle(kind, "x")
             raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
