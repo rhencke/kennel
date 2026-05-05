@@ -421,7 +421,15 @@ escape-hatch event is accepted in every state.
 
 Formally proved in `session_lock.v`:
 - `force_release_to_free`: ∀s, transition(s, ForceRelease) = Some Free.
-- `every_state_reaches_free`: ∀s, ∃ev, transition(s, ev) = Some Free.
+- `unconditional_liveness`: ∃ev, ∀s, transition(s, ev) = Some Free —
+  strong liveness, with `ForceRelease` as the witness.  The watchdog
+  fires that single event without first inspecting FSM state and is
+  guaranteed `Free` regardless of where the holder was.
+- `every_state_reaches_free`: ∀s, ∃ev, transition(s, ev) = Some Free —
+  weaker form, named to document the *primary* path: voluntary
+  release for owned states, ForceRelease only for `Free` (idempotent
+  self-loop) and the unhappy case.  Strictly weaker than
+  `unconditional_liveness`; both are kept for pedagogical clarity.
 - `owned_state_exit_paths` (worker + handler): the only events that
   produce `Some _` from an owned state are the corresponding
   voluntary `*Release`, `Preempt` (worker only), and `ForceRelease`.

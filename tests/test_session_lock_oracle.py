@@ -12,7 +12,13 @@ Proved theorems being guarded:
   ``no_dual_ownership``        — acquisition rejected when session already owned
   ``release_only_by_owner``    — release rejected when wrong owner or Free
   ``force_release_to_free``    — ForceRelease always lands in Free
-  ``every_state_reaches_free`` — every state has at least one event reaching Free
+  ``unconditional_liveness``   — a *single* event (ForceRelease) drives every
+                                 state to Free (∃ev. ∀s. ...) — strong form
+                                 the watchdog relies on, fired without first
+                                 inspecting FSM state
+  ``every_state_reaches_free`` — weaker form (∀s. ∃ev. ...) — each state has
+                                 at least one event reaching Free, citing
+                                 voluntary releases for owned states
   ``owned_state_exit_paths``   — only WorkerRelease/Preempt/ForceRelease exit
                                  OwnedByWorker; only HandlerRelease/ForceRelease
                                  exit OwnedByHandler
@@ -447,3 +453,30 @@ def test_force_release_oracle_assertion_path_is_unreachable_in_practice() -> Non
             f"force_release_to_free violated: transition({s!r}, "
             f"ForceRelease()) = {result!r}"
         )
+
+
+def test_unconditional_liveness_witness_is_force_release() -> None:
+    """Runtime mirror of ``unconditional_liveness`` (``models/session_lock.v``).
+
+    The Rocq theorem says ``∃ev. ∀s. transition s ev = Some Free``.
+    ``ForceRelease`` is the witness — strictly stronger than
+    ``every_state_reaches_free`` (``∀s. ∃ev. …``), which would leave
+    open the possibility of no single event working universally.
+
+    This test pins down ForceRelease *as* that witness so the
+    watchdog's "fire ForceRelease without inspecting FSM state"
+    guarantee is asserted on the extracted Python and not just in
+    the model.  Mirroring the model proof keeps the runtime honest
+    about the strong form rather than the weak one.
+    """
+    from fido.rocq.transition import ForceRelease, transition
+
+    witness = ForceRelease()
+    # The witness works for *every* state — the strong ∃∀ shape.
+    assert all(
+        isinstance(transition(s, witness), Free)
+        for s in (Free(), OwnedByWorker(), OwnedByHandler())
+    ), (
+        "unconditional_liveness violated: ForceRelease should reach Free "
+        "from every state; the watchdog relies on this without state inspection."
+    )

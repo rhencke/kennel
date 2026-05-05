@@ -9,12 +9,19 @@
     functional step function extracted to Python and run as a
     runtime-asserted oracle on every real state change.
 
-    Five invariants are proved by computation ([reflexivity]):
+    Six invariants are proved by computation ([reflexivity]) or simple
+    case analysis:
       [no_dual_ownership]            — acquiring an already-owned session fails.
       [release_only_by_owner]        — voluntary releases only succeed for the owner.
       [force_release_to_free]        — [ForceRelease] always lands in [Free].
-      [every_state_reaches_free]     — every state has at least one event reaching [Free]
-                                       (liveness — the lock cannot be held indefinitely).
+      [unconditional_liveness]       — strong liveness: there exists a *single*
+                                       event ([ForceRelease]) that drives every
+                                       state to [Free].  The watchdog fires this
+                                       event without first inspecting FSM state.
+      [every_state_reaches_free]     — weak liveness: every state has at least
+                                       one event reaching [Free] — citing
+                                       voluntary releases for owned states to
+                                       document them as the primary path.
       [owned_state_exit_paths]       — the only events that move out of an owned state
                                        are the corresponding [*Release], [Preempt]
                                        (worker only), and [ForceRelease].
@@ -155,13 +162,32 @@ Proof.
   intros s; destruct s; reflexivity.
 Qed.
 
-(** [every_state_reaches_free]: liveness.  From every state there is at
-    least one event that drives the FSM to [Free].  Without
-    [ForceRelease], owned states could reach [Free] only via the
-    holder's voluntary release — which a wedged or dead holder will
-    never fire.  With [ForceRelease], the watchdog can always
-    progress the lock; the model proves the lock is never terminally
-    held. *)
+(** [unconditional_liveness]: strong liveness.  There exists a *single*
+    event that drives every state to [Free] — that event is
+    [ForceRelease].  The shape is [exists ev, forall s, ...], strictly
+    stronger than the [forall s, exists ev, ...] of
+    [every_state_reaches_free]: the latter leaves open the possibility
+    that no single event works universally and the watchdog would
+    have to inspect FSM state before choosing what to fire.
+
+    This is the property the watchdog actually relies on: it calls
+    [force_release] without first reading [_fsm_state], and the
+    Rocq-modeled transition is guaranteed to land in [Free]
+    regardless of where the holder was.  Proved trivially as a
+    corollary of [force_release_to_free]. *)
+Theorem unconditional_liveness :
+  exists ev, forall s, transition s ev = Some Free.
+Proof. exists ForceRelease; exact force_release_to_free. Qed.
+
+(** [every_state_reaches_free]: weak liveness.  From every state there
+    is at least one event that drives the FSM to [Free].  Strictly
+    weaker than [unconditional_liveness], which provides a single
+    universal event; this lemma instead names a *different* event per
+    state — voluntary releases for owned states — to document them as
+    the primary path that real holders take.  [ForceRelease] is the
+    safety net for [Free] (idempotent self-loop) and the only
+    available event in the unhappy case where the holder will never
+    fire its voluntary release. *)
 Lemma every_state_reaches_free :
   forall s, exists ev, transition s ev = Some Free.
 Proof.
