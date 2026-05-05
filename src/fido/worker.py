@@ -3308,7 +3308,7 @@ class Worker:
                         helped_by_identities.append(
                             self.gh.get_user_identity(thread_author)
                         )
-                    except Exception:
+                    except _requests.RequestException:
                         log.warning(
                             "failed to resolve identity for %s — "
                             "commit will omit Helped-by trailer",

@@ -11185,7 +11185,9 @@ class TestExecuteTask:
                 "url": "https://github.com/owner/repo/pull/1#comment-123",
             },
         }
-        gh.get_user_identity.side_effect = Exception("404 Not Found")
+        import requests
+
+        gh.get_user_identity.side_effect = requests.RequestException("404 Not Found")
         gh.find_closed_prs_as_context.return_value = []
 
         with (
