@@ -1294,7 +1294,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "elapsed_seconds": (now - w.started_at).total_seconds(),
                     "thread_id": w.thread_id,
                 }
-                for w in self.registry.get_webhook_activities(repo_state.key)
+                for w in repo_state.webhook_activities
             ]
             fido_state = (
                 _collect_fido_state(repo_cfg.work_dir, now)
