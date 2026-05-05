@@ -1,4 +1,4 @@
-A fresh git branch has been created. Your job is to PLAN the work by creating tasks. You are NOT implementing anything — just planning. The PR does not exist yet — it will be created after you finish. All context is in the Context section above.
+A fresh git branch has been created. Your job is to PLAN the work by emitting the desired task list as a JSON sentinel. You are NOT implementing anything — just planning. The PR does not exist yet — it will be created after you finish. All context is in the Context section above.
 
 ## Steps
 
@@ -8,33 +8,39 @@ Check for CLAUDE.md files. Note the test command, commit discipline, and any oth
 ### 2. Plan
 Break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.
 
-For each task, write it to the shared task file:
-```bash
-cd /home/rhencke/home-runner && ./fido task <work_dir> add spec "<task title>"
-```
-Where `<work_dir>` is from the Context section.
+**Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `fido status`, PR work queues, and log lines — it needs to fit on one line. Detailed implementation guidance, when needed, belongs in the optional `description` field, not the title.
 
-**Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `fido status`, PR work queues, and log lines — it needs to fit on one line. Details belong in the implementation itself, not the task title.
+### 3. Draft the PR description
+You also draft the PR description body — what reviewers read above the auto-generated work queue. Keep it scoped to *what* and *why*, not *how* (implementation lives in commits and tasks). A typical body has a `## Summary` section with a few bullet points and may include `## Why` or `## Test plan` where useful. Always include `Fixes #<issue>.` somewhere — the harness will append it if you forget.
 
-The `spec` argument is the task type — always use `spec` for planned tasks. Other types (`thread`, `ci`) are created by the system, never by you.
+### 4. Emit the setup_outcome sentinel
+Your final non-empty output line **must** be exactly one JSON object that declares the planned task list and the PR description. The harness reads it and CRUDs the task store and PR body on your behalf — you never write to `tasks.json`, never edit the PR body directly, and never run `./fido task` yourself.
 
-**CRITICAL**: Always use the `./fido task add` CLI command from `/home/rhencke/home-runner` to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
+Choose exactly one outcome:
 
-Do NOT use TaskCreate or TodoWrite — only `./fido task`.
-Do NOT create a PR. Do NOT edit any PR body. The Fido server handles PR body sync.
+- **`tasks-planned`** — you have at least one task to queue. The harness creates one `spec`-type pending task per entry, in the order given. `description` is optional. `pr_description` is the markdown body the harness will write above the work queue (skip the `---` divider — the harness inserts it).
+  ```json
+  {"setup_outcome": "tasks-planned", "pr_description": "## Summary\n\n- bullet 1\n- bullet 2\n\nFixes #1234.", "tasks": [{"title": "First task title"}, {"title": "Second task title", "description": "Optional implementation hint"}]}
+  ```
+- **`no-tasks-needed`** — the issue's work is already covered by the current branch state, or is a no-op. The harness will mark the PR ready and post an explanation comment. `pr_description` is optional here.
+  ```json
+  {"setup_outcome": "no-tasks-needed", "reason": "Already implemented in commit abc1234"}
+  ```
+
+The sentinel must be the literal last non-empty line of your response — nothing after it. Do not wrap it in a code fence or markdown block. The single object must be valid JSON on one line. Embed newlines inside `pr_description` as `\n` escapes.
 
 ## Done when
-All tasks written to the task file via `./fido task`.
+The setup_outcome sentinel has been emitted.
 
-**Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
+**Stop immediately after emitting the sentinel. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
 ## Constraints
-- **Never** commit code. No `git commit`, no `git add`. You are planning, not implementing.
-- **Never** edit source files. No `Edit`, no `Write` to any file except via `./fido task add`.
+- **You are a planner, not an implementer.** Read the code to understand it, then emit the sentinel. Do not change the code.
+- **Never** commit code. No `git commit`, no `git add`. The harness owns commits.
+- **Never** edit source files. No `Edit`, no `Write` to any file.
 - **Never** push to any branch. No `git push`.
-- **Never** mark the PR as ready for review (`gh pr ready`).
+- **Never** mark the PR as ready for review (`gh pr ready`). The harness handles this.
 - **Never** rebase, amend, or force-push.
-- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `./fido task`.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `./fido task`.
 - **Never** edit any PR body. The Fido server handles that.
-- **Never** write to tasks.json directly. Always use `./fido task add`.
-- **You are a planner, not an implementer.** Read the code to understand it, then create tasks. Do not change it.
+- **Never** write to tasks.json directly. The harness owns the task store.

@@ -57,6 +57,7 @@ from fido.rocq.commit_result import (
 from fido.rocq.turn_outcome import (
     StuckOnTask,
 )
+from fido.setup_outcome import NoTasksNeeded, parse_setup_outcome
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -434,34 +435,38 @@ def provider_start(
     timeout: int = 300,
     cwd: Path | str = ".",
     session_mode: TurnSessionMode = TurnSessionMode.REUSE,
-) -> str:
+) -> tuple[str, str]:
     """Start a new provider session from fido_dir/system and fido_dir/prompt.
 
+    Returns ``(session_id, output)``.  ``output`` is the raw provider text so
+    the caller can parse the setup sentinel and CRUD the task list itself
+    (closes #1403).
+
     When the provider agent already has an attached persistent session, the
-    setup prompt is sent through :meth:`ProviderAgent.run_turn` and an empty
-    string is returned — there is no subprocess session id to track.
+    setup prompt is sent through :meth:`ProviderAgent.run_turn` and the
+    session-id slot is empty (the session is already tracked by the agent).
 
     When no persistent session is attached, a fresh one-shot subprocess is
-    spawned via :meth:`ProviderAgent.print_prompt_from_file` and the session id
-    is extracted from its raw output.
+    spawned via :meth:`ProviderAgent.print_prompt_from_file` and the session
+    id is extracted from its raw output.
     """
     del session
     if agent is None:
         raise ValueError("provider_start requires agent")
     if agent.session is not None:
-        agent.run_turn(
+        output = agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
             retry_on_preempt=True,
             session_mode=session_mode,
         )
-        return ""
+        return "", output
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
         system_file, prompt_file, model, timeout, cwd=cwd
     )
-    return agent.extract_session_id(output)
+    return agent.extract_session_id(output), output
 
 
 def _session_turn_prompt(fido_dir: Path) -> str:
@@ -1012,6 +1017,7 @@ def _write_pr_description(
     existing_body: str = "",
     *,
     agent: ProviderAgent | None = None,
+    pre_baked_description: str = "",
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -1020,18 +1026,23 @@ def _write_pr_description(
     contains the current body; preserves the rest section after the ``---``
     divider).
 
-    Generates the description via the provider agent and writes it back via
-    ``gh.edit_pr_body``.  The final PATCH is serialized through the same
-    ``sync.lock`` that :func:`fido.tasks.sync_tasks` holds, preventing a
-    description rewrite from overwriting a concurrent work-queue update.
+    When *pre_baked_description* is non-empty, the provider call is skipped
+    entirely — the LLM already supplied the description text via the setup
+    sentinel (#1403), so the harness writes it directly.  Otherwise the
+    description is generated via the provider agent.  The final PATCH is
+    serialized through the same ``sync.lock`` that :func:`fido.tasks.sync_tasks`
+    holds, preventing a description rewrite from overwriting a concurrent
+    work-queue update.
 
     Self-heals when the existing body has no ``---`` divider: builds a fresh
     work-queue section and treats the entire existing body as the description
     seed.  Returns without writing when the agent returns empty or un-parseable
     output — the existing body is kept as-is and a warning is logged.
     """
-    if agent is None:
-        raise ValueError("_write_pr_description requires agent")
+    if agent is None and not pre_baked_description:
+        raise ValueError(
+            "_write_pr_description requires agent or pre_baked_description"
+        )
 
     divider = "\n\n---\n\n"
 
@@ -1069,19 +1080,30 @@ def _write_pr_description(
                 pr_number,
             )
 
-    prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
-    raw = safe_voice_turn(
-        agent, prompt, model=agent.voice_model, log_prefix="_write_pr_description"
-    )
-    new_desc = _extract_body(raw)
-    if not new_desc:
-        log.warning(
-            "_write_pr_description: skipping PR #%s description update — "
-            "no <body> content in provider output (raw=%r)",
+    if pre_baked_description:
+        new_desc = pre_baked_description.strip()
+        log.info(
+            "_write_pr_description: PR #%s using pre-baked description from "
+            "setup sentinel (skipping LLM call)",
             pr_number,
-            raw[:200],
         )
-        return
+    else:
+        # The top-level guard already rejected (agent=None, pre_baked="") so
+        # `agent` is non-None here.
+        assert agent is not None
+        prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
+        raw = safe_voice_turn(
+            agent, prompt, model=agent.voice_model, log_prefix="_write_pr_description"
+        )
+        new_desc = _extract_body(raw)
+        if not new_desc:
+            log.warning(
+                "_write_pr_description: skipping PR #%s description update — "
+                "no <body> content in provider output (raw=%r)",
+                pr_number,
+                raw[:200],
+            )
+            return
 
     # Ensure "Fixes #N" is always present (the agent preserves it for rewrites via
     # prompt rules; for initial writes we append it here).
@@ -1881,7 +1903,7 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context, labels=issue_labels)
-                provider_start(
+                _, setup_output = provider_start(
                     fido_dir,
                     agent=self._provider_agent,
                     model=self._provider_agent.voice_model,
@@ -1889,6 +1911,7 @@ class Worker:
                     session=None,
                     session_mode=self._consume_turn_session_mode(),
                 )
+                pre_baked_description = self._apply_setup_outcome(setup_output)
                 if not self._tasks.list():
                     # Setup legitimately produced zero tasks — the work on this
                     # branch already covers the issue.  Finalize rather than
@@ -1967,7 +1990,7 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context, labels=issue_labels)
-        provider_start(
+        _, setup_output = provider_start(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.voice_model,
@@ -1975,6 +1998,7 @@ class Worker:
             session=None,
             session_mode=self._consume_turn_session_mode(),
         )
+        pre_baked_description = self._apply_setup_outcome(setup_output)
 
         # Create draft PR, then write the description using the same function
         # used for post-rescope rewrites so both paths share one code path.
@@ -2013,6 +2037,7 @@ class Worker:
             issue,
             self._tasks.list(),
             agent=self._provider_agent,
+            pre_baked_description=pre_baked_description,
         )
         task_count = len(
             [t for t in self._tasks.list() if t.get("status") == "pending"]
@@ -2792,6 +2817,47 @@ class Worker:
             repo_ctx.gh_user,
             leak_before_ids,
         )
+
+    def _apply_setup_outcome(self, output: str) -> str:
+        """Parse the setup_outcome sentinel from *output* and CRUD the task list.
+
+        Under the post-#1403 protocol, the setup sub-agent does not write to
+        the task store directly — ``Bash(./fido task *)`` is blocked at the
+        permissions layer.  Instead the LLM emits a JSON sentinel describing
+        the desired task list (and optionally the PR description body), and
+        the harness applies it here by calling :meth:`Tasks.add` per planned
+        entry.
+
+        Returns the LLM-provided ``pr_description`` (or ``""`` when absent or
+        the sentinel didn't parse) so the caller can pass it through to
+        :func:`_write_pr_description` and skip the separate
+        description-rewrite LLM call.
+
+        Two recognised outcomes:
+
+        * :class:`TasksPlanned` — create one ``spec`` pending task per entry.
+        * :class:`NoTasksNeeded` — no-op; the caller's empty-list check
+          falls through to the no-tasks finalize path.
+
+        Parse failure is non-fatal: log a warning and return ``""``.  An empty
+        :meth:`Tasks.list` is the existing signal for "setup found no work",
+        and the no-tasks finalize path handles it the same regardless of why.
+        """
+        try:
+            outcome = parse_setup_outcome(output)
+        except ValueError as exc:
+            log.warning("setup sentinel parse failed: %s — treating as no tasks", exc)
+            return ""
+        if isinstance(outcome, NoTasksNeeded):
+            log.info("setup outcome: no-tasks-needed (%s)", outcome.reason)
+            return outcome.pr_description
+        for spec in outcome.tasks:
+            self._tasks.add(spec.title, TaskType.SPEC, description=spec.description)
+        log.info(
+            "setup outcome: tasks-planned — created %d task(s) from sentinel",
+            len(outcome.tasks),
+        )
+        return outcome.pr_description
 
     def _finalize_setup_with_no_tasks(
         self,
