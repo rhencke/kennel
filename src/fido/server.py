@@ -49,6 +49,7 @@ from fido.provider_factory import DefaultProviderFactory
 from fido.rate_limit import RateLimitMonitor, RateLimitWindow
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.rocq import self_restart as restart_fsm
+from fido.session_lock_watchdog import SessionLockWatchdog
 from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
@@ -1470,6 +1471,7 @@ def run(
     _kill_active_children: Callable[..., None] = kill_active_children,
     _Watchdog: type[Watchdog] = Watchdog,
     _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
+    _SessionLockWatchdog: type[SessionLockWatchdog] = SessionLockWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
     _preflight_tools: Callable[..., None] = preflight_tools,
@@ -1550,6 +1552,11 @@ def run(
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
     _ReconcileWatchdog(registry, config.repos, gh).start_thread()
+    # Session-lock watchdog evicts FSM lock holders that have parked past
+    # the deadline — without it, a holder wedged inside
+    # ``consume_until_result`` on a streaming-forever subprocess holds
+    # the lock indefinitely (closes #1377).
+    _SessionLockWatchdog(registry, config.repos).start_thread()
     rate_limit_monitor = _RateLimitMonitor(gh)
     rate_limit_monitor.start_thread()
     WebhookHandler.rate_limit_monitor = rate_limit_monitor

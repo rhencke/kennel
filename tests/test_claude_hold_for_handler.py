@@ -472,3 +472,106 @@ def test_hold_reraises_leak_error_and_releases_lock(
         provider.set_thread_kind(None)
         provider.unregister_talker("owner/repo", 111_111)
         session.stop()
+
+
+# ---------------------------------------------------------------------------
+# ClaudeSession._on_force_release — kill subprocess so wedged holder escapes
+# (closes #1377)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingProc:
+    """Hand-rolled subprocess.Popen-shaped fake that records ``kill()`` calls.
+
+    Used in place of MagicMock so the test follows the project rule of
+    "hand-rolled typed fakes" for new tests; we only need ``pid``,
+    ``kill``, and the methods ``stop`` touches during cleanup.
+    """
+
+    def __init__(self, pid: int = 99999) -> None:
+        self.pid = pid
+        self.kill_calls = 0
+        self.kill_raises: BaseException | None = None
+        self.returncode: int | None = None
+        self.stdin = MagicMock()
+        self.stdin.closed = False
+        # ``stop()`` invokes wait/kill on shutdown — accept calls but no
+        # actual subprocess work to do.
+        self._wait_returncode = 0
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        if self.kill_raises is not None:
+            raise self.kill_raises
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return self._wait_returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+def test_on_force_release_kills_subprocess_and_resets_stream(
+    tmp_path: Path,
+) -> None:
+    """``_on_force_release`` knocks the wedged holder out of its parked IO
+    by killing the subprocess; the stream FSM is also reset so the next
+    acquire's first turn does not inherit stale ``Sending`` /
+    ``AwaitingReply`` state from the killed subprocess."""
+    from fido.claude import stream_fsm
+
+    session = _setup_session(tmp_path)
+    fake_proc = _RecordingProc(pid=12345)
+    session._proc = fake_proc  # type: ignore[assignment]
+    # Drive the stream FSM to AwaitingReply so we can observe the reset.
+    with session._stream_lock:
+        session._stream_state = stream_fsm.AwaitingReply()
+
+    session._on_force_release(reason="watchdog test eviction")
+
+    assert fake_proc.kill_calls == 1
+    assert isinstance(session._stream_state, stream_fsm.Idle)
+
+
+def test_on_force_release_swallows_already_dead_subprocess(
+    tmp_path: Path,
+) -> None:
+    """If the subprocess has already exited (race with idle timeout or
+    another recovery path), ``kill()`` raises :class:`ProcessLookupError`
+    or :class:`OSError` — the eviction must continue rather than
+    propagating that as a watchdog crash."""
+    from fido.claude import stream_fsm
+
+    session = _setup_session(tmp_path)
+    fake_proc = _RecordingProc()
+    fake_proc.kill_raises = ProcessLookupError("no such process")
+    session._proc = fake_proc  # type: ignore[assignment]
+    with session._stream_lock:
+        session._stream_state = stream_fsm.AwaitingReply()
+
+    # Must not raise.
+    session._on_force_release(reason="dead-subprocess test")
+
+    assert fake_proc.kill_calls == 1
+    # Stream FSM is still reset even when kill failed — defensive
+    # cleanup runs regardless of the kill outcome.
+    assert isinstance(session._stream_state, stream_fsm.Idle)
+
+
+def test_on_force_release_swallows_kill_oserror(tmp_path: Path) -> None:
+    """``OSError`` from ``kill`` (e.g. EPERM in restricted contexts) is
+    handled the same as ``ProcessLookupError``."""
+    from fido.claude import stream_fsm
+
+    session = _setup_session(tmp_path)
+    fake_proc = _RecordingProc()
+    fake_proc.kill_raises = OSError("permission denied")
+    session._proc = fake_proc  # type: ignore[assignment]
+    with session._stream_lock:
+        session._stream_state = stream_fsm.AwaitingReply()
+
+    session._on_force_release(reason="oserror test")
+
+    assert fake_proc.kill_calls == 1
+    assert isinstance(session._stream_state, stream_fsm.Idle)

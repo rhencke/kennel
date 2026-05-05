@@ -1009,6 +1009,46 @@ class ClaudeSession(OwnedSession):
         self._cancel.set()
         self._wake()
 
+    def _on_force_release(self, *, reason: str) -> None:
+        """Knock a wedged holder out of its parked IO call by killing the
+        subprocess.
+
+        :meth:`OwnedSession.force_release` has already fired the
+        ``ForceRelease`` FSM event and (if any handler is queued)
+        transferred ownership.  All that is left is to escape the
+        wedged thread from its blocking call inside
+        :meth:`consume_until_result`: closing the subprocess's stdout
+        makes the parked ``select()`` return ready with EOF, the
+        ``iter_events`` loop hits the EOF branch and returns,
+        :meth:`prompt`'s ``with self:`` runs ``__exit__``, and the
+        ``_evicted_tids`` guard in :meth:`OwnedSession._fsm_release`
+        skips the now-incorrect ``WorkerRelease`` / ``HandlerRelease``.
+
+        The kill is best-effort: if the subprocess has already exited
+        (race with idle timeout, normal shutdown, or another recovery
+        path), :meth:`subprocess.Popen.kill` raises
+        :class:`ProcessLookupError` which is caught and ignored.
+        """
+        log.warning(
+            "ClaudeSession[%s]: force_release killing pid=%s (reason=%r)",
+            self._repo_name or "?",
+            self._proc.pid,
+            reason,
+        )
+        try:
+            self._proc.kill()
+        except (ProcessLookupError, OSError) as exc:
+            log.debug(
+                "ClaudeSession[%s]: force_release kill: %s",
+                self._repo_name or "?",
+                exc,
+            )
+        # Reset the stream FSM so the next acquire's first turn does not
+        # inherit a stale Sending/AwaitingReply state from the killed
+        # subprocess.  Mirrors the cleanup in :meth:`_drain_to_boundary`
+        # after a cancel-drain timeout.
+        self._stream_reset()
+
     def _send_control_interrupt(self) -> str:
         """Write a stream-json ``control_request`` interrupt to subprocess
         stdin and return the request_id so the caller can assert the

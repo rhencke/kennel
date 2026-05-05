@@ -614,6 +614,14 @@ class OwnedSession:
     _fsm_cond: threading.Condition
     _fsm_state: fsm.State
     _handler_queue: list[threading.Event]
+    # Tids that were evicted by :meth:`force_release` while still inside
+    # ``with self:``.  When the evicted holder eventually escapes
+    # ``consume_until_result`` (via the subprocess kill closing stdout) and
+    # runs ``__exit__``, the depth==0 cleanup consults this set: if its tid
+    # is present, it skips the normal :meth:`_fsm_release` (which would
+    # otherwise crash on ``release_only_by_owner`` because the FSM has
+    # already moved past the holder's state).  Guarded by ``_fsm_cond``.
+    _evicted_tids: set[int]
     # Allowed-tools value passed to :meth:`switch_tools` on handler entry.
     # ``None`` means no restriction (default for CopilotCLISession whose
     # switch_tools is a no-op; ClaudeSession sets this to
@@ -635,6 +643,10 @@ class OwnedSession:
         # not acquire immediately.  _fsm_release pops from the front and sets
         # the event to hand ownership to the next handler.
         self._handler_queue: list[threading.Event] = []
+        # Holders evicted by :meth:`force_release`; their eventual ``__exit__``
+        # consults this set under ``_fsm_cond`` and skips the normal
+        # ``_fsm_release`` so the double-release does not raise.
+        self._evicted_tids: set[int] = set()
         # Tool restriction applied on handler entry via switch_tools().
         # ClaudeSession overrides to HANDLER_ALLOWED_TOOLS in its constructor.
         self._handler_tools: str | None = None
@@ -752,12 +764,27 @@ class OwnedSession:
         :attr:`_fsm_state` transitions to :class:`~fido.rocq.transition.Free`
         and worker threads waiting on :attr:`_fsm_cond` are notified.
 
+        Skips the release entirely if the calling thread's tid is in
+        :attr:`_evicted_tids` — the watchdog already advanced the FSM
+        via :meth:`force_release` while this thread was wedged in IO,
+        so firing a normal ``*Release`` here would crash on the
+        ``release_only_by_owner`` invariant.
+
         Raises :class:`RuntimeError` if the current state is
-        :class:`~fido.rocq.transition.Free` (``release_only_by_owner``
-        invariant).
+        :class:`~fido.rocq.transition.Free` and the caller was not
+        evicted (``release_only_by_owner`` invariant).
         """
         tid = threading.get_ident()
         with self._fsm_cond:
+            if tid in self._evicted_tids:
+                self._evicted_tids.discard(tid)
+                log.debug(
+                    "fsm[%s]: WorkerRelease/HandlerRelease skipped "
+                    "(tid=%d previously evicted by ForceRelease)",
+                    self._repo_name or "?",
+                    tid,
+                )
+                return
             ev = (
                 fsm.WorkerRelease()
                 if isinstance(self._fsm_state, fsm.OwnedByWorker)
@@ -792,6 +819,124 @@ class OwnedSession:
                     type(ev).__name__,
                     tid,
                 )
+
+    def force_release(self, *, reason: str) -> bool:
+        """Evict the current FSM lock holder, advancing the lock to a
+        usable state.
+
+        The watchdog calls this when it detects a holder that has held
+        the lock past its deadline (typical cause: a thread parked
+        inside :meth:`PromptSession.prompt` on a subprocess that
+        streams forever and never produces ``type=result``, so
+        ``consume_until_result`` blocks indefinitely and the holder's
+        normal ``__exit__`` never runs).
+
+        Fires the ``ForceRelease`` FSM event through the oracle —
+        :func:`fido.rocq.transition.transition` accepts it in every
+        state and lands in :class:`~fido.rocq.transition.Free`
+        (proved by ``force_release_to_free``).  If a handler is queued
+        in :attr:`_handler_queue`, ownership is then transferred to
+        that handler with a second oracle call
+        (``Free + HandlerAcquire → OwnedByHandler``); otherwise the
+        FSM stays at ``Free`` and waiters on :attr:`_fsm_cond` are
+        notified.
+
+        The evicted holder's tid is recorded in :attr:`_evicted_tids`
+        so its eventual ``__exit__`` skips the normal
+        :meth:`_fsm_release` (which would crash on the
+        ``release_only_by_owner`` invariant — the FSM has moved past
+        the holder's state).  The evicted holder's
+        :class:`SessionTalker` is unregistered here too, so the next
+        :meth:`register_talker` from a fresh acquire does not collide
+        on a stale entry and raise :class:`SessionLeakError`.
+
+        After the FSM transition is committed, calls
+        :meth:`_on_force_release` so the subclass can knock the
+        holder thread out of its parked IO call (typically
+        ``self._proc.kill()`` — closing stdout makes the parked
+        ``select()`` return ready with EOF, ``iter_events`` breaks on
+        EOF, and the holder cleanly exits ``consume_until_result``).
+
+        Returns ``True`` when an owned state was evicted, ``False``
+        when the FSM was already :class:`~fido.rocq.transition.Free`
+        (the watchdog can race with a holder that just released
+        voluntarily; treat as a no-op).
+        """
+        with self._fsm_cond:
+            if isinstance(self._fsm_state, fsm.Free):
+                log.debug(
+                    "fsm[%s]: ForceRelease no-op — already Free (reason=%r)",
+                    self._repo_name or "?",
+                    reason,
+                )
+                return False
+            # Capture the evicted holder's identity before mutating any
+            # state.  ``_repo_name`` may be None on test stubs; in that
+            # case there is no global talker to consult and we fall back
+            # to the FSM state alone.
+            evicted_tid: int | None = None
+            if self._repo_name is not None:
+                talker = get_talker(self._repo_name)
+                if talker is not None:
+                    evicted_tid = talker.thread_id
+            prev_state_name = type(self._fsm_state).__name__
+            new_state = fsm.transition(self._fsm_state, fsm.ForceRelease())
+            if new_state is None:  # pragma: no cover — force_release_to_free
+                raise RuntimeError(
+                    "session-lock FSM: force_release_to_free violated — "
+                    f"ForceRelease rejected in state {prev_state_name}"
+                )
+            self._fsm_state = new_state  # → Free
+            if evicted_tid is not None:
+                self._evicted_tids.add(evicted_tid)
+                if self._repo_name is not None:
+                    unregister_talker(self._repo_name, evicted_tid)
+            if self._handler_queue:
+                # Transfer ownership directly to the next queued handler
+                # via the modeled HandlerAcquire transition (Free →
+                # OwnedByHandler).
+                handover = fsm.transition(self._fsm_state, fsm.HandlerAcquire())
+                if handover is None:  # pragma: no cover — proved unreachable
+                    raise RuntimeError(
+                        "session-lock FSM: HandlerAcquire from Free rejected"
+                    )
+                waiter = self._handler_queue.pop(0)
+                self._fsm_state = handover  # → OwnedByHandler
+                waiter.set()
+                log.warning(
+                    "fsm[%s]: ForceRelease %s → OwnedByHandler "
+                    "(evicted_tid=%s, queue=%d remaining, reason=%r)",
+                    self._repo_name or "?",
+                    prev_state_name,
+                    evicted_tid,
+                    len(self._handler_queue),
+                    reason,
+                )
+            else:
+                self._fsm_cond.notify_all()
+                log.warning(
+                    "fsm[%s]: ForceRelease %s → Free (evicted_tid=%s, reason=%r)",
+                    self._repo_name or "?",
+                    prev_state_name,
+                    evicted_tid,
+                    reason,
+                )
+        # Subclass hook fires *outside* the FSM lock so a slow
+        # subprocess kill doesn't block other threads waiting on
+        # ``_fsm_cond``.
+        self._on_force_release(reason=reason)
+        return True
+
+    def _on_force_release(self, *, reason: str) -> None:
+        """Subclass hook fired after :meth:`force_release` commits the
+        FSM transition.  Subclasses that wrap a long-lived IO resource
+        (e.g. :class:`~fido.claude.ClaudeSession`) override this to
+        knock the wedged holder thread out of its parked IO call —
+        typically by killing the subprocess so the parked ``select()``
+        returns EOF and the holder escapes ``consume_until_result``
+        cleanly.  Default is a no-op for subclasses with no such
+        coupling (e.g. CopilotCLISession)."""
+        del reason  # default base hook ignores the reason
 
     def _fire_worker_cancel(self) -> None:
         """Abort the current lock-holder's turn.  Subclasses override
