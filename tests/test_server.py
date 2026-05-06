@@ -18,7 +18,6 @@ import pytest
 from frozendict import frozendict
 
 from fido import provider
-from fido.atomic import AtomicReference
 from fido.claude import ClaudeClient
 from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
@@ -29,6 +28,7 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
+from fido.rate_limit import RateLimitSnapshot, RateLimitWindow
 from fido.registry import (
     FidoState,
     RepoState,
@@ -82,8 +82,14 @@ def _repo_state(
     )
 
 
-def _fido_state(*repo_states: RepoState) -> FidoState:
-    return FidoState(repos=frozendict({rs.key: rs for rs in repo_states}))
+def _fido_state(
+    *repo_states: RepoState,
+    rate_limit: RateLimitSnapshot | None = None,
+) -> FidoState:
+    return FidoState(
+        repos=frozendict({rs.key: rs for rs in repo_states}),
+        rate_limit=rate_limit,
+    )
 
 
 class RepoConfig(_RepoConfig):
@@ -427,14 +433,53 @@ class TestGetEndpoint:
         data = json.loads(resp.read())
         assert data["activities"][0]["rescoping"] is True
 
-    def test_status_endpoint_includes_rate_limit_when_monitor_present(
+    def test_status_endpoint_includes_rate_limit_when_snapshot_present(
         self, server: tuple
     ) -> None:
-        """A real ``RateLimitMonitor`` with a refreshed snapshot serializes
-        into ``/status.json`` under the top-level ``rate_limit`` key
-        (closes #812 follow-up)."""
-        from fido.rate_limit import RateLimitMonitor
+        """A rate-limit snapshot in ``FidoState`` serializes into ``/status.json``
+        under the top-level ``rate_limit`` key (lock-free read via registry
+        snapshot, closes #812 follow-up)."""
+        from datetime import timezone
 
+        url, _ = server
+        snap = RateLimitSnapshot(
+            rest=RateLimitWindow(
+                name="core",
+                used=5,
+                limit=5000,
+                resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
+            ),
+            graphql=RateLimitWindow(
+                name="graphql",
+                used=12,
+                limit=5000,
+                resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
+            ),
+            fetched_at=datetime(2024, 11, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            _repo_state("owner/repo", what="idle", busy=False),
+            rate_limit=snap,
+        )
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        rl = data["rate_limit"]
+        assert rl is not None
+        assert rl["rest"]["used"] == 5
+        assert rl["rest"]["limit"] == 5000
+        assert rl["graphql"]["used"] == 12
+        assert "fetched_at" in rl
+
+    def test_status_endpoint_omits_rate_limit_when_snapshot_absent(
+        self, server: tuple
+    ) -> None:
+        """``FidoState.rate_limit`` is ``None`` → ``rate_limit`` key is ``None``
+        in the ``/status.json`` response."""
         url, _ = server
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
@@ -443,70 +488,10 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-
-        gh = MagicMock()
-        gh.get_rate_limit.return_value = {
-            "core": {"used": 5, "limit": 5000, "reset": 1700000000},
-            "graphql": {"used": 12, "limit": 5000, "reset": 1700003600},
-        }
-        monitor = RateLimitMonitor(gh, AtomicReference(FidoState(repos=frozendict())))
-        monitor.refresh()
-        WebhookHandler.rate_limit_monitor = monitor
-        try:
-            resp = urllib.request.urlopen(f"{url}/status.json")
-            data = json.loads(resp.read())
-            rl = data["rate_limit"]
-            assert rl is not None
-            assert rl["rest"]["used"] == 5
-            assert rl["rest"]["limit"] == 5000
-            assert rl["graphql"]["used"] == 12
-            assert "fetched_at" in rl
-        finally:
-            WebhookHandler.rate_limit_monitor = None
-
-    def test_status_endpoint_omits_rate_limit_when_monitor_absent(
-        self, server: tuple
-    ) -> None:
-        """No monitor instance attached → ``rate_limit`` is ``None``."""
-        url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False)
-        )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.is_rescoping.return_value = False
-        WebhookHandler.rate_limit_monitor = None
 
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         assert data["rate_limit"] is None
-
-    def test_status_endpoint_omits_rate_limit_before_first_refresh(
-        self, server: tuple
-    ) -> None:
-        """Monitor present but ``latest()`` returns None → rate_limit None."""
-        from fido.rate_limit import RateLimitMonitor
-
-        url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False)
-        )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        monitor = RateLimitMonitor(
-            MagicMock(), AtomicReference(FidoState(repos=frozendict()))
-        )
-        WebhookHandler.rate_limit_monitor = monitor
-        try:
-            resp = urllib.request.urlopen(f"{url}/status.json")
-            data = json.loads(resp.read())
-            assert data["rate_limit"] is None
-        finally:
-            WebhookHandler.rate_limit_monitor = None
 
     def test_status_endpoint_serializes_loaded_issue_cache(self, server: tuple) -> None:
         """Wire a real loaded :class:`IssueTreeCache` through the registry
@@ -1135,15 +1120,9 @@ class TestStatusXml:
         assert "<fido_uptime_seconds>" not in body
 
     def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
-        """<rate_limit> with nested windows appears in the root element when available."""
-        from fido.rate_limit import (
-            RateLimitMonitor,
-            RateLimitSnapshot,
-            RateLimitWindow,
-        )
-
+        """<rate_limit> with nested windows appears in the root element when
+        ``FidoState.rate_limit`` is populated."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
         snap = RateLimitSnapshot(
             rest=RateLimitWindow(
                 name="rest",
@@ -1159,9 +1138,7 @@ class TestStatusXml:
             ),
             fetched_at=datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc),
         )
-        monitor = MagicMock(spec=RateLimitMonitor)
-        monitor.latest.return_value = snap
-        WebhookHandler.rate_limit_monitor = monitor
+        WebhookHandler.registry.get_state.return_value = _fido_state(rate_limit=snap)
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<rate_limit>" in body
@@ -3496,7 +3473,7 @@ class TestRun:
         mock_watchdog_cls.return_value.start_thread.assert_called_once()
 
     def test_run_starts_rate_limit_monitor_with_gh(self, tmp_path: Path) -> None:
-        from fido.server import WebhookHandler, run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3525,7 +3502,6 @@ class TestRun:
         expected_state_ref = mock_make_registry.return_value.get_state_ref.return_value
         mock_rl_cls.assert_called_once_with(mock_gh_instance, expected_state_ref)
         mock_rl_cls.return_value.start_thread.assert_called_once()
-        assert WebhookHandler.rate_limit_monitor is mock_rl_cls.return_value
 
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
         self, tmp_path: Path

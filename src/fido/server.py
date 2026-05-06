@@ -46,7 +46,7 @@ from fido.infra import (
     real_infra,
 )
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import RateLimitMonitor, RateLimitWindow
+from fido.rate_limit import RateLimitMonitor, RateLimitSnapshot, RateLimitWindow
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
@@ -276,18 +276,15 @@ def _serialize_provider_status(
     }
 
 
-def _serialize_rate_limit(monitor: object) -> dict[str, Any] | None:
-    """Serialize the latest :class:`~fido.rate_limit.RateLimitSnapshot`
-    for the ``/status.json`` payload (closes #812 follow-up).
+def _serialize_rate_limit(snap: RateLimitSnapshot | None) -> dict[str, Any] | None:
+    """Serialize a :class:`~fido.rate_limit.RateLimitSnapshot` for the
+    ``/status.json`` payload.
 
-    Returns ``None`` when *monitor* is missing (tests with a MagicMock
-    registry omit it) or hasn't yet completed its first refresh.
+    Returns ``None`` when *snap* is ``None`` — i.e. before the rate-limit
+    monitor has completed its first successful poll.  The snapshot is read
+    directly from :attr:`~fido.registry.FidoState.rate_limit` on the
+    registry's atomically-swapped state, so no separate lock is needed.
     """
-    from fido.rate_limit import RateLimitMonitor
-
-    if not isinstance(monitor, RateLimitMonitor):
-        return None
-    snap = monitor.latest()
     if snap is None:
         return None
     return {
@@ -617,7 +614,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
     provider_factory: DefaultProviderFactory | None = None
-    rate_limit_monitor: Any = None
     # Set by run() to record when the server came up, used for fido uptime.
     fido_started_at: datetime | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
@@ -1266,7 +1262,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         fido_uptime = (now - started).total_seconds() if started is not None else None
         return {
             "activities": self._collect_activities(),
-            "rate_limit": _serialize_rate_limit(self.rate_limit_monitor),
+            "rate_limit": _serialize_rate_limit(self.registry.get_state().rate_limit),
             "fido_uptime_seconds": fido_uptime,
         }
 
@@ -1564,9 +1560,7 @@ def run(
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
-    rate_limit_monitor = _RateLimitMonitor(gh, registry.get_state_ref())
-    rate_limit_monitor.start_thread()
-    WebhookHandler.rate_limit_monitor = rate_limit_monitor
+    _RateLimitMonitor(gh, registry.get_state_ref()).start_thread()
     WebhookHandler.fido_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)
