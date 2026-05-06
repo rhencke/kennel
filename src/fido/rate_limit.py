@@ -15,7 +15,7 @@ snapshot stays put until the next successful refresh.
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -47,8 +47,8 @@ class GitHubLimit:
     atomically via :class:`~fido.atomic.AtomicUpdater`.
     """
 
-    rest: ProviderLimitWindow = field(default_factory=lambda: _ZERO_WINDOW_REST)
-    graphql: ProviderLimitWindow = field(default_factory=lambda: _ZERO_WINDOW_GRAPHQL)
+    rest: ProviderLimitWindow = _ZERO_WINDOW_REST
+    graphql: ProviderLimitWindow = _ZERO_WINDOW_GRAPHQL
 
 
 class RateLimitMonitor:
