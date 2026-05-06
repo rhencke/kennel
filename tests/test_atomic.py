@@ -5,13 +5,26 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReference
+from fido.atomic import AtomicReader, AtomicReference, AtomicUpdater
 from fido.lens import Lens
 
 
 @dataclass(frozen=True)
 class _State:
     n: int
+
+
+class TestAtomicProtocols:
+    def test_atomic_reference_is_atomic_reader(self) -> None:
+        ref: AtomicReader[int] = AtomicReference(7)
+        assert ref.get() == 7
+
+    def test_atomic_reference_is_atomic_updater(self) -> None:
+        state = _Container(items=frozendict({"x": _Item(0)}))
+        ref: AtomicUpdater[_Container] = AtomicReference(state)
+        ref.update(lambda root: root.items["x"], _Item(9))
+        assert isinstance(ref, AtomicReference)
+        assert ref.get().items["x"] == _Item(9)  # type: ignore[attr-defined]
 
 
 class TestAtomicReferenceGet:

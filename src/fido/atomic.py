@@ -8,15 +8,57 @@ CPython-supported architectures, including the free-threaded (no-GIL) build.
 ``T`` should be an immutable value (frozen dataclass, namedtuple, ``None``,
 etc.) so that readers who hold a reference to the snapshot can inspect all
 fields without encountering races inside the value itself.
+
+:class:`AtomicReader` and :class:`AtomicUpdater` are the two narrow
+Protocol faces of :class:`AtomicReference`.  Collaborators should accept
+one of those, not the concrete class — a callee that holds both is usually
+doing something that belongs inside the owner (code smell).
 """
 
 import threading
 from collections.abc import Callable
-from typing import Generic, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from fido.lens import Lens
 
 _T = TypeVar("_T")
+_T_co = TypeVar("_T_co", covariant=True)
+_T_upd = TypeVar("_T_upd")
+
+
+class AtomicReader(Protocol[_T_co]):
+    """Read-only face of an atomic reference cell.
+
+    Pass this to collaborators that only need to observe the latest snapshot.
+    A collaborator that also calls :meth:`~AtomicUpdater.update` is likely
+    crossing an ownership boundary — prefer passing an :class:`AtomicUpdater`
+    to the writer and letting the registry expose snapshots via a separate read
+    path.
+    """
+
+    def get(self) -> _T_co:
+        """Return the current value.  Lock-free; safe to call from any thread."""
+        ...
+
+
+class AtomicUpdater(Protocol[_T_upd]):
+    """Write-only face of an atomic reference cell.
+
+    Pass this to collaborators that only need to publish updates.  Receiving
+    an :class:`AtomicUpdater` makes the intent clear: *this object writes,
+    it does not read back what it wrote*.  If a collaborator needs to read
+    the current snapshot, it should receive an :class:`AtomicReader` as a
+    separate dependency — and if it truly needs both, that is usually a sign
+    the logic belongs in the owner that holds the full :class:`AtomicReference`.
+    """
+
+    def update(
+        self,
+        selector: "Callable[[Lens[_T_upd]], Lens[_T_upd]]",
+        value: object,
+    ) -> "_T_upd":
+        """Install *value* at the path described by *selector* atomically."""
+        ...
 
 
 class AtomicReference(Generic[_T]):
@@ -101,3 +143,6 @@ class AtomicReference(Generic[_T]):
             success, old = self.compare_and_set(old, new)
             if success:
                 return new
+
+
+__all__ = ["AtomicReader", "AtomicReference", "AtomicUpdater"]

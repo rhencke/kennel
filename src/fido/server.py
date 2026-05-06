@@ -45,9 +45,9 @@ from fido.infra import (
     ProcessRunner,
     real_infra,
 )
-from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from fido.provider import ProviderLimitWindow
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import RateLimitMonitor
+from fido.rate_limit import GitHubLimit, RateLimitMonitor
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
@@ -273,27 +273,25 @@ def _serialize_provider_status(
     }
 
 
-def _serialize_rate_limit(snap: ProviderLimitSnapshot | None) -> dict[str, Any] | None:
-    """Serialize the GitHub :class:`~fido.provider.ProviderLimitSnapshot` for
-    the ``/status.json`` payload.
+def _serialize_rate_limit(limits: GitHubLimit) -> dict[str, Any] | None:
+    """Serialize :class:`~fido.rate_limit.GitHubLimit` for the ``/status.json``
+    payload.
 
-    Returns ``None`` when *snap* is ``None`` — i.e. before the rate-limit
-    monitor has completed its first successful poll.  The snapshot is read
-    directly from :attr:`~fido.registry.FidoState.provider_limits` on the
-    registry's atomically-swapped state, so no separate lock is needed.
+    Returns ``None`` when *limits* is the zero-value sentinel — both windows
+    have ``used=None``, meaning the monitor has not yet completed its first
+    successful poll.  The value is read lock-free from
+    :attr:`~fido.registry.FidoState.github_limits` on the registry's
+    atomically-swapped state.
     """
-    if snap is None:
+    if limits.rest.used is None and limits.graphql.used is None:
         return None
-    windows_by_name = {w.name: w for w in snap.windows}
     return {
-        "rest": _serialize_rate_window(windows_by_name.get("rest")),
-        "graphql": _serialize_rate_window(windows_by_name.get("graphql")),
+        "rest": _serialize_rate_window(limits.rest),
+        "graphql": _serialize_rate_window(limits.graphql),
     }
 
 
-def _serialize_rate_window(window: ProviderLimitWindow | None) -> dict[str, Any]:
-    if window is None:
-        return {"name": "unknown", "used": 0, "limit": 0, "resets_at": None}
+def _serialize_rate_window(window: ProviderLimitWindow) -> dict[str, Any]:
     return {
         "name": window.name,
         "used": window.used,
@@ -1262,7 +1260,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         return {
             "activities": self._collect_activities(),
             "rate_limit": _serialize_rate_limit(
-                self.registry.get_state().provider_limits.get(ProviderID.GITHUB)
+                self.registry.get_state().github_limits
             ),
             "fido_uptime_seconds": fido_uptime,
         }
@@ -1561,7 +1559,7 @@ def run(
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
-    _RateLimitMonitor(gh, registry.get_state_ref()).start_thread()
+    _RateLimitMonitor(gh, registry.get_state_updater()).start_thread()
     WebhookHandler.fido_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)

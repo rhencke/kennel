@@ -1,11 +1,12 @@
 """GitHub rate-limit monitor for ``fido status`` (closes #812 follow-up).
 
 Polls ``GET /rate_limit`` once per minute (per GitHub docs, this endpoint
-itself does not count against any quota), and publishes the latest snapshot
-into :attr:`~fido.registry.FidoState.provider_limits` under the
-``"github"`` key via a CAS update on the registry's
-:class:`~fido.atomic.AtomicReference`.  Reads are lock-free: callers read
-``provider_limits["github"]`` from the current :class:`~fido.registry.FidoState`.
+itself does not count against any quota), and publishes the latest
+:class:`GitHubLimit` snapshot into
+:attr:`~fido.registry.FidoState.github_limits` via a CAS update on the
+registry's :class:`~fido.atomic.AtomicUpdater`.  Reads are lock-free:
+callers read ``state.github_limits`` from the current
+:class:`~fido.registry.FidoState`.
 
 The poller thread treats fetch failures as soft errors — the previous
 snapshot stays put until the next successful refresh.
@@ -14,85 +15,92 @@ snapshot stays put until the next successful refresh.
 import logging
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fido.atomic import AtomicReference
+from fido.atomic import AtomicUpdater
 from fido.github import GitHub
-from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from fido.provider import ProviderLimitWindow
+
+if TYPE_CHECKING:
+    from fido.registry import FidoState
 
 log = logging.getLogger(__name__)
 
 _REFRESH_INTERVAL: float = 60.0
 
+_ZERO_WINDOW_REST = ProviderLimitWindow(name="rest")
+_ZERO_WINDOW_GRAPHQL = ProviderLimitWindow(name="graphql")
 
-class RateLimitMonitor:
-    """Lock-free holder for the latest ``GET /rate_limit`` snapshot.
 
-    Construct with a :class:`~fido.github.GitHub` client and the
-    :class:`~fido.atomic.AtomicReference` backing
-    :class:`~fido.registry.WorkerRegistry`'s
-    :class:`~fido.registry.FidoState` (constructor DI per CLAUDE.md).
-    Either call :meth:`refresh` directly or hand the monitor to
-    :meth:`start_thread` for the 60s poller.
+@dataclass(frozen=True)
+class GitHubLimit:
+    """Normalized GitHub platform rate-limit state (REST + GraphQL windows).
 
-    A failed refresh logs the exception and leaves the prior snapshot in
-    place — ``fido status`` keeps showing the last known good numbers
-    rather than blanking.
+    The zero value (``GitHubLimit()``) is the initial sentinel — both
+    windows have ``used=None``, meaning the monitor has not yet completed
+    a successful poll.  After the first successful :meth:`RateLimitMonitor.refresh`
+    the ``used`` fields will be integers (possibly ``0``).
 
-    Single writer: only the poller thread calls :meth:`refresh`.  Reads
-    are lock-free via :meth:`latest`.
+    Stored at :attr:`~fido.registry.FidoState.github_limits`; updated
+    atomically via :class:`~fido.atomic.AtomicUpdater`.
     """
 
-    def __init__(self, gh: GitHub, state: AtomicReference[Any]) -> None:
+    rest: ProviderLimitWindow = field(default_factory=lambda: _ZERO_WINDOW_REST)
+    graphql: ProviderLimitWindow = field(default_factory=lambda: _ZERO_WINDOW_GRAPHQL)
+
+
+class RateLimitMonitor:
+    """Polls ``GET /rate_limit`` and publishes into the registry snapshot.
+
+    Construct with a :class:`~fido.github.GitHub` client and an
+    :class:`~fido.atomic.AtomicUpdater` for the registry's
+    :class:`~fido.registry.FidoState` (constructor DI per CLAUDE.md).
+
+    This object is write-only relative to the snapshot — it holds an
+    :class:`~fido.atomic.AtomicUpdater`, not an
+    :class:`~fido.atomic.AtomicReader`.  Status display reads
+    ``registry.get_state().github_limits`` directly without going through
+    the monitor.
+
+    Either call :meth:`refresh` directly or hand the monitor to
+    :meth:`start_thread` for the 60 s poller.  A failed refresh logs the
+    exception and leaves the prior snapshot in place — ``fido status`` keeps
+    showing the last known good numbers rather than blanking.
+
+    Single writer: only the poller thread calls :meth:`refresh`.
+    """
+
+    def __init__(self, gh: GitHub, state: "AtomicUpdater[FidoState]") -> None:
         self._gh = gh
         self._state = state
-        # Seed the provider_limits map with a zero-value entry so the Lens
-        # path exists before the first refresh completes.
-        limits = self._state.get().provider_limits
-        if ProviderID.GITHUB not in limits:
-            zero = ProviderLimitSnapshot(provider=ProviderID.GITHUB)
-            self._state.update(
-                lambda root: root.provider_limits[ProviderID.GITHUB], zero
-            )
 
-    def latest(self) -> ProviderLimitSnapshot | None:
-        """Lock-free read of the latest rate-limit snapshot, or ``None``
-        before the first successful refresh."""
-        return self._state.get().provider_limits.get(ProviderID.GITHUB)
-
-    def refresh(self) -> ProviderLimitSnapshot | None:
+    def refresh(self) -> "GitHubLimit | None":
         """Hit ``GET /rate_limit`` and publish the snapshot into
-        :attr:`~fido.registry.FidoState.provider_limits` via CAS update.
+        :attr:`~fido.registry.FidoState.github_limits` via CAS update.
 
-        Returns the new snapshot on success, ``None`` on failure (the
-        prior snapshot remains in the shared state).
+        Returns the new :class:`GitHubLimit` on success, ``None`` on failure
+        (the prior snapshot remains in the shared state).
         """
         try:
             resources = self._gh.get_rate_limit()
         except Exception:
             log.exception("rate-limit monitor: refresh failed — keeping prior snapshot")
             return None
-        snapshot = ProviderLimitSnapshot(
-            provider=ProviderID.GITHUB,
-            windows=(
-                _parse_window("rest", resources.get("core") or {}),
-                _parse_window("graphql", resources.get("graphql") or {}),
-            ),
+        limits = GitHubLimit(
+            rest=_parse_window("rest", resources.get("core") or {}),
+            graphql=_parse_window("graphql", resources.get("graphql") or {}),
         )
-        self._state.update(
-            lambda root: root.provider_limits[ProviderID.GITHUB], snapshot
-        )
-        rest = snapshot.windows[0] if snapshot.windows else None
-        gql = snapshot.windows[1] if len(snapshot.windows) > 1 else None
+        self._state.update(lambda root: root.github_limits, limits)
         log.info(
             "rate-limit: rest %s/%s, graphql %s/%s",
-            rest.used if rest else "?",
-            rest.limit if rest else "?",
-            gql.used if gql else "?",
-            gql.limit if gql else "?",
+            limits.rest.used,
+            limits.rest.limit,
+            limits.graphql.used,
+            limits.graphql.limit,
         )
-        return snapshot
+        return limits
 
     def start_thread(self, *, _interval: float = _REFRESH_INTERVAL) -> threading.Thread:
         """Start a daemon thread that calls :meth:`refresh` every
@@ -133,6 +141,4 @@ def _parse_window(name: str, raw: dict[str, Any]) -> ProviderLimitWindow:
     )
 
 
-__all__ = [
-    "RateLimitMonitor",
-]
+__all__ = ["GitHubLimit", "RateLimitMonitor"]

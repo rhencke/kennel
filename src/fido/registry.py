@@ -4,25 +4,25 @@ import logging
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReference
+from fido.atomic import AtomicReader, AtomicReference, AtomicUpdater
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.provider import PromptSession, Provider
+from fido.rate_limit import GitHubLimit
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
     from fido.events import Dispatcher
-    from fido.provider import ProviderLimitSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ class FidoState:
     """
 
     repos: frozendict[str, RepoState]
-    provider_limits: "frozendict[str, ProviderLimitSnapshot]" = frozendict()
+    github_limits: GitHubLimit = field(default_factory=GitHubLimit)
 
 
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())
@@ -419,15 +419,24 @@ class WorkerRegistry:
         """Return the current FidoState snapshot.  Lock-free."""
         return self._state.get()
 
-    def get_state_ref(self) -> AtomicReference[FidoState]:
-        """Return the raw :class:`~fido.atomic.AtomicReference` backing
-        :attr:`_state`.
+    def get_state_reader(self) -> "AtomicReader[FidoState]":
+        """Return a read-only view of the :class:`FidoState` snapshot.
 
-        Used by collaborators that are the single writer for a top-level
-        field and need to publish directly into the snapshot via CAS update
-        (e.g. :class:`~fido.rate_limit.RateLimitMonitor`).  Callers must
-        only update fields they own — writing to another collaborator's field
-        creates a silent ownership conflict.
+        Pass to collaborators that only need to observe the latest state.
+        Holding both a reader and an updater in one collaborator is a code
+        smell — it usually means logic that belongs in the owner.
+        """
+        return self._state
+
+    def get_state_updater(self) -> "AtomicUpdater[FidoState]":
+        """Return a write-only view for single-field writers.
+
+        Pass to collaborators that publish into a single top-level field
+        they own (e.g. :class:`~fido.rate_limit.RateLimitMonitor` owns
+        ``github_limits``).  Callers must only update fields they own —
+        writing to another collaborator's field creates a silent ownership
+        conflict.  Holding both reader and updater in one collaborator is
+        a code smell.
         """
         return self._state
 

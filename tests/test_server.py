@@ -27,7 +27,8 @@ from fido.events import (
     WebhookIngressOracle,
 )
 from fido.infra import Infra
-from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from fido.provider import ProviderID, ProviderLimitWindow
+from fido.rate_limit import GitHubLimit
 from fido.registry import (
     FidoState,
     RepoState,
@@ -81,16 +82,16 @@ def _repo_state(
     )
 
 
+_ZERO_GITHUB_LIMITS = GitHubLimit()
+
+
 def _fido_state(
     *repo_states: RepoState,
-    rate_limit: ProviderLimitSnapshot | None = None,
+    github_limits: GitHubLimit = _ZERO_GITHUB_LIMITS,
 ) -> FidoState:
-    provider_limits: frozendict[str, ProviderLimitSnapshot] = frozendict()
-    if rate_limit is not None:
-        provider_limits = frozendict({ProviderID.GITHUB: rate_limit})
     return FidoState(
         repos=frozendict({rs.key: rs for rs in repo_states}),
-        provider_limits=provider_limits,
+        github_limits=github_limits,
     )
 
 
@@ -438,32 +439,29 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_rate_limit_when_snapshot_present(
         self, server: tuple
     ) -> None:
-        """A rate-limit snapshot in ``FidoState`` serializes into ``/status.json``
+        """A :class:`GitHubLimit` in ``FidoState`` serializes into ``/status.json``
         under the top-level ``rate_limit`` key (lock-free read via registry
         snapshot, closes #812 follow-up)."""
         from datetime import timezone
 
         url, _ = server
-        snap = ProviderLimitSnapshot(
-            provider=ProviderID.GITHUB,
-            windows=(
-                ProviderLimitWindow(
-                    name="rest",
-                    used=5,
-                    limit=5000,
-                    resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
-                ),
-                ProviderLimitWindow(
-                    name="graphql",
-                    used=12,
-                    limit=5000,
-                    resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
-                ),
+        limits = GitHubLimit(
+            rest=ProviderLimitWindow(
+                name="rest",
+                used=5,
+                limit=5000,
+                resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
+            ),
+            graphql=ProviderLimitWindow(
+                name="graphql",
+                used=12,
+                limit=5000,
+                resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
             ),
         )
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False),
-            rate_limit=snap,
+            github_limits=limits,
         )
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -481,7 +479,7 @@ class TestGetEndpoint:
     def test_status_endpoint_omits_rate_limit_when_snapshot_absent(
         self, server: tuple
     ) -> None:
-        """``FidoState.provider_limits`` has no GitHub entry → ``rate_limit``
+        """Zero-value ``GitHubLimit`` (not yet polled) → ``rate_limit``
         key is ``None`` in the ``/status.json`` response."""
         url, _ = server
         WebhookHandler.registry.get_state.return_value = _fido_state(
@@ -496,28 +494,26 @@ class TestGetEndpoint:
         data = json.loads(resp.read())
         assert data["rate_limit"] is None
 
-    def test_status_endpoint_rate_limit_missing_window_fallback(
+    def test_status_endpoint_rate_limit_graphql_zero_when_only_rest_polled(
         self, server: tuple
     ) -> None:
-        """When a GitHub snapshot has only one window, the missing window
-        serializes with zero defaults."""
+        """When ``GitHubLimit`` has rest populated but graphql is zero-value
+        (used=None), the serialized graphql window carries None fields."""
         from datetime import timezone
 
         url, _ = server
-        snap = ProviderLimitSnapshot(
-            provider=ProviderID.GITHUB,
-            windows=(
-                ProviderLimitWindow(
-                    name="rest",
-                    used=5,
-                    limit=5000,
-                    resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
-                ),
+        limits = GitHubLimit(
+            rest=ProviderLimitWindow(
+                name="rest",
+                used=5,
+                limit=5000,
+                resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
             ),
+            # graphql uses zero-value default: used=None, limit=None
         )
         WebhookHandler.registry.get_state.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False),
-            rate_limit=snap,
+            github_limits=limits,
         )
         WebhookHandler.registry.get_session_owner.return_value = None
         WebhookHandler.registry.get_session_alive.return_value = False
@@ -529,9 +525,9 @@ class TestGetEndpoint:
         rl = data["rate_limit"]
         assert rl is not None
         assert rl["rest"]["used"] == 5
-        # graphql window is missing → fallback
-        assert rl["graphql"]["name"] == "unknown"
-        assert rl["graphql"]["used"] == 0
+        # graphql window is zero-value: used and limit are None
+        assert rl["graphql"]["name"] == "graphql"
+        assert rl["graphql"]["used"] is None
 
     def test_status_endpoint_serializes_loaded_issue_cache(self, server: tuple) -> None:
         """Wire a real loaded :class:`IssueTreeCache` through the registry
@@ -1161,26 +1157,25 @@ class TestStatusXml:
 
     def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
         """<rate_limit> with nested windows appears in the root element when
-        ``FidoState.provider_limits`` has a GitHub entry."""
+        ``FidoState.github_limits`` has been populated."""
         url, _ = server
-        snap = ProviderLimitSnapshot(
-            provider=ProviderID.GITHUB,
-            windows=(
-                ProviderLimitWindow(
-                    name="rest",
-                    used=100,
-                    limit=5000,
-                    resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
-                ),
-                ProviderLimitWindow(
-                    name="graphql",
-                    used=5,
-                    limit=5000,
-                    resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
-                ),
+        limits = GitHubLimit(
+            rest=ProviderLimitWindow(
+                name="rest",
+                used=100,
+                limit=5000,
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
+            ),
+            graphql=ProviderLimitWindow(
+                name="graphql",
+                used=5,
+                limit=5000,
+                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
             ),
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(rate_limit=snap)
+        WebhookHandler.registry.get_state.return_value = _fido_state(
+            github_limits=limits
+        )
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<rate_limit>" in body
@@ -3541,8 +3536,10 @@ class TestRun:
             _RateLimitMonitor=mock_rl_cls,
         )
 
-        expected_state_ref = mock_make_registry.return_value.get_state_ref.return_value
-        mock_rl_cls.assert_called_once_with(mock_gh_instance, expected_state_ref)
+        expected_state_updater = (
+            mock_make_registry.return_value.get_state_updater.return_value
+        )
+        mock_rl_cls.assert_called_once_with(mock_gh_instance, expected_state_updater)
         mock_rl_cls.return_value.start_thread.assert_called_once()
 
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(

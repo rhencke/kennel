@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 from frozendict import frozendict
 
 from fido.atomic import AtomicReference
-from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
+from fido.provider import ProviderLimitWindow
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
+    GitHubLimit,
     RateLimitMonitor,
     _parse_window,  # noqa: PLC2701
 )
@@ -66,6 +67,28 @@ class TestProviderLimitWindowProperties:
         assert self._w(used=0, limit=0).pressure is None
 
 
+# ── GitHubLimit ───────────────────────────────────────────────────────────────
+
+
+class TestGitHubLimit:
+    def test_zero_value_has_none_used(self) -> None:
+        gl = GitHubLimit()
+        assert gl.rest.used is None
+        assert gl.graphql.used is None
+
+    def test_zero_value_window_names(self) -> None:
+        gl = GitHubLimit()
+        assert gl.rest.name == "rest"
+        assert gl.graphql.name == "graphql"
+
+    def test_custom_windows(self) -> None:
+        rest = ProviderLimitWindow(name="rest", used=5, limit=5000)
+        gql = ProviderLimitWindow(name="graphql", used=7, limit=5000)
+        gl = GitHubLimit(rest=rest, graphql=gql)
+        assert gl.rest.used == 5
+        assert gl.graphql.used == 7
+
+
 # ── RateLimitMonitor ──────────────────────────────────────────────────────────
 
 
@@ -87,58 +110,55 @@ def _resources(rest_used: int = 5, gql_used: int = 7) -> dict:
 
 
 class TestRateLimitMonitorRefresh:
-    def test_returns_zero_snapshot_before_first_refresh(self) -> None:
+    def test_state_has_zero_limits_before_first_refresh(self) -> None:
         gh = MagicMock()
-        m = RateLimitMonitor(gh, _make_state())
-        snap = m.latest()
-        # Seeded with zero-value snapshot (no windows populated from API yet)
-        assert snap is not None
-        assert snap.provider == ProviderID.GITHUB
-        assert snap.windows == ()
+        state = _make_state()
+        RateLimitMonitor(gh, state)
+        # Monitor construction does not seed the state; zero-value until refresh
+        assert state.get().github_limits.rest.used is None
         gh.get_rate_limit.assert_not_called()
 
-    def test_refresh_stores_snapshot(self) -> None:
+    def test_refresh_stores_snapshot_in_state(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh, _make_state())
-        snap = m.refresh()
-        assert snap is not None
-        assert snap.provider == ProviderID.GITHUB
-        rest_w = snap.windows[0]
-        gql_w = snap.windows[1]
-        assert rest_w.used == 5
-        assert gql_w.used == 7
-        assert m.latest() is snap
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
+        limits = m.refresh()
+        assert limits is not None
+        assert limits.rest.used == 5
+        assert limits.graphql.used == 7
+        assert state.get().github_limits is limits
 
-    def test_refresh_failure_keeps_prior_snapshot(self) -> None:
+    def test_refresh_failure_keeps_prior_state(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        m = RateLimitMonitor(gh, _make_state())
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
         first = m.refresh()
         gh.get_rate_limit.side_effect = RuntimeError("network down")
         second = m.refresh()
         assert second is None
-        assert m.latest() is first
+        assert state.get().github_limits is first
 
     def test_refresh_updates_when_new_data_arrives(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        m = RateLimitMonitor(gh, _make_state())
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
         m.refresh()
         gh.get_rate_limit.return_value = _resources(rest_used=42)
         m.refresh()
-        latest = m.latest()
-        assert latest is not None
-        assert latest.windows[0].used == 42
+        assert state.get().github_limits.rest.used == 42
 
     def test_handles_missing_resources_keys(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = {}
-        m = RateLimitMonitor(gh, _make_state())
-        snap = m.refresh()
-        assert snap is not None
-        assert snap.windows[0].limit == 0
-        assert snap.windows[1].limit == 0
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
+        limits = m.refresh()
+        assert limits is not None
+        assert limits.rest.limit == 0
+        assert limits.graphql.limit == 0
 
 
 class TestRateLimitMonitorStartThread:
@@ -157,12 +177,13 @@ class TestRateLimitMonitorStartThread:
     def test_does_initial_refresh_before_loop(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh, _make_state())
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
         m.start_thread(_interval=60.0)
         # At least the inline initial refresh happened
-        snap = m.latest()
-        assert snap is not None
-        assert len(snap.windows) == 2
+        limits = state.get().github_limits
+        assert limits.rest.used is not None
+        assert limits.graphql.used is not None
         gh.get_rate_limit.assert_called()
 
     def test_calls_refresh_periodically(self) -> None:
@@ -175,13 +196,14 @@ class TestRateLimitMonitorStartThread:
 
 
 class TestRateLimitMonitorThreadSafety:
-    """Smoke-test: refresh() and latest() don't deadlock or corrupt state
+    """Smoke-test: refresh() and state reads don't deadlock or corrupt state
     when called concurrently from many threads (Python 3.14t free-threaded)."""
 
     def test_concurrent_refresh_and_latest(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh, _make_state())
+        state = _make_state()
+        m = RateLimitMonitor(gh, state)
         m.refresh()  # seed
 
         stop = threading.Event()
@@ -192,10 +214,9 @@ class TestRateLimitMonitorThreadSafety:
 
         def reader() -> None:
             while not stop.is_set():
-                snap = m.latest()
+                limits = state.get().github_limits
                 # always either the zero seed or a real populated snapshot
-                assert snap is not None
-                assert isinstance(snap, ProviderLimitSnapshot)
+                assert isinstance(limits, GitHubLimit)
 
         threads = [threading.Thread(target=writer) for _ in range(2)] + [
             threading.Thread(target=reader) for _ in range(4)
