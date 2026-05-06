@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
+from fido.atomic import AtomicReader, AtomicUpdater
+from fido.atomic import create_atomic as _create_atomic
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
@@ -144,12 +145,19 @@ class RepoState:
 
 @dataclass(frozen=True, slots=True)
 class FidoState:
-    """Atomically-swapped coordination snapshot owned by :class:`WorkerRegistry`.
+    """Atomically-swapped coordination snapshot.
 
     ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
     a :class:`frozendict` so stale readers that hold a reference to an old
     snapshot can never accidentally mutate the mapping — the immutability
     guarantee holds even on the free-threaded (no-GIL) build.
+
+    The atomic cell is owned by the composition root (``run()`` in
+    ``server.py``), not by :class:`WorkerRegistry`.  The root creates both
+    faces via :func:`~fido.atomic.create_atomic`, passes the
+    :class:`~fido.atomic.AtomicUpdater` to ``WorkerRegistry`` and
+    :class:`~fido.rate_limit.RateLimitMonitor`, and passes the
+    :class:`~fido.atomic.AtomicReader` to the status serialisation path.
 
     **Convergence target**: ``FidoState`` is intended to grow to cover all
     coordination fields currently scattered across the per-lock dicts in
@@ -194,15 +202,26 @@ class WorkerRegistry:
     Threads are created via the injected *thread_factory* so tests can
     supply mock threads without patching module-level names.
 
+    Write-only relative to :class:`FidoState` — the registry holds only the
+    :class:`~fido.atomic.AtomicUpdater` face of the atomic cell.  The
+    :class:`~fido.atomic.AtomicReader` face lives in the composition root and
+    is passed directly to the status serialisation path so only the one
+    collaborator that actually reads holds the read face.
+
     Usage::
 
-        registry = WorkerRegistry(my_factory)
+        state_reader, state_updater = create_fido_atomic()
+        registry = WorkerRegistry(my_factory, state_updater)
         registry.start(repo_cfg)   # create + start thread
         registry.wake("owner/repo")  # nudge thread to check for work
         registry.stop_all()          # clean shutdown
     """
 
-    def __init__(self, thread_factory: Callable[..., WorkerThread]) -> None:
+    def __init__(
+        self,
+        thread_factory: Callable[..., WorkerThread],
+        state_updater: "AtomicUpdater[FidoState]",
+    ) -> None:
         self._threads: dict[str, WorkerThread] = {}
         # _threads_lock guards _threads: written by start() on the watchdog
         # thread, read from HTTP handler threads (wake, abort_task, get_session,
@@ -210,13 +229,11 @@ class WorkerRegistry:
         self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
-        # _state_reader / _state_updater are the two narrow faces of the
-        # atomic FidoState cell.  Writers call _state_updater.update(selector,
-        # value) to CAS-install a value at a Lens path; readers call
-        # _state_reader.get() without any lock (lock-free).
-        self._state_reader: AtomicReader[FidoState]
-        self._state_updater: AtomicUpdater[FidoState]
-        self._state_reader, self._state_updater = create_atomic(_EMPTY_FIDO_STATE)
+        # _state_updater is the write-only face of the atomic FidoState cell.
+        # Writers call _state_updater.update(selector, value) to CAS-install a
+        # value at a Lens path.  The read face (AtomicReader) lives in the
+        # composition root; this class never reads the snapshot.
+        self._state_updater: AtomicUpdater[FidoState] = state_updater
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -408,40 +425,6 @@ class WorkerRegistry:
         )
         _name = repo_name
         self._state_updater.update(lambda root: root.repos[_name].activity, activity)
-
-    def get_all_activities(self) -> list[WorkerActivity]:
-        """Return a snapshot of all registered workers' current activities.
-
-        Lock-free: reads from the current :class:`FidoState` snapshot.
-        Excludes repos whose activity is still the zero sentinel (``what=""``).
-        """
-        repos = self._state_reader.get().repos
-        return [rs.activity for rs in repos.values() if rs.activity.what != ""]
-
-    def get_state(self) -> FidoState:
-        """Return the current FidoState snapshot.  Lock-free."""
-        return self._state_reader.get()
-
-    def get_state_reader(self) -> "AtomicReader[FidoState]":
-        """Return a read-only view of the :class:`FidoState` snapshot.
-
-        Pass to collaborators that only need to observe the latest state.
-        Holding both a reader and an updater in one collaborator is a code
-        smell — it usually means logic that belongs in the owner.
-        """
-        return self._state_reader
-
-    def get_state_updater(self) -> "AtomicUpdater[FidoState]":
-        """Return a write-only view for single-field writers.
-
-        Pass to collaborators that publish into a single top-level field
-        they own (e.g. :class:`~fido.rate_limit.RateLimitMonitor` owns
-        ``github_limits``).  Callers must only update fields they own —
-        writing to another collaborator's field creates a silent ownership
-        conflict.  Holding both reader and updater in one collaborator is
-        a code smell.
-        """
-        return self._state_updater
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.
@@ -907,6 +890,34 @@ class WorkerRegistry:
             return list(self._issue_caches.values())
 
 
+def get_all_activities(reader: "AtomicReader[FidoState]") -> list[WorkerActivity]:
+    """Return a snapshot of all registered workers' current activities.
+
+    Lock-free: reads from the current :class:`FidoState` snapshot via *reader*.
+    Excludes repos whose activity is still the zero sentinel (``what=""``).
+
+    Accepts the :class:`~fido.atomic.AtomicReader` face directly so that the
+    caller (the composition root) remains the sole holder of the read face —
+    :class:`WorkerRegistry` is write-only and is never passed here.
+    """
+    repos = reader.get().repos
+    return [rs.activity for rs in repos.values() if rs.activity.what != ""]
+
+
+def create_fido_atomic() -> tuple[
+    "AtomicReader[FidoState]", "AtomicUpdater[FidoState]"
+]:
+    """Create the atomic cell for :class:`FidoState` and return both faces.
+
+    Thin wrapper around :func:`~fido.atomic.create_atomic` with the correct
+    initial value.  Call this once at the composition root (``run()``), pass
+    the updater to :class:`WorkerRegistry` and
+    :class:`~fido.rate_limit.RateLimitMonitor`, and keep the reader in the
+    composition root for the status serialisation path.
+    """
+    return _create_atomic(_EMPTY_FIDO_STATE)
+
+
 def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
@@ -945,12 +956,15 @@ def make_registry(
     config: Config | None = None,
     *,
     dispatchers: "dict[str, Dispatcher]",
+    state_updater: "AtomicUpdater[FidoState]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
     Uses :func:`_make_thread` as the factory; all threads share the provided
-    :class:`~fido.github.GitHub` client.  Pass a custom registry directly
+    :class:`~fido.github.GitHub` client.  The caller (composition root) is
+    responsible for creating the atomic cell via :func:`create_fido_atomic`
+    and passing the updater face here.  Pass a custom registry directly
     (with a mock factory) in tests instead of calling this.
     """
 
@@ -970,7 +984,7 @@ def make_registry(
             dispatchers=dispatchers,
         )
 
-    registry = WorkerRegistry(factory)
+    registry = WorkerRegistry(factory, state_updater)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

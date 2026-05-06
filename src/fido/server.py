@@ -22,6 +22,7 @@ from xml.etree.ElementTree import Element, SubElement, register_namespace, tostr
 import requests
 
 from fido import provider
+from fido.atomic import AtomicReader, AtomicUpdater
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
@@ -48,7 +49,13 @@ from fido.infra import (
 from fido.provider import ProviderLimitWindow
 from fido.provider_factory import DefaultProviderFactory
 from fido.rate_limit import GitHubLimit, RateLimitMonitor
-from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
+from fido.registry import (
+    FidoState,
+    WebhookActivityHandle,
+    WorkerRegistry,
+    create_fido_atomic,
+    make_registry,
+)
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
 from fido.state import State
@@ -610,6 +617,9 @@ def _noop_after_post() -> None:
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
+    # Read face of the FidoState atomic cell — set by run() alongside
+    # registry.  Status serialisation reads from here; registry only writes.
+    state_reader: AtomicReader[FidoState]
     provider_factory: DefaultProviderFactory | None = None
     # Set by run() to record when the server came up, used for fido uptime.
     fido_started_at: datetime | None = None
@@ -1259,9 +1269,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         fido_uptime = (now - started).total_seconds() if started is not None else None
         return {
             "activities": self._collect_activities(),
-            "rate_limit": _serialize_rate_limit(
-                self.registry.get_state().github_limits
-            ),
+            "rate_limit": _serialize_rate_limit(self.state_reader.get().github_limits),
             "fido_uptime_seconds": fido_uptime,
         }
 
@@ -1273,7 +1281,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             list(self.config.repos.values()),
             _provider_factory=self.provider_factory,
         )
-        snapshot = self.registry.get_state()
+        snapshot = self.state_reader.get()
         for repo_state in snapshot.repos.values():
             a = repo_state.activity
             if a.what == "":
@@ -1481,6 +1489,9 @@ def run(
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
     _GitHub: type[GitHub] = GitHub,
     _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
+    _create_fido_atomic: Callable[
+        [], tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]
+    ] = create_fido_atomic,
 ) -> None:
     config = _from_args()
 
@@ -1543,8 +1554,17 @@ def run(
     WebhookHandler.provider_factory = DefaultProviderFactory(
         session_system_file=config.sub_dir / "persona.md"
     )
-    registry = _make_registry(config.repos, gh, config, dispatchers=dispatchers)
+    # Create the atomic FidoState cell here (composition root) and hand the
+    # two faces to their respective owners: the updater goes to the registry
+    # (write-only) and to the rate-limit monitor; the reader stays here and
+    # is placed on WebhookHandler so the status serialisation path can read
+    # without going through the registry at all.
+    state_reader, state_updater = _create_fido_atomic()
+    registry = _make_registry(
+        config.repos, gh, config, dispatchers=dispatchers, state_updater=state_updater
+    )
     WebhookHandler.registry = registry
+    WebhookHandler.state_reader = state_reader
     # Bootstrap issue caches eagerly so the picker has populated data immediately —
     # even for repos whose worker resumes on an existing issue and never calls
     # find_next_issue during this run (closes #837).
@@ -1559,7 +1579,7 @@ def run(
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
-    _RateLimitMonitor(gh, registry.get_state_updater()).start_thread()
+    _RateLimitMonitor(gh, state_updater).start_thread()
     WebhookHandler.fido_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)

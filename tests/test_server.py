@@ -220,6 +220,7 @@ def server(tmp_path: Path) -> object:
     repo_cfg = cfg.repos["owner/repo"]
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
+    WebhookHandler.state_reader = MagicMock()
     WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
@@ -301,7 +302,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_returns_activities(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -331,7 +332,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = "worker-home"
@@ -350,7 +351,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -364,7 +365,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state(
                 "owner/repo",
                 what="Napping",
@@ -384,7 +385,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
         assert json.loads(resp.read()) == {
@@ -395,7 +396,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.headers.get("Content-Type") == "application/json"
 
@@ -403,7 +404,7 @@ class TestGetEndpoint:
         """Repos whose activity is still the zero sentinel (what='') are excluded."""
         url, _ = server
         # A repo in the snapshot with what="" — prepopulated but never active.
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="")
         )
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -412,7 +413,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", stale=True)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -425,7 +426,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_includes_rescoping_flag(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -459,7 +460,7 @@ class TestGetEndpoint:
                 resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
             ),
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False),
             github_limits=limits,
         )
@@ -482,7 +483,7 @@ class TestGetEndpoint:
         """Zero-value ``GitHubLimit`` (not yet polled) → ``rate_limit``
         key is ``None`` in the ``/status.json`` response."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -511,7 +512,7 @@ class TestGetEndpoint:
             ),
             # graphql uses zero-value default: used=None, limit=None
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False),
             github_limits=limits,
         )
@@ -537,7 +538,7 @@ class TestGetEndpoint:
         from fido.issue_cache import IssueTreeCache
 
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -579,7 +580,7 @@ class TestGetEndpoint:
         it as non-cache and emit ``None`` rather than raise.
         """
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -594,7 +595,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -625,7 +626,7 @@ class TestGetEndpoint:
 
     def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Napping", busy=False)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -641,7 +642,7 @@ class TestGetEndpoint:
     ) -> None:
         """With no state.json or tasks.json on disk, fido_state fields default."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -710,7 +711,7 @@ class TestGetEndpoint:
         tasks_path.write_text(json.dumps(tasks))
 
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #42")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -741,7 +742,7 @@ class TestGetEndpoint:
         """When a repo has no config entry, fido_state fields are all defaults."""
         url, _ = server
         # Report an activity for a repo not in config
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("unknown/repo", what="idle", busy=False)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1020,7 +1021,7 @@ class TestRepoStatus:
 class TestStatusXml:
     def test_status_returns_namespaced_xml_with_xslt_pi(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert resp.headers.get("Content-Type") == "application/xml; charset=utf-8"
@@ -1031,7 +1032,7 @@ class TestStatusXml:
 
     def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1047,7 +1048,7 @@ class TestStatusXml:
 
     def test_status_xml_empty_fido(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert 'xmlns="https://fidocancode.dog/fido"' in body
@@ -1066,7 +1067,7 @@ class TestStatusXml:
             claude_pid=9999,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1081,7 +1082,7 @@ class TestStatusXml:
 
     def test_status_xml_includes_provider_status(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working", busy=False)
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1112,7 +1113,7 @@ class TestStatusXml:
 
     def test_status_xml_includes_webhooks(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state(
                 "owner/repo",
                 what="working",
@@ -1138,7 +1139,7 @@ class TestStatusXml:
     def test_status_xml_includes_fido_uptime(self, server: tuple) -> None:
         """<fido_uptime_seconds> appears in the root element when fido_started_at is set."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
@@ -1149,7 +1150,7 @@ class TestStatusXml:
     def test_status_xml_no_fido_uptime_when_not_started(self, server: tuple) -> None:
         """<fido_uptime_seconds> is absent when fido_started_at is None (default)."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
@@ -1173,9 +1174,7 @@ class TestStatusXml:
                 resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
             ),
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(
-            github_limits=limits
-        )
+        WebhookHandler.state_reader.get.return_value = _fido_state(github_limits=limits)
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<rate_limit>" in body
@@ -1187,7 +1186,7 @@ class TestStatusXml:
     def test_status_json_includes_fido_uptime(self, server: tuple) -> None:
         """fido_uptime_seconds appears in /status.json when fido_started_at is set."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
@@ -1199,7 +1198,7 @@ class TestStatusXml:
     def test_status_json_fido_uptime_null_when_not_started(self, server: tuple) -> None:
         """fido_uptime_seconds is null in /status.json when fido_started_at is None."""
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state()
+        WebhookHandler.state_reader.get.return_value = _fido_state()
         assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -1249,7 +1248,7 @@ class TestStatusXml:
         (fido_dir / "tasks.json").write_text(json.dumps(tasks))
 
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #10")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1269,7 +1268,7 @@ class TestStatusXml:
         from fido.issue_cache import IssueTreeCache
 
         url, _ = server
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1804,7 +1803,7 @@ class TestProcessAction:
             claude_pid=12345,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
-        WebhookHandler.registry.get_state.return_value = _fido_state(
+        WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="running")
         )
         WebhookHandler.registry.get_session_owner.return_value = None
@@ -1914,12 +1913,13 @@ class TestProcessAction:
 
     def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
         from fido.events import Action
-        from fido.registry import WorkerRegistry
+        from fido.registry import WorkerRegistry, create_fido_atomic
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
-        handler.registry = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
@@ -3536,10 +3536,15 @@ class TestRun:
             _RateLimitMonitor=mock_rl_cls,
         )
 
-        expected_state_updater = (
-            mock_make_registry.return_value.get_state_updater.return_value
-        )
-        mock_rl_cls.assert_called_once_with(mock_gh_instance, expected_state_updater)
+        # The state_updater is the second element returned by _create_fido_atomic().
+        # RateLimitMonitor must be wired with the same updater that was passed to
+        # make_registry — verify positional args rather than the updater value.
+        assert mock_rl_cls.call_count == 1
+        rl_args = mock_rl_cls.call_args[0]
+        assert rl_args[0] is mock_gh_instance
+        # The updater passed to RateLimitMonitor must be the same object that was
+        # passed as state_updater to make_registry.
+        assert rl_args[1] is mock_make_registry.call_args.kwargs["state_updater"]
         mock_rl_cls.return_value.start_thread.assert_called_once()
 
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
