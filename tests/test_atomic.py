@@ -1,11 +1,16 @@
-"""Tests for fido.atomic — AtomicReference[T] primitive."""
+"""Tests for fido.atomic — create_atomic factory and _AtomicReference internals."""
 
 import threading
 from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReference
+from fido.atomic import (
+    AtomicReader,
+    AtomicUpdater,
+    _AtomicReference,  # noqa: PLC2701
+    create_atomic,
+)
 from fido.lens import Lens
 
 
@@ -14,27 +19,61 @@ class _State:
     n: int
 
 
+class TestCreateAtomic:
+    """Tests for the public create_atomic factory."""
+
+    def test_returns_reader_updater_tuple(self) -> None:
+        reader, updater = create_atomic(42)
+        assert reader.get() == 42
+
+    def test_reader_satisfies_atomic_reader_protocol(self) -> None:
+        reader, _ = create_atomic(7)
+        ref: AtomicReader[int] = reader
+        assert ref.get() == 7
+
+    def test_updater_satisfies_atomic_updater_protocol(self) -> None:
+        state = _Container(items=frozendict({"x": _Item(0)}))
+        _, updater = create_atomic(state)
+        ref: AtomicUpdater[_Container] = updater
+        ref.update(lambda root: root.items["x"], _Item(9))
+
+    def test_reader_and_updater_share_state(self) -> None:
+        reader, updater = create_atomic(_Container(items=frozendict({"k": _Item(0)})))
+        updater.update(lambda root: root.items["k"], _Item(99))
+        assert reader.get().items["k"] == _Item(99)
+
+    def test_reader_has_no_update_attribute(self) -> None:
+        reader, _ = create_atomic(0)
+        # AtomicReader protocol exposes only .get() — no .update()
+        assert not hasattr(AtomicReader, "update")
+
+    def test_updater_has_no_get_attribute(self) -> None:
+        _, updater = create_atomic(0)
+        # AtomicUpdater protocol exposes only .update() — no .get()
+        assert not hasattr(AtomicUpdater, "get")
+
+
 class TestAtomicReferenceGet:
     def test_get_returns_initial_value(self) -> None:
-        ref: AtomicReference[int] = AtomicReference(42)
+        ref: _AtomicReference[int] = _AtomicReference(42)
         assert ref.get() == 42
 
     def test_get_returns_same_object(self) -> None:
         obj = object()
-        ref: AtomicReference[object] = AtomicReference(obj)
+        ref: _AtomicReference[object] = _AtomicReference(obj)
         assert ref.get() is obj
 
 
 class TestAtomicReferenceSet:
     def test_set_replaces_value(self) -> None:
-        ref: AtomicReference[int] = AtomicReference(1)
+        ref: _AtomicReference[int] = _AtomicReference(1)
         ref.set(99)
         assert ref.get() == 99
 
     def test_set_replaces_with_new_object(self) -> None:
         a = _State(0)
         b = _State(1)
-        ref: AtomicReference[_State] = AtomicReference(a)
+        ref: _AtomicReference[_State] = _AtomicReference(a)
         ref.set(b)
         assert ref.get() is b
 
@@ -43,7 +82,7 @@ class TestAtomicReferenceCompareAndSet:
     def test_succeeds_when_expected_matches(self) -> None:
         a = _State(0)
         b = _State(1)
-        ref: AtomicReference[_State] = AtomicReference(a)
+        ref: _AtomicReference[_State] = _AtomicReference(a)
         success, value = ref.compare_and_set(a, b)
         assert success is True
         assert value is b
@@ -53,7 +92,7 @@ class TestAtomicReferenceCompareAndSet:
         a = _State(0)
         other = _State(0)  # equal value, different identity
         b = _State(1)
-        ref: AtomicReference[_State] = AtomicReference(a)
+        ref: _AtomicReference[_State] = _AtomicReference(a)
         success, current = ref.compare_and_set(other, b)
         assert success is False
         assert current is a  # returned current reference, not the rejected new value
@@ -68,7 +107,7 @@ class TestAtomicReferenceCompareAndSet:
         assert x == y
         assert x is not y  # distinct objects despite equal values
         new: tuple[int, ...] = tuple(range(4, 7))
-        ref: AtomicReference[tuple[int, ...]] = AtomicReference(x)
+        ref: _AtomicReference[tuple[int, ...]] = _AtomicReference(x)
         success, current = ref.compare_and_set(y, new)
         assert success is False
         assert current is x  # returned the actual current reference
@@ -78,7 +117,7 @@ class TestAtomicReferenceCompareAndSet:
         a = _State(10)
         wrong = _State(99)
         new = _State(20)
-        ref: AtomicReference[_State] = AtomicReference(a)
+        ref: _AtomicReference[_State] = _AtomicReference(a)
         success, current = ref.compare_and_set(wrong, new)
         assert success is False
         assert current is a
@@ -98,14 +137,14 @@ class _Container:
 class TestAtomicReferenceUpdate:
     def test_installs_value_at_path(self) -> None:
         state = _Container(items=frozendict({"a": _Item(1)}))
-        ref: AtomicReference[_Container] = AtomicReference(state)
+        ref: _AtomicReference[_Container] = _AtomicReference(state)
         new_item = _Item(99)
         result = ref.update(lambda root: root.items["a"], new_item)
         assert result.items["a"] is new_item
         assert ref.get().items["a"] is new_item
 
     def test_inserts_new_key(self) -> None:
-        ref: AtomicReference[_Container] = AtomicReference(
+        ref: _AtomicReference[_Container] = _AtomicReference(
             _Container(items=frozendict())
         )
         new_item = _Item(7)
@@ -113,7 +152,7 @@ class TestAtomicReferenceUpdate:
         assert ref.get().items["new"] is new_item
 
     def test_returns_installed_root(self) -> None:
-        ref: AtomicReference[_Container] = AtomicReference(
+        ref: _AtomicReference[_Container] = _AtomicReference(
             _Container(items=frozendict({"x": _Item(0)}))
         )
         result = ref.update(lambda root: root.items["x"], _Item(5))
@@ -127,7 +166,7 @@ class TestAtomicReferenceUpdate:
             received.append(root)
             return root.items["a"]
 
-        ref: AtomicReference[_Container] = AtomicReference(
+        ref: _AtomicReference[_Container] = _AtomicReference(
             _Container(items=frozendict({"a": _Item(1)}))
         )
         ref.update(selector, _Item(2))
@@ -136,7 +175,7 @@ class TestAtomicReferenceUpdate:
     def test_preserves_sibling_keys(self) -> None:
         a = _Item(1)
         b = _Item(2)
-        ref: AtomicReference[_Container] = AtomicReference(
+        ref: _AtomicReference[_Container] = _AtomicReference(
             _Container(items=frozendict({"a": a, "b": b}))
         )
         ref.update(lambda root: root.items["a"], _Item(99))
@@ -144,7 +183,7 @@ class TestAtomicReferenceUpdate:
 
     def test_retries_after_concurrent_modification(self) -> None:
         """update() retries when a concurrent writer sneaks in between get() and CAS."""
-        ref: AtomicReference[_Container] = AtomicReference(
+        ref: _AtomicReference[_Container] = _AtomicReference(
             _Container(items=frozendict({"a": _Item(0)}))
         )
         injected = [False]
@@ -168,7 +207,7 @@ class TestAtomicReferenceUpdate:
         """Many concurrent update() calls on disjoint keys; no writes lost."""
         n_threads = 20
         items = frozendict({f"k{i}": _Item(0) for i in range(n_threads)})
-        ref: AtomicReference[_Container] = AtomicReference(_Container(items=items))
+        ref: _AtomicReference[_Container] = _AtomicReference(_Container(items=items))
 
         def run(key: str) -> None:
             for v in range(1, 51):

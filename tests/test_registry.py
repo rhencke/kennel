@@ -14,6 +14,8 @@ from fido.registry import (
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
+    create_fido_atomic,
+    get_all_activities,
     make_registry,
 )
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -37,16 +39,17 @@ def _repo(name: str, work_dir: Path) -> RepoConfig:
 class TestWorkerRegistry:
     def _make_registry(
         self, *, repos: list[str] | None = None
-    ) -> tuple[WorkerRegistry, MagicMock]:
+    ) -> tuple[WorkerRegistry, MagicMock, object]:
         factory = MagicMock()
-        reg = WorkerRegistry(factory)
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         if repos:
             for name in repos:
                 reg.start(_repo(name, Path("/tmp/fake")))
-        return reg, factory
+        return reg, factory, reader
 
     def test_start_calls_factory_with_repo_cfg(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         factory.assert_called_once_with(cfg, provider=None, session_issue=None)
@@ -56,7 +59,8 @@ class TestWorkerRegistry:
         mock_provider = MagicMock()
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         # First start — no prior thread
         reg.start(cfg)
@@ -85,7 +89,8 @@ class TestWorkerRegistry:
         mock_provider = MagicMock()
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         threads[0].is_alive.return_value = False
@@ -100,7 +105,8 @@ class TestWorkerRegistry:
         """No provider rescue when the old thread exited via orderly stop()."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         # Simulate orderly shutdown: was_stopped is True (session was already stopped)
@@ -114,25 +120,25 @@ class TestWorkerRegistry:
         threads[0].detach_provider.assert_not_called()
 
     def test_start_starts_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         factory.return_value.start.assert_called_once()
 
     def test_wake_calls_thread_wake(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         reg.wake("foo/bar")
         factory.return_value.wake.assert_called_once()
 
     def test_wake_unknown_repo_is_noop(self) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         reg.wake("unknown/repo")  # must not raise
         factory.return_value.wake.assert_not_called()
 
     def test_stop_all_calls_stop_on_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         reg.stop_all()
@@ -140,7 +146,8 @@ class TestWorkerRegistry:
 
     def test_stop_all_calls_stop_on_every_thread(self, tmp_path: Path) -> None:
         factory = MagicMock(side_effect=[MagicMock(), MagicMock()])
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
@@ -158,7 +165,8 @@ class TestWorkerRegistry:
     def test_stop_all_calls_stop_count(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
@@ -166,146 +174,146 @@ class TestWorkerRegistry:
             t.stop.assert_called_once()
 
     def test_stop_all_empty_is_noop(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         reg.stop_all()  # must not raise
 
     def test_stop_and_join_calls_stop_and_join_on_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))
         reg.stop_and_join("foo/bar", timeout=5.0)
         factory.return_value.stop.assert_called_once()
         factory.return_value.join.assert_called_once_with(timeout=5.0)
 
     def test_stop_and_join_unknown_repo_is_noop(self) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         reg.stop_and_join("unknown/repo")  # must not raise
         factory.return_value.stop.assert_not_called()
         factory.return_value.join.assert_not_called()
 
     def test_abort_task_calls_thread_abort_task(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         reg.abort_task("foo/bar", task_id="t-1")
         factory.return_value.abort_task.assert_called_once_with(task_id="t-1")
 
     def test_abort_task_unknown_repo_is_noop(self) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         reg.abort_task("unknown/repo", task_id="t-1")  # must not raise
         factory.return_value.abort_task.assert_not_called()
 
     def test_recover_provider_calls_thread_recover_provider(
         self, tmp_path: Path
     ) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.recover_provider.return_value = True
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.recover_provider("foo/bar") is True
         factory.return_value.recover_provider.assert_called_once_with()
 
     def test_recover_provider_unknown_repo_returns_false(self) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         assert reg.recover_provider("unknown/repo") is False
         factory.return_value.recover_provider.assert_not_called()
 
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))
         reg.stop_and_join("foo/bar")
         factory.return_value.join.assert_called_once_with(timeout=30.0)
 
     def test_is_alive_true_when_thread_alive(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         factory.return_value.is_alive.return_value = True
         reg.start(cfg)
         assert reg.is_alive("foo/bar") is True
 
     def test_is_alive_false_when_thread_dead(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         cfg = _repo("foo/bar", tmp_path)
         factory.return_value.is_alive.return_value = False
         reg.start(cfg)
         assert reg.is_alive("foo/bar") is False
 
     def test_is_alive_false_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.is_alive("unknown/repo") is False
 
     def test_get_thread_crash_error_returns_none_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_thread_crash_error("unknown/repo") is None
 
     def test_get_session_owner_returns_none_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_owner("unknown/repo") is None
 
     def test_get_session_owner_delegates_to_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_owner = "worker-home"
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_owner("foo/bar") == "worker-home"
 
     def test_get_session_alive_returns_false_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_alive("unknown/repo") is False
 
     def test_get_session_alive_delegates_to_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_alive = True
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_alive("foo/bar") is True
 
     def test_get_session_pid_returns_none_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_pid("unknown/repo") is None
 
     def test_get_session_pid_delegates_to_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_pid = 77777
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_pid("foo/bar") == 77777
 
     def test_get_session_dropped_count_returns_zero_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_dropped_count("unknown/repo") == 0
 
     def test_get_session_dropped_count_delegates_to_thread(
         self, tmp_path: Path
     ) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_dropped_count = 4
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_dropped_count("foo/bar") == 4
 
     def test_get_session_sent_count_returns_zero_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_sent_count("unknown/repo") == 0
 
     def test_get_session_sent_count_delegates_to_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_sent_count = 17
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_sent_count("foo/bar") == 17
 
     def test_get_session_received_count_returns_zero_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session_received_count("unknown/repo") == 0
 
     def test_get_session_received_count_delegates_to_thread(
         self, tmp_path: Path
     ) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.session_received_count = 15
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session_received_count("foo/bar") == 15
 
     def test_get_session_returns_none_for_unknown_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.get_session("unknown/repo") is None
 
     def test_get_session_delegates_to_thread(self, tmp_path: Path) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         fake_session = MagicMock()
         factory.return_value.current_provider.return_value.agent.session = fake_session
         reg.start(_repo("foo/bar", tmp_path))
@@ -316,24 +324,24 @@ class TestWorkerRegistry:
     def test_get_issue_cache_creates_lazily(self) -> None:
         from fido.issue_cache import IssueTreeCache
 
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         cache = reg.get_issue_cache("foo/bar")
         assert isinstance(cache, IssueTreeCache)
 
     def test_get_issue_cache_returns_same_instance(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         a = reg.get_issue_cache("foo/bar")
         b = reg.get_issue_cache("foo/bar")
         assert a is b
 
     def test_get_issue_cache_per_repo(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         a = reg.get_issue_cache("foo/bar")
         b = reg.get_issue_cache("foo/baz")
         assert a is not b
 
     def test_all_issue_caches_returns_snapshot(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         assert reg.all_issue_caches() == []
         reg.get_issue_cache("a/1")
         reg.get_issue_cache("b/2")
@@ -346,7 +354,7 @@ class TestWorkerRegistry:
     def test_get_thread_crash_error_returns_thread_crash_error(
         self, tmp_path: Path
     ) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.crash_error = "RuntimeError: boom"
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_thread_crash_error("foo/bar") == "RuntimeError: boom"
@@ -354,47 +362,47 @@ class TestWorkerRegistry:
     def test_get_thread_crash_error_returns_none_when_thread_has_no_error(
         self, tmp_path: Path
     ) -> None:
-        reg, factory = self._make_registry()
+        reg, factory, reader = self._make_registry()
         factory.return_value.crash_error = None
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_thread_crash_error("foo/bar") is None
 
     def test_report_activity_stores_entry(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
-        activities = reg.get_all_activities()
+        activities = get_all_activities(reader)
         assert len(activities) == 1
         assert activities[0].repo_name == "foo/bar"
         assert activities[0].what == "Working on: #1"
         assert activities[0].busy is True
 
     def test_report_activity_overwrites_previous(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/bar", "Napping", busy=False)
-        activities = reg.get_all_activities()
+        activities = get_all_activities(reader)
         assert len(activities) == 1
         assert activities[0].what == "Napping"
         assert activities[0].busy is False
 
     def test_get_all_activities_returns_all_repos(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar", "foo/baz"])
+        reg, _, reader = self._make_registry(repos=["foo/bar", "foo/baz"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/baz", "Napping", busy=False)
-        activities = sorted(reg.get_all_activities(), key=lambda a: a.repo_name)
+        activities = sorted(get_all_activities(reader), key=lambda a: a.repo_name)
         assert [(a.repo_name, a.what, a.busy) for a in activities] == [
             ("foo/bar", "Working on: #1", True),
             ("foo/baz", "Napping", False),
         ]
 
     def test_get_all_activities_empty_initially(self) -> None:
-        reg, _ = self._make_registry()
-        assert reg.get_all_activities() == []
+        reg, _, reader = self._make_registry()
+        assert get_all_activities(reader) == []
 
     def test_get_all_activities_returns_snapshot(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
-        snapshot = reg.get_all_activities()
+        snapshot = get_all_activities(reader)
         reg.report_activity("foo/bar", "Napping", busy=False)
         # snapshot must not reflect the later update
         assert snapshot[0].what == "Working on: #1"
@@ -403,9 +411,9 @@ class TestWorkerRegistry:
         import datetime as dt
 
         fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
-        activities = reg.get_all_activities()
+        activities = get_all_activities(reader)
         assert activities[0].last_progress_at == fixed
 
     def test_report_activity_updates_last_progress_at(self) -> None:
@@ -413,10 +421,10 @@ class TestWorkerRegistry:
 
         t1 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t2 = dt.datetime(2026, 1, 1, 12, 5, 0, tzinfo=dt.timezone.utc)
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
         reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
-        activities = reg.get_all_activities()
+        activities = get_all_activities(reader)
         assert activities[0].last_progress_at == t2
 
     def test_concurrent_report_and_read_are_safe(self) -> None:
@@ -429,7 +437,7 @@ class TestWorkerRegistry:
         """
         n_repos = 8
         repos = [f"owner/repo{i}" for i in range(n_repos)]
-        reg, _ = self._make_registry(repos=repos)
+        reg, _, state_reader = self._make_registry(repos=repos)
         n_writes = 200
         errors: list[Exception] = []
 
@@ -440,17 +448,17 @@ class TestWorkerRegistry:
             except Exception as exc:
                 errors.append(exc)
 
-        def reader() -> None:
+        def reader_fn() -> None:
             try:
                 for _ in range(n_writes * n_repos):
-                    activities = reg.get_all_activities()
+                    activities = get_all_activities(state_reader)
                     # snapshot must be a plain list — no shared references
                     assert isinstance(activities, list)
             except Exception as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=writer, args=(r,)) for r in repos]
-        threads.append(threading.Thread(target=reader))
+        threads.append(threading.Thread(target=reader_fn))
 
         for t in threads:
             t.start()
@@ -459,19 +467,19 @@ class TestWorkerRegistry:
 
         assert not errors, f"concurrent errors: {errors}"
 
-        final = {a.repo_name: a for a in reg.get_all_activities()}
+        final = {a.repo_name: a for a in get_all_activities(state_reader)}
         assert set(final) == set(repos)
         for repo in repos:
             assert final[repo].what == f"step {n_writes - 1}"
 
     def test_status_update_is_context_manager(self) -> None:
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         with reg.status_update():
             pass  # must not raise
 
     def test_status_update_serializes_concurrent_callers(self) -> None:
         """Only one caller may be inside status_update() at a time."""
-        reg, _ = self._make_registry()
+        reg, _, reader = self._make_registry()
         inside_count = 0
         max_concurrent = 0
         counter_lock = threading.Lock()
@@ -494,15 +502,23 @@ class TestWorkerRegistry:
 
         assert max_concurrent == 1
 
-    def test_get_state_returns_fido_state(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
-        state = reg.get_state()
-        assert "foo/bar" in state.repos
+    def test_create_fido_atomic_reader_sees_state(self) -> None:
+        """create_fido_atomic reader reflects writes made via the updater."""
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        # reader sees the repo populated by start()
+        assert "foo/bar" in reader.get().repos
+
+    def test_registry_is_write_only_for_fido_state(self) -> None:
+        """WorkerRegistry has no read face — get_state/get_state_reader/get_state_updater are gone."""
+        reg, _, reader = self._make_registry()
+        assert not hasattr(reg, "get_state")
+        assert not hasattr(reg, "get_state_reader")
+        assert not hasattr(reg, "get_state_updater")
 
     def test_record_crash_stores_error_and_count(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "boom")
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == 1
         assert crash.last_error == "boom"
 
@@ -510,26 +526,26 @@ class TestWorkerRegistry:
         import datetime as dt
 
         before = dt.datetime.now(tz=dt.timezone.utc)
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "oops")
         after = dt.datetime.now(tz=dt.timezone.utc)
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count > 0
         assert before <= crash.last_crash_time <= after
 
     def test_record_crash_increments_death_count(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "err1")
         reg.record_crash("foo/bar", "err2")
         reg.record_crash("foo/bar", "err3")
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == 3
 
     def test_record_crash_updates_last_error(self) -> None:
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "first")
         reg.record_crash("foo/bar", "second")
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.last_error == "second"
 
     def test_record_crash_accumulates_count(self) -> None:
@@ -540,12 +556,12 @@ class TestWorkerRegistry:
         then publishes via a pure lens write.  This test verifies the counter
         accumulates without loss over many sequential calls.
         """
-        reg, _ = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"])
         n = 200
         for _ in range(n):
             reg.record_crash("foo/bar", "err")
 
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == n
 
     def test_worker_crash_dataclass_fields(self) -> None:
@@ -561,7 +577,8 @@ class TestWorkerRegistry:
         """crash_record is preserved across start() so history accumulates."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         reg.record_crash("foo/bar", "boom")
@@ -569,14 +586,15 @@ class TestWorkerRegistry:
         threads[0].is_alive.return_value = False
         threads[0].was_stopped = False
         reg.start(cfg)
-        crash = reg.get_state().repos["foo/bar"].crash_record
+        crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == 1
         assert crash.last_error == "boom"
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         # Simulate a crash so the FSM accepts the second start
@@ -678,10 +696,12 @@ class TestMakeRegistry:
     def test_returns_worker_registry(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
+        _, updater = create_fido_atomic()
         result = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
             dispatchers={},
+            state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert isinstance(result, WorkerRegistry)
@@ -691,17 +711,20 @@ class TestMakeRegistry:
         cfg2 = _repo("foo/baz", tmp_path)
         mock_thread = MagicMock()
         mock_factory = MagicMock(return_value=mock_thread)
+        _, updater = create_fido_atomic()
         make_registry(
             {"foo/bar": cfg1, "foo/baz": cfg2},
             MagicMock(),
             dispatchers={},
+            state_updater=updater,
             _thread_factory=mock_factory,
         )
         assert mock_factory.call_count == 2
         assert mock_thread.start.call_count == 2
 
     def test_empty_repos_returns_empty_registry(self) -> None:
-        result = make_registry({}, MagicMock(), dispatchers={})
+        _, updater = create_fido_atomic()
+        result = make_registry({}, MagicMock(), dispatchers={}, state_updater=updater)
         assert isinstance(result, WorkerRegistry)
         assert result.is_alive("anything") is False
 
@@ -709,10 +732,12 @@ class TestMakeRegistry:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
         mock_thread.is_alive.return_value = True
+        _, updater = create_fido_atomic()
         reg = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
             dispatchers={},
+            state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert reg.is_alive("foo/bar") is True
@@ -730,11 +755,13 @@ class TestMakeRegistry:
             sub_dir=tmp_path,
         )
         mock_factory = MagicMock(return_value=MagicMock())
+        _, updater = create_fido_atomic()
         make_registry(
             {"foo/bar": cfg},
             MagicMock(),
             config,
             dispatchers={},
+            state_updater=updater,
             _thread_factory=mock_factory,
         )
         assert mock_factory.call_args.kwargs["config"] is config
@@ -742,7 +769,8 @@ class TestMakeRegistry:
 
 class TestWebhookActivity:
     def test_registers_and_unregisters(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_webhook_activities("foo/bar") == []
         with reg.webhook_activity("foo/bar", "triaging"):
@@ -754,7 +782,8 @@ class TestWebhookActivity:
     def test_unregisters_on_exception(self, tmp_path: Path) -> None:
         import pytest as _pytest
 
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with _pytest.raises(RuntimeError):
             with reg.webhook_activity("foo/bar", "oops"):
@@ -762,7 +791,8 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_multiple_concurrent_activities(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "first"):
             with reg.webhook_activity("foo/bar", "second"):
@@ -773,7 +803,8 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_activities_isolated_per_repo(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("a/b", tmp_path))
         reg.start(_repo("c/d", tmp_path))
         with reg.webhook_activity("a/b", "work-ab"):
@@ -784,11 +815,13 @@ class TestWebhookActivity:
                 assert [x.description for x in c] == ["work-cd"]
 
     def test_unknown_repo_returns_empty_list(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_handle_can_update_description(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
@@ -796,7 +829,8 @@ class TestWebhookActivity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "triaging"
 
     def test_handle_update_after_exit_is_noop(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             pass
@@ -804,63 +838,72 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_unknown_handle_update_is_noop(self, tmp_path: Path) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             reg.set_webhook_description("foo/bar", -1, "triaging")
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
 
     def test_unknown_repo_handle_update_is_noop(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_publishes_to_fido_state_when_repo_started(self, tmp_path: Path) -> None:
         """webhook_activity publishes activities into FidoState when start() has run."""
-        reg = WorkerRegistry(MagicMock())
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
-            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            acts = reader.get().repos["foo/bar"].webhook_activities
             assert len(acts) == 1
             assert acts[0].description == "handling"
-        assert reg.get_state().repos["foo/bar"].webhook_activities == ()
+        assert reader.get().repos["foo/bar"].webhook_activities == ()
 
     def test_publishes_description_update_to_fido_state(self, tmp_path: Path) -> None:
         """set_webhook_description publishes the update into FidoState."""
-        reg = WorkerRegistry(MagicMock())
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "original") as handle:
             handle.set_description("updated")
-            acts = reg.get_state().repos["foo/bar"].webhook_activities
+            acts = reader.get().repos["foo/bar"].webhook_activities
             assert len(acts) == 1
             assert acts[0].description == "updated"
 
 
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         assert reg.is_rescoping("unknown/repo") is False
 
     def test_set_rescoping_true(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
 
     def test_set_rescoping_false_clears_flag(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         reg.set_rescoping("foo/bar", False)
         assert reg.is_rescoping("foo/bar") is False
 
     def test_rescoping_is_per_repo(self) -> None:
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
         assert reg.is_rescoping("foo/baz") is False
 
     def test_rescoping_is_threadsafe(self) -> None:
         """Concurrent set_rescoping and is_rescoping calls must not corrupt state."""
-        reg = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         errors: list[Exception] = []
 
         def toggler(repo: str) -> None:
@@ -892,7 +935,8 @@ class TestUntriagedInbox:
     """Tests for the per-repo untriaged-webhook inbox (fix #1067)."""
 
     def _reg(self) -> WorkerRegistry:
-        return WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        return WorkerRegistry(MagicMock(), updater)
 
     # ── has_untriaged ─────────────────────────────────────────────────────
 
@@ -1122,7 +1166,8 @@ class TestPreemptionFsmOracle:
     """
 
     def _reg(self) -> WorkerRegistry:
-        return WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        return WorkerRegistry(MagicMock(), updater)
 
     # ── worker_blocked_when_nonempty ─────────────────────────────────────
 
@@ -1347,7 +1392,8 @@ class TestRegistryFsmOracle:
     """
 
     def _reg(self) -> WorkerRegistry:
-        return WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        return WorkerRegistry(MagicMock(), updater)
 
     def _cfg(self, tmp_path: Path, name: str = "foo/bar") -> RepoConfig:
         return _repo(name, tmp_path)
@@ -1434,7 +1480,8 @@ class TestRegistryFsmOracle:
         """start() after crash fires ThreadDies then Rescue: Active → Crashed → Active."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         assert isinstance(
@@ -1456,7 +1503,8 @@ class TestRegistryFsmOracle:
         """start() after orderly stop fires ThreadStops then Launch: Active → Stopped → Active."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         # Simulate orderly stop
@@ -1479,7 +1527,8 @@ class TestRegistryFsmOracle:
         """
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         # Leave thread alive (is_alive() returns a truthy MagicMock by default)
@@ -1491,7 +1540,8 @@ class TestRegistryFsmOracle:
         """FSM state is independent for each repo — no cross-repo contamination."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reg = WorkerRegistry(factory)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("org/a", tmp_path))
         reg.start(_repo("org/b", tmp_path))
         assert isinstance(
