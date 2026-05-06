@@ -1,4 +1,4 @@
-"""AtomicReference[T] — single-lock pointer-swap primitive for lock-free reads.
+"""Atomic reference cell — lock-free read, lock-serialized write.
 
 Writers hold ``_lock`` for the duration of the pointer swap so concurrent
 writes are serialized and no update is lost.  Readers call :meth:`get`
@@ -10,9 +10,14 @@ etc.) so that readers who hold a reference to the snapshot can inspect all
 fields without encountering races inside the value itself.
 
 :class:`AtomicReader` and :class:`AtomicUpdater` are the two narrow
-Protocol faces of :class:`AtomicReference`.  Collaborators should accept
-one of those, not the concrete class — a callee that holds both is usually
-doing something that belongs inside the owner (code smell).
+public Protocol faces.  Use :func:`create_atomic` to create a cell — it
+returns ``(reader, updater)`` so callers accept only the face they need.
+A collaborator that holds *both* faces is doing something that belongs
+inside the owner of the cell (code smell).
+
+:class:`_AtomicReference` is the private backing implementation.  Import
+it only in unit tests that need to exercise ``set`` / ``compare_and_set``
+internals; production code should use :func:`create_atomic` exclusively.
 """
 
 import threading
@@ -61,18 +66,22 @@ class AtomicUpdater(Protocol[_T_upd]):
         ...
 
 
-class AtomicReference(Generic[_T]):
-    """A reference cell whose pointer swap is serialized by a single lock.
+class _AtomicReference(Generic[_T]):
+    """Private backing implementation of an atomic reference cell.
 
     Readers are observationally lock-free — :meth:`get` is a bare attribute
     read with no lock acquire.  Writers hold the internal ``_lock`` only for
     the atomic swap, keeping write-side latency minimal.
 
+    Do not import this class in production code.  Use :func:`create_atomic`
+    instead, which returns ``(AtomicReader[T], AtomicUpdater[T])`` so each
+    collaborator gets exactly the face it needs.
+
     The typical usage pattern is *lens update*::
 
-        ref = AtomicReference(initial_snapshot)
-
-        ref.update(lambda root: root.counter, new_counter_value)
+        reader, updater = create_atomic(initial_snapshot)
+        updater.update(lambda root: root.counter, new_counter_value)
+        current = reader.get()
 
     *selector* passed to :meth:`update` must be a **pure function** — the
     retry loop may call it more than once under write contention.
@@ -145,4 +154,18 @@ class AtomicReference(Generic[_T]):
                 return new
 
 
-__all__ = ["AtomicReader", "AtomicReference", "AtomicUpdater"]
+def create_atomic(initial: _T) -> "tuple[AtomicReader[_T], AtomicUpdater[_T]]":
+    """Create an atomic reference cell seeded with *initial*.
+
+    Returns a ``(reader, updater)`` pair backed by a single
+    :class:`_AtomicReference`.  Pass the reader to collaborators that only
+    observe state; pass the updater to collaborators that publish updates.
+
+    A collaborator that holds *both* is crossing an ownership boundary —
+    prefer putting that logic in the class that called :func:`create_atomic`.
+    """
+    ref: _AtomicReference[_T] = _AtomicReference(initial)
+    return ref, ref
+
+
+__all__ = ["AtomicReader", "AtomicUpdater", "create_atomic"]

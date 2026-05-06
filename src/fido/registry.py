@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReader, AtomicReference, AtomicUpdater
+from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
@@ -210,10 +210,13 @@ class WorkerRegistry:
         self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
-        # _state holds the atomically-swapped FidoState snapshot.  Writers
-        # call AtomicReference.update(selector, value) to install a value at a
-        # path via CAS; readers call .get() without any lock (lock-free).
-        self._state: AtomicReference[FidoState] = AtomicReference(_EMPTY_FIDO_STATE)
+        # _state_reader / _state_updater are the two narrow faces of the
+        # atomic FidoState cell.  Writers call _state_updater.update(selector,
+        # value) to CAS-install a value at a Lens path; readers call
+        # _state_reader.get() without any lock (lock-free).
+        self._state_reader: AtomicReader[FidoState]
+        self._state_updater: AtomicUpdater[FidoState]
+        self._state_reader, self._state_updater = create_atomic(_EMPTY_FIDO_STATE)
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -349,7 +352,7 @@ class WorkerRegistry:
             crash_record=crash_record,
             webhook_activities=(),
         )
-        self._state.update(lambda root: root.repos[_name], new_repo)
+        self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()
         log.info("started WorkerThread for %s", repo_cfg.name)
 
@@ -404,7 +407,7 @@ class WorkerRegistry:
             repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
         )
         _name = repo_name
-        self._state.update(lambda root: root.repos[_name].activity, activity)
+        self._state_updater.update(lambda root: root.repos[_name].activity, activity)
 
     def get_all_activities(self) -> list[WorkerActivity]:
         """Return a snapshot of all registered workers' current activities.
@@ -412,12 +415,12 @@ class WorkerRegistry:
         Lock-free: reads from the current :class:`FidoState` snapshot.
         Excludes repos whose activity is still the zero sentinel (``what=""``).
         """
-        repos = self._state.get().repos
+        repos = self._state_reader.get().repos
         return [rs.activity for rs in repos.values() if rs.activity.what != ""]
 
     def get_state(self) -> FidoState:
         """Return the current FidoState snapshot.  Lock-free."""
-        return self._state.get()
+        return self._state_reader.get()
 
     def get_state_reader(self) -> "AtomicReader[FidoState]":
         """Return a read-only view of the :class:`FidoState` snapshot.
@@ -426,7 +429,7 @@ class WorkerRegistry:
         Holding both a reader and an updater in one collaborator is a code
         smell — it usually means logic that belongs in the owner.
         """
-        return self._state
+        return self._state_reader
 
     def get_state_updater(self) -> "AtomicUpdater[FidoState]":
         """Return a write-only view for single-field writers.
@@ -438,7 +441,7 @@ class WorkerRegistry:
         conflict.  Holding both reader and updater in one collaborator is
         a code smell.
         """
-        return self._state
+        return self._state_updater
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.
@@ -458,7 +461,9 @@ class WorkerRegistry:
         )
         self._crash_records[repo_name] = new_crash
         _name = repo_name
-        self._state.update(lambda root: root.repos[_name].crash_record, new_crash)
+        self._state_updater.update(
+            lambda root: root.repos[_name].crash_record, new_crash
+        )
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
@@ -472,7 +477,9 @@ class WorkerRegistry:
         """
         acts = tuple(self._webhook_activities.get(repo_name, []))
         _name = repo_name
-        self._state.update(lambda root: root.repos[_name].webhook_activities, acts)
+        self._state_updater.update(
+            lambda root: root.repos[_name].webhook_activities, acts
+        )
 
     @contextmanager
     def webhook_activity(

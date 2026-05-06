@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReference
+from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
 from fido.provider import ProviderLimitWindow
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
@@ -18,10 +18,10 @@ from fido.rate_limit import (
 from fido.registry import FidoState
 
 
-def _make_state() -> AtomicReference[FidoState]:
-    """Return a fresh :class:`~fido.atomic.AtomicReference` seeded with an
-    empty :class:`~fido.registry.FidoState` for use in monitor tests."""
-    return AtomicReference(FidoState(repos=frozendict()))
+def _make_state() -> tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]:
+    """Return a fresh ``(reader, updater)`` pair seeded with an empty
+    :class:`~fido.registry.FidoState` for use in monitor tests."""
+    return create_atomic(FidoState(repos=frozendict()))
 
 
 # ── _parse_window ─────────────────────────────────────────────────────────────
@@ -112,49 +112,49 @@ def _resources(rest_used: int = 5, gql_used: int = 7) -> dict:
 class TestRateLimitMonitorRefresh:
     def test_state_has_zero_limits_before_first_refresh(self) -> None:
         gh = MagicMock()
-        state = _make_state()
-        RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        RateLimitMonitor(gh, state_updater)
         # Monitor construction does not seed the state; zero-value until refresh
-        assert state.get().github_limits.rest.used is None
+        assert state_reader.get().github_limits.rest.used is None
         gh.get_rate_limit.assert_not_called()
 
     def test_refresh_stores_snapshot_in_state(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         limits = m.refresh()
         assert limits is not None
         assert limits.rest.used == 5
         assert limits.graphql.used == 7
-        assert state.get().github_limits is limits
+        assert state_reader.get().github_limits is limits
 
     def test_refresh_failure_keeps_prior_state(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         first = m.refresh()
         gh.get_rate_limit.side_effect = RuntimeError("network down")
         second = m.refresh()
         assert second is None
-        assert state.get().github_limits is first
+        assert state_reader.get().github_limits is first
 
     def test_refresh_updates_when_new_data_arrives(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         m.refresh()
         gh.get_rate_limit.return_value = _resources(rest_used=42)
         m.refresh()
-        assert state.get().github_limits.rest.used == 42
+        assert state_reader.get().github_limits.rest.used == 42
 
     def test_handles_missing_resources_keys(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = {}
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        _, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         limits = m.refresh()
         assert limits is not None
         assert limits.rest.limit == 0
@@ -165,23 +165,25 @@ class TestRateLimitMonitorStartThread:
     def test_returns_daemon_thread(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        t = RateLimitMonitor(gh, _make_state()).start_thread(_interval=60.0)
+        _, state_updater = _make_state()
+        t = RateLimitMonitor(gh, state_updater).start_thread(_interval=60.0)
         assert t.daemon
 
     def test_thread_name(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        t = RateLimitMonitor(gh, _make_state()).start_thread(_interval=60.0)
+        _, state_updater = _make_state()
+        t = RateLimitMonitor(gh, state_updater).start_thread(_interval=60.0)
         assert t.name == "rate-limit-monitor"
 
     def test_does_initial_refresh_before_loop(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         m.start_thread(_interval=60.0)
         # At least the inline initial refresh happened
-        limits = state.get().github_limits
+        limits = state_reader.get().github_limits
         assert limits.rest.used is not None
         assert limits.graphql.used is not None
         gh.get_rate_limit.assert_called()
@@ -189,7 +191,8 @@ class TestRateLimitMonitorStartThread:
     def test_calls_refresh_periodically(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh, _make_state())
+        _, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         m.start_thread(_interval=0.01)
         time.sleep(0.1)
         assert gh.get_rate_limit.call_count >= 2
@@ -202,8 +205,8 @@ class TestRateLimitMonitorThreadSafety:
     def test_concurrent_refresh_and_latest(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        state = _make_state()
-        m = RateLimitMonitor(gh, state)
+        state_reader, state_updater = _make_state()
+        m = RateLimitMonitor(gh, state_updater)
         m.refresh()  # seed
 
         stop = threading.Event()
@@ -214,7 +217,7 @@ class TestRateLimitMonitorThreadSafety:
 
         def reader() -> None:
             while not stop.is_set():
-                limits = state.get().github_limits
+                limits = state_reader.get().github_limits
                 # always either the zero seed or a real populated snapshot
                 assert isinstance(limits, GitHubLimit)
 
