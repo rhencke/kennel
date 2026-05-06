@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -175,10 +175,10 @@ class FidoState:
     """
 
     repos: frozendict[str, RepoState]
-    github_limits: GitHubLimit = field(default_factory=GitHubLimit)
+    github_limits: GitHubLimit
 
 
-_EMPTY_FIDO_STATE = FidoState(repos=frozendict())
+_EMPTY_FIDO_STATE = FidoState(repos=frozendict(), github_limits=GitHubLimit())
 
 
 @dataclass(frozen=True, slots=True)
