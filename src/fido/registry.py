@@ -22,7 +22,7 @@ from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
     from fido.events import Dispatcher
-    from fido.rate_limit import RateLimitSnapshot
+    from fido.provider import ProviderLimitSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ class FidoState:
     """
 
     repos: frozendict[str, RepoState]
-    rate_limit: "RateLimitSnapshot | None" = None
+    provider_limits: "frozendict[str, ProviderLimitSnapshot]" = frozendict()
 
 
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())

@@ -1,5 +1,6 @@
 """Tests for fido.rate_limit — RateLimitMonitor + parsers (closes #812)."""
 
+import threading
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -7,11 +8,10 @@ from unittest.mock import MagicMock
 from frozendict import frozendict
 
 from fido.atomic import AtomicReference
+from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
     RateLimitMonitor,
-    RateLimitSnapshot,
-    RateLimitWindow,
     _parse_window,  # noqa: PLC2701
 )
 from fido.registry import FidoState
@@ -29,9 +29,9 @@ def _make_state() -> AtomicReference[FidoState]:
 class TestParseWindow:
     def test_parses_full_payload(self) -> None:
         w = _parse_window(
-            "core", {"used": 5, "limit": 5000, "reset": 1700000000, "remaining": 4995}
+            "rest", {"used": 5, "limit": 5000, "reset": 1700000000, "remaining": 4995}
         )
-        assert w.name == "core"
+        assert w.name == "rest"
         assert w.used == 5
         assert w.limit == 5000
         assert w.resets_at == datetime.fromtimestamp(1700000000, tz=timezone.utc)
@@ -43,33 +43,27 @@ class TestParseWindow:
         assert w.resets_at == datetime.fromtimestamp(0, tz=timezone.utc)
 
     def test_handles_garbage_reset_value(self) -> None:
-        w = _parse_window("core", {"reset": "not-a-number"})
+        w = _parse_window("rest", {"reset": "not-a-number"})
         assert w.resets_at == datetime.fromtimestamp(0, tz=timezone.utc)
 
 
-# ── RateLimitWindow properties ────────────────────────────────────────────────
+# ── ProviderLimitWindow properties ───────────────────────────────────────────
 
 
-class TestRateLimitWindowProperties:
-    def _w(self, used: int, limit: int) -> RateLimitWindow:
-        return RateLimitWindow(
-            name="core",
+class TestProviderLimitWindowProperties:
+    def _w(self, used: int, limit: int) -> ProviderLimitWindow:
+        return ProviderLimitWindow(
+            name="rest",
             used=used,
             limit=limit,
             resets_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
         )
 
-    def test_remaining_basic(self) -> None:
-        assert self._w(used=10, limit=100).remaining == 90
+    def test_pressure_basic(self) -> None:
+        assert self._w(used=10, limit=100).pressure == 0.1
 
-    def test_remaining_clamps_to_zero_when_over(self) -> None:
-        assert self._w(used=200, limit=100).remaining == 0
-
-    def test_percent_remaining(self) -> None:
-        assert self._w(used=25, limit=100).percent_remaining == 75.0
-
-    def test_percent_remaining_zero_limit(self) -> None:
-        assert self._w(used=0, limit=0).percent_remaining == 0.0
+    def test_pressure_none_when_limit_zero(self) -> None:
+        assert self._w(used=0, limit=0).pressure is None
 
 
 # ── RateLimitMonitor ──────────────────────────────────────────────────────────
@@ -93,10 +87,14 @@ def _resources(rest_used: int = 5, gql_used: int = 7) -> dict:
 
 
 class TestRateLimitMonitorRefresh:
-    def test_returns_none_before_first_refresh(self) -> None:
+    def test_returns_zero_snapshot_before_first_refresh(self) -> None:
         gh = MagicMock()
         m = RateLimitMonitor(gh, _make_state())
-        assert m.latest() is None
+        snap = m.latest()
+        # Seeded with zero-value snapshot (no windows populated from API yet)
+        assert snap is not None
+        assert snap.provider == ProviderID.GITHUB
+        assert snap.windows == ()
         gh.get_rate_limit.assert_not_called()
 
     def test_refresh_stores_snapshot(self) -> None:
@@ -105,8 +103,11 @@ class TestRateLimitMonitorRefresh:
         m = RateLimitMonitor(gh, _make_state())
         snap = m.refresh()
         assert snap is not None
-        assert snap.rest.used == 5
-        assert snap.graphql.used == 7
+        assert snap.provider == ProviderID.GITHUB
+        rest_w = snap.windows[0]
+        gql_w = snap.windows[1]
+        assert rest_w.used == 5
+        assert gql_w.used == 7
         assert m.latest() is snap
 
     def test_refresh_failure_keeps_prior_snapshot(self) -> None:
@@ -128,7 +129,7 @@ class TestRateLimitMonitorRefresh:
         m.refresh()
         latest = m.latest()
         assert latest is not None
-        assert latest.rest.used == 42
+        assert latest.windows[0].used == 42
 
     def test_handles_missing_resources_keys(self) -> None:
         gh = MagicMock()
@@ -136,8 +137,8 @@ class TestRateLimitMonitorRefresh:
         m = RateLimitMonitor(gh, _make_state())
         snap = m.refresh()
         assert snap is not None
-        assert snap.rest.limit == 0
-        assert snap.graphql.limit == 0
+        assert snap.windows[0].limit == 0
+        assert snap.windows[1].limit == 0
 
 
 class TestRateLimitMonitorStartThread:
@@ -159,7 +160,9 @@ class TestRateLimitMonitorStartThread:
         m = RateLimitMonitor(gh, _make_state())
         m.start_thread(_interval=60.0)
         # At least the inline initial refresh happened
-        assert m.latest() is not None
+        snap = m.latest()
+        assert snap is not None
+        assert len(snap.windows) == 2
         gh.get_rate_limit.assert_called()
 
     def test_calls_refresh_periodically(self) -> None:
@@ -176,8 +179,6 @@ class TestRateLimitMonitorThreadSafety:
     when called concurrently from many threads (Python 3.14t free-threaded)."""
 
     def test_concurrent_refresh_and_latest(self) -> None:
-        import threading
-
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
         m = RateLimitMonitor(gh, _make_state())
@@ -192,8 +193,9 @@ class TestRateLimitMonitorThreadSafety:
         def reader() -> None:
             while not stop.is_set():
                 snap = m.latest()
-                # always either None (briefly) or a real RateLimitSnapshot
-                assert snap is None or isinstance(snap, RateLimitSnapshot)
+                # always either the zero seed or a real populated snapshot
+                assert snap is not None
+                assert isinstance(snap, ProviderLimitSnapshot)
 
         threads = [threading.Thread(target=writer) for _ in range(2)] + [
             threading.Thread(target=reader) for _ in range(4)

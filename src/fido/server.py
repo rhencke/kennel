@@ -45,8 +45,9 @@ from fido.infra import (
     ProcessRunner,
     real_infra,
 )
+from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import RateLimitMonitor, RateLimitSnapshot, RateLimitWindow
+from fido.rate_limit import RateLimitMonitor
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
@@ -193,14 +194,10 @@ def _activities_to_xml(payload: dict[str, Any]) -> bytes:
     if rate_limit is not None:
         rl_el = SubElement(root, f"{{{_NS_FIDO}}}rate_limit")
         for rl_key, rl_val in rate_limit.items():
-            if isinstance(rl_val, dict):
-                child_el = SubElement(rl_el, f"{{{_NS_FIDO}}}{rl_key}")
-                for k, v in rl_val.items():
-                    sub_el = SubElement(child_el, f"{{{_NS_FIDO}}}{k}")
-                    sub_el.text = _xml_text(v)
-            else:
-                child_el = SubElement(rl_el, f"{{{_NS_FIDO}}}{rl_key}")
-                child_el.text = _xml_text(rl_val)
+            child_el = SubElement(rl_el, f"{{{_NS_FIDO}}}{rl_key}")
+            for k, v in rl_val.items():
+                sub_el = SubElement(child_el, f"{{{_NS_FIDO}}}{k}")
+                sub_el.text = _xml_text(v)
 
     for act in payload.get("activities", []):
         repo = SubElement(root, f"{{{_NS_FIDO}}}repo")
@@ -276,30 +273,32 @@ def _serialize_provider_status(
     }
 
 
-def _serialize_rate_limit(snap: RateLimitSnapshot | None) -> dict[str, Any] | None:
-    """Serialize a :class:`~fido.rate_limit.RateLimitSnapshot` for the
-    ``/status.json`` payload.
+def _serialize_rate_limit(snap: ProviderLimitSnapshot | None) -> dict[str, Any] | None:
+    """Serialize the GitHub :class:`~fido.provider.ProviderLimitSnapshot` for
+    the ``/status.json`` payload.
 
     Returns ``None`` when *snap* is ``None`` — i.e. before the rate-limit
     monitor has completed its first successful poll.  The snapshot is read
-    directly from :attr:`~fido.registry.FidoState.rate_limit` on the
+    directly from :attr:`~fido.registry.FidoState.provider_limits` on the
     registry's atomically-swapped state, so no separate lock is needed.
     """
     if snap is None:
         return None
+    windows_by_name = {w.name: w for w in snap.windows}
     return {
-        "rest": _serialize_rate_window(snap.rest),
-        "graphql": _serialize_rate_window(snap.graphql),
-        "fetched_at": snap.fetched_at.isoformat(),
+        "rest": _serialize_rate_window(windows_by_name.get("rest")),
+        "graphql": _serialize_rate_window(windows_by_name.get("graphql")),
     }
 
 
-def _serialize_rate_window(window: RateLimitWindow) -> dict[str, Any]:
+def _serialize_rate_window(window: ProviderLimitWindow | None) -> dict[str, Any]:
+    if window is None:
+        return {"name": "unknown", "used": 0, "limit": 0, "resets_at": None}
     return {
         "name": window.name,
         "used": window.used,
         "limit": window.limit,
-        "resets_at": window.resets_at.isoformat(),
+        "resets_at": window.resets_at.isoformat() if window.resets_at else None,
     }
 
 
@@ -1262,7 +1261,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         fido_uptime = (now - started).total_seconds() if started is not None else None
         return {
             "activities": self._collect_activities(),
-            "rate_limit": _serialize_rate_limit(self.registry.get_state().rate_limit),
+            "rate_limit": _serialize_rate_limit(
+                self.registry.get_state().provider_limits.get(ProviderID.GITHUB)
+            ),
             "fido_uptime_seconds": fido_uptime,
         }
 

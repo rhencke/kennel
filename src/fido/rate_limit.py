@@ -2,10 +2,10 @@
 
 Polls ``GET /rate_limit`` once per minute (per GitHub docs, this endpoint
 itself does not count against any quota), and publishes the latest snapshot
-into :class:`~fido.registry.FidoState` via a CAS update on the registry's
-:class:`~fido.atomic.AtomicReference`.  Reads are lock-free: callers call
-:meth:`~RateLimitMonitor.latest` which simply reads
-:attr:`~fido.registry.FidoState.rate_limit` from the current snapshot.
+into :attr:`~fido.registry.FidoState.provider_limits` under the
+``"github"`` key via a CAS update on the registry's
+:class:`~fido.atomic.AtomicReference`.  Reads are lock-free: callers read
+``provider_limits["github"]`` from the current :class:`~fido.registry.FidoState`.
 
 The poller thread treats fetch failures as soft errors — the previous
 snapshot stays put until the next successful refresh.
@@ -14,49 +14,16 @@ snapshot stays put until the next successful refresh.
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from fido.atomic import AtomicReference
 from fido.github import GitHub
+from fido.provider import ProviderID, ProviderLimitSnapshot, ProviderLimitWindow
 
 log = logging.getLogger(__name__)
 
 _REFRESH_INTERVAL: float = 60.0
-
-
-@dataclass(frozen=True)
-class RateLimitWindow:
-    """One resource window from ``GET /rate_limit``.
-
-    *resets_at* is the tz-aware datetime when *used* drops back to zero
-    (parsed from GitHub's epoch-seconds ``reset`` field).
-    """
-
-    name: str
-    used: int
-    limit: int
-    resets_at: datetime
-
-    @property
-    def remaining(self) -> int:
-        return max(self.limit - self.used, 0)
-
-    @property
-    def percent_remaining(self) -> float:
-        if self.limit <= 0:
-            return 0.0
-        return 100.0 * self.remaining / self.limit
-
-
-@dataclass(frozen=True)
-class RateLimitSnapshot:
-    """One full ``/rate_limit`` response, parsed for the windows we display."""
-
-    rest: RateLimitWindow
-    graphql: RateLimitWindow
-    fetched_at: datetime
 
 
 class RateLimitMonitor:
@@ -80,15 +47,23 @@ class RateLimitMonitor:
     def __init__(self, gh: GitHub, state: AtomicReference[Any]) -> None:
         self._gh = gh
         self._state = state
+        # Seed the provider_limits map with a zero-value entry so the Lens
+        # path exists before the first refresh completes.
+        limits = self._state.get().provider_limits
+        if ProviderID.GITHUB not in limits:
+            zero = ProviderLimitSnapshot(provider=ProviderID.GITHUB)
+            self._state.update(
+                lambda root: root.provider_limits[ProviderID.GITHUB], zero
+            )
 
-    def latest(self) -> RateLimitSnapshot | None:
+    def latest(self) -> ProviderLimitSnapshot | None:
         """Lock-free read of the latest rate-limit snapshot, or ``None``
         before the first successful refresh."""
-        return self._state.get().rate_limit
+        return self._state.get().provider_limits.get(ProviderID.GITHUB)
 
-    def refresh(self) -> RateLimitSnapshot | None:
+    def refresh(self) -> ProviderLimitSnapshot | None:
         """Hit ``GET /rate_limit`` and publish the snapshot into
-        :class:`~fido.registry.FidoState` via CAS update.
+        :attr:`~fido.registry.FidoState.provider_limits` via CAS update.
 
         Returns the new snapshot on success, ``None`` on failure (the
         prior snapshot remains in the shared state).
@@ -98,18 +73,24 @@ class RateLimitMonitor:
         except Exception:
             log.exception("rate-limit monitor: refresh failed — keeping prior snapshot")
             return None
-        snapshot = RateLimitSnapshot(
-            rest=_parse_window("core", resources.get("core") or {}),
-            graphql=_parse_window("graphql", resources.get("graphql") or {}),
-            fetched_at=datetime.now(tz=timezone.utc),
+        snapshot = ProviderLimitSnapshot(
+            provider=ProviderID.GITHUB,
+            windows=(
+                _parse_window("rest", resources.get("core") or {}),
+                _parse_window("graphql", resources.get("graphql") or {}),
+            ),
         )
-        self._state.update(lambda root: root.rate_limit, snapshot)
+        self._state.update(
+            lambda root: root.provider_limits[ProviderID.GITHUB], snapshot
+        )
+        rest = snapshot.windows[0] if snapshot.windows else None
+        gql = snapshot.windows[1] if len(snapshot.windows) > 1 else None
         log.info(
-            "rate-limit: rest %d/%d, graphql %d/%d",
-            snapshot.rest.used,
-            snapshot.rest.limit,
-            snapshot.graphql.used,
-            snapshot.graphql.limit,
+            "rate-limit: rest %s/%s, graphql %s/%s",
+            rest.used if rest else "?",
+            rest.limit if rest else "?",
+            gql.used if gql else "?",
+            gql.limit if gql else "?",
         )
         return snapshot
 
@@ -132,8 +113,8 @@ class RateLimitMonitor:
         return t
 
 
-def _parse_window(name: str, raw: dict[str, Any]) -> RateLimitWindow:
-    """Convert one ``resources.<name>`` entry into a :class:`RateLimitWindow`.
+def _parse_window(name: str, raw: dict[str, Any]) -> ProviderLimitWindow:
+    """Convert one ``resources.<name>`` entry into a :class:`ProviderLimitWindow`.
 
     Defaults to ``0/0`` and the unix epoch when fields are missing — the
     poller never raises just because GitHub omitted a field; the caller
@@ -144,7 +125,7 @@ def _parse_window(name: str, raw: dict[str, Any]) -> RateLimitWindow:
         resets_at = datetime.fromtimestamp(int(reset_epoch), tz=timezone.utc)
     except TypeError, ValueError, OverflowError, OSError:
         resets_at = datetime.fromtimestamp(0, tz=timezone.utc)
-    return RateLimitWindow(
+    return ProviderLimitWindow(
         name=name,
         used=int(raw.get("used", 0)),
         limit=int(raw.get("limit", 0)),
@@ -154,6 +135,4 @@ def _parse_window(name: str, raw: dict[str, Any]) -> RateLimitWindow:
 
 __all__ = [
     "RateLimitMonitor",
-    "RateLimitSnapshot",
-    "RateLimitWindow",
 ]

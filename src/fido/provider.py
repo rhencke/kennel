@@ -49,11 +49,18 @@ class ContextOverflowError(RuntimeError):
 
 
 class ProviderID(StrEnum):
-    """Supported LLM providers for fido."""
+    """Supported LLM providers for fido.
+
+    ``GITHUB`` represents the GitHub platform API itself (REST + GraphQL
+    rate-limit windows) — not an LLM provider, but tracked in the same
+    :attr:`~fido.registry.FidoState.provider_limits` map so all quota
+    pressure lives in one place.
+    """
 
     CLAUDE_CODE = "claude-code"
     COPILOT_CLI = "copilot-cli"
     CODEX = "codex"
+    GITHUB = "github"
 
 
 @dataclass(frozen=True)
