@@ -1564,7 +1564,7 @@ def run(
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
-    rate_limit_monitor = _RateLimitMonitor(gh)
+    rate_limit_monitor = _RateLimitMonitor(gh, registry.get_state_ref())
     rate_limit_monitor.start_thread()
     WebhookHandler.rate_limit_monitor = rate_limit_monitor
     WebhookHandler.fido_started_at = datetime.now(tz=timezone.utc)

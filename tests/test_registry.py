@@ -499,6 +499,14 @@ class TestWorkerRegistry:
         state = reg.get_state()
         assert "foo/bar" in state.repos
 
+    def test_get_state_ref_returns_backing_atomic_reference(self) -> None:
+        from fido.atomic import AtomicReference
+
+        reg, _ = self._make_registry(repos=["foo/bar"])
+        ref = reg.get_state_ref()
+        assert isinstance(ref, AtomicReference)
+        assert ref.get() is reg.get_state()
+
     def test_record_crash_stores_error_and_count(self) -> None:
         reg, _ = self._make_registry(repos=["foo/bar"])
         reg.record_crash("foo/bar", "boom")

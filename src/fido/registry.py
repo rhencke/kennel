@@ -22,6 +22,7 @@ from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
     from fido.events import Dispatcher
+    from fido.rate_limit import RateLimitSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ class FidoState:
     """
 
     repos: frozendict[str, RepoState]
+    rate_limit: "RateLimitSnapshot | None" = None
 
 
 _EMPTY_FIDO_STATE = FidoState(repos=frozendict())
@@ -416,6 +418,18 @@ class WorkerRegistry:
     def get_state(self) -> FidoState:
         """Return the current FidoState snapshot.  Lock-free."""
         return self._state.get()
+
+    def get_state_ref(self) -> AtomicReference[FidoState]:
+        """Return the raw :class:`~fido.atomic.AtomicReference` backing
+        :attr:`_state`.
+
+        Used by collaborators that are the single writer for a top-level
+        field and need to publish directly into the snapshot via CAS update
+        (e.g. :class:`~fido.rate_limit.RateLimitMonitor`).  Callers must
+        only update fields they own — writing to another collaborator's field
+        creates a silent ownership conflict.
+        """
+        return self._state
 
     def record_crash(self, repo_name: str, error: str) -> None:
         """Record an unexpected worker death for *repo_name*.

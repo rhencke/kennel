@@ -4,6 +4,9 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from frozendict import frozendict
+
+from fido.atomic import AtomicReference
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
     RateLimitMonitor,
@@ -11,6 +14,14 @@ from fido.rate_limit import (
     RateLimitWindow,
     _parse_window,  # noqa: PLC2701
 )
+from fido.registry import FidoState
+
+
+def _make_state() -> AtomicReference[FidoState]:
+    """Return a fresh :class:`~fido.atomic.AtomicReference` seeded with an
+    empty :class:`~fido.registry.FidoState` for use in monitor tests."""
+    return AtomicReference(FidoState(repos=frozendict()))
+
 
 # ── _parse_window ─────────────────────────────────────────────────────────────
 
@@ -84,14 +95,14 @@ def _resources(rest_used: int = 5, gql_used: int = 7) -> dict:
 class TestRateLimitMonitorRefresh:
     def test_returns_none_before_first_refresh(self) -> None:
         gh = MagicMock()
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         assert m.latest() is None
         gh.get_rate_limit.assert_not_called()
 
     def test_refresh_stores_snapshot(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         snap = m.refresh()
         assert snap is not None
         assert snap.rest.used == 5
@@ -101,7 +112,7 @@ class TestRateLimitMonitorRefresh:
     def test_refresh_failure_keeps_prior_snapshot(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         first = m.refresh()
         gh.get_rate_limit.side_effect = RuntimeError("network down")
         second = m.refresh()
@@ -111,7 +122,7 @@ class TestRateLimitMonitorRefresh:
     def test_refresh_updates_when_new_data_arrives(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources(rest_used=10)
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         m.refresh()
         gh.get_rate_limit.return_value = _resources(rest_used=42)
         m.refresh()
@@ -122,7 +133,7 @@ class TestRateLimitMonitorRefresh:
     def test_handles_missing_resources_keys(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = {}
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         snap = m.refresh()
         assert snap is not None
         assert snap.rest.limit == 0
@@ -133,19 +144,19 @@ class TestRateLimitMonitorStartThread:
     def test_returns_daemon_thread(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        t = RateLimitMonitor(gh).start_thread(_interval=60.0)
+        t = RateLimitMonitor(gh, _make_state()).start_thread(_interval=60.0)
         assert t.daemon
 
     def test_thread_name(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        t = RateLimitMonitor(gh).start_thread(_interval=60.0)
+        t = RateLimitMonitor(gh, _make_state()).start_thread(_interval=60.0)
         assert t.name == "rate-limit-monitor"
 
     def test_does_initial_refresh_before_loop(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         m.start_thread(_interval=60.0)
         # At least the inline initial refresh happened
         assert m.latest() is not None
@@ -154,7 +165,7 @@ class TestRateLimitMonitorStartThread:
     def test_calls_refresh_periodically(self) -> None:
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         m.start_thread(_interval=0.01)
         time.sleep(0.1)
         assert gh.get_rate_limit.call_count >= 2
@@ -169,7 +180,7 @@ class TestRateLimitMonitorThreadSafety:
 
         gh = MagicMock()
         gh.get_rate_limit.return_value = _resources()
-        m = RateLimitMonitor(gh)
+        m = RateLimitMonitor(gh, _make_state())
         m.refresh()  # seed
 
         stop = threading.Event()

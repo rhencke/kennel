@@ -18,6 +18,7 @@ import pytest
 from frozendict import frozendict
 
 from fido import provider
+from fido.atomic import AtomicReference
 from fido.claude import ClaudeClient
 from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
@@ -448,7 +449,7 @@ class TestGetEndpoint:
             "core": {"used": 5, "limit": 5000, "reset": 1700000000},
             "graphql": {"used": 12, "limit": 5000, "reset": 1700003600},
         }
-        monitor = RateLimitMonitor(gh)
+        monitor = RateLimitMonitor(gh, AtomicReference(FidoState(repos=frozendict())))
         monitor.refresh()
         WebhookHandler.rate_limit_monitor = monitor
         try:
@@ -496,7 +497,9 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
-        monitor = RateLimitMonitor(MagicMock())
+        monitor = RateLimitMonitor(
+            MagicMock(), AtomicReference(FidoState(repos=frozendict()))
+        )
         WebhookHandler.rate_limit_monitor = monitor
         try:
             resp = urllib.request.urlopen(f"{url}/status.json")
@@ -3519,7 +3522,8 @@ class TestRun:
             _RateLimitMonitor=mock_rl_cls,
         )
 
-        mock_rl_cls.assert_called_once_with(mock_gh_instance)
+        expected_state_ref = mock_make_registry.return_value.get_state_ref.return_value
+        mock_rl_cls.assert_called_once_with(mock_gh_instance, expected_state_ref)
         mock_rl_cls.return_value.start_thread.assert_called_once()
         assert WebhookHandler.rate_limit_monitor is mock_rl_cls.return_value
 
