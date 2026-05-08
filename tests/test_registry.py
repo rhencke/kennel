@@ -15,7 +15,6 @@ from fido.registry import (
     WorkerRegistry,
     _make_thread,
     create_fido_atomic,
-    get_all_activities,
     make_registry,
 )
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -370,42 +369,18 @@ class TestWorkerRegistry:
     def test_report_activity_stores_entry(self) -> None:
         reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
-        activities = get_all_activities(reader)
-        assert len(activities) == 1
-        assert activities[0].repo_name == "foo/bar"
-        assert activities[0].what == "Working on: #1"
-        assert activities[0].busy is True
+        activity = reader.get().repos["foo/bar"].activity
+        assert activity.repo_name == "foo/bar"
+        assert activity.what == "Working on: #1"
+        assert activity.busy is True
 
     def test_report_activity_overwrites_previous(self) -> None:
         reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/bar", "Napping", busy=False)
-        activities = get_all_activities(reader)
-        assert len(activities) == 1
-        assert activities[0].what == "Napping"
-        assert activities[0].busy is False
-
-    def test_get_all_activities_returns_all_repos(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar", "foo/baz"])
-        reg.report_activity("foo/bar", "Working on: #1", busy=True)
-        reg.report_activity("foo/baz", "Napping", busy=False)
-        activities = sorted(get_all_activities(reader), key=lambda a: a.repo_name)
-        assert [(a.repo_name, a.what, a.busy) for a in activities] == [
-            ("foo/bar", "Working on: #1", True),
-            ("foo/baz", "Napping", False),
-        ]
-
-    def test_get_all_activities_empty_initially(self) -> None:
-        reg, _, reader = self._make_registry()
-        assert get_all_activities(reader) == []
-
-    def test_get_all_activities_returns_snapshot(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
-        reg.report_activity("foo/bar", "Working on: #1", busy=True)
-        snapshot = get_all_activities(reader)
-        reg.report_activity("foo/bar", "Napping", busy=False)
-        # snapshot must not reflect the later update
-        assert snapshot[0].what == "Working on: #1"
+        activity = reader.get().repos["foo/bar"].activity
+        assert activity.what == "Napping"
+        assert activity.busy is False
 
     def test_report_activity_records_last_progress_at(self) -> None:
         import datetime as dt
@@ -413,8 +388,8 @@ class TestWorkerRegistry:
         fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
-        activities = get_all_activities(reader)
-        assert activities[0].last_progress_at == fixed
+        activity = reader.get().repos["foo/bar"].activity
+        assert activity.last_progress_at == fixed
 
     def test_report_activity_updates_last_progress_at(self) -> None:
         import datetime as dt
@@ -424,16 +399,16 @@ class TestWorkerRegistry:
         reg, _, reader = self._make_registry(repos=["foo/bar"])
         reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
         reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
-        activities = get_all_activities(reader)
-        assert activities[0].last_progress_at == t2
+        activity = reader.get().repos["foo/bar"].activity
+        assert activity.last_progress_at == t2
 
     def test_concurrent_report_and_read_are_safe(self) -> None:
-        """report_activity and get_all_activities are safe under concurrent load.
+        """report_activity is safe under concurrent load.
 
         Multiple writer threads each own one repo and hammer report_activity;
-        a reader thread continuously calls get_all_activities.  After all
-        writers finish, every repo must appear exactly once in the snapshot
-        with its final value, proving no data was lost or corrupted.
+        a reader thread continuously snapshots FidoState.  After all writers
+        finish, every repo must appear with its final value, proving no data
+        was lost or corrupted.
         """
         n_repos = 8
         repos = [f"owner/repo{i}" for i in range(n_repos)]
@@ -451,9 +426,8 @@ class TestWorkerRegistry:
         def reader_fn() -> None:
             try:
                 for _ in range(n_writes * n_repos):
-                    activities = get_all_activities(state_reader)
-                    # snapshot must be a plain list — no shared references
-                    assert isinstance(activities, list)
+                    snapshot = state_reader.get().repos
+                    assert isinstance(snapshot, dict)
             except Exception as exc:
                 errors.append(exc)
 
@@ -467,10 +441,10 @@ class TestWorkerRegistry:
 
         assert not errors, f"concurrent errors: {errors}"
 
-        final = {a.repo_name: a for a in get_all_activities(state_reader)}
-        assert set(final) == set(repos)
+        final_repos = state_reader.get().repos
+        assert set(final_repos) == set(repos)
         for repo in repos:
-            assert final[repo].what == f"step {n_writes - 1}"
+            assert final_repos[repo].activity.what == f"step {n_writes - 1}"
 
     def test_status_update_is_context_manager(self) -> None:
         reg, _, reader = self._make_registry()

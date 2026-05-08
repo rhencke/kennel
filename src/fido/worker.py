@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.atomic import AtomicReader
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
@@ -1217,7 +1216,6 @@ class Worker:
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
         nudges: Nudges | None = None,
-        state_reader: "AtomicReader[Any] | None" = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -1236,7 +1234,6 @@ class Worker:
         # iteration; webhook events keep the cache in sync.
         self._issue_cache = issue_cache
         self._registry = registry
-        self._state_reader: AtomicReader[Any] | None = state_reader
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
         self._next_turn_session_mode = TurnSessionMode.REUSE
@@ -1453,15 +1450,7 @@ class Worker:
         with ctx:
             if self._registry is not None:
                 self._registry.report_activity(self._repo_name, what, busy)
-                if self._state_reader is not None:
-                    repos = self._state_reader.get().repos
-                    activities = [
-                        (rs.activity.repo_name, rs.activity.what, rs.activity.busy)
-                        for rs in repos.values()
-                        if rs.activity.what != ""
-                    ]
-                else:
-                    activities = [(self._repo_name, what, busy)]
+                activities = [(self._repo_name, what, busy)]
             else:
                 activities = [(self.work_dir.name, what, busy)]
 
@@ -4215,7 +4204,6 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        state_reader: "AtomicReader[Any] | None" = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -4225,7 +4213,6 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
-        self._state_reader: AtomicReader[Any] | None = state_reader
         self._membership = membership if membership is not None else RepoMembership()
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
@@ -4544,7 +4531,6 @@ class WorkerThread(threading.Thread):
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,
                     first_iteration=self._is_first_iteration,
-                    state_reader=self._state_reader,
                     dispatcher=self._dispatcher,
                     issue_cache=self._issue_cache,
                 )

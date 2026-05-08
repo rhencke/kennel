@@ -769,68 +769,29 @@ class TestWorker:
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         registry = MagicMock()
-        state_reader = MagicMock()
-        state_reader.get.return_value.repos = {}
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
             tmp_path,
             gh,
             repo_name="owner/myrepo",
             registry=registry,
-            state_reader=state_reader,
             session=self._session(status="working"),
         ).set_status("working", busy=True, _sub_dir_fn=lambda: tmp_path)
         registry.report_activity.assert_called_once_with(
             "owner/myrepo", "working", True
         )
 
-    def test_set_status_uses_full_registry_snapshot_for_prompt(
-        self, tmp_path: Path
-    ) -> None:
-        gh = self._make_gh()
-        registry = MagicMock()
-        # Build a fake state_reader whose repos map contains two repo states.
-        state_reader = MagicMock()
-        rs_a = MagicMock()
-        rs_a.activity.repo_name = "owner/repo-a"
-        rs_a.activity.what = "fixing bug"
-        rs_a.activity.busy = True
-        rs_b = MagicMock()
-        rs_b.activity.repo_name = "owner/repo-b"
-        rs_b.activity.what = "napping"
-        rs_b.activity.busy = False
-        state_reader.get.return_value.repos = {
-            "owner/repo-a": rs_a,
-            "owner/repo-b": rs_b,
-        }
-        (tmp_path / "persona.md").write_text("I am Fido.")
-        session = self._session(status="fixing bug")
-        Worker(
-            tmp_path,
-            gh,
-            repo_name="owner/repo-a",
-            registry=registry,
-            state_reader=state_reader,
-            session=session,
-        ).set_status("fixing bug", _sub_dir_fn=lambda: tmp_path)
-        prompt_arg = session.prompt.call_args[0][0]
-        assert "owner/repo-a" in prompt_arg
-        assert "owner/repo-b" in prompt_arg
-
     def test_set_status_acquires_status_lock_when_registry_present(
         self, tmp_path: Path
     ) -> None:
         gh = self._make_gh()
         registry = MagicMock()
-        state_reader = MagicMock()
-        state_reader.get.return_value.repos = {}
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
             tmp_path,
             gh,
             repo_name="owner/repo",
             registry=registry,
-            state_reader=state_reader,
             session=self._session(status="working"),
         ).set_status("working", _sub_dir_fn=lambda: tmp_path)
         registry.status_update.assert_called_once()
@@ -15113,11 +15074,10 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
-            state_reader: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, state_reader, dispatcher, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -15222,11 +15182,10 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
-            state_reader: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, state_reader, dispatcher, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -15278,11 +15237,10 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
-            state_reader: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, state_reader, dispatcher, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -15740,11 +15698,10 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
-            state_reader: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, state_reader, dispatcher, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task

@@ -890,20 +890,6 @@ class WorkerRegistry:
             return list(self._issue_caches.values())
 
 
-def get_all_activities(reader: "AtomicReader[FidoState]") -> list[WorkerActivity]:
-    """Return a snapshot of all registered workers' current activities.
-
-    Lock-free: reads from the current :class:`FidoState` snapshot via *reader*.
-    Excludes repos whose activity is still the zero sentinel (``what=""``).
-
-    Accepts the :class:`~fido.atomic.AtomicReader` face directly so that the
-    caller (the composition root) remains the sole holder of the read face —
-    :class:`WorkerRegistry` is write-only and is never passed here.
-    """
-    repos = reader.get().repos
-    return [rs.activity for rs in repos.values() if rs.activity.what != ""]
-
-
 def create_fido_atomic() -> tuple[
     "AtomicReader[FidoState]", "AtomicUpdater[FidoState]"
 ]:
