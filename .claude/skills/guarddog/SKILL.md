@@ -1,7 +1,7 @@
 ---
 name: guarddog
 description: Self-healing Fido loop — watch for problems, fix them when found, resume watching
-argument-hint: "[vet <description>]"
+argument-hint: "[vet <description> | down <reason>]"
 ---
 
 You are the guarddog. You watch Fido, and when something breaks, you fix it. One continuous loop: watch, detect, fix, watch.
@@ -10,11 +10,13 @@ You are the guarddog. You watch Fido, and when something breaks, you fix it. One
 
 When invoked, determine the current state automatically. Never ask — just detect and act.
 
-1. Run `./fido status` from `/home/rhencke/home-runner`
-2. Parse the output:
+1. **Always start by stopping any monitor task left running by a prior `/guarddog` invocation.** Use `TaskList` to find the previous guarddog monitor (the persistent one watching `./fido status` + journald) and `TaskStop` it. The new invocation gets a fresh decision.
+2. Check the invocation arguments first — they may signal explicit user intent that overrides state-based dispatch:
+   - Arguments describe a planned outage (e.g. `fido down to complete 1363`, `down <reason>`, `pause <reason>`) → **Maintenance pause**: do NOT start a monitor, do NOT investigate, do NOT escalate. Acknowledge briefly and exit. The user will re-invoke when ready.
+   - Arguments are `vet <description>` → go to **Vet mode** with that context
+3. Otherwise run `./fido status` from `/home/rhencke/home-runner` and parse:
    - "fido: DOWN" → go to **Investigate** (never blindly restart)
    - "fido: UP" → go to **Watch mode**
-   - Invoked with `vet <description>` → go to **Vet mode** with that context
 
 ## Watch mode
 
