@@ -225,16 +225,16 @@ class WorkerRegistry:
     Threads are created via the injected *thread_factory* so tests can
     supply mock threads without patching module-level names.
 
-    Write-only relative to :class:`FidoState` — the registry holds only the
-    :class:`~fido.atomic.AtomicUpdater` face of the atomic cell.  The
-    :class:`~fido.atomic.AtomicReader` face lives in the composition root and
-    is passed directly to the status serialisation path so only the one
-    collaborator that actually reads holds the read face.
+    Holds both faces of the atomic :class:`FidoState` cell: the updater for
+    writing thread and activity state into the snapshot, and the reader for
+    lock-free thread lookups via :meth:`_get_thread`.  Status serialisation
+    reads the snapshot directly via the reader passed to
+    :class:`~fido.server.WebhookHandler` at the composition root.
 
     Usage::
 
         state_reader, state_updater = create_fido_atomic()
-        registry = WorkerRegistry(my_factory, state_updater)
+        registry = WorkerRegistry(my_factory, state_reader, state_updater)
         registry.start(repo_cfg)   # create + start thread
         registry.wake("owner/repo")  # nudge thread to check for work
         registry.stop_all()          # clean shutdown
@@ -243,19 +243,23 @@ class WorkerRegistry:
     def __init__(
         self,
         thread_factory: Callable[..., WorkerThread],
+        state_reader: "AtomicReader[FidoState]",
         state_updater: "AtomicUpdater[FidoState]",
     ) -> None:
         self._threads: dict[str, WorkerThread] = {}
         # _threads_lock guards _threads: written by start() on the watchdog
-        # thread, read from HTTP handler threads (wake, abort_task, get_session,
-        # etc.).  Python 3.14t has no GIL — dict reads and writes are not atomic.
+        # thread, read from stop_all/stop_and_join (not yet migrated to the
+        # snapshot).  Python 3.14t has no GIL — dict reads and writes are not atomic.
         self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
-        # _state_updater is the write-only face of the atomic FidoState cell.
+        # _state_reader is the read face of the atomic FidoState cell.
+        # Lock-free thread lookups (wake, abort_task, get_session, …) call
+        # _get_thread() which reads thread_handle from the snapshot via this reader.
+        self._state_reader: "AtomicReader[FidoState]" = state_reader
+        # _state_updater is the write face of the atomic FidoState cell.
         # Writers call _state_updater.update(selector, value) to CAS-install a
-        # value at a Lens path.  The read face (AtomicReader) lives in the
-        # composition root; this class never reads the snapshot.
+        # value at a Lens path.
         self._state_updater: AtomicUpdater[FidoState] = state_updater
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
@@ -290,6 +294,19 @@ class WorkerRegistry:
         # so the snapshot is always up to date.
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
+
+    def _get_thread(self, repo_name: str) -> WorkerThread | None:
+        """Return the :class:`~fido.worker.WorkerThread` for *repo_name* from
+        the lock-free snapshot, or ``None`` if no thread has been started.
+
+        Reads :attr:`RepoState.thread_handle` via the atomic reader — no lock
+        acquisition needed.  Callers that only need to *invoke* thread methods
+        (wake, abort, session lookups) use this instead of ``_threads_lock``.
+        """
+        repo_state = self._state_reader.get().repos.get(repo_name)
+        if repo_state is None or repo_state.thread_handle is None:
+            return None
+        return repo_state.thread_handle.thread
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -402,8 +419,7 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         if thread:
             thread.wake()
 
@@ -416,15 +432,13 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         if thread:
             thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
         """Recover the attached provider session for *repo_name*, if present."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         if thread is None:
             return False
         return thread.recover_provider()
@@ -592,14 +606,12 @@ class WorkerRegistry:
 
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread is not None and thread.is_alive()
 
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.crash_error if thread is not None else None
 
     def get_session_owner(self, repo_name: str) -> str | None:
@@ -609,8 +621,7 @@ class WorkerRegistry:
         registered thread.  Returns ``None`` when no thread is registered for
         the repo, no session exists, or the lock is currently free.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_owner if thread is not None else None
 
     def get_session_alive(self, repo_name: str) -> bool:
@@ -620,8 +631,7 @@ class WorkerRegistry:
         currently holds still reports ``session_alive=True`` so status display
         can distinguish "session exists, idle" from "no session".
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_alive if thread is not None else False
 
     def get_session_pid(self, repo_name: str) -> int | None:
@@ -631,26 +641,22 @@ class WorkerRegistry:
         pgrep — the system prompt file path changed in #456 so the pgrep
         heuristic in :mod:`fido.status` can no longer locate it.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_pid if thread is not None else None
 
     def get_session_dropped_count(self, repo_name: str) -> int:
         """Return how many stale persistent session ids were dropped for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_dropped_count if thread is not None else 0
 
     def get_session_sent_count(self, repo_name: str) -> int:
         """Return the number of messages sent to the current session subprocess for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_sent_count if thread is not None else 0
 
     def get_session_received_count(self, repo_name: str) -> int:
         """Return the number of events received from the current session subprocess for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         return thread.session_received_count if thread is not None else 0
 
     def set_rescoping(self, repo_name: str, active: bool) -> None:
@@ -883,8 +889,7 @@ class WorkerRegistry:
         when no worker thread is registered for the repo or the thread has
         not yet created its session.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         if thread is None:
             return None
         provider = thread.current_provider()
@@ -966,6 +971,7 @@ def make_registry(
     config: Config | None = None,
     *,
     dispatchers: "dict[str, Dispatcher]",
+    state_reader: "AtomicReader[FidoState]",
     state_updater: "AtomicUpdater[FidoState]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
@@ -974,7 +980,7 @@ def make_registry(
     Uses :func:`_make_thread` as the factory; all threads share the provided
     :class:`~fido.github.GitHub` client.  The caller (composition root) is
     responsible for creating the atomic cell via :func:`create_fido_atomic`
-    and passing the updater face here.  Pass a custom registry directly
+    and passing both faces here.  Pass a custom registry directly
     (with a mock factory) in tests instead of calling this.
     """
 
@@ -994,7 +1000,7 @@ def make_registry(
             dispatchers=dispatchers,
         )
 
-    registry = WorkerRegistry(factory, state_updater)
+    registry = WorkerRegistry(factory, state_reader, state_updater)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

@@ -1561,7 +1561,12 @@ def run(
     # without going through the registry at all.
     state_reader, state_updater = _create_fido_atomic()
     registry = _make_registry(
-        config.repos, gh, config, dispatchers=dispatchers, state_updater=state_updater
+        config.repos,
+        gh,
+        config,
+        dispatchers=dispatchers,
+        state_reader=state_reader,
+        state_updater=state_updater,
     )
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader

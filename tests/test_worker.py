@@ -802,8 +802,8 @@ class TestWorker:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
         from fido.registry import WorkerRegistry, create_fido_atomic
 
-        _, updater = create_fido_atomic()
-        registry = WorkerRegistry(MagicMock(), updater)
+        reader, updater = create_fido_atomic()
+        registry = WorkerRegistry(MagicMock(), reader, updater)
         # Prepopulate FidoState so report_activity can lens-write into it.
         for i in range(3):
             registry.start(_default_repo_cfg(tmp_path, repo_name=f"owner/repo{i}"))

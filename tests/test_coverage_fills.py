@@ -63,8 +63,8 @@ class TestWorkerRegistryPreemptionHelpers:
     def _registry(self) -> WorkerRegistry:
         # WorkerRegistry takes a thread factory callable; tests don't
         # need real WorkerThreads, so a no-op factory is fine.
-        _, updater = create_fido_atomic()
-        return WorkerRegistry(MagicMock(), updater)
+        reader, updater = create_fido_atomic()
+        return WorkerRegistry(MagicMock(), reader, updater)
 
     def test_note_provider_interrupt_requested(self) -> None:
         registry = self._registry()

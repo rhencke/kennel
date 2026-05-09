@@ -1919,8 +1919,8 @@ class TestProcessAction:
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
-        _, updater = create_fido_atomic()
-        handler.registry = WorkerRegistry(MagicMock(), updater)
+        reader, updater = create_fido_atomic()
+        handler.registry = WorkerRegistry(MagicMock(), reader, updater)
         handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
