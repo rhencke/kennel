@@ -83,7 +83,6 @@ class RateLimitInfo:
 
     rest: RateLimitWindowInfo
     graphql: RateLimitWindowInfo
-    fetched_at: datetime
 
 
 @dataclass
@@ -500,15 +499,11 @@ def _parse_rate_limit(raw: object) -> RateLimitInfo | None:
         return None
     rest_raw = raw.get("rest")
     graphql_raw = raw.get("graphql")
-    fetched_at = _parse_iso_datetime(raw.get("fetched_at"))
     if not isinstance(rest_raw, dict) or not isinstance(graphql_raw, dict):
-        return None
-    if fetched_at is None:
         return None
     return RateLimitInfo(
         rest=_parse_rate_window(rest_raw),
         graphql=_parse_rate_window(graphql_raw),
-        fetched_at=fetched_at,
     )
 
 

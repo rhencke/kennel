@@ -3045,21 +3045,17 @@ class TestParseRateLimit:
         assert _parse_rate_limit("nope") is None
 
     def test_returns_none_when_rest_missing(self) -> None:
-        raw = {"graphql": {}, "fetched_at": "2026-04-19T12:00:00+00:00"}
+        raw = {"graphql": {}}
         assert _parse_rate_limit(raw) is None
 
     def test_returns_none_when_graphql_missing(self) -> None:
-        raw = {"rest": {}, "fetched_at": "2026-04-19T12:00:00+00:00"}
-        assert _parse_rate_limit(raw) is None
-
-    def test_returns_none_when_fetched_at_missing(self) -> None:
-        raw = {"rest": {}, "graphql": {}}
+        raw = {"rest": {}}
         assert _parse_rate_limit(raw) is None
 
     def test_parses_full_payload(self) -> None:
         raw = {
             "rest": {
-                "name": "core",
+                "name": "rest",
                 "used": 5,
                 "limit": 5000,
                 "resets_at": "2026-04-19T13:00:00+00:00",
@@ -3070,19 +3066,16 @@ class TestParseRateLimit:
                 "limit": 5000,
                 "resets_at": "2026-04-19T14:00:00+00:00",
             },
-            "fetched_at": "2026-04-19T12:00:00+00:00",
         }
         info = _parse_rate_limit(raw)
         assert info is not None
         assert info.rest.used == 5
         assert info.graphql.used == 12
-        assert info.fetched_at.year == 2026
 
     def test_window_falls_back_to_epoch_when_resets_at_invalid(self) -> None:
         raw = {
-            "rest": {"name": "core", "used": 0, "limit": 5000, "resets_at": "garbage"},
+            "rest": {"name": "rest", "used": 0, "limit": 5000, "resets_at": "garbage"},
             "graphql": {"name": "graphql", "used": 0, "limit": 5000},
-            "fetched_at": "2026-04-19T12:00:00+00:00",
         }
         info = _parse_rate_limit(raw)
         assert info is not None
@@ -3152,7 +3145,6 @@ class TestFormatRateLimitLine:
         info = RateLimitInfo(
             rest=_window("core", used=5, limit=5000),
             graphql=_window("graphql", used=10, limit=5000),
-            fetched_at=datetime.now(tz=timezone.utc),
         )
         out = _format_rate_limit_line(info)
         assert out is not None
@@ -3186,7 +3178,6 @@ class TestFormatStatusRateLimitIntegration:
         info = RateLimitInfo(
             rest=_window("core", used=5, limit=5000),
             graphql=_window("graphql", used=12, limit=5000),
-            fetched_at=datetime.now(tz=timezone.utc),
         )
         status = FidoStatus(
             fido_pid=None,
@@ -3227,7 +3218,7 @@ class TestFetchActivitiesRateLimit:
     def test_parses_rate_limit_payload(self) -> None:
         rate = {
             "rest": {
-                "name": "core",
+                "name": "rest",
                 "used": 7,
                 "limit": 5000,
                 "resets_at": "2026-04-19T13:00:00+00:00",
@@ -3238,7 +3229,6 @@ class TestFetchActivitiesRateLimit:
                 "limit": 5000,
                 "resets_at": "2026-04-19T14:00:00+00:00",
             },
-            "fetched_at": "2026-04-19T12:00:00+00:00",
         }
         data = self._wrap([], rate)
         _, info = _fetch_activities(9000, _urlopen=self._make_urlopen(data))

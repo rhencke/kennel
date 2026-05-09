@@ -18,7 +18,7 @@ import pytest
 
 from fido import provider
 from fido.provider_factory import DefaultProviderFactory
-from fido.registry import WorkerRegistry
+from fido.registry import WorkerRegistry, create_fido_atomic
 from fido.tasks import (
     _merge_thread_lineage,
     _review_thread_contains_comment,
@@ -63,7 +63,8 @@ class TestWorkerRegistryPreemptionHelpers:
     def _registry(self) -> WorkerRegistry:
         # WorkerRegistry takes a thread factory callable; tests don't
         # need real WorkerThreads, so a no-op factory is fine.
-        return WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        return WorkerRegistry(MagicMock(), updater)
 
     def test_note_provider_interrupt_requested(self) -> None:
         registry = self._registry()

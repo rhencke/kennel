@@ -769,7 +769,6 @@ class TestWorker:
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         registry = MagicMock()
-        registry.get_all_activities.return_value = []
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
             tmp_path,
@@ -782,39 +781,11 @@ class TestWorker:
             "owner/myrepo", "working", True
         )
 
-    def test_set_status_uses_full_registry_snapshot_for_prompt(
-        self, tmp_path: Path
-    ) -> None:
-        gh = self._make_gh()
-        registry = MagicMock()
-        activity_a = MagicMock()
-        activity_a.repo_name = "owner/repo-a"
-        activity_a.what = "fixing bug"
-        activity_a.busy = True
-        activity_b = MagicMock()
-        activity_b.repo_name = "owner/repo-b"
-        activity_b.what = "napping"
-        activity_b.busy = False
-        registry.get_all_activities.return_value = [activity_a, activity_b]
-        (tmp_path / "persona.md").write_text("I am Fido.")
-        session = self._session(status="fixing bug")
-        Worker(
-            tmp_path,
-            gh,
-            repo_name="owner/repo-a",
-            registry=registry,
-            session=session,
-        ).set_status("fixing bug", _sub_dir_fn=lambda: tmp_path)
-        prompt_arg = session.prompt.call_args[0][0]
-        assert "owner/repo-a" in prompt_arg
-        assert "owner/repo-b" in prompt_arg
-
     def test_set_status_acquires_status_lock_when_registry_present(
         self, tmp_path: Path
     ) -> None:
         gh = self._make_gh()
         registry = MagicMock()
-        registry.get_all_activities.return_value = []
         (tmp_path / "persona.md").write_text("I am Fido.")
         Worker(
             tmp_path,
@@ -829,9 +800,10 @@ class TestWorker:
         self, tmp_path: Path
     ) -> None:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
-        from fido.registry import WorkerRegistry
+        from fido.registry import WorkerRegistry, create_fido_atomic
 
-        registry = WorkerRegistry(MagicMock())
+        _, updater = create_fido_atomic()
+        registry = WorkerRegistry(MagicMock(), updater)
         # Prepopulate FidoState so report_activity can lens-write into it.
         for i in range(3):
             registry.start(_default_repo_cfg(tmp_path, repo_name=f"owner/repo{i}"))
@@ -11784,9 +11756,6 @@ class _FakeActivityReporter:
     ) -> None:  # pragma: no cover — unused in these tests
         _ = (repo_name, what, busy)
 
-    def get_all_activities(self) -> list[object]:  # pragma: no cover — unused
-        return []
-
     def status_update(
         self,
     ) -> AbstractContextManager[None]:  # pragma: no cover — unused
@@ -15104,8 +15073,8 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
-            dispatcher: object = None,
             first_iteration: bool = False,
+            dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
             del provider_factory, dispatcher, first_iteration, issue_cache
@@ -15212,8 +15181,8 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
-            dispatcher: object = None,
             first_iteration: bool = False,
+            dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
             del provider_factory, dispatcher, first_iteration, issue_cache
@@ -15267,8 +15236,8 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
-            dispatcher: object = None,
             first_iteration: bool = False,
+            dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
             del provider_factory, dispatcher, first_iteration, issue_cache
@@ -15728,8 +15697,8 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
-            dispatcher: object = None,
             first_iteration: bool = False,
+            dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
             del provider_factory, dispatcher, first_iteration, issue_cache

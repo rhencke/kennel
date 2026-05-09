@@ -372,7 +372,7 @@ class TestFidoLauncher:
                 ],
                 "rate_limit": {
                     "rest": {
-                        "name": "core",
+                        "name": "rest",
                         "used": 7,
                         "limit": 5000,
                         "resets_at": "2026-04-24T13:00:00+00:00",
@@ -383,7 +383,6 @@ class TestFidoLauncher:
                         "limit": 5000,
                         "resets_at": "2026-04-24T14:00:00+00:00",
                     },
-                    "fetched_at": "2026-04-24T12:00:00+00:00",
                 },
                 "fido_uptime_seconds": 7322,
             },

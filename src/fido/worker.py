@@ -217,8 +217,6 @@ class ActivityReporter(Protocol):
 
     def report_activity(self, repo_name: str, what: str, busy: bool) -> None: ...
 
-    def get_all_activities(self) -> list[Any]: ...
-
     def status_update(self) -> AbstractContextManager[None]: ...
 
     def has_untriaged(self, repo_name: str) -> bool: ...
@@ -1452,10 +1450,7 @@ class Worker:
         with ctx:
             if self._registry is not None:
                 self._registry.report_activity(self._repo_name, what, busy)
-                activities = [
-                    (a.repo_name, a.what, a.busy)
-                    for a in self._registry.get_all_activities()
-                ]
+                activities = [(self._repo_name, what, busy)]
             else:
                 activities = [(self.work_dir.name, what, busy)]
 
@@ -4535,8 +4530,8 @@ class WorkerThread(threading.Thread):
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,
-                    dispatcher=self._dispatcher,
                     first_iteration=self._is_first_iteration,
+                    dispatcher=self._dispatcher,
                     issue_cache=self._issue_cache,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
