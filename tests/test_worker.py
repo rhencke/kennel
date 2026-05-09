@@ -4953,6 +4953,7 @@ class TestFindOrCreatePr:
         # retry-acknowledgement comment on every test.
         gh.find_closed_unmerged_prs_for_issue.return_value = []
         gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = []
         return Worker(
             tmp_path,
             gh,
@@ -5635,6 +5636,132 @@ class TestFindOrCreatePr:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Active PR" not in context
+
+    def test_fetch_closed_sub_issues_called_for_open_pr_path(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is called with the correct repo and issue on the open-PR path."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=["a task"]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 7)
+
+    def test_fetch_closed_sub_issues_called_for_new_pr_path(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is called with the correct repo and issue on the new-PR path."""
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 9, "title")
+        gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 9)
+
+    def test_open_pr_setup_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues fetched for the issue appear in the setup context (open-PR path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=55,
+                title="Closed child",
+                body="Implemented the thing.",
+                close_state="merged",
+                pr_number=60,
+                pr_body="",
+            )
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#55: Closed child" in context
+        assert "Implemented the thing." in context
+
+    def test_no_pr_setup_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues fetched for the issue appear in the setup context (new-PR path)."""
+        from fido.types import ClosedSubIssue
+
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=33,
+                title="Already done",
+                body="Covers the auth layer.",
+                close_state="merged",
+                pr_number=34,
+                pr_body="",
+            )
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#33: Already done" in context
+        assert "Covers the auth layer." in context
+
+    def test_no_sub_issues_omits_closed_sub_issues_section(
+        self, tmp_path: Path
+    ) -> None:
+        """When there are no closed sub-issues, the context has no ## Closed sub-issues section."""
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.fetch_closed_sub_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" not in context
 
     def test_no_pr_setup_context_includes_prior_attempts(self, tmp_path: Path) -> None:
         """Prior closed PRs appear in the setup context for the fresh-PR path."""

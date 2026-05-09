@@ -70,6 +70,7 @@ from fido.types import (
     ActiveIssue,
     ActivePR,
     ClosedPR,
+    ClosedSubIssue,
     GitIdentity,
     TaskSnapshot,
     TaskStatus,
@@ -1873,6 +1874,10 @@ class Worker:
         remote = "origin"
         request = f"{issue_title} (closes #{issue})"
 
+        closed_sub_issues: list[ClosedSubIssue] = self.gh.fetch_closed_sub_issues(
+            repo_ctx.repo, issue
+        )
+
         existing = self.gh.find_pr(repo_ctx.repo, issue, repo_ctx.gh_user)
 
         if existing is not None:
@@ -1912,6 +1917,7 @@ class Worker:
                     tasks=[],
                     current_task=None,
                     prior_attempts=prior_attempts,
+                    closed_sub_issues=closed_sub_issues,
                 )
                 context = (
                     f"{active_ctx}\n\n"
@@ -2001,6 +2007,7 @@ class Worker:
             tasks=[],
             current_task=None,
             prior_attempts=prior_attempts,
+            closed_sub_issues=closed_sub_issues,
         )
         context = (
             f"{active_ctx}\n\n"
