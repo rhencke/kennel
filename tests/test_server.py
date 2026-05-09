@@ -92,6 +92,7 @@ def _fido_state(
     return FidoState(
         repos=frozendict({rs.key: rs for rs in repo_states}),
         github_limits=github_limits,
+        threads_by_repo=frozendict(),
     )
 
 

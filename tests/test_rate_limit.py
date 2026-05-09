@@ -21,7 +21,13 @@ from fido.registry import FidoState
 def _make_state() -> tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]:
     """Return a fresh ``(reader, updater)`` pair seeded with an empty
     :class:`~fido.registry.FidoState` for use in monitor tests."""
-    return create_atomic(FidoState(repos=frozendict(), github_limits=GitHubLimit()))
+    return create_atomic(
+        FidoState(
+            repos=frozendict(),
+            github_limits=GitHubLimit(),
+            threads_by_repo=frozendict(),
+        )
+    )
 
 
 # ── _parse_window ─────────────────────────────────────────────────────────────

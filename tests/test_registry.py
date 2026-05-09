@@ -11,6 +11,7 @@ import pytest
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
+    ThreadSnapshot,
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
@@ -581,6 +582,183 @@ class TestWorkerRegistry:
         # Second start — latest thread is in registry
         threads[1].is_alive.return_value = True
         assert reg.is_alive("foo/bar") is True
+
+    # ── ThreadSnapshot / threads_by_repo ─────────────────────────────────
+
+    def test_threads_by_repo_empty_before_any_start(self) -> None:
+        reader, updater = create_fido_atomic()
+        WorkerRegistry(MagicMock(), updater)
+        assert reader.get().threads_by_repo == {}
+
+    def test_start_publishes_thread_snapshot(self, tmp_path: Path) -> None:
+        """start() adds an entry to threads_by_repo in FidoState."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo.get("foo/bar")
+        assert snap is not None
+        assert isinstance(snap, ThreadSnapshot)
+
+    def test_thread_snapshot_is_alive_field(self, tmp_path: Path) -> None:
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        assert snap.is_alive is True
+
+    def test_thread_snapshot_was_stopped_field(self, tmp_path: Path) -> None:
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = False
+        factory.return_value.was_stopped = True
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        assert snap.was_stopped is True
+
+    def test_thread_snapshot_session_fields(self, tmp_path: Path) -> None:
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = "worker-home"
+        factory.return_value.session_alive = True
+        factory.return_value.session_pid = 12345
+        factory.return_value.session_dropped_count = 2
+        factory.return_value.session_sent_count = 7
+        factory.return_value.session_received_count = 5
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        assert snap.session_owner == "worker-home"
+        assert snap.session_alive is True
+        assert snap.session_pid == 12345
+        assert snap.session_dropped_count == 2
+        assert snap.session_sent_count == 7
+        assert snap.session_received_count == 5
+
+    def test_thread_snapshot_crash_error_field(self, tmp_path: Path) -> None:
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = False
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = "RuntimeError: boom"
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        assert snap.crash_error == "RuntimeError: boom"
+
+    def test_thread_snapshot_no_mutable_thread_ref(self, tmp_path: Path) -> None:
+        """ThreadSnapshot stores only primitive values — no WorkerThread handle."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        # The snapshot must not hold a reference to the thread mock itself
+        from fido.worker import WorkerThread
+
+        assert not isinstance(snap, WorkerThread)
+        # All values are primitives: bool, int, str, or None
+        for val in (
+            snap.is_alive,
+            snap.was_stopped,
+            snap.session_owner,
+            snap.session_alive,
+            snap.session_pid,
+            snap.session_dropped_count,
+            snap.session_sent_count,
+            snap.session_received_count,
+            snap.crash_error,
+        ):
+            assert val is None or isinstance(val, (bool, int, str))
+
+    def test_threads_by_repo_is_per_repo(self, tmp_path: Path) -> None:
+        """Each repo gets its own ThreadSnapshot entry."""
+        threads = [MagicMock(), MagicMock()]
+        for t in threads:
+            t.is_alive.return_value = True
+            t.was_stopped = False
+            t.session_owner = None
+            t.session_alive = False
+            t.session_pid = None
+            t.session_dropped_count = 0
+            t.session_sent_count = 0
+            t.session_received_count = 0
+            t.crash_error = None
+        factory = MagicMock(side_effect=threads)
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        reg.start(_repo("foo/baz", tmp_path))
+        state = reader.get()
+        assert "foo/bar" in state.threads_by_repo
+        assert "foo/baz" in state.threads_by_repo
+
+    def test_thread_snapshot_frozen_in_fido_state(self, tmp_path: Path) -> None:
+        """ThreadSnapshot is frozen — stored safely inside frozen FidoState."""
+        import dataclasses
+
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().threads_by_repo["foo/bar"]
+        assert dataclasses.is_dataclass(snap)
+        with pytest.raises((TypeError, dataclasses.FrozenInstanceError)):
+            snap.is_alive = False  # type: ignore[misc]
 
 
 class TestMakeThread:

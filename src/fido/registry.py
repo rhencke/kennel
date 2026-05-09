@@ -145,6 +145,31 @@ class RepoState:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadSnapshot:
+    """Immutable snapshot of one :class:`~fido.worker.WorkerThread`'s observable state.
+
+    Captures all thread metadata as primitive values — no handles to the
+    mutable :class:`~fido.worker.WorkerThread` object itself.  Stored inside
+    the frozen :class:`FidoState` so the SCADA display invariant is preserved:
+    a snapshot reader can never reach through to a live thread and observe
+    partial mutations.
+
+    Fields mirror the public attributes/properties on :class:`WorkerThread`
+    that are read by ``WorkerRegistry`` getters and the status display path.
+    """
+
+    is_alive: bool
+    was_stopped: bool
+    session_owner: str | None
+    session_alive: bool
+    session_pid: int | None
+    session_dropped_count: int
+    session_sent_count: int
+    session_received_count: int
+    crash_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class FidoState:
     """Atomically-swapped coordination snapshot.
 
@@ -152,6 +177,12 @@ class FidoState:
     a :class:`frozendict` so stale readers that hold a reference to an old
     snapshot can never accidentally mutate the mapping — the immutability
     guarantee holds even on the free-threaded (no-GIL) build.
+
+    ``threads_by_repo`` maps each repo slug to a :class:`ThreadSnapshot` —
+    an immutable copy of the thread's observable state at the last
+    :meth:`WorkerRegistry.start` call.  No mutable :class:`~fido.worker.WorkerThread`
+    objects are stored here; stale snapshots carry the last-known values until
+    the next ``start()`` publishes a fresh one.
 
     The atomic cell is owned by the composition root (``run()`` in
     ``server.py``), not by :class:`WorkerRegistry`.  The root creates both
@@ -177,9 +208,12 @@ class FidoState:
 
     repos: frozendict[str, RepoState]
     github_limits: GitHubLimit
+    threads_by_repo: frozendict[str, ThreadSnapshot]
 
 
-_EMPTY_FIDO_STATE = FidoState(repos=frozendict(), github_limits=GitHubLimit())
+_EMPTY_FIDO_STATE = FidoState(
+    repos=frozendict(), github_limits=GitHubLimit(), threads_by_repo=frozendict()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +407,7 @@ class WorkerRegistry:
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()
+        self._publish_thread_snapshot(repo_cfg.name)
         log.info("started WorkerThread for %s", repo_cfg.name)
 
     def wake(self, repo_name: str) -> None:
@@ -446,6 +481,32 @@ class WorkerRegistry:
         self._state_updater.update(
             lambda root: root.repos[_name].crash_record, new_crash
         )
+
+    def _publish_thread_snapshot(self, repo_name: str) -> None:
+        """Publish an immutable :class:`ThreadSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Reads primitive state values from the thread in ``_threads`` and
+        installs a fresh :class:`ThreadSnapshot` at
+        ``threads_by_repo[repo_name]`` via a single lens write.  No mutable
+        thread reference is stored in the snapshot.
+
+        Must be called only after the thread has been inserted into
+        ``_threads`` (i.e. at the end of :meth:`start`).
+        """
+        thread = self._threads[repo_name]
+        snapshot = ThreadSnapshot(
+            is_alive=thread.is_alive(),
+            was_stopped=thread.was_stopped,
+            session_owner=thread.session_owner,
+            session_alive=thread.session_alive,
+            session_pid=thread.session_pid,
+            session_dropped_count=thread.session_dropped_count,
+            session_sent_count=thread.session_sent_count,
+            session_received_count=thread.session_received_count,
+            crash_error=thread.crash_error,
+        )
+        _name = repo_name
+        self._state_updater.update(lambda root: root.threads_by_repo[_name], snapshot)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
