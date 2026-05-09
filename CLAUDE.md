@@ -188,6 +188,18 @@ the pending task list based on dependency analysis.
 - **100% test coverage** — CI enforced, no exceptions.
 - **ruff** — lint + format on all Python.
 - **PRs required** — branch protection on main.
+- **Keep leaf issues reviewable** — one leaf issue should produce one small,
+  coherent PR that a reviewer can hold in their head. If the work needs a
+  prerequisite contract/codegen/test-harness change, split that into its own
+  earlier issue instead of mixing it with the behavior change. Do not combine
+  broad architecture movement, generated ABI/spec changes, performance
+  optimizations, UI behavior, and cleanup in one PR unless the issue explicitly
+  exists to connect those pieces.
+- **Stop and rescope when the diff fans out** — if implementation touches more
+  than three major boundaries, or a review comment would require edits across
+  unrelated layers, pause and file/subdivide follow-up issues before continuing.
+  Parent, release, and benchmark-gate issues should mostly order or verify
+  smaller leaves; they should not silently become large implementation PRs.
 - **Pre-commit hook** — blocks commits that fail format/lint/tests. Before
   running a test suite or build step "as a good-citizen check", compare the
   pre-commit hook against the GHA jobs marked required for a PR to `main`. If
