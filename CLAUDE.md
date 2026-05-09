@@ -357,6 +357,34 @@ extracted reducer enforcing it.
 calling the scheduler/reducer transition, the proof is only covering the
 clean model while races remain in the glue.
 
+### FidoState is a SCADA display snapshot — not a data source
+
+`FidoState` and its `AtomicReader` face are exclusively for the status
+serialisation path (`/status.json` and `./fido status`).  No other code may
+hold an `AtomicReader[FidoState]` or read from the snapshot.
+
+The reasoning: `FidoState` is a display projection of mutable class state.
+Classes own the authoritative mutable state and publish *copies* of the subset
+needed for display — the snapshot is not the source of truth.  If app logic
+reads from the snapshot, every `status.json` enhancement becomes a
+cross-cutting change instead of a localised one.
+
+Concretely:
+- **`WorkerRegistry` holds only `AtomicUpdater[FidoState]`** — it writes new
+  values into the cell but never reads back.  The composition root (in
+  `server.py`) creates both faces via `create_fido_atomic()`, passes the updater
+  to `WorkerRegistry` (and `RateLimitMonitor`), and keeps the reader in the
+  composition root for the status path only.
+- **Thread references are never stored in `FidoState`** — `WorkerThread` is
+  mutable; a snapshot reader could reach through it and observe partial
+  mutations.  Thread lookups for command paths (`stop`, `wake`, `abort_task`,
+  …) go through a plain `_threads` dict on `WorkerRegistry`, not through the
+  snapshot.
+
+**Reviewer signal:** if any class other than the status serialisation path
+holds or accepts an `AtomicReader[FidoState]`, or if any mutable object
+appears inside `FidoState`, that is a violation of this invariant.
+
 ### Patterns to reject in review
 
 | Pattern | Why it's wrong |
@@ -365,6 +393,8 @@ clean model while races remain in the glue.
 | Long-lived callable-slot seams (`_fn_start`, `_run=subprocess.run`) used to inject cross-thread callbacks | Callable slots hide ownership; the real fix is a typed collaborator with a clear owner |
 | Cross-thread reach-through (thread A reads/writes thread B's `_private` attribute directly) | Bypasses the owner's lock; creates invisible coupling; makes reasoning about state impossible |
 | Ambient global set/cleared across requests (`request_context`, `current_repo`) | Thread-local globals are invisible dependencies; translate at the boundary instead |
+| Any class other than the status serialisation path holding `AtomicReader[FidoState]` | The snapshot is a display projection, not a data source; app code that reads it locks in the schema and makes status enhancements cross-cutting |
+| Mutable object (e.g. `WorkerThread`) stored inside `FidoState` | A snapshot reader can reach through the mutable ref and observe partial mutations, breaking the immutability guarantee |
 
 ## Fail-fast / fail-closed
 
