@@ -12,7 +12,7 @@ from typing import Any
 
 import requests as _requests
 
-from fido.types import ClosedPR, GitIdentity
+from fido.types import ClosedPR, ClosedSubIssue, GitIdentity
 
 log = logging.getLogger(__name__)
 
@@ -597,6 +597,137 @@ class GitHub:
                     title=data.get("title") or "",
                     body=data.get("body") or "",
                     close_reason="",
+                )
+            )
+        return result
+
+    def _find_linked_pr_for_issue(
+        self, repo: str, number: int | str
+    ) -> tuple[int | None, bool]:
+        """Scan the timeline of *number* in *repo* for any linked PR.
+
+        Unlike :meth:`find_pr` and :meth:`find_closed_unmerged_prs_for_issue`,
+        this helper does **not** filter by author — sub-issue PRs may have been
+        authored by anyone (a human, a bot, or a different fido user).
+
+        Returns ``(pr_number, merged)`` for the first linked PR found
+        (keyword PRs preferred; sidebar PRs as fallback), where *merged* is
+        ``True`` when the PR was merged.  Returns ``(None, False)`` when no
+        PR is linked.
+
+        Keyword PRs (``CrossReferencedEvent`` with a closing keyword) take
+        priority over sidebar PRs (``ConnectedEvent``).  Within each bucket,
+        the lowest-numbered PR is returned as a stable tiebreaker.
+        ``DisconnectedEvent`` removes sidebar links.
+        """
+        owner, name = repo.split("/", 1)
+        query = (
+            "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
+            "repository(owner:$owner,name:$repo){"
+            "issue(number:$number){"
+            "timelineItems("
+            "first:100,"
+            "itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT,DISCONNECTED_EVENT],"
+            "after:$cursor"
+            "){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{__typename"
+            "...on CrossReferencedEvent{source{__typename"
+            " ...on PullRequest{number state merged}}}"
+            "...on ConnectedEvent{subject{__typename"
+            " ...on PullRequest{number state merged}}}"
+            "...on DisconnectedEvent{subject{__typename"
+            " ...on PullRequest{number}}}"
+            "}}}}}"
+        )
+        # Maps pr_number → merged (bool).
+        keyword_prs: dict[int, bool] = {}
+        sidebar_prs: dict[int, bool] = {}
+        cursor: str | None = None
+        while True:
+            data = self._graphql(
+                query,
+                owner=owner,
+                repo=name,
+                number=int(number),
+                cursor=cursor,
+            )
+            items = data["data"]["repository"]["issue"]["timelineItems"]
+            if not items:
+                break
+            for node in items["nodes"]:
+                typename = node["__typename"]
+                if typename == "CrossReferencedEvent":
+                    pr = node.get("source") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    pr_num = pr["number"]
+                    if pr_num not in keyword_prs:
+                        keyword_prs[pr_num] = bool(pr.get("merged"))
+                elif typename == "ConnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    pr_num = pr["number"]
+                    if pr_num not in sidebar_prs:
+                        sidebar_prs[pr_num] = bool(pr.get("merged"))
+                elif typename == "DisconnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") == "PullRequest":
+                        sidebar_prs.pop(pr["number"], None)
+            page_info = items["pageInfo"]
+            if not page_info["hasNextPage"]:
+                break
+            cursor = page_info["endCursor"]
+        # Keyword PRs take priority; fall back to sidebar.
+        chosen = keyword_prs or sidebar_prs
+        if not chosen:
+            return None, False
+        pr_num = min(chosen)
+        return pr_num, chosen[pr_num]
+
+    def fetch_closed_sub_issues(
+        self, repo: str, number: int | str
+    ) -> list[ClosedSubIssue]:
+        """Return :class:`~fido.types.ClosedSubIssue` entries for each closed
+        direct sub-issue of *number* in *repo*, oldest-first.
+
+        Calls ``GET /repos/{repo}/issues/{number}/sub_issues`` and filters to
+        items whose ``state`` is ``"closed"``.  For each, walks the timeline
+        via :meth:`_find_linked_pr_for_issue` to discover any linked PR (any
+        author — sub-issue PRs are not filtered by user).  Fetches the PR body
+        via the REST API when a PR is found.
+
+        No recursion — direct children only.  Every parent issue summarises
+        its children; traversing further would be prohibitively expensive.
+        """
+        items = sorted(
+            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/sub_issues"),
+            key=lambda x: int(x.get("number", 0)),
+        )
+        result: list[ClosedSubIssue] = []
+        for item in items:
+            if item.get("state") != "closed":
+                continue
+            sub_num = int(item["number"])
+            sub_title = item.get("title") or ""
+            sub_body = item.get("body") or ""
+            pr_num, pr_merged = self._find_linked_pr_for_issue(repo, sub_num)
+            if pr_num is None:
+                close_state = "closed_no_pr"
+                pr_body = ""
+            else:
+                close_state = "merged" if pr_merged else "closed_unmerged"
+                pr_data = self._get(f"/repos/{repo}/pulls/{pr_num}")
+                pr_body = pr_data.get("body") or ""
+            result.append(
+                ClosedSubIssue(
+                    number=sub_num,
+                    title=sub_title,
+                    body=sub_body,
+                    close_state=close_state,
+                    pr_number=pr_num,
+                    pr_body=pr_body,
                 )
             )
         return result
