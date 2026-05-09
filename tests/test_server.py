@@ -79,6 +79,7 @@ def _repo_state(
             last_crash_time=_EPOCH,
         ),
         webhook_activities=webhook_activities,
+        thread_handle=None,
     )
 
 

@@ -107,6 +107,24 @@ class WebhookActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadHandle:
+    """Frozen reference to a :class:`~fido.worker.WorkerThread`.
+
+    Stored inside :class:`RepoState` so snapshot readers can reach the
+    thread's session metadata and liveness state without holding any lock.
+    The thread itself is mutable — ``ThreadHandle`` only freezes the
+    *reference*, not the object it points to.
+
+    ``thread_handle`` is ``None`` only in a zero-value :class:`RepoState`
+    that was constructed before :meth:`~WorkerRegistry.start` ran for that
+    repo.  After :meth:`~WorkerRegistry.start` completes the field is always
+    non-``None``.
+    """
+
+    thread: WorkerThread
+
+
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -128,8 +146,11 @@ class RepoState:
     repo.  Published from the authoritative ``_webhook_activities`` dict on
     :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
 
-    No field is ``None`` — the full tree is prepopulated by :meth:`start`
-    with zero values so lens-path writes never encounter missing keys.
+    *thread_handle* is a :class:`ThreadHandle` wrapping the
+    :class:`~fido.worker.WorkerThread` for this repo.  Populated by
+    :meth:`~WorkerRegistry.start`; ``None`` only before the first start
+    (which never happens in the normal lifecycle).  Lock-free readers use
+    this field instead of acquiring ``_threads_lock``.
 
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
@@ -142,6 +163,7 @@ class RepoState:
     activity: WorkerActivity
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
+    thread_handle: ThreadHandle | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +391,7 @@ class WorkerRegistry:
             activity=_zero_activity(_name),
             crash_record=crash_record,
             webhook_activities=(),
+            thread_handle=ThreadHandle(thread=thread),
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()

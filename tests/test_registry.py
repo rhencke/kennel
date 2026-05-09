@@ -11,6 +11,7 @@ import pytest
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
+    ThreadHandle,
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
@@ -580,6 +581,47 @@ class TestWorkerRegistry:
         # Second start — latest thread is in registry
         threads[1].is_alive.return_value = True
         assert reg.is_alive("foo/bar") is True
+
+    # ── ThreadHandle in RepoState snapshot ───────────────────────────────
+
+    def test_start_publishes_thread_handle_to_snapshot(self, tmp_path: Path) -> None:
+        """start() stores the new WorkerThread in RepoState.thread_handle."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        reg = WorkerRegistry(factory, updater)
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        handle = reader.get().repos["foo/bar"].thread_handle
+        assert handle is not None
+        assert isinstance(handle, ThreadHandle)
+        assert handle.thread is factory.return_value
+
+    def test_start_thread_handle_is_nonnull_after_start(self, tmp_path: Path) -> None:
+        """thread_handle is non-None in the snapshot immediately after start()."""
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reader.get().repos["foo/bar"].thread_handle is not None
+
+    def test_start_replaces_thread_handle_on_restart(self, tmp_path: Path) -> None:
+        """After a crash restart, thread_handle points to the new thread."""
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reader, updater = create_fido_atomic()
+        reg = WorkerRegistry(factory, updater)
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        first_handle = reader.get().repos["foo/bar"].thread_handle
+        assert first_handle is not None
+        assert first_handle.thread is threads[0]
+        # Simulate crash so FSM accepts the second start
+        threads[0].is_alive.return_value = False
+        threads[0].was_stopped = False
+        reg.start(cfg)
+        second_handle = reader.get().repos["foo/bar"].thread_handle
+        assert second_handle is not None
+        assert second_handle.thread is threads[1]
+        assert second_handle is not first_handle
 
 
 class TestMakeThread:
