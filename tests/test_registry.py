@@ -244,6 +244,34 @@ class TestWorkerRegistry:
         assert provider.session_alive is True
         assert provider.session_pid == 42
 
+    def test_publish_provider_snapshot_updates_fido_state(self, tmp_path: Path) -> None:
+        """publish_provider_snapshot() publishes a fresh ProviderSnapshot into FidoState."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        # Simulate a turn running: session is now active with counters
+        factory.return_value.session_owner = "worker-foo"
+        factory.return_value.session_alive = True
+        factory.return_value.session_sent_count = 5
+        factory.return_value.session_received_count = 3
+        reg.publish_provider_snapshot("foo/bar")
+        provider = reader.get().repos["foo/bar"].provider
+        assert provider is not None
+        assert provider.session_owner == "worker-foo"
+        assert provider.session_alive is True
+        assert provider.session_sent_count == 5
+        assert provider.session_received_count == 3
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))

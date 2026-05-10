@@ -15879,6 +15879,90 @@ class TestWorkerThread:
         with patch.object(Worker, "run", fake_worker_run):
             self._run_thread(wt)  # must not raise
 
+    # ── publish_provider_snapshot ─────────────────────────────────────────
+
+    def test_publish_provider_snapshot_called_after_ensure_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called after _ensure_provider at each iteration start."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        mock_registry.publish_provider_snapshot.assert_called_with("owner/repo")
+        # At least once at the top of the iteration
+        assert mock_registry.publish_provider_snapshot.call_count >= 1
+
+    def test_publish_provider_snapshot_called_in_finally_after_worker_run(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called in the finally block after worker.run()."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        publish_calls_at_run_time: list[int] = []
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            # Capture the call count at the point worker.run() starts — the
+            # finally-block publish has not fired yet (it fires after run returns).
+            publish_calls_at_run_time.append(
+                mock_registry.publish_provider_snapshot.call_count
+            )
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        # Exactly one call at top-of-iteration (point A), plus one in finally (point B).
+        assert mock_registry.publish_provider_snapshot.call_count == 2
+        # Point A fired before worker.run() was entered.
+        assert publish_calls_at_run_time == [1]
+
+    def test_publish_provider_snapshot_not_called_when_no_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """WorkerThread with registry=None must not crash on publish_provider_snapshot path."""
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=None)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)  # must not raise
+
+    def test_publish_provider_snapshot_called_per_iteration(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot fires twice per loop iteration (top + finally)."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        call_count = 0
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                wt._stop.set()
+            return 1  # did work, loop immediately
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        assert call_count == 2
+        # 2 iterations × 2 publishes each = 4
+        assert mock_registry.publish_provider_snapshot.call_count == 4
+
     # ── session lifecycle ─────────────────────────────────────────────────
 
     def test_session_carried_to_next_iteration(self, tmp_path: Path) -> None:

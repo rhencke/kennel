@@ -242,6 +242,8 @@ class ActivityReporter(Protocol):
 
     def abort_task(self, repo_name: str, *, task_id: str) -> None: ...
 
+    def publish_provider_snapshot(self, repo_name: str) -> None: ...
+
 
 class LockHeld(Exception):
     """Raised when the fido lock is already held by another process."""
@@ -4659,6 +4661,8 @@ class WorkerThread(threading.Thread):
                         self._repo_name, "scanning for work", busy=False
                     )
                 provider = self._ensure_provider()
+                if self._registry is not None:
+                    self._registry.publish_provider_snapshot(self._repo_name)
                 session = provider.agent.session
                 if session is None:
                     session = self._create_session()
@@ -4691,6 +4695,8 @@ class WorkerThread(threading.Thread):
                         self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
                         self._persist_session_id()
                         self._is_first_iteration = False
+                        if self._registry is not None:
+                            self._registry.publish_provider_snapshot(self._repo_name)
 
                     if result == 1:
                         # Did work — loop immediately without waiting.

@@ -561,6 +561,17 @@ class WorkerRegistry:
         _name = repo_name
         self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)
 
+    def publish_provider_snapshot(self, repo_name: str) -> None:
+        """Publish a fresh :class:`ProviderSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Public wrapper around :meth:`_publish_provider_snapshot`, satisfying the
+        :class:`~fido.worker.ActivityReporter` protocol so workers can trigger
+        snapshot publication at loop-iteration boundaries — after session attach
+        and after each :class:`~fido.worker.Worker` turn — so the SCADA display
+        stays fresh during active turns without a separate polling thread.
+        """
+        self._publish_provider_snapshot(repo_name)
+
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
 
