@@ -1874,10 +1874,6 @@ class Worker:
         remote = "origin"
         request = f"{issue_title} (closes #{issue})"
 
-        closed_sub_issues: list[ClosedSubIssue] = self.gh.fetch_closed_sub_issues(
-            repo_ctx.repo, issue
-        )
-
         existing = self.gh.find_pr(repo_ctx.repo, issue, repo_ctx.gh_user)
 
         if existing is not None:
@@ -1905,6 +1901,9 @@ class Worker:
                 pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
                 prior_attempts = self.gh.find_closed_prs_as_context(
                     repo_ctx.repo, issue, repo_ctx.gh_user
+                )
+                closed_sub_issues: list[ClosedSubIssue] = (
+                    self.gh.fetch_closed_sub_issues(repo_ctx.repo, issue)
                 )
                 active_ctx = render_active_context(
                     issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
@@ -2009,6 +2008,9 @@ class Worker:
 
         # Run setup sub-agent (plans tasks before PR is created)
         log.info("running setup (pre-PR)")
+        closed_sub_issues: list[ClosedSubIssue] = self.gh.fetch_closed_sub_issues(
+            repo_ctx.repo, issue
+        )
         active_ctx = render_active_context(
             issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
             pr=None,

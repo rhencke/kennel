@@ -5637,16 +5637,36 @@ class TestFindOrCreatePr:
         _, _, context = mock_build.call_args.args
         assert "## Active PR" not in context
 
-    def test_fetch_closed_sub_issues_called_for_open_pr_path(
+    def test_fetch_closed_sub_issues_not_called_when_tasks_exist(
         self, tmp_path: Path
     ) -> None:
-        """fetch_closed_sub_issues is called with the correct repo and issue on the open-PR path."""
+        """fetch_closed_sub_issues is NOT called when the open PR already has tasks."""
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=["a task"]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        gh.fetch_closed_sub_issues.assert_not_called()
+
+    def test_fetch_closed_sub_issues_called_for_open_pr_no_tasks_path(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is called when open PR has no tasks (setup path)."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 7)
