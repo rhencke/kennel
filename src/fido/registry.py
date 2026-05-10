@@ -432,11 +432,18 @@ class WorkerRegistry:
             thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
-        """Recover the attached provider session for *repo_name*, if present."""
+        """Recover the attached provider session for *repo_name*, if present.
+
+        Publishes a fresh :class:`ThreadSnapshot` after recovery so the SCADA
+        display reflects the post-recovery session state (e.g. a previously
+        detached provider is now reattached).
+        """
         thread = self._threads.get(repo_name)
         if thread is None:
             return False
-        return thread.recover_provider()
+        result = thread.recover_provider()
+        self._publish_thread_snapshot(repo_name)
+        return result
 
     def report_activity(
         self,

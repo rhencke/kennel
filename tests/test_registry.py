@@ -216,6 +216,31 @@ class TestWorkerRegistry:
         assert reg.recover_provider("unknown/repo") is False
         factory.return_value.recover_provider.assert_not_called()
 
+    def test_recover_provider_republishes_thread_snapshot(self, tmp_path: Path) -> None:
+        """recover_provider() refreshes the ThreadSnapshot after recovery."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        factory.return_value.recover_provider.return_value = True
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        # Simulate what recovery does: session becomes alive after recover_provider
+        factory.return_value.session_alive = True
+        factory.return_value.session_pid = 42
+        reg.recover_provider("foo/bar")
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
+        assert snap.session_alive is True
+        assert snap.session_pid == 42
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))
