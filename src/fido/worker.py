@@ -1919,6 +1919,7 @@ class Worker:
                     current_task=None,
                     prior_attempts=prior_attempts,
                     closed_sub_issues=closed_sub_issues,
+                    parent_repo=repo_ctx.repo,
                 )
                 context = (
                     f"{active_ctx}\n\n"
@@ -2021,6 +2022,7 @@ class Worker:
             current_task=None,
             prior_attempts=prior_attempts,
             closed_sub_issues=closed_sub_issues,
+            parent_repo=repo_ctx.repo,
         )
         context = (
             f"{active_ctx}\n\n"
@@ -3022,7 +3024,11 @@ class Worker:
             sub_lines: list[str] = []
             for sub in closed_sub_issues:
                 if sub.pr_number is not None:
-                    state_desc = f"PR #{sub.pr_number} ({sub.close_state})"
+                    if sub.pr_repo is not None and sub.pr_repo != repo_ctx.repo:
+                        pr_ref = f"{sub.pr_repo}#{sub.pr_number}"
+                    else:
+                        pr_ref = f"#{sub.pr_number}"
+                    state_desc = f"PR {pr_ref} ({sub.close_state})"
                 else:
                     state_desc = sub.close_state
                 sub_lines.append(f"  - #{sub.number}: {sub.title} — {state_desc}")

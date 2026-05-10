@@ -77,6 +77,10 @@ class ClosedSubIssue:
     pr_number:
         GitHub PR number of the linked pull request, or ``None`` when
         ``close_state`` is ``"closed_no_pr"``.
+    pr_repo:
+        ``"owner/repo"`` of the linked pull request, or ``None`` when
+        ``close_state`` is ``"closed_no_pr"``.  May differ from the parent
+        issue's repo for cross-repo sub-issue PRs.
     pr_body:
         Body text of the linked PR, or ``""`` when no PR exists.
     """
@@ -86,6 +90,7 @@ class ClosedSubIssue:
     body: str
     close_state: str
     pr_number: int | None = None
+    pr_repo: str | None = None
     pr_body: str = ""
 
 

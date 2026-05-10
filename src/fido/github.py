@@ -869,6 +869,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     body=sub_body,
                     close_state=close_state,
                     pr_number=pr_num,
+                    pr_repo=pr_repo,
                     pr_body=pr_body,
                 )
             )

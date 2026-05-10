@@ -1775,6 +1775,7 @@ class TestGitHubClass:
                 body="B",
                 close_state="closed_no_pr",
                 pr_number=None,
+                pr_repo=None,
                 pr_body="",
             )
         ]
@@ -1804,6 +1805,7 @@ class TestGitHubClass:
                 body="B",
                 close_state="merged",
                 pr_number=99,
+                pr_repo="o/r",
                 pr_body="pr body text",
             )
         ]
@@ -1832,6 +1834,7 @@ class TestGitHubClass:
                 body="B2",
                 close_state="closed_unmerged",
                 pr_number=88,
+                pr_repo="o/r",
                 pr_body="rejected",
             )
         ]
@@ -1906,6 +1909,7 @@ class TestGitHubClass:
                 body="B",
                 close_state="merged",
                 pr_number=77,
+                pr_repo="other/repo",
                 pr_body="cross-repo body",
             )
         ]
@@ -1935,6 +1939,7 @@ class TestGitHubClass:
                 body="B",
                 close_state="closed_no_pr",
                 pr_number=None,
+                pr_repo=None,
                 pr_body="",
             )
         ]

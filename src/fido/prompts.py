@@ -76,6 +76,7 @@ def render_active_context(
     prior_attempts: list[ClosedPR],
     *,
     closed_sub_issues: list[ClosedSubIssue] | None = None,
+    parent_repo: str | None = None,
 ) -> str:
     """Render active-work context blocks for injection into any LLM system prompt.
 
@@ -133,7 +134,11 @@ def render_active_context(
         for sub in closed_sub_issues:
             entry = f"### #{sub.number}: {sub.title} ({sub.close_state})"
             if sub.pr_number is not None:
-                entry += f"\n\nLinked PR: #{sub.pr_number}"
+                if sub.pr_repo is not None and sub.pr_repo != parent_repo:
+                    pr_ref = f"{sub.pr_repo}#{sub.pr_number}"
+                else:
+                    pr_ref = f"#{sub.pr_number}"
+                entry += f"\n\nLinked PR: {pr_ref}"
             if sub.body:
                 entry += f"\n\n{sub.body}"
             if sub.pr_body:

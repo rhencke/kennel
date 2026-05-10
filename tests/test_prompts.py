@@ -1055,6 +1055,7 @@ class TestRenderActiveContext:
         body: str = "Handle the A case.",
         close_state: str = "merged",
         pr_number: int | None = 200,
+        pr_repo: str | None = None,
         pr_body: str = "Implements sub-task A.",
     ) -> ClosedSubIssue:
         return ClosedSubIssue(
@@ -1063,6 +1064,7 @@ class TestRenderActiveContext:
             body=body,
             close_state=close_state,
             pr_number=pr_number,
+            pr_repo=pr_repo,
             pr_body=pr_body,
         )
 
@@ -1108,6 +1110,45 @@ class TestRenderActiveContext:
             closed_sub_issues=[self._sub_issue(pr_number=77)],
         )
         assert "Linked PR: #77" in result
+
+    def test_closed_sub_issue_linked_pr_same_repo(self) -> None:
+        """When pr_repo matches parent_repo, renders as bare #N (no owner/repo prefix)."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="owner/proj")],
+            parent_repo="owner/proj",
+        )
+        assert "Linked PR: #77" in result
+        assert "owner/proj#77" not in result
+
+    def test_closed_sub_issue_linked_pr_cross_repo(self) -> None:
+        """When pr_repo differs from parent_repo, renders as owner/repo#N."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="other/repo")],
+            parent_repo="owner/proj",
+        )
+        assert "Linked PR: other/repo#77" in result
+
+    def test_closed_sub_issue_linked_pr_cross_repo_no_parent(self) -> None:
+        """When parent_repo is None (not provided), pr_repo is shown if set."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="other/repo")],
+        )
+        assert "Linked PR: other/repo#77" in result
 
     def test_closed_sub_issue_no_linked_pr(self) -> None:
         result = render_active_context(

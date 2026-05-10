@@ -6299,6 +6299,42 @@ class TestFinalizeSetupWithNoTasks:
         assert "closed_no_pr" in prompt_arg
         assert "PR #None" not in prompt_arg
 
+    def test_sub_issue_prompt_cross_repo_pr_renders_owner_repo_ref(
+        self, tmp_path: Path
+    ) -> None:
+        """When a linked PR is in a different repo, renders as owner/repo#N."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=7,
+                title="Feature A",
+                body="",
+                close_state="merged",
+                pr_number=99,
+                pr_repo="other/repo",
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "other/repo#99" in prompt_arg
+        # Must NOT render as bare #99 (that would point to the wrong repo)
+        assert "PR #99" not in prompt_arg
+
     def test_sub_issue_comment_posted_with_marker(self, tmp_path: Path) -> None:
         """The comment generated from sub-issue context still carries the idempotency marker."""
         from fido.types import ClosedSubIssue
