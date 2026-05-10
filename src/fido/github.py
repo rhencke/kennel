@@ -621,25 +621,60 @@ class GitHub:
         ``DisconnectedEvent`` removes sidebar links.
         """
         owner, name = repo.split("/", 1)
-        query = (
-            "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
-            "repository(owner:$owner,name:$repo){"
-            "issue(number:$number){"
-            "timelineItems("
-            "first:100,"
-            "itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT,DISCONNECTED_EVENT],"
-            "after:$cursor"
-            "){"
-            "pageInfo{hasNextPage endCursor}"
-            "nodes{__typename"
-            "...on CrossReferencedEvent{willCloseTarget source{__typename"
-            " ...on PullRequest{number state merged}}}"
-            "...on ConnectedEvent{subject{__typename"
-            " ...on PullRequest{number state merged}}}"
-            "...on DisconnectedEvent{subject{__typename"
-            " ...on PullRequest{number}}}"
-            "}}}}}"
-        )
+        query = """\
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      timelineItems(
+        first: 100
+        itemTypes: [
+          CROSS_REFERENCED_EVENT
+          CONNECTED_EVENT
+          DISCONNECTED_EVENT
+        ]
+        after: $cursor
+      ) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            willCloseTarget
+            source {
+              __typename
+              ... on PullRequest {
+                number
+                state
+                merged
+              }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+                state
+                merged
+              }
+            }
+          }
+          ... on DisconnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
         # Maps pr_number → merged (bool).
         keyword_prs: dict[int, bool] = {}
         sidebar_prs: dict[int, bool] = {}
