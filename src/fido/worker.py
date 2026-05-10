@@ -4668,6 +4668,8 @@ class WorkerThread(threading.Thread):
                     session = self._create_session()
                     if provider.agent.session is not session:
                         provider.agent.attach_session(session)
+                if self._registry is not None:
+                    self._registry.publish_provider_snapshot(self._repo_name)
                 worker = Worker(
                     self.work_dir,
                     self._gh,

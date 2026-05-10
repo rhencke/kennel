@@ -15921,10 +15921,36 @@ class TestWorkerThread:
         with patch.object(Worker, "run", fake_worker_run):
             self._run_thread(wt)
 
-        # Exactly one call at top-of-iteration (point A), plus one in finally (point B).
-        assert mock_registry.publish_provider_snapshot.call_count == 2
-        # Point A fired before worker.run() was entered.
-        assert publish_calls_at_run_time == [1]
+        # Three calls per iteration: after _ensure_provider (A), after session
+        # create/attach (B), and in the finally block (C).
+        assert mock_registry.publish_provider_snapshot.call_count == 3
+        # Points A and B both fired before worker.run() was entered.
+        assert publish_calls_at_run_time == [2]
+
+    def test_publish_provider_snapshot_called_after_session_attach(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called after session create/attach so the first-iteration
+        snapshot reflects the live session immediately rather than waiting for the finally block."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        publish_calls_at_run_time: list[int] = []
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            # By the time worker.run() is entered, two publishes must have fired:
+            # one after _ensure_provider and one after session create/attach.
+            publish_calls_at_run_time.append(
+                mock_registry.publish_provider_snapshot.call_count
+            )
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        # Two publishes before worker.run(): after _ensure_provider and after attach.
+        assert publish_calls_at_run_time == [2]
 
     def test_publish_provider_snapshot_not_called_when_no_registry(
         self, tmp_path: Path
@@ -15943,7 +15969,7 @@ class TestWorkerThread:
     def test_publish_provider_snapshot_called_per_iteration(
         self, tmp_path: Path
     ) -> None:
-        """publish_provider_snapshot fires twice per loop iteration (top + finally)."""
+        """publish_provider_snapshot fires three times per loop iteration (top + after-attach + finally)."""
         mock_registry = MagicMock()
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
         wt._wake = MagicMock()
@@ -15960,8 +15986,8 @@ class TestWorkerThread:
             self._run_thread(wt)
 
         assert call_count == 2
-        # 2 iterations × 2 publishes each = 4
-        assert mock_registry.publish_provider_snapshot.call_count == 4
+        # 2 iterations × 3 publishes each = 6
+        assert mock_registry.publish_provider_snapshot.call_count == 6
 
     # ── session lifecycle ─────────────────────────────────────────────────
 
