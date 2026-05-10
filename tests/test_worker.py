@@ -6007,7 +6007,7 @@ class TestApplySetupOutcome:
             '{"title": "Add bar", "description": "with details"}'
             "]}"
         )
-        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         tasks = worker._tasks.list()  # type: ignore[attr-defined]
         assert [t["title"] for t in tasks] == ["Add foo", "Add bar"]
         assert all(t["status"] == "pending" for t in tasks)
@@ -6016,6 +6016,7 @@ class TestApplySetupOutcome:
         assert tasks[1]["description"] == "with details"
         assert desc == ""
         assert explicit is False
+        assert reason == ""
 
     def test_pr_description_returned_when_present(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -6024,17 +6025,19 @@ class TestApplySetupOutcome:
             '"pr_description": "## Summary\\n\\n- bullet\\n\\nFixes #1.", '
             '"tasks": [{"title": "task"}]}'
         )
-        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         assert desc == "## Summary\n\n- bullet\n\nFixes #1."
         assert explicit is False
+        assert reason == ""
 
     def test_no_tasks_needed_creates_no_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         sentinel = '{"setup_outcome": "no-tasks-needed", "reason": "already covered"}'
-        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         assert worker._tasks.list() == []  # type: ignore[attr-defined]
         assert desc == ""
         assert explicit is True
+        assert reason == "already covered"
 
     def test_no_tasks_needed_returns_pr_description(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -6043,9 +6046,10 @@ class TestApplySetupOutcome:
             '"reason": "no-op", '
             '"pr_description": "## Why\\n\\nNothing to do.\\n\\nFixes #2."}'
         )
-        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         assert desc == "## Why\n\nNothing to do.\n\nFixes #2."
         assert explicit is True
+        assert reason == "no-op"
 
     def test_invalid_sentinel_raises(self, tmp_path: Path) -> None:
         """Parse failure raises RuntimeError — fail closed rather than becoming
@@ -6348,6 +6352,106 @@ class TestFinalizeSetupWithNoTasks:
             or "closed sub-issues" not in prompt_arg
         )
 
+    def test_no_tasks_reason_included_in_pr_path_prompt(self, tmp_path: Path) -> None:
+        """When no_tasks_reason is provided, it appears in the voice prompt (PR path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                no_tasks_reason="#10 handled the full auth migration",
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10 handled the full auth migration" in prompt_arg
+
+    def test_no_tasks_reason_included_in_issue_close_path_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """When no_tasks_reason is provided, it appears in the voice prompt (issue-close path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        gh.get_issue_comments.return_value = []
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+                no_tasks_reason="#10 covered the authentication surface completely",
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10 covered the authentication surface completely" in prompt_arg
+
+    def test_no_tasks_reason_absent_does_not_add_section(self, tmp_path: Path) -> None:
+        """When no_tasks_reason is empty (default), no extra section is injected."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                # no_tasks_reason omitted (defaults to "")
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "planner's analysis" not in prompt_arg
+
     # ── sub-issue all-covered path, no diff: close issue directly ─────────────
 
     def _make_subs(self) -> list:
@@ -6600,6 +6704,8 @@ class TestFinalizeSetupWithNoTasks:
         assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
         # provider_start returned NoTasksNeeded sentinel → explicit_no_tasks=True
         assert finalize_calls[0]["kwargs"].get("explicit_no_tasks") is True
+        # The planner's reason must be threaded through to the finalize call
+        assert finalize_calls[0]["kwargs"].get("no_tasks_reason") == "test"
 
 
 class TestResetLocalWorkspaceAndRetryAck:

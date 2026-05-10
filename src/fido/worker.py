@@ -1939,8 +1939,8 @@ class Worker:
                     session=None,
                     session_mode=self._consume_turn_session_mode(),
                 )
-                pre_baked_description, explicit_no_tasks = self._apply_setup_outcome(
-                    setup_output
+                pre_baked_description, explicit_no_tasks, no_tasks_reason = (
+                    self._apply_setup_outcome(setup_output)
                 )
                 if not self._tasks.list():
                     # Setup legitimately produced zero tasks — the work on this
@@ -1955,6 +1955,7 @@ class Worker:
                         slug,
                         closed_sub_issues=closed_sub_issues,
                         explicit_no_tasks=explicit_no_tasks,
+                        no_tasks_reason=no_tasks_reason,
                     )
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
@@ -2039,8 +2040,8 @@ class Worker:
             session=None,
             session_mode=self._consume_turn_session_mode(),
         )
-        pre_baked_description, explicit_no_tasks = self._apply_setup_outcome(
-            setup_output
+        pre_baked_description, explicit_no_tasks, no_tasks_reason = (
+            self._apply_setup_outcome(setup_output)
         )
 
         # Create draft PR, then write the description using the same function
@@ -2073,6 +2074,7 @@ class Worker:
                 slug,
                 closed_sub_issues=closed_sub_issues,
                 explicit_no_tasks=explicit_no_tasks,
+                no_tasks_reason=no_tasks_reason,
             )
             log.info("PR: #%s opened with 0 tasks (setup found no work)", pr_number)
             log.info("PR: #%s  %s", pr_number, url)
@@ -2900,7 +2902,7 @@ class Worker:
             leak_before_ids,
         )
 
-    def _apply_setup_outcome(self, output: str) -> tuple[str, bool]:
+    def _apply_setup_outcome(self, output: str) -> tuple[str, bool, str]:
         """Parse the setup_outcome sentinel from *output* and CRUD the task list.
 
         Under the post-#1403 protocol, the setup sub-agent does not write to
@@ -2910,13 +2912,19 @@ class Worker:
         the harness applies it here by calling :meth:`Tasks.add` per planned
         entry.
 
-        Returns ``(pr_description, explicit_no_tasks)`` where:
+        Returns ``(pr_description, explicit_no_tasks, no_tasks_reason)`` where:
 
         * *pr_description* is the LLM-provided ``pr_description`` field
           (or ``""`` when absent or the sentinel didn't parse).
         * *explicit_no_tasks* is ``True`` only when the sentinel parsed
           successfully as :class:`NoTasksNeeded`.  ``False`` on parse failure
           or :class:`TasksPlanned`.
+        * *no_tasks_reason* is the planner's explanation of what each
+          sub-issue covered (the ``reason`` field from a :class:`NoTasksNeeded`
+          sentinel), or ``""`` when absent or the sentinel produced tasks.  The
+          caller passes this to :meth:`_finalize_setup_with_no_tasks` so the
+          close comment can include the planner's analysis rather than just the
+          mechanical sub-issue listing.
 
         The caller uses *explicit_no_tasks* to gate destructive actions (like
         closing the parent issue on the sub-issue all-covered path) so that a
@@ -2942,14 +2950,14 @@ class Worker:
             ) from exc
         if isinstance(outcome, NoTasksNeeded):
             log.info("setup outcome: no-tasks-needed (%s)", outcome.reason)
-            return outcome.pr_description, True
+            return outcome.pr_description, True, outcome.reason
         for spec in outcome.tasks:
             self._tasks.add(spec.title, TaskType.SPEC, description=spec.description)
         log.info(
             "setup outcome: tasks-planned — created %d task(s) from sentinel",
             len(outcome.tasks),
         )
-        return outcome.pr_description, False
+        return outcome.pr_description, False, ""
 
     def _finalize_setup_with_no_tasks(
         self,
@@ -2961,6 +2969,7 @@ class Worker:
         *,
         closed_sub_issues: list[ClosedSubIssue] | None = None,
         explicit_no_tasks: bool = False,
+        no_tasks_reason: str = "",
     ) -> None:
         """Setup produced 0 tasks because the work appears already complete —
         finalize the PR rather than crash.
@@ -2972,6 +2981,13 @@ class Worker:
         #1542's "all scope covered by closed sub-issues" case — the PR body
         ``Fixes #N`` trailer never fires on an empty PR that will never merge,
         so we must close the issue explicitly.
+
+        *no_tasks_reason* is the planner's ``reason`` field from the
+        :class:`NoTasksNeeded` sentinel — the setup LLM's analysis of what
+        each sub-issue covered.  When non-empty it is included in the voice
+        prompt so the Opus-generated close comment can incorporate that
+        reasoning rather than relying solely on the mechanical
+        number/title/close_state listing.
 
         The *explicit_no_tasks* gate ensures that a sentinel parse failure —
         which also produces an empty task list — does not accidentally trigger
@@ -3030,16 +3046,22 @@ class Worker:
                 for c in existing_issue_comments
             )
             if not already_posted:
+                reason_section = (
+                    f"\nThe planner's analysis of what each sub-issue covered:\n{no_tasks_reason}\n"
+                    if no_tasks_reason
+                    else ""
+                )
                 prompt = (
                     f'Setup just finished for issue #{issue} ("{issue_title}"). '
                     "The scope is fully covered by the following closed sub-issues:\n\n"
-                    f"{sub_summary}\n\n"
+                    f"{sub_summary}\n"
+                    f"{reason_section}\n"
                     "Write a comment in your voice (1-2 short paragraphs) "
                     "explaining that the work is already done because these sub-issues "
                     "covered the full scope. List each sub-issue by number with a "
-                    "brief note about its close state (merged PR, closed without merge, "
-                    "or closed with no PR). Conclude that there is nothing left to do "
-                    "and you are closing the issue. "
+                    "brief note about what it covered and its close state (merged PR, "
+                    "closed without merge, or closed with no PR). Conclude that there "
+                    "is nothing left to do and you are closing the issue. "
                     "Output ONLY the comment body — no preamble, no markdown fence, "
                     "no signature."
                 )
@@ -3075,16 +3097,22 @@ class Worker:
             )
             return
         if closed_sub_issues:
+            reason_section = (
+                f"\nThe planner's analysis of what each sub-issue covered:\n{no_tasks_reason}\n"
+                if no_tasks_reason
+                else ""
+            )
             prompt = (
                 f'Setup just finished for issue #{issue} ("{issue_title}"). '
                 "The scope is fully covered by the following closed sub-issues:\n\n"
-                f"{sub_summary}\n\n"
+                f"{sub_summary}\n"
+                f"{reason_section}\n"
                 "Write a PR comment in your voice (1-2 short paragraphs) "
                 "explaining that the work is already done because these sub-issues "
                 "covered the full scope. List each sub-issue by number with a "
-                "brief note about its close state (merged PR, closed without merge, "
-                "or closed with no PR). Conclude that there's nothing left to do "
-                "and the PR is ready for review. "
+                "brief note about what it covered and its close state (merged PR, "
+                "closed without merge, or closed with no PR). Conclude that "
+                "there's nothing left to do and the PR is ready for review. "
                 "Output ONLY the comment body — no preamble, no markdown fence, "
                 "no signature."
             )
