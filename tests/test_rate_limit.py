@@ -25,7 +25,6 @@ def _make_state() -> tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]:
         FidoState(
             repos=frozendict(),
             github_limits=GitHubLimit(),
-            threads_by_repo=frozendict(),
         )
     )
 

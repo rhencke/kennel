@@ -583,15 +583,15 @@ class TestWorkerRegistry:
         threads[1].is_alive.return_value = True
         assert reg.is_alive("foo/bar") is True
 
-    # ── ThreadSnapshot / threads_by_repo ─────────────────────────────────
+    # ── ThreadSnapshot / RepoState.thread ────────────────────────────────
 
-    def test_threads_by_repo_empty_before_any_start(self) -> None:
+    def test_thread_snapshot_none_before_any_start(self) -> None:
         reader, updater = create_fido_atomic()
         WorkerRegistry(MagicMock(), updater)
-        assert reader.get().threads_by_repo == {}
+        assert reader.get().repos == {}
 
     def test_start_publishes_thread_snapshot(self, tmp_path: Path) -> None:
-        """start() adds an entry to threads_by_repo in FidoState."""
+        """start() sets thread on the repo's RepoState in FidoState."""
         reader, updater = create_fido_atomic()
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
@@ -605,7 +605,7 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo.get("foo/bar")
+        snap = reader.get().repos["foo/bar"].thread
         assert snap is not None
         assert isinstance(snap, ThreadSnapshot)
 
@@ -623,7 +623,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         assert snap.is_alive is True
 
     def test_thread_snapshot_was_stopped_field(self, tmp_path: Path) -> None:
@@ -640,7 +641,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         assert snap.was_stopped is True
 
     def test_thread_snapshot_session_fields(self, tmp_path: Path) -> None:
@@ -657,7 +659,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         assert snap.session_owner == "worker-home"
         assert snap.session_alive is True
         assert snap.session_pid == 12345
@@ -679,7 +682,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = "RuntimeError: boom"
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         assert snap.crash_error == "RuntimeError: boom"
 
     def test_thread_snapshot_no_mutable_thread_ref(self, tmp_path: Path) -> None:
@@ -697,7 +701,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         # The snapshot must not hold a reference to the thread mock itself
         from fido.worker import WorkerThread
 
@@ -716,8 +721,8 @@ class TestWorkerRegistry:
         ):
             assert val is None or isinstance(val, (bool, int, str))
 
-    def test_threads_by_repo_is_per_repo(self, tmp_path: Path) -> None:
-        """Each repo gets its own ThreadSnapshot entry."""
+    def test_thread_snapshot_is_per_repo(self, tmp_path: Path) -> None:
+        """Each repo gets its own ThreadSnapshot on its RepoState."""
         threads = [MagicMock(), MagicMock()]
         for t in threads:
             t.is_alive.return_value = True
@@ -735,8 +740,8 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         state = reader.get()
-        assert "foo/bar" in state.threads_by_repo
-        assert "foo/baz" in state.threads_by_repo
+        assert state.repos["foo/bar"].thread is not None
+        assert state.repos["foo/baz"].thread is not None
 
     def test_thread_snapshot_frozen_in_fido_state(self, tmp_path: Path) -> None:
         """ThreadSnapshot is frozen — stored safely inside frozen FidoState."""
@@ -755,7 +760,8 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().threads_by_repo["foo/bar"]
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
         assert dataclasses.is_dataclass(snap)
         with pytest.raises((TypeError, dataclasses.FrozenInstanceError)):
             snap.is_alive = False  # type: ignore[misc]

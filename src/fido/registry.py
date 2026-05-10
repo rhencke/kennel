@@ -128,8 +128,12 @@ class RepoState:
     repo.  Published from the authoritative ``_webhook_activities`` dict on
     :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
 
-    No field is ``None`` — the full tree is prepopulated by :meth:`start`
-    with zero values so lens-path writes never encounter missing keys.
+    *thread* is the immutable :class:`ThreadSnapshot` for the repo's
+    :class:`~fido.worker.WorkerThread`.  ``None`` until the first
+    :meth:`~WorkerRegistry.start` call; refreshed by
+    :meth:`~WorkerRegistry._publish_thread_snapshot` immediately after the
+    thread is started.  No mutable thread reference is stored here — the
+    snapshot captures primitive values only.
 
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
@@ -142,6 +146,7 @@ class RepoState:
     activity: WorkerActivity
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
+    thread: "ThreadSnapshot | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,13 +181,10 @@ class FidoState:
     ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
     a :class:`frozendict` so stale readers that hold a reference to an old
     snapshot can never accidentally mutate the mapping — the immutability
-    guarantee holds even on the free-threaded (no-GIL) build.
-
-    ``threads_by_repo`` maps each repo slug to a :class:`ThreadSnapshot` —
-    an immutable copy of the thread's observable state at the last
-    :meth:`WorkerRegistry.start` call.  No mutable :class:`~fido.worker.WorkerThread`
-    objects are stored here; stale snapshots carry the last-known values until
-    the next ``start()`` publishes a fresh one.
+    guarantee holds even on the free-threaded (no-GIL) build.  Each
+    :class:`RepoState` carries a :class:`ThreadSnapshot` at its ``thread``
+    field — an immutable copy of the thread's observable state at the last
+    :meth:`WorkerRegistry.start` call.
 
     The atomic cell is owned by the composition root (``run()`` in
     ``server.py``), not by :class:`WorkerRegistry`.  The root creates both
@@ -208,12 +210,9 @@ class FidoState:
 
     repos: frozendict[str, RepoState]
     github_limits: GitHubLimit
-    threads_by_repo: frozendict[str, ThreadSnapshot]
 
 
-_EMPTY_FIDO_STATE = FidoState(
-    repos=frozendict(), github_limits=GitHubLimit(), threads_by_repo=frozendict()
-)
+_EMPTY_FIDO_STATE = FidoState(repos=frozendict(), github_limits=GitHubLimit())
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,11 +486,12 @@ class WorkerRegistry:
 
         Reads primitive state values from the thread in ``_threads`` and
         installs a fresh :class:`ThreadSnapshot` at
-        ``threads_by_repo[repo_name]`` via a single lens write.  No mutable
+        ``repos[repo_name].thread`` via a single lens write.  No mutable
         thread reference is stored in the snapshot.
 
         Must be called only after the thread has been inserted into
-        ``_threads`` (i.e. at the end of :meth:`start`).
+        ``_threads`` and the repo's :class:`RepoState` has been written to
+        ``FidoState`` (i.e. at the end of :meth:`start`).
         """
         thread = self._threads[repo_name]
         snapshot = ThreadSnapshot(
@@ -506,7 +506,7 @@ class WorkerRegistry:
             crash_error=thread.crash_error,
         )
         _name = repo_name
-        self._state_updater.update(lambda root: root.threads_by_repo[_name], snapshot)
+        self._state_updater.update(lambda root: root.repos[_name].thread, snapshot)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
