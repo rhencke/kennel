@@ -811,20 +811,21 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             if not page_info["hasNextPage"]:
                 break
             cursor = page_info["endCursor"]
-        # Keyword PRs take priority; fall back to sidebar.
-        chosen = keyword_prs or sidebar_prs
+        # Filter OPEN PRs from each bucket first — a sub-issue manually
+        # closed while its PR is still open has no completed PR body worth
+        # including.
+        kw_candidates = {k: s for k, s in keyword_prs.items() if s != "OPEN"}
+        sb_candidates = {k: s for k, s in sidebar_prs.items() if s != "OPEN"}
+        # Tier by merge state across both buckets: merged beats
+        # closed-unmerged regardless of keyword vs sidebar origin.  Within
+        # the same merge tier, keyword PRs take priority over sidebar PRs.
+        kw_merged = {k: s for k, s in kw_candidates.items() if s == "MERGED"}
+        sb_merged = {k: s for k, s in sb_candidates.items() if s == "MERGED"}
+        chosen = kw_merged or sb_merged or kw_candidates or sb_candidates
         if not chosen:
             return None, False, None
-        # Prefer merged PRs over closed-unmerged; skip OPEN PRs — a sub-issue
-        # manually closed while its PR is still open has no completed PR body
-        # worth including.  Break ties by lowest number, then repository.
-        merged_prs = {pr_key for pr_key, state in chosen.items() if state == "MERGED"}
-        non_open_prs = {pr_key for pr_key, state in chosen.items() if state != "OPEN"}
-        pool = merged_prs or non_open_prs
-        if not pool:
-            # Every candidate PR is still OPEN; treat as no linked PR.
-            return None, False, None
-        pr_repo, pr_num = min(pool, key=lambda pr_key: (pr_key[1], pr_key[0]))
+        # Break ties by lowest number, then repository.
+        pr_repo, pr_num = min(chosen, key=lambda pr_key: (pr_key[1], pr_key[0]))
         pr_merged = chosen[(pr_repo, pr_num)] == "MERGED"
         return pr_num, pr_merged, pr_repo
 

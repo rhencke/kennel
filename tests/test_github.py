@@ -1441,6 +1441,39 @@ class TestGitHubClass:
         assert merged is True
         assert pr_repo == "o/r"
 
+    def test_find_linked_pr_merged_sidebar_beats_open_keyword(self) -> None:
+        """An all-OPEN keyword bucket must not starve a merged sidebar PR."""
+        gh, mock_s = self._gh()
+        kw_pr = self._gql_pr_simple(50, "OPEN", merged=False)
+        sb_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(kw_pr),
+                {"__typename": "ConnectedEvent", "subject": sb_pr},
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_merged_sidebar_beats_closed_keyword(self) -> None:
+        """A merged sidebar PR must beat a closed-unmerged keyword PR —
+        merge state takes priority over keyword vs sidebar origin."""
+        gh, mock_s = self._gh()
+        kw_pr = self._gql_pr_simple(50, "CLOSED", merged=False)
+        sb_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(kw_pr),
+                {"__typename": "ConnectedEvent", "subject": sb_pr},
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
     def test_find_linked_pr_prefers_merged_over_closed(self) -> None:
         gh, mock_s = self._gh()
         pr1 = self._gql_pr_simple(400, "MERGED", merged=True)
