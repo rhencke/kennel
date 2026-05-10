@@ -645,22 +645,24 @@ class GitHub:
 
     def _find_linked_pr_for_issue(
         self, repo: str, number: int | str
-    ) -> tuple[int | None, bool]:
+    ) -> tuple[int | None, bool, str | None]:
         """Scan the timeline of *number* in *repo* for any linked PR.
 
         Unlike :meth:`find_pr` and :meth:`find_closed_unmerged_prs_for_issue`,
         this helper does **not** filter by author — sub-issue PRs may have been
         authored by anyone (a human, a bot, or a different fido user).
 
-        Returns ``(pr_number, merged)`` for the first linked PR found
+        Returns ``(pr_number, merged, pr_repo)`` for the best linked PR found
         (keyword PRs preferred; sidebar PRs as fallback), where *merged* is
-        ``True`` when the PR was merged.  Returns ``(None, False)`` when no
-        PR is linked.
+        ``True`` when the PR was merged and *pr_repo* is the
+        ``"owner/name"`` repository the PR lives in (which may differ from
+        *repo* for cross-repo sub-issues).  Returns ``(None, False, None)``
+        when no PR is linked.
 
         Keyword PRs (``CrossReferencedEvent`` with a closing keyword) take
         priority over sidebar PRs (``ConnectedEvent``).  Within each bucket,
-        the lowest-numbered PR is returned as a stable tiebreaker.
-        ``DisconnectedEvent`` removes sidebar links.
+        merged PRs are preferred over closed-unmerged ones; ties broken by
+        lowest PR number.  ``DisconnectedEvent`` removes sidebar links.
         """
         owner, name = repo.split("/", 1)
         query = """\
@@ -692,6 +694,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 merged
                 body
                 title
+                repository {
+                  nameWithOwner
+                }
               }
             }
           }
@@ -702,6 +707,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 number
                 state
                 merged
+                repository {
+                  nameWithOwner
+                }
               }
             }
           }
@@ -719,9 +727,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   }
 }
 """
-        # Maps pr_number → merged (bool).
-        keyword_prs: dict[int, bool] = {}
-        sidebar_prs: dict[int, bool] = {}
+        # Maps pr_number → (merged, pr_repo).
+        keyword_prs: dict[int, tuple[bool, str]] = {}
+        sidebar_prs: dict[int, tuple[bool, str]] = {}
         cursor: str | None = None
         while True:
             data = self._graphql(
@@ -757,14 +765,20 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                         continue
                     pr_num = pr["number"]
                     if pr_num not in keyword_prs:
-                        keyword_prs[pr_num] = bool(pr.get("merged"))
+                        pr_repo_val = (pr.get("repository") or {}).get(
+                            "nameWithOwner"
+                        ) or repo
+                        keyword_prs[pr_num] = (bool(pr.get("merged")), pr_repo_val)
                 elif typename == "ConnectedEvent":
                     pr = node.get("subject") or {}
                     if pr.get("__typename") != "PullRequest":
                         continue
                     pr_num = pr["number"]
                     if pr_num not in sidebar_prs:
-                        sidebar_prs[pr_num] = bool(pr.get("merged"))
+                        pr_repo_val = (pr.get("repository") or {}).get(
+                            "nameWithOwner"
+                        ) or repo
+                        sidebar_prs[pr_num] = (bool(pr.get("merged")), pr_repo_val)
                 elif typename == "DisconnectedEvent":
                     pr = node.get("subject") or {}
                     if pr.get("__typename") == "PullRequest":
@@ -776,12 +790,13 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         # Keyword PRs take priority; fall back to sidebar.
         chosen = keyword_prs or sidebar_prs
         if not chosen:
-            return None, False
+            return None, False, None
         # Prefer merged PRs over closed-unmerged; break ties by lowest number.
-        merged_prs = {n for n, m in chosen.items() if m}
+        merged_prs = {n for n, (m, _) in chosen.items() if m}
         pool = merged_prs or set(chosen)
         pr_num = min(pool)
-        return pr_num, chosen[pr_num]
+        pr_merged, pr_repo = chosen[pr_num]
+        return pr_num, pr_merged, pr_repo
 
     def fetch_closed_sub_issues(
         self, repo: str, number: int | str
@@ -809,13 +824,13 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             sub_num = int(item["number"])
             sub_title = item.get("title") or ""
             sub_body = item.get("body") or ""
-            pr_num, pr_merged = self._find_linked_pr_for_issue(repo, sub_num)
+            pr_num, pr_merged, pr_repo = self._find_linked_pr_for_issue(repo, sub_num)
             if pr_num is None:
                 close_state = "closed_no_pr"
                 pr_body = ""
             else:
                 close_state = "merged" if pr_merged else "closed_unmerged"
-                pr_data = self._get(f"/repos/{repo}/pulls/{pr_num}")
+                pr_data = self._get(f"/repos/{pr_repo}/pulls/{pr_num}")
                 pr_body = pr_data.get("body") or ""
             result.append(
                 ClosedSubIssue(

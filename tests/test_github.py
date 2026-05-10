@@ -1291,13 +1291,16 @@ class TestGitHubClass:
 
     # --- _find_linked_pr_for_issue ---
 
-    def _gql_pr_simple(self, number: int, state: str, merged: bool = False) -> dict:
+    def _gql_pr_simple(
+        self, number: int, state: str, merged: bool = False, repo: str = "o/r"
+    ) -> dict:
         """Build a minimal PR node for timeline scan helpers."""
         return {
             "__typename": "PullRequest",
             "number": number,
             "state": state,
             "merged": merged,
+            "repository": {"nameWithOwner": repo},
         }
 
     def _gql_sub_timeline(
@@ -1314,16 +1317,18 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = {
             "data": {"repository": {"issue": {"timelineItems": {}}}}
         }
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     def test_find_linked_pr_returns_none_when_empty_nodes(self) -> None:
         gh, mock_s = self._gh()
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     def _gql_cross_ref(self, pr: dict, *, will_close: bool = True) -> dict:
         """Build a CrossReferencedEvent node with willCloseTarget set."""
@@ -1339,9 +1344,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_finds_closed_unmerged_cross_ref(self) -> None:
         gh, mock_s = self._gh()
@@ -1349,9 +1355,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
         assert merged is False
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_finds_sidebar_pr(self) -> None:
         gh, mock_s = self._gh()
@@ -1359,9 +1366,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [{"__typename": "ConnectedEvent", "subject": pr}]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 200
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_prefers_keyword_over_sidebar(self) -> None:
         gh, mock_s = self._gh()
@@ -1373,9 +1381,10 @@ class TestGitHubClass:
                 self._gql_cross_ref(kw_pr),
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 300
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_prefers_merged_over_closed(self) -> None:
         gh, mock_s = self._gh()
@@ -1387,9 +1396,10 @@ class TestGitHubClass:
                 self._gql_cross_ref(pr2),
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 400
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_lowest_number_among_same_merge_state(self) -> None:
         gh, mock_s = self._gh()
@@ -1401,9 +1411,10 @@ class TestGitHubClass:
                 self._gql_cross_ref(pr2),
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 400
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_removes_disconnected_sidebar(self) -> None:
         gh, mock_s = self._gh()
@@ -1414,9 +1425,10 @@ class TestGitHubClass:
                 self._disconnected_node(200),
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     def test_find_linked_pr_skips_non_pr_cross_ref(self) -> None:
         gh, mock_s = self._gh()
@@ -1429,8 +1441,9 @@ class TestGitHubClass:
                 }
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
+        assert pr_repo is None
 
     def test_find_linked_pr_bare_mention_not_treated_as_keyword(self) -> None:
         """A CrossReferencedEvent with willCloseTarget=False and no closing
@@ -1442,9 +1455,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     def test_find_linked_pr_keyword_in_body_accepted_when_will_close_false(
         self,
@@ -1461,9 +1475,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_keyword_in_title_accepted_when_will_close_false(
         self,
@@ -1479,9 +1494,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_keyword_wrong_number_skipped(self) -> None:
         """A closing keyword referencing a different issue number does not
@@ -1495,9 +1511,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     def test_find_linked_pr_keyword_case_insensitive(self) -> None:
         """The closing keyword regex is case-insensitive (CLOSES, fixes, etc.)."""
@@ -1510,9 +1527,10 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_bare_mention_falls_back_to_sidebar(self) -> None:
         """A bare mention (willCloseTarget=False) is skipped; a sidebar
@@ -1526,9 +1544,10 @@ class TestGitHubClass:
                 {"__typename": "ConnectedEvent", "subject": sidebar_pr},
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 200
         assert merged is True
+        assert pr_repo == "o/r"
 
     def test_find_linked_pr_follows_pagination(self) -> None:
         gh, mock_s = self._gh()
@@ -1537,9 +1556,10 @@ class TestGitHubClass:
             self._gql_sub_timeline([], has_next=True, cursor="cur1"),
             self._gql_sub_timeline([self._gql_cross_ref(pr)]),
         ]
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 500
         assert merged is True
+        assert pr_repo == "o/r"
         assert mock_s.post.call_count == 2
 
     def test_find_linked_pr_does_not_filter_by_author(self) -> None:
@@ -1552,7 +1572,7 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr)]
         )
-        pr_num, _ = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, _, _repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
 
     def test_find_linked_pr_skips_non_pr_connected_subject(self) -> None:
@@ -1565,9 +1585,10 @@ class TestGitHubClass:
                 }
             ]
         )
-        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+        assert pr_repo is None
 
     # --- fetch_closed_sub_issues ---
 
@@ -1731,6 +1752,40 @@ class TestGitHubClass:
         gh.fetch_closed_sub_issues("o/r", 42)
         url = mock_s.get.call_args.args[0]
         assert "/repos/o/r/issues/42/sub_issues" in url
+
+    def test_fetch_closed_sub_issues_uses_linked_pr_repo_for_body_fetch(self) -> None:
+        """When the linked PR lives in a different repo, fetch the body from
+        that repo's REST endpoint, not the parent issue's repo."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(5, state="closed", title="T", body="B")
+        sub_issues_resp = self._sub_issues_page([sub])
+        pr_rest_resp = MagicMock()
+        pr_rest_resp.status_code = 200
+        pr_rest_resp.raise_for_status.return_value = None
+        pr_rest_resp.headers = {}
+        pr_rest_resp.json.return_value = {"body": "cross-repo body"}
+        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        # PR lives in "other/repo", not "o/r".
+        pr_node = self._gql_pr_simple(77, "MERGED", merged=True, repo="other/repo")
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="merged",
+                pr_number=77,
+                pr_body="cross-repo body",
+            )
+        ]
+        # The PR body fetch must use the linked PR's repo, not the parent's.
+        pr_fetch_url = mock_s.get.call_args_list[1].args[0]
+        assert "/repos/other/repo/pulls/77" in pr_fetch_url
 
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
