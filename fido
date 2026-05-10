@@ -54,7 +54,20 @@ log() {
 
 redirect_up_logs() {
   log INFO "redirecting up output to journald (-t fido)"
-  exec > >(systemd-cat --identifier=fido --priority=info) 2>&1
+  # Wrap systemd-cat in a respawn loop.  A single long-lived
+  # systemd-cat sometimes dies mid-stream (FIFO break, journal
+  # rotation, etc.) and bash silently keeps writing to a broken
+  # pipe — leaving journalctl --user -t fido silent while fido is
+  # still alive and processing.  The loop reopens systemd-cat on
+  # death; the new invocation inherits the same FIFO stdin and
+  # picks up the next data.  sleep 0.5 between iterations to
+  # avoid tight-looping on a persistent failure (closes #1567).
+  exec > >(
+    while true; do
+      systemd-cat --identifier=fido --priority=info
+      sleep 0.5
+    done
+  ) 2>&1
 }
 
 buildx_driver() {

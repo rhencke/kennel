@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 FIDO = REPO / "fido"
@@ -26,7 +27,7 @@ def run_build(
 
 
 def run_status(
-    payload: dict, tmp_path: Path, *, env: dict[str, str] | None = None
+    payload: dict[str, Any], tmp_path: Path, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     payload_path = tmp_path / "status.json"
     payload_path.write_text(json.dumps(payload))
@@ -545,7 +546,11 @@ class TestFidoLauncher:
         assert "fido_log=${FIDO_LOG:-$HOME/log/fido.log}" not in script
         assert "redirect_up_logs()" in script
         assert "systemd-cat --identifier=fido --priority=info" in script
-        assert "exec > >(systemd-cat" in script
+        # systemd-cat is wrapped in a respawn loop so the journal pipeline
+        # self-heals when systemd-cat dies mid-stream (#1567).
+        assert "exec > >(" in script
+        assert "while true; do" in script
+        assert "sleep 0.5" in script
         assert "prune_on_restart=${FIDO_PRUNE_ON_RESTART:-1}" in script
         assert "prune_keep_storage=${FIDO_BUILDKIT_KEEP_STORAGE:-24gb}" in script
         assert "prune_restart_buildkit_async()" in script

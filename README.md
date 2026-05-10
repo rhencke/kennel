@@ -94,7 +94,7 @@ The helper keeps build work inside buildx:
 
 - Rocq/Dune run through the `rocq-image` bake target from
   `rocq-python-extraction/Dockerfile`.
-- Python formatting runs in `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`.
+- Python formatting runs in `docker.io/astral/uv:python3.14-bookworm-slim`.
 - BuildKit owns the image and layer cache in the active builder.
 - The Dune `_build` cache is exported through buildx to
   `.cache/rocq-models/context/_build`.
