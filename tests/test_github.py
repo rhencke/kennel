@@ -863,10 +863,14 @@ class TestGitHubClass:
         pr_no_body = {k: v for k, v in pr.items() if k != "body"}
         return {"__typename": "ConnectedEvent", "subject": pr_no_body}
 
-    def _disconnected_node(self, pr_number: int) -> dict:
+    def _disconnected_node(self, pr_number: int, repo: str = "o/r") -> dict:
         return {
             "__typename": "DisconnectedEvent",
-            "subject": {"__typename": "PullRequest", "number": pr_number},
+            "subject": {
+                "__typename": "PullRequest",
+                "number": pr_number,
+                "repository": {"nameWithOwner": repo},
+            },
         }
 
     def test_find_pr_returns_match(self) -> None:
@@ -1416,6 +1420,25 @@ class TestGitHubClass:
         assert merged is True
         assert pr_repo == "o/r"
 
+    def test_find_linked_pr_keys_keyword_candidates_by_repo(self) -> None:
+        gh, mock_s = self._gh()
+        same_number_closed = self._gql_pr_simple(
+            77, "CLOSED", merged=False, repo="other/repo"
+        )
+        same_number_merged = self._gql_pr_simple(
+            77, "MERGED", merged=True, repo="owner/proj"
+        )
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(same_number_closed),
+                self._gql_cross_ref(same_number_merged),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 77
+        assert merged is True
+        assert pr_repo == "owner/proj"
+
     def test_find_linked_pr_removes_disconnected_sidebar(self) -> None:
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(200, "CLOSED", merged=False)
@@ -1429,6 +1452,24 @@ class TestGitHubClass:
         assert pr_num is None
         assert merged is False
         assert pr_repo is None
+
+    def test_find_linked_pr_disconnects_sidebar_by_repo_and_number(self) -> None:
+        gh, mock_s = self._gh()
+        disconnected_pr = self._gql_pr_simple(
+            77, "MERGED", merged=True, repo="other/repo"
+        )
+        kept_pr = self._gql_pr_simple(77, "MERGED", merged=True, repo="owner/proj")
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {"__typename": "ConnectedEvent", "subject": disconnected_pr},
+                {"__typename": "ConnectedEvent", "subject": kept_pr},
+                self._disconnected_node(77, repo="other/repo"),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 77
+        assert merged is True
+        assert pr_repo == "owner/proj"
 
     def test_find_linked_pr_skips_non_pr_cross_ref(self) -> None:
         gh, mock_s = self._gh()
