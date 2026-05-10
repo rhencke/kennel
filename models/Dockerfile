@@ -2,7 +2,7 @@
 
 ARG ROCQ_IMAGE=rocq-python-extraction:ci
 
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS python-base
+FROM docker.io/astral/uv:python3.14-bookworm-slim AS python-base
 
 ARG DOCKER_BUILDX_VERSION=0.17.1
 
