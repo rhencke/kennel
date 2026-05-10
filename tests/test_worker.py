@@ -5838,14 +5838,15 @@ class TestApplySetupOutcome:
             '{"title": "Add bar", "description": "with details"}'
             "]}"
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         tasks = worker._tasks.list()  # type: ignore[attr-defined]
         assert [t["title"] for t in tasks] == ["Add foo", "Add bar"]
         assert all(t["status"] == "pending" for t in tasks)
         assert all(t["type"] == "spec" for t in tasks)
         assert tasks[0]["description"] == ""
         assert tasks[1]["description"] == "with details"
-        assert result == ""
+        assert desc == ""
+        assert explicit is False
 
     def test_pr_description_returned_when_present(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -5854,15 +5855,17 @@ class TestApplySetupOutcome:
             '"pr_description": "## Summary\\n\\n- bullet\\n\\nFixes #1.", '
             '"tasks": [{"title": "task"}]}'
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
-        assert result == "## Summary\n\n- bullet\n\nFixes #1."
+        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert desc == "## Summary\n\n- bullet\n\nFixes #1."
+        assert explicit is False
 
     def test_no_tasks_needed_creates_no_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         sentinel = '{"setup_outcome": "no-tasks-needed", "reason": "already covered"}'
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         assert worker._tasks.list() == []  # type: ignore[attr-defined]
-        assert result == ""
+        assert desc == ""
+        assert explicit is True
 
     def test_no_tasks_needed_returns_pr_description(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -5871,16 +5874,18 @@ class TestApplySetupOutcome:
             '"reason": "no-op", '
             '"pr_description": "## Why\\n\\nNothing to do.\\n\\nFixes #2."}'
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
-        assert result == "## Why\n\nNothing to do.\n\nFixes #2."
+        desc, explicit = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert desc == "## Why\n\nNothing to do.\n\nFixes #2."
+        assert explicit is True
 
     def test_invalid_sentinel_creates_no_tasks(self, tmp_path: Path) -> None:
         """Parse failure is non-fatal — log + return; existing no-tasks
         finalize path takes over."""
         worker = self._make_worker(tmp_path)
-        result = worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
+        desc, explicit = worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
         assert worker._tasks.list() == []  # type: ignore[attr-defined]
-        assert result == ""
+        assert desc == ""
+        assert explicit is False
 
     def test_sentinel_with_narration_above(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -6210,6 +6215,7 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         gh.comment_issue.assert_called_once()
         repo_arg, num_arg, _body_arg = gh.comment_issue.call_args.args
@@ -6230,6 +6236,7 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         gh.close_pr.assert_called_once_with("owner/proj", 42)
 
@@ -6246,6 +6253,7 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         gh.close_issue.assert_called_once_with("owner/proj", 5)
 
@@ -6262,11 +6270,15 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         gh.pr_ready.assert_not_called()
 
-    def test_sub_issue_no_diff_idempotent_on_issue_marker(self, tmp_path: Path) -> None:
-        """If the parent issue already has the finalize marker, skip re-posting."""
+    def test_sub_issue_no_diff_idempotent_skips_comment_but_still_closes(
+        self, tmp_path: Path
+    ) -> None:
+        """If the parent issue already has the finalize marker, skip the
+        comment but still close the PR and issue (crash-retry safety)."""
         worker, gh, agent = self._make_worker(tmp_path)
         # Return the marker on the ISSUE comments (get_issue_comments called
         # with issue number 5, not PR number 42)
@@ -6282,9 +6294,40 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         agent.run_turn.assert_not_called()
         gh.comment_issue.assert_not_called()
+        # Close calls still fire — they are API-idempotent
+        gh.close_pr.assert_called_once_with("owner/proj", 42)
+        gh.close_issue.assert_called_once_with("owner/proj", 5)
+
+    def test_sub_issue_no_diff_without_explicit_uses_pr_path(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues is set and no diff but explicit_no_tasks is
+        False (parse failure), fall through to the standard PR path instead
+        of closing the parent issue."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Can't tell what happened."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=False,
+            )
+        # Falls through to the standard PR path — comment on PR, not issue
+        gh.comment_issue.assert_called_once()
+        _repo, num_arg, _body = gh.comment_issue.call_args.args
+        assert num_arg == 42
+        # No close calls — parent issue must not be closed on parse failure
         gh.close_pr.assert_not_called()
         gh.close_issue.assert_not_called()
 
@@ -6304,6 +6347,7 @@ class TestFinalizeSetupWithNoTasks:
                 pr_number=42,
                 slug="fix-bug",
                 closed_sub_issues=subs,
+                explicit_no_tasks=True,
             )
         gh.comment_issue.assert_called_once()
         _repo, num_arg, _body = gh.comment_issue.call_args.args
@@ -6381,6 +6425,8 @@ class TestFinalizeSetupWithNoTasks:
             worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
         assert len(finalize_calls) == 1
         assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
+        # provider_start returned "" → parse failure → explicit_no_tasks=False
+        assert finalize_calls[0]["kwargs"].get("explicit_no_tasks") is False
 
 
 class TestResetLocalWorkspaceAndRetryAck:

@@ -1938,7 +1938,9 @@ class Worker:
                     session=None,
                     session_mode=self._consume_turn_session_mode(),
                 )
-                pre_baked_description = self._apply_setup_outcome(setup_output)
+                pre_baked_description, explicit_no_tasks = self._apply_setup_outcome(
+                    setup_output
+                )
                 if not self._tasks.list():
                     # Setup legitimately produced zero tasks — the work on this
                     # branch already covers the issue.  Finalize rather than
@@ -1951,6 +1953,7 @@ class Worker:
                         pr_number,
                         slug,
                         closed_sub_issues=closed_sub_issues,
+                        explicit_no_tasks=explicit_no_tasks,
                     )
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
@@ -2032,7 +2035,9 @@ class Worker:
             session=None,
             session_mode=self._consume_turn_session_mode(),
         )
-        pre_baked_description = self._apply_setup_outcome(setup_output)
+        pre_baked_description, explicit_no_tasks = self._apply_setup_outcome(
+            setup_output
+        )
 
         # Create draft PR, then write the description using the same function
         # used for post-rescope rewrites so both paths share one code path.
@@ -2063,6 +2068,7 @@ class Worker:
                 pr_number,
                 slug,
                 closed_sub_issues=closed_sub_issues,
+                explicit_no_tasks=explicit_no_tasks,
             )
             log.info("PR: #%s opened with 0 tasks (setup found no work)", pr_number)
             log.info("PR: #%s  %s", pr_number, url)
@@ -2890,7 +2896,7 @@ class Worker:
             leak_before_ids,
         )
 
-    def _apply_setup_outcome(self, output: str) -> str:
+    def _apply_setup_outcome(self, output: str) -> tuple[str, bool]:
         """Parse the setup_outcome sentinel from *output* and CRUD the task list.
 
         Under the post-#1403 protocol, the setup sub-agent does not write to
@@ -2900,10 +2906,18 @@ class Worker:
         the harness applies it here by calling :meth:`Tasks.add` per planned
         entry.
 
-        Returns the LLM-provided ``pr_description`` (or ``""`` when absent or
-        the sentinel didn't parse) so the caller can pass it through to
-        :func:`_write_pr_description` and skip the separate
-        description-rewrite LLM call.
+        Returns ``(pr_description, explicit_no_tasks)`` where:
+
+        * *pr_description* is the LLM-provided ``pr_description`` field
+          (or ``""`` when absent or the sentinel didn't parse).
+        * *explicit_no_tasks* is ``True`` only when the sentinel parsed
+          successfully as :class:`NoTasksNeeded`.  ``False`` on parse failure
+          or :class:`TasksPlanned`.
+
+        The caller uses *explicit_no_tasks* to gate destructive actions (like
+        closing the parent issue on the sub-issue all-covered path) so that a
+        parse failure — which also leaves the task list empty — does not
+        accidentally trigger the close path.
 
         Two recognised outcomes:
 
@@ -2911,25 +2925,26 @@ class Worker:
         * :class:`NoTasksNeeded` — no-op; the caller's empty-list check
           falls through to the no-tasks finalize path.
 
-        Parse failure is non-fatal: log a warning and return ``""``.  An empty
-        :meth:`Tasks.list` is the existing signal for "setup found no work",
-        and the no-tasks finalize path handles it the same regardless of why.
+        Parse failure is non-fatal: log a warning and return ``("", False)``.
+        An empty :meth:`Tasks.list` is the existing signal for "setup found no
+        work", and the no-tasks finalize path handles it — but without
+        *explicit_no_tasks* it will not close the parent issue.
         """
         try:
             outcome = parse_setup_outcome(output)
         except ValueError as exc:
             log.warning("setup sentinel parse failed: %s — treating as no tasks", exc)
-            return ""
+            return "", False
         if isinstance(outcome, NoTasksNeeded):
             log.info("setup outcome: no-tasks-needed (%s)", outcome.reason)
-            return outcome.pr_description
+            return outcome.pr_description, True
         for spec in outcome.tasks:
             self._tasks.add(spec.title, TaskType.SPEC, description=spec.description)
         log.info(
             "setup outcome: tasks-planned — created %d task(s) from sentinel",
             len(outcome.tasks),
         )
-        return outcome.pr_description
+        return outcome.pr_description, False
 
     def _finalize_setup_with_no_tasks(
         self,
@@ -2940,16 +2955,23 @@ class Worker:
         slug: str,
         *,
         closed_sub_issues: list[ClosedSubIssue] | None = None,
+        explicit_no_tasks: bool = False,
     ) -> None:
         """Setup produced 0 tasks because the work appears already complete —
         finalize the PR rather than crash.
 
-        When *closed_sub_issues* covers the full scope and the branch has no
-        real diff, posts a coverage comment on the parent *issue* (not the
-        PR), closes the empty draft PR, and closes the parent issue directly.
-        This is the correct path for #1542's "all scope covered by closed
-        sub-issues" case — the PR body ``Fixes #N`` trailer never fires on an
-        empty PR that will never merge, so we must close the issue explicitly.
+        When *closed_sub_issues* covers the full scope, *explicit_no_tasks*
+        is ``True``, and the branch has no real diff, posts a coverage comment
+        on the parent *issue* (not the PR), closes the empty draft PR, and
+        closes the parent issue directly.  This is the correct path for
+        #1542's "all scope covered by closed sub-issues" case — the PR body
+        ``Fixes #N`` trailer never fires on an empty PR that will never merge,
+        so we must close the issue explicitly.
+
+        The *explicit_no_tasks* gate ensures that a sentinel parse failure —
+        which also produces an empty task list — does not accidentally trigger
+        the parent-close path.  Only an explicit :class:`NoTasksNeeded`
+        outcome from the setup sentinel warrants closing the parent issue.
 
         Otherwise, generates a Fido-voice comment justifying why no further
         tasks are needed, posts it to the PR, marks the PR ready for review,
@@ -2961,12 +2983,14 @@ class Worker:
         real diff, the comment is structured around the sub-issues that
         covered the scope and the PR goes through the normal review flow.
 
-        Idempotent on :data:`_NO_TASKS_PR_COMMENT_MARKER`: a second call
-        checks for the marker on the appropriate target (parent issue for the
-        sub-issue all-covered path; PR for all other paths) and returns
-        without re-posting.  The diff guard from #1194 still applies on the
-        PR-based path — if the branch has no diff vs base, the PR is left as
-        draft.
+        Idempotent on :data:`_NO_TASKS_PR_COMMENT_MARKER`: on the sub-issue
+        all-covered path, the marker suppresses re-posting the comment but
+        the ``close_pr`` / ``close_issue`` calls still fire (they are
+        API-idempotent) so a crash between the comment and the close calls
+        is retried correctly.  On the PR-based path, the marker suppresses
+        both the comment and the ready/review calls.  The diff guard from
+        #1194 still applies on the PR-based path — if the branch has no diff
+        vs base, the PR is left as draft.
         """
         has_real_diff = self._pr_has_real_diff("origin", slug, repo_ctx.default_branch)
 
@@ -2985,43 +3009,50 @@ class Worker:
 
         # ── sub-issue all-covered path, no diff: close issue directly ─────────
         #
-        # When closed sub-issues fully cover the scope and the branch carries
-        # no real diff, there is nothing to review.  Post the coverage
-        # comment on the parent issue (where humans look), close the empty
-        # draft PR, and close the issue.
-        if closed_sub_issues and not has_real_diff:
+        # When closed sub-issues fully cover the scope, the branch carries
+        # no real diff, AND the setup outcome was an explicit NoTasksNeeded
+        # (not a parse failure), there is nothing to review.  Post the
+        # coverage comment on the parent issue (where humans look), close the
+        # empty draft PR, and close the parent issue.
+        #
+        # The close calls are unconditional (idempotent at the API level) so
+        # a crash between the comment post and the close calls doesn't leave
+        # the issue/PR permanently open on retry.
+        if closed_sub_issues and not has_real_diff and explicit_no_tasks:
             existing_issue_comments = self.gh.get_issue_comments(repo_ctx.repo, issue)
-            if any(
+            already_posted = any(
                 _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "")
                 for c in existing_issue_comments
-            ):
+            )
+            if not already_posted:
+                prompt = (
+                    f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                    "The scope is fully covered by the following closed sub-issues:\n\n"
+                    f"{sub_summary}\n\n"
+                    "Write a comment in your voice (1-2 short paragraphs) "
+                    "explaining that the work is already done because these sub-issues "
+                    "covered the full scope. List each sub-issue by number with a "
+                    "brief note about its close state (merged PR, closed without merge, "
+                    "or closed with no PR). Conclude that there is nothing left to do "
+                    "and you are closing the issue. "
+                    "Output ONLY the comment body — no preamble, no markdown fence, "
+                    "no signature."
+                )
+                body_text = safe_voice_turn(
+                    self._provider_agent,
+                    prompt,
+                    model=self._provider_agent.voice_model,
+                    log_prefix="finalize_setup_no_tasks",
+                )
+                body = f"{body_text.strip()}\n\n{_NO_TASKS_PR_COMMENT_MARKER}"
+                self.gh.comment_issue(repo_ctx.repo, issue, body)
+                log.info("Issue #%s: sub-issue coverage comment posted", issue)
+            else:
                 log.info(
-                    "Issue #%s: sub-issue coverage comment already posted — skipping",
+                    "Issue #%s: sub-issue coverage comment already posted — "
+                    "skipping comment, still ensuring close",
                     issue,
                 )
-                return
-            prompt = (
-                f'Setup just finished for issue #{issue} ("{issue_title}"). '
-                "The scope is fully covered by the following closed sub-issues:\n\n"
-                f"{sub_summary}\n\n"
-                "Write a comment in your voice (1-2 short paragraphs) "
-                "explaining that the work is already done because these sub-issues "
-                "covered the full scope. List each sub-issue by number with a "
-                "brief note about its close state (merged PR, closed without merge, "
-                "or closed with no PR). Conclude that there is nothing left to do "
-                "and you are closing the issue. "
-                "Output ONLY the comment body — no preamble, no markdown fence, "
-                "no signature."
-            )
-            body_text = safe_voice_turn(
-                self._provider_agent,
-                prompt,
-                model=self._provider_agent.voice_model,
-                log_prefix="finalize_setup_no_tasks",
-            )
-            body = f"{body_text.strip()}\n\n{_NO_TASKS_PR_COMMENT_MARKER}"
-            self.gh.comment_issue(repo_ctx.repo, issue, body)
-            log.info("Issue #%s: sub-issue coverage comment posted", issue)
             self.gh.close_pr(repo_ctx.repo, pr_number)
             log.info(
                 "PR #%s: closed empty draft (sub-issue all-covered path)", pr_number
