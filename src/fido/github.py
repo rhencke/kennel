@@ -632,7 +632,7 @@ class GitHub:
             "){"
             "pageInfo{hasNextPage endCursor}"
             "nodes{__typename"
-            "...on CrossReferencedEvent{source{__typename"
+            "...on CrossReferencedEvent{willCloseTarget source{__typename"
             " ...on PullRequest{number state merged}}}"
             "...on ConnectedEvent{subject{__typename"
             " ...on PullRequest{number state merged}}}"
@@ -658,6 +658,11 @@ class GitHub:
             for node in items["nodes"]:
                 typename = node["__typename"]
                 if typename == "CrossReferencedEvent":
+                    # Only treat as a keyword/closing PR when willCloseTarget
+                    # is true — bare "see #123" mentions fire the same event
+                    # but must not be mistaken for the PR that closed the issue.
+                    if not node.get("willCloseTarget"):
+                        continue
                     pr = node.get("source") or {}
                     if pr.get("__typename") != "PullRequest":
                         continue

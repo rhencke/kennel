@@ -1242,11 +1242,19 @@ class TestGitHubClass:
         assert pr_num is None
         assert merged is False
 
+    def _gql_cross_ref(self, pr: dict, *, will_close: bool = True) -> dict:
+        """Build a CrossReferencedEvent node with willCloseTarget set."""
+        return {
+            "__typename": "CrossReferencedEvent",
+            "willCloseTarget": will_close,
+            "source": pr,
+        }
+
     def test_find_linked_pr_finds_merged_cross_ref(self) -> None:
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(100, "MERGED", merged=True)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
-            [{"__typename": "CrossReferencedEvent", "source": pr}]
+            [self._gql_cross_ref(pr)]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
@@ -1256,7 +1264,7 @@ class TestGitHubClass:
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(100, "CLOSED", merged=False)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
-            [{"__typename": "CrossReferencedEvent", "source": pr}]
+            [self._gql_cross_ref(pr)]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
@@ -1279,7 +1287,7 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [
                 {"__typename": "ConnectedEvent", "subject": sb_pr},
-                {"__typename": "CrossReferencedEvent", "source": kw_pr},
+                self._gql_cross_ref(kw_pr),
             ]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
@@ -1292,8 +1300,8 @@ class TestGitHubClass:
         pr2 = self._gql_pr_simple(300, "CLOSED", merged=False)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [
-                {"__typename": "CrossReferencedEvent", "source": pr1},
-                {"__typename": "CrossReferencedEvent", "source": pr2},
+                self._gql_cross_ref(pr1),
+                self._gql_cross_ref(pr2),
             ]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
@@ -1319,6 +1327,7 @@ class TestGitHubClass:
             [
                 {
                     "__typename": "CrossReferencedEvent",
+                    "willCloseTarget": True,
                     "source": {"__typename": "Issue", "number": 99},
                 }
             ]
@@ -1326,14 +1335,40 @@ class TestGitHubClass:
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
 
+    def test_find_linked_pr_bare_mention_not_treated_as_keyword(self) -> None:
+        """A CrossReferencedEvent with willCloseTarget=False is a bare mention
+        ('see #123') — must not be added to keyword_prs."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+
+    def test_find_linked_pr_bare_mention_falls_back_to_sidebar(self) -> None:
+        """A bare mention (willCloseTarget=False) is skipped; a sidebar
+        ConnectedEvent for a different PR is still returned as fallback."""
+        gh, mock_s = self._gh()
+        mention_pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        sidebar_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(mention_pr, will_close=False),
+                {"__typename": "ConnectedEvent", "subject": sidebar_pr},
+            ]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+
     def test_find_linked_pr_follows_pagination(self) -> None:
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(500, "MERGED", merged=True)
         mock_s.post.return_value.json.side_effect = [
             self._gql_sub_timeline([], has_next=True, cursor="cur1"),
-            self._gql_sub_timeline(
-                [{"__typename": "CrossReferencedEvent", "source": pr}]
-            ),
+            self._gql_sub_timeline([self._gql_cross_ref(pr)]),
         ]
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 500
@@ -1348,7 +1383,7 @@ class TestGitHubClass:
         # The simple node has no author field; that's intentional — the helper
         # doesn't look at author at all.
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
-            [{"__typename": "CrossReferencedEvent", "source": pr}]
+            [self._gql_cross_ref(pr)]
         )
         pr_num, _ = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num == 100
@@ -1446,7 +1481,7 @@ class TestGitHubClass:
         mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
         pr_node = self._gql_pr_simple(99, "MERGED", merged=True)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
-            [{"__typename": "CrossReferencedEvent", "source": pr_node}]
+            [self._gql_cross_ref(pr_node)]
         )
         result = gh.fetch_closed_sub_issues("o/r", 10)
         assert result == [
@@ -1474,7 +1509,7 @@ class TestGitHubClass:
         mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
         pr_node = self._gql_pr_simple(88, "CLOSED", merged=False)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
-            [{"__typename": "CrossReferencedEvent", "source": pr_node}]
+            [self._gql_cross_ref(pr_node)]
         )
         result = gh.fetch_closed_sub_issues("o/r", 10)
         assert result == [
