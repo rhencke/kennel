@@ -10,6 +10,7 @@ from fido.github import (
     GraphQLError,
     _gh_token,
     _has_closing_keyword,  # noqa: PLC2701
+    _pr_state_str,  # noqa: PLC2701
     _TimeoutSession,  # noqa: PLC2701
 )
 
@@ -123,6 +124,26 @@ class TestHasClosingKeyword:
 
     def test_cross_repo_does_not_match_when_repo_is_none(self) -> None:
         assert _has_closing_keyword("Fixes owner/repo#5", 5, repo=None) is False
+
+
+class TestPrStateStr:
+    """Unit tests for _pr_state_str."""
+
+    def test_returns_state_field_when_present(self) -> None:
+        assert _pr_state_str({"state": "MERGED", "merged": True}) == "MERGED"
+        assert _pr_state_str({"state": "CLOSED", "merged": False}) == "CLOSED"
+        assert _pr_state_str({"state": "OPEN", "merged": False}) == "OPEN"
+
+    def test_falls_back_to_merged_bool_when_state_absent(self) -> None:
+        assert _pr_state_str({"merged": True}) == "MERGED"
+        assert _pr_state_str({"merged": False}) == "CLOSED"
+
+    def test_falls_back_when_state_is_none(self) -> None:
+        assert _pr_state_str({"state": None, "merged": True}) == "MERGED"
+        assert _pr_state_str({"state": None, "merged": False}) == "CLOSED"
+
+    def test_empty_dict_returns_closed(self) -> None:
+        assert _pr_state_str({}) == "CLOSED"
 
 
 class TestTimeoutSession:
@@ -1364,6 +1385,36 @@ class TestGitHubClass:
         assert merged is False
         assert pr_repo == "o/r"
 
+    def test_find_linked_pr_skips_open_cross_ref(self) -> None:
+        """An OPEN linked PR must not be returned — a sub-issue manually closed
+        while its PR is still open has no completed/abandoned PR to classify."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "OPEN", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_prefers_closed_over_open(self) -> None:
+        """When candidates include both an OPEN and a CLOSED PR, return the
+        CLOSED one — OPEN PRs are skipped in favour of completed ones."""
+        gh, mock_s = self._gh()
+        open_pr = self._gql_pr_simple(50, "OPEN", merged=False)
+        closed_pr = self._gql_pr_simple(99, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(open_pr),
+                self._gql_cross_ref(closed_pr),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 99
+        assert merged is False
+        assert pr_repo == "o/r"
+
     def test_find_linked_pr_finds_sidebar_pr(self) -> None:
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(200, "MERGED", merged=True)
@@ -1828,6 +1879,34 @@ class TestGitHubClass:
         # The PR body fetch must use the linked PR's repo, not the parent's.
         pr_fetch_url = mock_s.get.call_args_list[1].args[0]
         assert "/repos/other/repo/pulls/77" in pr_fetch_url
+
+    def test_fetch_closed_sub_issues_open_linked_pr_treated_as_no_pr(self) -> None:
+        """A sub-issue manually closed while its linked PR is still OPEN must
+        not be classified as closed_unmerged.  The open PR is skipped and the
+        sub-issue gets close_state='closed_no_pr' (no completed PR body)."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(9, state="closed", title="T", body="B")
+        mock_s.get.return_value = self._sub_issues_page([sub])
+        # Only candidate is an OPEN PR.
+        pr_node = self._gql_pr_simple(55, "OPEN", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=9,
+                title="T",
+                body="B",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_body="",
+            )
+        ]
+        # Must NOT have fetched a PR body via REST.
+        assert mock_s.get.call_count == 1
 
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()

@@ -60,6 +60,19 @@ def _has_closing_keyword(
     return False
 
 
+def _pr_state_str(pr: dict[str, object]) -> str:
+    """Return the GitHub PR state string ("OPEN", "CLOSED", or "MERGED").
+
+    Prefers the explicit ``state`` field from the GraphQL response.  Falls
+    back to deriving the state from the ``merged`` boolean when ``state`` is
+    absent or ``None`` (defensive for older query shapes).
+    """
+    state = pr.get("state")
+    if state:
+        return str(state)
+    return "MERGED" if pr.get("merged") else "CLOSED"
+
+
 # Retry schedule for transient GitHub failures on idempotent GETs (#664).
 # Delays in seconds between successive attempts.  Total retry budget is
 # ~14s of wall clock on top of the per-request _HTTP_TIMEOUT.  Only applied
@@ -732,9 +745,10 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
 """
         # GitHub PR numbers are only unique inside a repository.  Key linked
         # candidates by repo and number so cross-repo sub-issue PRs cannot
-        # collide while we choose or disconnect candidates.
-        keyword_prs: dict[tuple[str, int], bool] = {}
-        sidebar_prs: dict[tuple[str, int], bool] = {}
+        # collide while we choose or disconnect candidates.  Values are the
+        # GitHub PR state string: "OPEN", "CLOSED", or "MERGED".
+        keyword_prs: dict[tuple[str, int], str] = {}
+        sidebar_prs: dict[tuple[str, int], str] = {}
         cursor: str | None = None
         while True:
             data = self._graphql(
@@ -774,7 +788,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     ) or repo
                     pr_key = (pr_repo_val, pr_num)
                     if pr_key not in keyword_prs:
-                        keyword_prs[pr_key] = bool(pr.get("merged"))
+                        keyword_prs[pr_key] = _pr_state_str(pr)
                 elif typename == "ConnectedEvent":
                     pr = node.get("subject") or {}
                     if pr.get("__typename") != "PullRequest":
@@ -785,7 +799,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     ) or repo
                     pr_key = (pr_repo_val, pr_num)
                     if pr_key not in sidebar_prs:
-                        sidebar_prs[pr_key] = bool(pr.get("merged"))
+                        sidebar_prs[pr_key] = _pr_state_str(pr)
                 elif typename == "DisconnectedEvent":
                     pr = node.get("subject") or {}
                     if pr.get("__typename") == "PullRequest":
@@ -801,12 +815,17 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         chosen = keyword_prs or sidebar_prs
         if not chosen:
             return None, False, None
-        # Prefer merged PRs over closed-unmerged; break ties by lowest number,
-        # then repository for duplicate repo-scoped PR numbers.
-        merged_prs = {pr_key for pr_key, merged in chosen.items() if merged}
-        pool = merged_prs or set(chosen)
+        # Prefer merged PRs over closed-unmerged; skip OPEN PRs — a sub-issue
+        # manually closed while its PR is still open has no completed PR body
+        # worth including.  Break ties by lowest number, then repository.
+        merged_prs = {pr_key for pr_key, state in chosen.items() if state == "MERGED"}
+        non_open_prs = {pr_key for pr_key, state in chosen.items() if state != "OPEN"}
+        pool = merged_prs or non_open_prs
+        if not pool:
+            # Every candidate PR is still OPEN; treat as no linked PR.
+            return None, False, None
         pr_repo, pr_num = min(pool, key=lambda pr_key: (pr_key[1], pr_key[0]))
-        pr_merged = chosen[(pr_repo, pr_num)]
+        pr_merged = chosen[(pr_repo, pr_num)] == "MERGED"
         return pr_num, pr_merged, pr_repo
 
     def fetch_closed_sub_issues(
