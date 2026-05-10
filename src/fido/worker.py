@@ -3110,20 +3110,45 @@ class Worker:
                 if no_tasks_reason
                 else ""
             )
-            prompt = (
-                f'Setup just finished for issue #{issue} ("{issue_title}"). '
-                "The scope is fully covered by the following closed sub-issues:\n\n"
-                f"{sub_summary}\n"
-                f"{reason_section}\n"
-                "Write a PR comment in your voice (1-2 short paragraphs) "
-                "explaining that the work is already done because these sub-issues "
-                "covered the full scope. List each sub-issue by number with a "
-                "brief note about what it covered and its close state (merged PR, "
-                "closed without merge, or closed with no PR). Conclude that "
-                "there's nothing left to do and the PR is ready for review. "
-                "Output ONLY the comment body — no preamble, no markdown fence, "
-                "no signature."
-            )
+            if has_real_diff:
+                # The branch carries real work AND closed sub-issues covered
+                # the rest — together they leave nothing remaining.  Use a
+                # prompt that names both contributors so the voice comment
+                # accurately reflects that it's the *combination* of
+                # sub-issues + branch diff that closes the gap, not the
+                # sub-issues alone.
+                prompt = (
+                    f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                    "The combination of closed sub-issues and the existing branch "
+                    "diff leaves no remaining tasks:\n\n"
+                    f"{sub_summary}\n"
+                    f"{reason_section}\n"
+                    "Write a PR comment in your voice (1-2 short paragraphs) "
+                    "explaining that the closed sub-issues covered part of the "
+                    "scope and the existing branch covers the rest, so there is "
+                    "nothing left to implement. Conclude that the PR is ready for "
+                    "review. "
+                    "Output ONLY the comment body — no preamble, no markdown fence, "
+                    "no signature."
+                )
+            else:
+                # Branch has no real diff but sub-issues cover the scope and
+                # this is NOT an explicit NoTasksNeeded (that path returns
+                # early above).  Use the coverage-focused wording.
+                prompt = (
+                    f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                    "The scope is fully covered by the following closed sub-issues:\n\n"
+                    f"{sub_summary}\n"
+                    f"{reason_section}\n"
+                    "Write a PR comment in your voice (1-2 short paragraphs) "
+                    "explaining that the work is already done because these sub-issues "
+                    "covered the full scope. List each sub-issue by number with a "
+                    "brief note about what it covered and its close state (merged PR, "
+                    "closed without merge, or closed with no PR). Conclude that "
+                    "there's nothing left to do and the PR is ready for review. "
+                    "Output ONLY the comment body — no preamble, no markdown fence, "
+                    "no signature."
+                )
         else:
             prompt = (
                 f'Setup just finished for issue #{issue} ("{issue_title}") and '

@@ -6335,6 +6335,77 @@ class TestFinalizeSetupWithNoTasks:
         # Must NOT render as bare #99 (that would point to the wrong repo)
         assert "PR #99" not in prompt_arg
 
+    def test_sub_issue_prompt_pr_ready_path_mentions_branch_and_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """PR-ready path (has_real_diff=True) prompt credits both branch and sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        # Must mention the existing branch diff, not just the sub-issues alone
+        assert "branch" in prompt_arg.lower() or "combination" in prompt_arg.lower()
+        # Must NOT use the issue-close "fully covered by the following closed sub-issues" framing
+        assert "fully covered by the following closed sub-issues" not in prompt_arg
+
+    def test_sub_issue_prompt_no_diff_path_uses_fully_covered_wording(
+        self, tmp_path: Path
+    ) -> None:
+        """No-diff, non-explicit-no-tasks path still uses 'fully covered' wording for sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        # has_real_diff=False, explicit_no_tasks=False (not an issue-close path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=False,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "fully covered by the following closed sub-issues" in prompt_arg
+
     def test_sub_issue_prompt_state_reason_shown_for_no_pr(
         self, tmp_path: Path
     ) -> None:
