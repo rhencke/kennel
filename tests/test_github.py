@@ -1377,7 +1377,7 @@ class TestGitHubClass:
         assert pr_num == 300
         assert merged is True
 
-    def test_find_linked_pr_returns_lowest_number_on_tie(self) -> None:
+    def test_find_linked_pr_prefers_merged_over_closed(self) -> None:
         gh, mock_s = self._gh()
         pr1 = self._gql_pr_simple(400, "MERGED", merged=True)
         pr2 = self._gql_pr_simple(300, "CLOSED", merged=False)
@@ -1388,8 +1388,22 @@ class TestGitHubClass:
             ]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
-        assert pr_num == 300
-        assert merged is False
+        assert pr_num == 400
+        assert merged is True
+
+    def test_find_linked_pr_lowest_number_among_same_merge_state(self) -> None:
+        gh, mock_s = self._gh()
+        pr1 = self._gql_pr_simple(500, "MERGED", merged=True)
+        pr2 = self._gql_pr_simple(400, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(pr1),
+                self._gql_cross_ref(pr2),
+            ]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 400
+        assert merged is True
 
     def test_find_linked_pr_removes_disconnected_sidebar(self) -> None:
         gh, mock_s = self._gh()

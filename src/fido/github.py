@@ -777,7 +777,10 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         chosen = keyword_prs or sidebar_prs
         if not chosen:
             return None, False
-        pr_num = min(chosen)
+        # Prefer merged PRs over closed-unmerged; break ties by lowest number.
+        merged_prs = {n for n, m in chosen.items() if m}
+        pool = merged_prs or set(chosen)
+        pr_num = min(pool)
         return pr_num, chosen[pr_num]
 
     def fetch_closed_sub_issues(
