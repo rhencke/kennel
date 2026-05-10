@@ -21,15 +21,43 @@ _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
 # Matches GitHub's closing-keyword syntax in PR body/title text.
 # Used to identify closing PRs for already-closed issues, where
 # willCloseTarget is always false once the target is closed.
+#
+# GitHub's full set of closing keywords (all tenses/numbers):
+#   close, closes, closed
+#   fix, fixes, fixed
+#   resolve, resolves, resolved
+# Optional colon after the keyword (e.g. "Fixes: #123").
+# Optional owner/repo prefix for cross-repo references (e.g. "Fixes owner/repo#123").
+# Word boundary \b before keyword prevents false matches like "prefix_closes #N".
 _CLOSING_KEYWORD_RE: re.Pattern[str] = re.compile(
-    r"(?i)(?:closes|fixes|resolves)\s+#(\d+)"
+    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+"
+    r"(?:([\w.-]+/[\w.-]+)#|#)(\d+)"
 )
 
 
-def _has_closing_keyword(text: str, issue_number: int | str) -> bool:
-    """Return ``True`` when *text* contains a closing keyword referencing *issue_number*."""
+def _has_closing_keyword(
+    text: str, issue_number: int | str, repo: str | None = None
+) -> bool:
+    """Return ``True`` when *text* contains a closing keyword referencing *issue_number*.
+
+    For bare ``#N`` references, the match is unconditional.  For cross-repo
+    references (``owner/repo#N``), the reference only matches when *repo* is
+    provided and equals the prefix (case-insensitive).  When *repo* is
+    ``None`` and a cross-repo ref is found, it is skipped — the caller must
+    supply *repo* to validate cross-repo refs.
+    """
     target = str(issue_number)
-    return any(m.group(1) == target for m in _CLOSING_KEYWORD_RE.finditer(text))
+    for m in _CLOSING_KEYWORD_RE.finditer(text):
+        ref_repo = m.group(1)  # None for bare #N refs; "owner/repo" otherwise
+        ref_num = m.group(2)
+        if ref_num != target:
+            continue
+        if ref_repo is None:
+            return True  # bare #N — matches regardless of repo context
+        # Cross-repo ref: only match when the caller supplied a repo to compare
+        if repo is not None and ref_repo.lower() == repo.lower():
+            return True
+    return False
 
 
 # Retry schedule for transient GitHub failures on idempotent GETs (#664).
@@ -724,7 +752,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     pr_body = pr.get("body") or ""
                     pr_title = pr.get("title") or ""
                     if not will_close and not _has_closing_keyword(
-                        pr_body + " " + pr_title, number
+                        pr_body + " " + pr_title, number, repo
                     ):
                         continue
                     pr_num = pr["number"]

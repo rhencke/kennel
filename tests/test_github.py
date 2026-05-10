@@ -9,6 +9,7 @@ from fido.github import (
     GitHub,
     GraphQLError,
     _gh_token,
+    _has_closing_keyword,  # noqa: PLC2701
     _TimeoutSession,  # noqa: PLC2701
 )
 
@@ -40,6 +41,88 @@ class TestGhToken:
         mock_run = MagicMock(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
             _gh_token(runner=mock_run, environ={})
+
+
+class TestHasClosingKeyword:
+    """Unit tests for _has_closing_keyword — all keyword variants, colon form, cross-repo."""
+
+    # ── bare #N matches ──────────────────────────────────────────────────────
+
+    def test_closes_matches(self) -> None:
+        assert _has_closing_keyword("closes #5", 5) is True
+
+    def test_close_singular_matches(self) -> None:
+        assert _has_closing_keyword("Close #5", 5) is True
+
+    def test_closed_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Closed #5", 5) is True
+
+    def test_fixes_matches(self) -> None:
+        assert _has_closing_keyword("fixes #5", 5) is True
+
+    def test_fix_singular_matches(self) -> None:
+        assert _has_closing_keyword("Fix #5", 5) is True
+
+    def test_fixed_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Fixed #5", 5) is True
+
+    def test_resolves_matches(self) -> None:
+        assert _has_closing_keyword("resolves #5", 5) is True
+
+    def test_resolve_singular_matches(self) -> None:
+        assert _has_closing_keyword("Resolve #5", 5) is True
+
+    def test_resolved_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Resolved #5", 5) is True
+
+    def test_uppercase_keyword_matches(self) -> None:
+        assert _has_closing_keyword("CLOSES #5", 5) is True
+
+    # ── colon form ───────────────────────────────────────────────────────────
+
+    def test_colon_after_keyword_matches(self) -> None:
+        assert _has_closing_keyword("Fixes: #5", 5) is True
+
+    def test_colon_without_space_before_matches(self) -> None:
+        assert _has_closing_keyword("Fixes: #5", 5) is True
+
+    # ── wrong number does not match ──────────────────────────────────────────
+
+    def test_wrong_number_does_not_match(self) -> None:
+        assert _has_closing_keyword("closes #10", 100) is False
+
+    def test_prefix_number_does_not_match(self) -> None:
+        """#10 must not match when target is #100."""
+        assert _has_closing_keyword("closes #10", 100) is False
+
+    # ── word boundary ────────────────────────────────────────────────────────
+
+    def test_word_boundary_prevents_underscore_prefix_match(self) -> None:
+        """prefix_closes #N must not match due to \b word boundary."""
+        assert _has_closing_keyword("prefix_closes #5", 5) is False
+
+    # ── no closing keyword ───────────────────────────────────────────────────
+
+    def test_bare_mention_does_not_match(self) -> None:
+        assert _has_closing_keyword("see #5 for context", 5) is False
+
+    # ── cross-repo references ─────────────────────────────────────────────────
+
+    def test_cross_repo_matches_when_repo_matches(self) -> None:
+        assert _has_closing_keyword("Fixes owner/repo#5", 5, repo="owner/repo") is True
+
+    def test_cross_repo_matches_case_insensitively(self) -> None:
+        assert _has_closing_keyword("Fixes Owner/Repo#5", 5, repo="owner/repo") is True
+
+    def test_cross_repo_does_not_match_when_repo_differs(self) -> None:
+        assert _has_closing_keyword("Fixes other/repo#5", 5, repo="owner/repo") is False
+
+    def test_cross_repo_does_not_match_when_repo_not_provided(self) -> None:
+        """When caller passes no repo, cross-repo refs are skipped (can't verify)."""
+        assert _has_closing_keyword("Fixes owner/repo#5", 5) is False
+
+    def test_cross_repo_does_not_match_when_repo_is_none(self) -> None:
+        assert _has_closing_keyword("Fixes owner/repo#5", 5, repo=None) is False
 
 
 class TestTimeoutSession:
