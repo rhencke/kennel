@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 FIDO = REPO / "fido"
@@ -26,7 +27,7 @@ def run_build(
 
 
 def run_status(
-    payload: dict, tmp_path: Path, *, env: dict[str, str] | None = None
+    payload: dict[str, Any], tmp_path: Path, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     payload_path = tmp_path / "status.json"
     payload_path.write_text(json.dumps(payload))
