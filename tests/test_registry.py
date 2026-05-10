@@ -766,6 +766,61 @@ class TestWorkerRegistry:
         with pytest.raises((TypeError, dataclasses.FrozenInstanceError)):
             snap.is_alive = False  # type: ignore[misc]
 
+    def test_record_crash_republishes_thread_snapshot(self, tmp_path: Path) -> None:
+        """record_crash refreshes the ThreadSnapshot so is_alive and crash_error reflect the crash."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        # Simulate what the watchdog does: thread has died and crash_error is set
+        factory.return_value.is_alive.return_value = False
+        factory.return_value.crash_error = "RuntimeError: oops"
+        reg.record_crash("foo/bar", "RuntimeError: oops")
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
+        assert snap.is_alive is False
+        assert snap.crash_error == "RuntimeError: oops"
+
+    def test_stop_and_join_republishes_thread_snapshot(self, tmp_path: Path) -> None:
+        """stop_and_join refreshes the ThreadSnapshot so is_alive and was_stopped reflect the stop."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        factory.return_value.is_alive.return_value = True
+        factory.return_value.was_stopped = False
+        factory.return_value.session_owner = None
+        factory.return_value.session_alive = False
+        factory.return_value.session_pid = None
+        factory.return_value.session_dropped_count = 0
+        factory.return_value.session_sent_count = 0
+        factory.return_value.session_received_count = 0
+        factory.return_value.crash_error = None
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        # Simulate what join() does: thread exits and was_stopped is set
+        factory.return_value.is_alive.return_value = False
+        factory.return_value.was_stopped = True
+        reg.stop_and_join("foo/bar", timeout=5.0)
+        snap = reader.get().repos["foo/bar"].thread
+        assert snap is not None
+        assert snap.is_alive is False
+        assert snap.was_stopped is True
+
+    def test_stop_and_join_unknown_repo_skips_snapshot(self) -> None:
+        """stop_and_join on an unknown repo must not attempt to publish a snapshot."""
+        reader, updater = create_fido_atomic()
+        factory = MagicMock()
+        reg = WorkerRegistry(factory, updater)
+        reg.stop_and_join("unknown/repo")  # must not raise
+
 
 class TestMakeThread:
     def test_creates_worker_thread_with_work_dir_and_github(

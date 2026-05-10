@@ -480,6 +480,7 @@ class WorkerRegistry:
         self._state_updater.update(
             lambda root: root.repos[_name].crash_record, new_crash
         )
+        self._publish_thread_snapshot(repo_name)
 
     def _publish_thread_snapshot(self, repo_name: str) -> None:
         """Publish an immutable :class:`ThreadSnapshot` for *repo_name* to :class:`FidoState`.
@@ -628,6 +629,7 @@ class WorkerRegistry:
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
+            self._publish_thread_snapshot(repo_name)
 
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
