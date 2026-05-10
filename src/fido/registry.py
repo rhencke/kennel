@@ -107,6 +107,29 @@ class WebhookActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderSnapshot:
+    """Immutable snapshot of one repo's provider (ClaudeSession) state.
+
+    Captures provider session metadata as primitive values at the moment of
+    each provider lifecycle event (session start, recovery).  Stored on
+    :class:`RepoState` so the SCADA display path reads stale-free values
+    without holding the provider lock.
+
+    Fields mirror the public session properties on
+    :class:`~fido.worker.WorkerThread` that are read by the status display
+    path.  Published by :meth:`WorkerRegistry._publish_provider_snapshot`
+    at lifecycle boundaries where session state actually changes.
+    """
+
+    session_owner: str | None
+    session_alive: bool
+    session_pid: int | None
+    session_dropped_count: int
+    session_sent_count: int
+    session_received_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -135,6 +158,12 @@ class RepoState:
     thread is started.  No mutable thread reference is stored here — the
     snapshot captures primitive values only.
 
+    *provider* is the immutable :class:`ProviderSnapshot` for the repo's
+    provider (ClaudeSession).  ``None`` until the first
+    :meth:`~WorkerRegistry.start` call; refreshed by
+    :meth:`~WorkerRegistry._publish_provider_snapshot` at provider lifecycle
+    events (session start, recovery).
+
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
     Each migration removes the corresponding lock and dict from
@@ -147,30 +176,26 @@ class RepoState:
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
     thread: "ThreadSnapshot | None" = None
+    provider: "ProviderSnapshot | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class ThreadSnapshot:
-    """Immutable snapshot of one :class:`~fido.worker.WorkerThread`'s observable state.
+    """Immutable snapshot of one :class:`~fido.worker.WorkerThread`'s lifecycle state.
 
-    Captures all thread metadata as primitive values — no handles to the
+    Captures thread lifecycle metadata as primitive values — no handles to the
     mutable :class:`~fido.worker.WorkerThread` object itself.  Stored inside
     the frozen :class:`FidoState` so the SCADA display invariant is preserved:
     a snapshot reader can never reach through to a live thread and observe
     partial mutations.
 
-    Fields mirror the public attributes/properties on :class:`WorkerThread`
-    that are read by ``WorkerRegistry`` getters and the status display path.
+    Provider session state (session_owner, session_alive, session_pid, and
+    the message counters) lives on :class:`ProviderSnapshot` instead so it can
+    be published independently at provider lifecycle boundaries.
     """
 
     is_alive: bool
     was_stopped: bool
-    session_owner: str | None
-    session_alive: bool
-    session_pid: int | None
-    session_dropped_count: int
-    session_sent_count: int
-    session_received_count: int
     crash_error: str | None
 
 
@@ -407,6 +432,7 @@ class WorkerRegistry:
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
+        self._publish_provider_snapshot(repo_cfg.name)
         log.info("started WorkerThread for %s", repo_cfg.name)
 
     def wake(self, repo_name: str) -> None:
@@ -434,15 +460,16 @@ class WorkerRegistry:
     def recover_provider(self, repo_name: str) -> bool:
         """Recover the attached provider session for *repo_name*, if present.
 
-        Publishes a fresh :class:`ThreadSnapshot` after recovery so the SCADA
-        display reflects the post-recovery session state (e.g. a previously
-        detached provider is now reattached).
+        Publishes a fresh :class:`ThreadSnapshot` and :class:`ProviderSnapshot`
+        after recovery so the SCADA display reflects the post-recovery session
+        state (e.g. a previously detached provider is now reattached).
         """
         thread = self._threads.get(repo_name)
         if thread is None:
             return False
         result = thread.recover_provider()
         self._publish_thread_snapshot(repo_name)
+        self._publish_provider_snapshot(repo_name)
         return result
 
     def report_activity(
@@ -492,7 +519,7 @@ class WorkerRegistry:
     def _publish_thread_snapshot(self, repo_name: str) -> None:
         """Publish an immutable :class:`ThreadSnapshot` for *repo_name* to :class:`FidoState`.
 
-        Reads primitive state values from the thread in ``_threads`` and
+        Reads lifecycle state values from the thread in ``_threads`` and
         installs a fresh :class:`ThreadSnapshot` at
         ``repos[repo_name].thread`` via a single lens write.  No mutable
         thread reference is stored in the snapshot.
@@ -505,16 +532,34 @@ class WorkerRegistry:
         snapshot = ThreadSnapshot(
             is_alive=thread.is_alive(),
             was_stopped=thread.was_stopped,
+            crash_error=thread.crash_error,
+        )
+        _name = repo_name
+        self._state_updater.update(lambda root: root.repos[_name].thread, snapshot)
+
+    def _publish_provider_snapshot(self, repo_name: str) -> None:
+        """Publish an immutable :class:`ProviderSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Reads provider session state from the thread in ``_threads`` and
+        installs a fresh :class:`ProviderSnapshot` at
+        ``repos[repo_name].provider`` via a single lens write.  No mutable
+        thread or session reference is stored in the snapshot.
+
+        Must be called only after the thread has been inserted into
+        ``_threads`` and the repo's :class:`RepoState` has been written to
+        ``FidoState`` (i.e. at the end of :meth:`start`).
+        """
+        thread = self._threads[repo_name]
+        snapshot = ProviderSnapshot(
             session_owner=thread.session_owner,
             session_alive=thread.session_alive,
             session_pid=thread.session_pid,
             session_dropped_count=thread.session_dropped_count,
             session_sent_count=thread.session_sent_count,
             session_received_count=thread.session_received_count,
-            crash_error=thread.crash_error,
         )
         _name = repo_name
-        self._state_updater.update(lambda root: root.repos[_name].thread, snapshot)
+        self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.

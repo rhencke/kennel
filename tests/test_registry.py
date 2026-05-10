@@ -11,6 +11,7 @@ import pytest
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
+    ProviderSnapshot,
     ThreadSnapshot,
     WorkerCrash,
     WorkerRegistry,
@@ -216,8 +217,10 @@ class TestWorkerRegistry:
         assert reg.recover_provider("unknown/repo") is False
         factory.return_value.recover_provider.assert_not_called()
 
-    def test_recover_provider_republishes_thread_snapshot(self, tmp_path: Path) -> None:
-        """recover_provider() refreshes the ThreadSnapshot after recovery."""
+    def test_recover_provider_republishes_provider_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """recover_provider() refreshes the ProviderSnapshot after recovery."""
         reader, updater = create_fido_atomic()
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
@@ -236,10 +239,10 @@ class TestWorkerRegistry:
         factory.return_value.session_alive = True
         factory.return_value.session_pid = 42
         reg.recover_provider("foo/bar")
-        snap = reader.get().repos["foo/bar"].thread
-        assert snap is not None
-        assert snap.session_alive is True
-        assert snap.session_pid == 42
+        provider = reader.get().repos["foo/bar"].provider
+        assert provider is not None
+        assert provider.session_alive is True
+        assert provider.session_pid == 42
 
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()
@@ -670,7 +673,7 @@ class TestWorkerRegistry:
         assert snap is not None
         assert snap.was_stopped is True
 
-    def test_thread_snapshot_session_fields(self, tmp_path: Path) -> None:
+    def test_provider_snapshot_fields(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
@@ -684,14 +687,15 @@ class TestWorkerRegistry:
         factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
-        snap = reader.get().repos["foo/bar"].thread
-        assert snap is not None
-        assert snap.session_owner == "worker-home"
-        assert snap.session_alive is True
-        assert snap.session_pid == 12345
-        assert snap.session_dropped_count == 2
-        assert snap.session_sent_count == 7
-        assert snap.session_received_count == 5
+        provider = reader.get().repos["foo/bar"].provider
+        assert provider is not None
+        assert isinstance(provider, ProviderSnapshot)
+        assert provider.session_owner == "worker-home"
+        assert provider.session_alive is True
+        assert provider.session_pid == 12345
+        assert provider.session_dropped_count == 2
+        assert provider.session_sent_count == 7
+        assert provider.session_received_count == 5
 
     def test_thread_snapshot_crash_error_field(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
@@ -736,12 +740,6 @@ class TestWorkerRegistry:
         for val in (
             snap.is_alive,
             snap.was_stopped,
-            snap.session_owner,
-            snap.session_alive,
-            snap.session_pid,
-            snap.session_dropped_count,
-            snap.session_sent_count,
-            snap.session_received_count,
             snap.crash_error,
         ):
             assert val is None or isinstance(val, (bool, int, str))
