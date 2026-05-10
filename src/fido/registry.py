@@ -692,51 +692,6 @@ class WorkerRegistry:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
         return self._threads[repo_name].crash_error
 
-    def get_session_owner(self, repo_name: str) -> str | None:
-        """Return the name of the thread currently holding the ClaudeSession lock.
-
-        Delegates to :attr:`~fido.worker.WorkerThread.session_owner` on the
-        registered thread.  Returns ``None`` when no thread is registered for
-        the repo, no session exists, or the lock is currently free.
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_owner if thread is not None else None
-
-    def get_session_alive(self, repo_name: str) -> bool:
-        """Return True if the persistent ClaudeSession subprocess is alive.
-
-        Distinct from :meth:`get_session_owner` — an idle session that nobody
-        currently holds still reports ``session_alive=True`` so status display
-        can distinguish "session exists, idle" from "no session".
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_alive if thread is not None else False
-
-    def get_session_pid(self, repo_name: str) -> int | None:
-        """Return the PID of the persistent ClaudeSession subprocess, or None.
-
-        Read authoritatively from the fido-tracked session rather than
-        pgrep — the system prompt file path changed in #456 so the pgrep
-        heuristic in :mod:`fido.status` can no longer locate it.
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_pid if thread is not None else None
-
-    def get_session_dropped_count(self, repo_name: str) -> int:
-        """Return how many stale persistent session ids were dropped for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_dropped_count if thread is not None else 0
-
-    def get_session_sent_count(self, repo_name: str) -> int:
-        """Return the number of messages sent to the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_sent_count if thread is not None else 0
-
-    def get_session_received_count(self, repo_name: str) -> int:
-        """Return the number of events received from the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_received_count if thread is not None else 0
-
     def set_rescoping(self, repo_name: str, active: bool) -> None:
         """Set the rescoping-active flag for *repo_name*.
 

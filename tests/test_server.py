@@ -31,6 +31,7 @@ from fido.provider import ProviderID, ProviderLimitWindow
 from fido.rate_limit import GitHubLimit
 from fido.registry import (
     FidoState,
+    ProviderSnapshot,
     RepoState,
     WebhookActivity,
     WorkerActivity,
@@ -58,6 +59,7 @@ def _repo_state(
     stale: bool = False,
     started_at: datetime | None = None,
     webhook_activities: tuple[WebhookActivity, ...] = (),
+    provider: ProviderSnapshot | None = None,
 ) -> RepoState:
     progress_at = (
         datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -79,6 +81,7 @@ def _repo_state(
             last_crash_time=_EPOCH,
         ),
         webhook_activities=webhook_activities,
+        provider=provider,
     )
 
 
@@ -305,12 +308,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.get_session_dropped_count.return_value = 0
-        WebhookHandler.registry.get_session_sent_count.return_value = 0
-        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         assert resp.status == 200
@@ -333,14 +330,18 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
+            _repo_state(
+                "owner/repo",
+                provider=ProviderSnapshot(
+                    session_owner="worker-home",
+                    session_alive=True,
+                    session_pid=None,
+                    session_dropped_count=3,
+                    session_sent_count=10,
+                    session_received_count=8,
+                ),
+            )
         )
-        WebhookHandler.registry.get_session_owner.return_value = "worker-home"
-        WebhookHandler.registry.get_session_alive.return_value = True
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.get_session_dropped_count.return_value = 3
-        WebhookHandler.registry.get_session_sent_count.return_value = 10
-        WebhookHandler.registry.get_session_received_count.return_value = 8
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -352,11 +353,20 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False)
+            _repo_state(
+                "owner/repo",
+                what="idle",
+                busy=False,
+                provider=ProviderSnapshot(
+                    session_owner=None,
+                    session_alive=True,
+                    session_pid=None,
+                    session_dropped_count=0,
+                    session_sent_count=0,
+                    session_received_count=0,
+                ),
+            )
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = True
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -374,9 +384,6 @@ class TestGetEndpoint:
                 last_error="RuntimeError: boom",
             )
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -416,9 +423,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", stale=True)
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -429,9 +433,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = True
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -464,9 +465,6 @@ class TestGetEndpoint:
             _repo_state("owner/repo", what="idle", busy=False),
             github_limits=limits,
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -486,9 +484,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -516,9 +511,6 @@ class TestGetEndpoint:
             _repo_state("owner/repo", what="idle", busy=False),
             github_limits=limits,
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -541,9 +533,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
         cache = IssueTreeCache("owner/repo")
@@ -583,9 +572,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         # registry.get_issue_cache returns a MagicMock by default, not a
         # real IssueTreeCache — must serialize to None.
@@ -598,9 +584,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch(
             "fido.server.provider_statuses_for_repo_configs",
@@ -629,9 +612,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Napping", busy=False)
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -645,12 +625,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.get_session_dropped_count.return_value = 0
-        WebhookHandler.registry.get_session_sent_count.return_value = 0
-        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -714,12 +688,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #42")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.get_session_dropped_count.return_value = 0
-        WebhookHandler.registry.get_session_sent_count.return_value = 0
-        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -745,12 +713,6 @@ class TestGetEndpoint:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("unknown/repo", what="idle", busy=False)
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
-        WebhookHandler.registry.get_session_dropped_count.return_value = 0
-        WebhookHandler.registry.get_session_sent_count.return_value = 0
-        WebhookHandler.registry.get_session_received_count.return_value = 0
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
@@ -1035,9 +997,6 @@ class TestStatusXml:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
@@ -1070,9 +1029,6 @@ class TestStatusXml:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch("fido.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status")
@@ -1085,9 +1041,6 @@ class TestStatusXml:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working", busy=False)
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch(
             "fido.server.provider_statuses_for_repo_configs",
@@ -1127,9 +1080,6 @@ class TestStatusXml:
                 ),
             )
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
@@ -1251,9 +1201,6 @@ class TestStatusXml:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="Working on: #10")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
@@ -1271,9 +1218,6 @@ class TestStatusXml:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="working")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = False
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
 
         cache = IssueTreeCache("owner/repo")
@@ -1806,9 +1750,6 @@ class TestProcessAction:
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo", what="running")
         )
-        WebhookHandler.registry.get_session_owner.return_value = None
-        WebhookHandler.registry.get_session_alive.return_value = True
-        WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch("fido.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status.json")
