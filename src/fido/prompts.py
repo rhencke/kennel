@@ -132,7 +132,11 @@ def render_active_context(
     if closed_sub_issues:
         sub_blocks: list[str] = []
         for sub in closed_sub_issues:
-            entry = f"### #{sub.number}: {sub.title} ({sub.close_state})"
+            if sub.close_state == "closed_no_pr" and sub.state_reason:
+                close_label = f"{sub.close_state} ({sub.state_reason})"
+            else:
+                close_label = sub.close_state
+            entry = f"### #{sub.number}: {sub.title} ({close_label})"
             if sub.pr_number is not None:
                 if sub.pr_repo is not None and sub.pr_repo != parent_repo:
                     pr_ref = f"{sub.pr_repo}#{sub.pr_number}"

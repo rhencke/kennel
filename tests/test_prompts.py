@@ -1057,12 +1057,14 @@ class TestRenderActiveContext:
         pr_number: int | None = 200,
         pr_repo: str | None = None,
         pr_body: str = "Implements sub-task A.",
+        state_reason: str | None = None,
     ) -> ClosedSubIssue:
         return ClosedSubIssue(
             number=number,
             title=title,
             body=body,
             close_state=close_state,
+            state_reason=state_reason,
             pr_number=pr_number,
             pr_repo=pr_repo,
             pr_body=pr_body,
@@ -1234,6 +1236,71 @@ class TestRenderActiveContext:
         assert "(merged)" in result
         assert "(closed_unmerged)" in result
         assert "(closed_no_pr)" in result
+
+    def test_closed_sub_issue_state_reason_shown_for_no_pr(self) -> None:
+        """state_reason is appended to close_state for closed_no_pr sub-issues."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    3,
+                    "Deferred task",
+                    close_state="closed_no_pr",
+                    pr_number=None,
+                    pr_body="",
+                    state_reason="not_planned",
+                )
+            ],
+        )
+        assert "(closed_no_pr (not_planned))" in result
+
+    def test_closed_sub_issue_state_reason_omitted_when_none(self) -> None:
+        """When state_reason is None the label is just the close_state."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    4,
+                    "Finished task",
+                    close_state="closed_no_pr",
+                    pr_number=None,
+                    pr_body="",
+                    state_reason=None,
+                )
+            ],
+        )
+        assert "(closed_no_pr)" in result
+        assert "(closed_no_pr (None))" not in result
+
+    def test_closed_sub_issue_state_reason_not_shown_for_merged(self) -> None:
+        """state_reason is not appended when close_state is merged (has a PR)."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    5,
+                    "Done via PR",
+                    close_state="merged",
+                    pr_number=50,
+                    pr_body="",
+                    state_reason="completed",
+                )
+            ],
+        )
+        assert "(merged)" in result
+        assert "(merged (completed))" not in result
 
     def test_closed_sub_issues_in_stable_prefix(self) -> None:
         """Closed sub-issues are stable context — they don't change during a session."""

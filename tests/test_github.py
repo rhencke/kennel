@@ -1852,6 +1852,44 @@ class TestGitHubClass:
         result = gh.fetch_closed_sub_issues("o/r", 10)
         assert [r.number for r in result] == [20, 5, 12]
 
+    def test_fetch_closed_sub_issues_state_reason_populated(self) -> None:
+        """state_reason from the API payload is carried onto ClosedSubIssue."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = {
+            "number": 5,
+            "state": "closed",
+            "title": "T",
+            "body": "B",
+            "state_reason": "not_planned",
+        }
+        mock_s.get.return_value = self._sub_issues_page([sub])
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="closed_no_pr",
+                state_reason="not_planned",
+                pr_number=None,
+                pr_repo=None,
+                pr_body="",
+            )
+        ]
+
+    def test_fetch_closed_sub_issues_state_reason_none_when_absent(self) -> None:
+        """state_reason is None when not present in the API payload."""
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = self._sub_issues_page(
+            [self._sub_issue_item(5, state="closed", title="T", body="B")]
+        )
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result[0].state_reason is None
+
     def test_fetch_closed_sub_issues_handles_none_body(self) -> None:
         gh, mock_s = self._gh()
         sub = {"number": 3, "state": "closed", "title": "T", "body": None}

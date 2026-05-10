@@ -6335,6 +6335,41 @@ class TestFinalizeSetupWithNoTasks:
         # Must NOT render as bare #99 (that would point to the wrong repo)
         assert "PR #99" not in prompt_arg
 
+    def test_sub_issue_prompt_state_reason_shown_for_no_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """state_reason is appended to close_state in the prompt for no-PR sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=3,
+                title="Deferred task",
+                body="",
+                close_state="closed_no_pr",
+                state_reason="not_planned",
+                pr_number=None,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "not_planned" in prompt_arg
+        assert "closed_no_pr" in prompt_arg
+
     def test_sub_issue_comment_posted_with_marker(self, tmp_path: Path) -> None:
         """The comment generated from sub-issue context still carries the idempotency marker."""
         from fido.types import ClosedSubIssue

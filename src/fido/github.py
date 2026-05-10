@@ -854,6 +854,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             sub_num = int(item["number"])
             sub_title = item.get("title") or ""
             sub_body = item.get("body") or ""
+            state_reason: str | None = item.get("state_reason") or None
             pr_num, pr_merged, pr_repo = self._find_linked_pr_for_issue(repo, sub_num)
             if pr_num is None:
                 close_state = "closed_no_pr"
@@ -868,6 +869,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     title=sub_title,
                     body=sub_body,
                     close_state=close_state,
+                    state_reason=state_reason,
                     pr_number=pr_num,
                     pr_repo=pr_repo,
                     pr_body=pr_body,

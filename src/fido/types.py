@@ -74,6 +74,11 @@ class ClosedSubIssue:
         One of ``"merged"`` (a linked PR was merged), ``"closed_unmerged"``
         (a linked PR was closed without merging), or ``"closed_no_pr"``
         (no linked PR — cancelled, won't-fix, or deferred).
+    state_reason:
+        GitHub's ``state_reason`` for the sub-issue (``"completed"``,
+        ``"not_planned"``, ``"reopened"``, or ``None`` when absent).  Only
+        meaningful when ``close_state`` is ``"closed_no_pr"`` — used to
+        distinguish "completed without a PR" from "won't fix / deferred".
     pr_number:
         GitHub PR number of the linked pull request, or ``None`` when
         ``close_state`` is ``"closed_no_pr"``.
@@ -89,6 +94,7 @@ class ClosedSubIssue:
     title: str
     body: str
     close_state: str
+    state_reason: str | None = None
     pr_number: int | None = None
     pr_repo: str | None = None
     pr_body: str = ""

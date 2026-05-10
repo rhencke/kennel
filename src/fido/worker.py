@@ -3029,6 +3029,8 @@ class Worker:
                     else:
                         pr_ref = f"#{sub.pr_number}"
                     state_desc = f"PR {pr_ref} ({sub.close_state})"
+                elif sub.state_reason:
+                    state_desc = f"{sub.close_state} ({sub.state_reason})"
                 else:
                     state_desc = sub.close_state
                 sub_lines.append(f"  - #{sub.number}: {sub.title} — {state_desc}")
