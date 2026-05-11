@@ -20,10 +20,11 @@ from urllib.parse import urlparse
 from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
 import requests
+from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState, create_fido_atomic
-from fido.atomic import AtomicReader, AtomicUpdater
+from fido.appstate import FidoState
+from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
@@ -1512,9 +1513,6 @@ def run(
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
     _GitHub: type[GitHub] = GitHub,
     _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
-    _create_fido_atomic: Callable[
-        [], tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]
-    ] = create_fido_atomic,
 ) -> None:
     config = _from_args()
 
@@ -1582,7 +1580,9 @@ def run(
     # (write-only) and to the rate-limit monitor; the reader stays here and
     # is placed on WebhookHandler so the status serialisation path can read
     # without going through the registry at all.
-    state_reader, state_updater = _create_fido_atomic()
+    state_reader, state_updater = create_atomic(
+        FidoState(repos=frozendict(), github_limits=GitHubLimit())
+    )
     registry = _make_registry(
         config.repos, gh, config, dispatchers=dispatchers, state_updater=state_updater
     )

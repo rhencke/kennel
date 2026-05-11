@@ -9,16 +9,10 @@ directly from this leaf module, with no back-reference to the registry.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicUpdater
-from fido.atomic import create_atomic as _create_atomic
 from fido.rate_limit import GitHubLimit
-
-if TYPE_CHECKING:
-    from fido.atomic import AtomicReader
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,18 +201,3 @@ class FidoState:
 
     repos: frozendict[str, RepoState]
     github_limits: GitHubLimit
-
-
-_EMPTY_FIDO_STATE = FidoState(repos=frozendict(), github_limits=GitHubLimit())
-
-
-def create_fido_atomic() -> "tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]":
-    """Create the atomic cell for :class:`FidoState` and return both faces.
-
-    Thin wrapper around :func:`~fido.atomic.create_atomic` with the correct
-    initial value.  Call this once at the composition root (``run()``), pass
-    the updater to :class:`~fido.registry.WorkerRegistry` and
-    :class:`~fido.rate_limit.RateLimitMonitor`, and keep the reader in the
-    composition root for the status serialisation path.
-    """
-    return _create_atomic(_EMPTY_FIDO_STATE)

@@ -15,10 +15,13 @@ from typing import Never
 from unittest.mock import MagicMock, patch
 
 import pytest
+from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import create_fido_atomic
+from fido.appstate import FidoState
+from fido.atomic import create_atomic
 from fido.provider_factory import DefaultProviderFactory
+from fido.rate_limit import GitHubLimit
 from fido.registry import WorkerRegistry
 from fido.tasks import (
     _merge_thread_lineage,
@@ -64,7 +67,9 @@ class TestWorkerRegistryPreemptionHelpers:
     def _registry(self) -> WorkerRegistry:
         # WorkerRegistry takes a thread factory callable; tests don't
         # need real WorkerThreads, so a no-op factory is fine.
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         return WorkerRegistry(MagicMock(), updater)
 
     def test_note_provider_interrupt_requested(self) -> None:

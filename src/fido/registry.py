@@ -82,7 +82,7 @@ class WorkerRegistry:
 
     Usage::
 
-        state_reader, state_updater = create_fido_atomic()
+        state_reader, state_updater = create_atomic(FidoState(repos=frozendict(), github_limits=GitHubLimit()))
         registry = WorkerRegistry(my_factory, state_updater)
         registry.start(repo_cfg)   # create + start thread
         registry.wake("owner/repo")  # nudge thread to check for work
@@ -820,7 +820,7 @@ def make_registry(
 
     Uses :func:`_make_thread` as the factory; all threads share the provided
     :class:`~fido.github.GitHub` client.  The caller (composition root) is
-    responsible for creating the atomic cell via :func:`create_fido_atomic`
+    responsible for creating the atomic cell via :func:`~fido.atomic.create_atomic`
     and passing the updater face here.  Pass a custom registry directly
     (with a mock factory) in tests instead of calling this.
     """

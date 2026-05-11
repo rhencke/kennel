@@ -800,10 +800,16 @@ class TestWorker:
         self, tmp_path: Path
     ) -> None:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
-        from fido.appstate import create_fido_atomic
+        from frozendict import frozendict
+
+        from fido.appstate import FidoState
+        from fido.atomic import create_atomic
+        from fido.rate_limit import GitHubLimit
         from fido.registry import WorkerRegistry
 
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         registry = WorkerRegistry(MagicMock(), updater)
         # Prepopulate FidoState so report_activity can lens-write into it.
         for i in range(3):
