@@ -913,7 +913,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     # behind long worker turns.  Both ClaudeSession and
                     # CopilotCLISession implement ``hold_for_handler``.
                     with session.hold_for_handler():
-                        self._process_action_inner(action, repo_cfg, activity)
+                        # Publish immediately after acquiring the handler hold
+                        # so repo_state.provider reflects the current ownership
+                        # (clears any stale worker-owner from the last snapshot).
+                        self.registry.publish_provider_snapshot(repo_cfg.name)
+                        try:
+                            self._process_action_inner(action, repo_cfg, activity)
+                        finally:
+                            # Publish again on the way out so the snapshot is
+                            # fresh after the session returns to the worker.
+                            self.registry.publish_provider_snapshot(repo_cfg.name)
                 else:
                     self._process_action_inner(action, repo_cfg, activity)
         except provider.SessionLeakError:

@@ -1074,57 +1074,6 @@ class TestWebhookActivity:
             assert len(acts) == 1
             assert acts[0].description == "updated"
 
-    def test_publishes_provider_snapshot_on_enter_and_exit(
-        self, tmp_path: Path
-    ) -> None:
-        """webhook_activity publishes a ProviderSnapshot on enter and on exit."""
-        _, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), updater)
-        reg.start(_repo("foo/bar", tmp_path))
-
-        publish_calls: list[str] = []
-        original = reg._publish_provider_snapshot
-
-        def spy(repo_name: str) -> None:
-            publish_calls.append(repo_name)
-            original(repo_name)
-
-        reg._publish_provider_snapshot = spy  # type: ignore[method-assign]
-
-        assert publish_calls == []
-        with reg.webhook_activity("foo/bar", "handling"):
-            # One call on enter
-            assert publish_calls == ["foo/bar"]
-        # One more call on exit
-        assert publish_calls == ["foo/bar", "foo/bar"]
-
-    def test_publishes_provider_snapshot_on_exit_after_exception(
-        self, tmp_path: Path
-    ) -> None:
-        """webhook_activity publishes a ProviderSnapshot on exit even when the body raises."""
-        import pytest as _pytest
-
-        _, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), updater)
-        reg.start(_repo("foo/bar", tmp_path))
-
-        publish_calls: list[str] = []
-        original = reg._publish_provider_snapshot
-
-        def spy(repo_name: str) -> None:
-            publish_calls.append(repo_name)
-            original(repo_name)
-
-        reg._publish_provider_snapshot = spy  # type: ignore[method-assign]
-
-        with _pytest.raises(RuntimeError):
-            with reg.webhook_activity("foo/bar", "handling"):
-                assert publish_calls == ["foo/bar"]  # published on enter
-                raise RuntimeError("boom")
-
-        # Published again on exit (finally path)
-        assert publish_calls == ["foo/bar", "foo/bar"]
-
 
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:

@@ -2084,6 +2084,157 @@ class TestProcessAction:
         mock_reply.assert_not_called()
         WebhookHandler._fn_launch_worker.assert_called_once()
 
+    def test_publish_provider_snapshot_inside_hold_for_handler(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called inside the hold_for_handler window.
+
+        The snapshot publishes must bracket the hold_for_handler ownership —
+        one immediately after hold_for_handler enters (ownership acquired) and
+        one in the finally before hold_for_handler exits (still held).  This
+        ensures the status display reflects current session state while the
+        webhook handler actually holds the session.
+        """
+        from contextlib import contextmanager
+
+        from fido.events import Action
+        from fido.registry import WorkerRegistry, create_fido_atomic
+
+        cfg = _config(tmp_path)
+        handler = WebhookHandler.__new__(WebhookHandler)
+        handler.config = cfg
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
+        reg.start(cfg.repos["owner/repo"])
+        handler.registry = reg
+        handler.gh = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
+
+        call_log: list[str] = []
+
+        @contextmanager  # type: ignore[misc]
+        def tracked_hold_for_handler() -> object:
+            call_log.append("hold_enter")
+            try:
+                yield mock_session
+            finally:
+                call_log.append("hold_exit")
+
+        mock_session = MagicMock()
+        mock_session.hold_for_handler = tracked_hold_for_handler
+
+        def patched_get_session(repo_name: str) -> object:
+            del repo_name
+            return mock_session
+
+        reg.get_session = patched_get_session  # type: ignore[method-assign]
+
+        original_publish = reg.publish_provider_snapshot
+
+        def spy_publish(repo_name: str) -> None:
+            call_log.append("publish")
+            original_publish(repo_name)
+
+        reg.publish_provider_snapshot = spy_publish  # type: ignore[method-assign]
+
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(  # type: ignore[assignment]
+            return_value=("ACT", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
+        WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
+
+        action = Action(
+            prompt="test",
+            comment_body="please fix",
+            thread={
+                "repo": "owner/repo",
+                "pr": 11,
+                "comment_id": 9300,
+                "url": "https://github.com/owner/repo/pull/11#issuecomment-9300",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+        )
+
+        reg.get_session = patched_get_session  # type: ignore[method-assign]
+        handler._process_action(action, cfg.repos["owner/repo"])
+
+        # publish(enter) must happen AFTER hold_enter, and publish(exit) before hold_exit
+        assert call_log == ["hold_enter", "publish", "publish", "hold_exit"]
+
+    def test_publish_provider_snapshot_inside_hold_for_handler_on_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot fires on both enter and exit even when the action raises."""
+        from contextlib import contextmanager
+
+        from fido.events import Action
+        from fido.registry import WorkerRegistry, create_fido_atomic
+
+        cfg = _config(tmp_path)
+        handler = WebhookHandler.__new__(WebhookHandler)
+        handler.config = cfg
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
+        reg.start(cfg.repos["owner/repo"])
+        handler.registry = reg
+        handler.gh = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
+
+        call_log: list[str] = []
+
+        @contextmanager  # type: ignore[misc]
+        def tracked_hold_for_handler() -> object:
+            call_log.append("hold_enter")
+            try:
+                yield mock_session
+            finally:
+                call_log.append("hold_exit")
+
+        mock_session = MagicMock()
+        mock_session.hold_for_handler = tracked_hold_for_handler
+
+        def patched_get_session(repo_name: str) -> object:
+            del repo_name
+            return mock_session
+
+        reg.get_session = patched_get_session  # type: ignore[method-assign]
+
+        original_publish = reg.publish_provider_snapshot
+
+        def spy_publish(repo_name: str) -> None:
+            call_log.append("publish")
+            original_publish(repo_name)
+
+        reg.publish_provider_snapshot = spy_publish  # type: ignore[method-assign]
+
+        def raise_in_handler(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            del args, kwargs
+            raise RuntimeError("boom")
+
+        WebhookHandler._fn_reply_to_issue_comment = raise_in_handler  # type: ignore[assignment]
+        WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
+        WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
+
+        action = Action(
+            prompt="test",
+            comment_body="please fix",
+            thread={
+                "repo": "owner/repo",
+                "pr": 12,
+                "comment_id": 9301,
+                "url": "https://github.com/owner/repo/pull/12#issuecomment-9301",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            handler._process_action(action, cfg.repos["owner/repo"])
+
+        # Even on exception: publish on enter, publish on exit (finally), then hold_exit
+        assert call_log == ["hold_enter", "publish", "publish", "hold_exit"]
+
 
 class TestProcessActionInner:
     """Direct unit tests for ``_process_action_inner`` — covers the

@@ -619,8 +619,6 @@ class WorkerRegistry:
         with self._webhook_lock:
             self._webhook_activities.setdefault(repo_name, []).append(activity)
             self._publish_webhook_activities(repo_name)
-        if repo_name in self._threads:
-            self._publish_provider_snapshot(repo_name)
         try:
             yield handle
         finally:
@@ -630,8 +628,6 @@ class WorkerRegistry:
                     a for a in acts if a.handle_id != activity.handle_id
                 ]
                 self._publish_webhook_activities(repo_name)
-            if repo_name in self._threads:
-                self._publish_provider_snapshot(repo_name)
 
     def set_webhook_description(
         self, repo_name: str, handle_id: int, description: str
