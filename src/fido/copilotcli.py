@@ -1181,6 +1181,7 @@ class CopilotCLISession(OwnedSession):
         )
         with self._metrics_lock:
             self._received_count += 1
+        self._notify_snapshot_publisher()
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)

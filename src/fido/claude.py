@@ -1382,6 +1382,7 @@ class ClaudeSession(OwnedSession):
                 self._log_event(obj)
                 with self._metrics_lock:
                     self._received_count += 1
+                self._notify_snapshot_publisher()
                 idle_deadline.reset()
                 # First non-empty event after Send transitions Sending →
                 # AwaitingReply.  Other states (AwaitingReply, Draining,

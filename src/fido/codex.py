@@ -846,6 +846,7 @@ class CodexSession(OwnedSession):
                     final_text = text
                     with self._state_lock:
                         self._received_count += 1
+                    self._notify_snapshot_publisher()
             completed = (
                 _extract_completed_turn(params) if method == "turn/completed" else None
             )

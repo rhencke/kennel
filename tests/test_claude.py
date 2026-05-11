@@ -937,6 +937,38 @@ class TestClaudeSessionMessageCounts:
         assert len(published) == 1
         assert published[0]["sent_count"] == 1
 
+    def test_snapshot_publisher_fires_after_receive(self, tmp_path: Path) -> None:
+        import json as _json
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        lines = [
+            _json.dumps({"type": "assistant", "text": "chunk"}) + "\n",
+            _json.dumps({"type": "result", "result": "done"}) + "\n",
+        ]
+        proc = _make_session_proc(lines)
+        published: list[dict[str, object]] = []
+
+        class Recorder:
+            def publish_metrics(self, **kwargs: object) -> None:
+                published.append(kwargs)
+
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=MagicMock(return_value=proc),
+            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            snapshot_publisher=Recorder(),
+        )
+        session.send("hello")
+        published.clear()  # ignore the send publication
+        list(session.iter_events())
+        # Two events received → two snapshot publications, each with the
+        # incremented received_count already visible.
+        assert len(published) == 2
+        assert published[0]["received_count"] == 1
+        assert published[1]["received_count"] == 2
+
     def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         import json as _json
 
