@@ -2309,6 +2309,7 @@ class Worker:
         nodes: list[dict[str, Any]],
         gh_user: str,
         collaborators: frozenset[str],
+        allowed_bots: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         """Return unresolved review threads for Python-owned reply handling.
 
@@ -2316,11 +2317,19 @@ class Worker:
         - it is not resolved,
         - it has at least one comment,
         - the last commenter is not *gh_user* (awaiting a response),
-        - the last commenter is either in *collaborators* or ends with ``[bot]``, and
+        - the last commenter is in *collaborators*, ends with ``[bot]``, or
+          is in *allowed_bots* (matches webhook-side ``_is_allowed``), and
         - the first comment's ID is not claimed or completed in SQLite.
 
         The last rule prevents the worker reply path from posting a duplicate
         reply to a thread that another webhook or worker attempt already owns.
+
+        ``allowed_bots`` mirrors the webhook-side allowlist
+        (``Config.allowed_bots``).  Without it, a bot user that doesn't
+        carry a ``[bot]`` suffix (e.g. GitHub Copilot inline-review's
+        ``Copilot`` identifier) would pass the webhook gate but get
+        silently dropped here even when the operator explicitly allowed
+        it.  Closes #1622.
         """
         result = []
         for node in nodes:
@@ -2334,7 +2343,11 @@ class Worker:
             last_author = (last_comment.get("author") or {}).get("login", "")
             if last_author == gh_user:
                 continue
-            if last_author not in collaborators and not last_author.endswith("[bot]"):
+            if (
+                last_author not in collaborators
+                and not last_author.endswith("[bot]")
+                and last_author not in allowed_bots
+            ):
                 continue
             first_db_id = first_comment.get("databaseId")
             if first_db_id is not None and FidoStore(
@@ -2418,10 +2431,14 @@ class Worker:
         ``False`` if there are no actionable threads.
         """
         log.info("checking: threads")
+        allowed_bots = (
+            self._config.allowed_bots if self._config is not None else frozenset()
+        )
         threads = self._filter_threads(
             self.gh.get_review_threads(repo_ctx.owner, repo_ctx.repo_name, pr_number),
             repo_ctx.gh_user,
             repo_ctx.collaborators,
+            allowed_bots,
         )
         if not threads:
             return False

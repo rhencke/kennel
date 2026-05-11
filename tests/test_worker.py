@@ -9035,6 +9035,35 @@ class TestFilterThreads:
         )
         assert len(result) == 1
 
+    def test_includes_thread_from_allowed_bot_without_bot_suffix(
+        self, tmp_path: Path
+    ) -> None:
+        # GitHub's Copilot inline reviewer posts as "Copilot" (no [bot]
+        # suffix).  Operators allow it via --allowed-bots; this filter
+        # must respect that intent (#1622).
+        w = self._make_worker(tmp_path)
+        result = w._filter_threads(
+            [self._make_node(last_author="Copilot", last_body="review note")],
+            "fido-bot",
+            frozenset({"owner"}),
+            frozenset({"Copilot"}),
+        )
+        assert len(result) == 1
+
+    def test_excludes_allowed_bot_when_not_in_allowed_bots(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression: a user that is neither a collaborator, nor ends with
+        # [bot], nor is in allowed_bots, is still rejected.
+        w = self._make_worker(tmp_path)
+        result = w._filter_threads(
+            [self._make_node(last_author="Copilot", last_body="review note")],
+            "fido-bot",
+            frozenset({"owner"}),
+            frozenset(),  # empty allowed_bots
+        )
+        assert result == []
+
     def test_maps_fields_correctly(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         result = w._filter_threads(
