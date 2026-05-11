@@ -433,6 +433,75 @@ class TestAddTask:
         assert t1["id"] != t2["id"]
         assert len(Tasks(tmp_path).list()) == 2
 
+    def test_completed_lineage_does_not_block_new_task_with_different_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: completed task with shared lineage_key must not dedup
+        a new task from a different comment (#1246, sibling of #1188)."""
+        thread_a = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 100,
+            "lineage_key": "issues:r/r:1",
+        }
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_key": "issues:r/r:1",
+        }
+
+        t1 = Tasks(tmp_path).add(
+            title="do first thing",
+            task_type=TaskType.THREAD,
+            thread=thread_a,
+        )
+        Tasks(tmp_path).complete_by_id(t1["id"])
+
+        t2 = Tasks(tmp_path).add(
+            title="do second thing",
+            task_type=TaskType.THREAD,
+            thread=thread_b,
+        )
+
+        assert t1["id"] != t2["id"], "new comment must produce a new task"
+        tasks = Tasks(tmp_path).list()
+        assert len(tasks) == 2
+
+    def test_in_progress_lineage_deduplicates_new_task_with_different_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """An in-progress sibling task in the same lineage should coalesce
+        the new task — one active worker is already on it."""
+        thread_a = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 100,
+            "lineage_key": "issues:r/r:1",
+        }
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_key": "issues:r/r:1",
+        }
+
+        t1 = Tasks(tmp_path).add(
+            title="do first thing",
+            task_type=TaskType.THREAD,
+            thread=thread_a,
+        )
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+
+        t2 = Tasks(tmp_path).add(
+            title="do second thing",
+            task_type=TaskType.THREAD,
+            thread=thread_b,
+        )
+
+        assert t1["id"] == t2["id"], "in-progress sibling must coalesce"
+        assert len(Tasks(tmp_path).list()) == 1
+
     def test_task_type_required(self, tmp_path: Path) -> None:
         import pytest
 

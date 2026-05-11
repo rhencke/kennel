@@ -1125,30 +1125,57 @@ class Tasks(JsonFileStore):
             existing = lock.read()
             for t in existing:
                 existing_thread = t.get("thread") or {}
+                existing_comment_id = existing_thread.get("comment_id")
                 existing_lineage_key = _thread_lineage_key(existing_thread)
-                if lineage_key is not None and lineage_key == existing_lineage_key:
+
+                # Same comment: always dedup, regardless of status.
+                if comment_id is not None and existing_comment_id == comment_id:
                     if _merge_thread_lineage(existing_thread, thread or {}):
                         t["thread"] = existing_thread
                         lock.write(existing)
                     log.info(
-                        "task already exists for lineage %s (status: %s)",
-                        lineage_key,
+                        "task already exists for comment_id %s (status: %s)",
+                        comment_id,
                         t["status"],
                     )
                     return t
-                if comment_id is not None:
-                    # Never re-create a task for the same comment, regardless of status.
-                    if existing_thread.get("comment_id") == comment_id:
+
+                # Same lineage, different comment: dedup only when the sibling
+                # task is in-progress, or when the new comment's lineage overlaps
+                # the existing task's lineage (replies to the same review thread).
+                # A completed or pending task with non-overlapping lineage
+                # represents independent work and must not block new task creation.
+                if lineage_key is not None and lineage_key == existing_lineage_key:
+                    new_lineage_ids = set(_thread_lineage_comment_ids(thread))
+                    existing_lineage_ids = set(
+                        _thread_lineage_comment_ids(existing_thread)
+                    )
+                    lineage_overlaps = bool(new_lineage_ids & existing_lineage_ids)
+                    if t["status"] == TaskStatus.IN_PROGRESS or lineage_overlaps:
                         if _merge_thread_lineage(existing_thread, thread or {}):
                             t["thread"] = existing_thread
                             lock.write(existing)
-                        log.info(
-                            "task already exists for comment_id %s (status: %s)",
-                            comment_id,
-                            t["status"],
-                        )
+                        if (
+                            t["status"] == TaskStatus.IN_PROGRESS
+                            and not lineage_overlaps
+                        ):
+                            log.info(
+                                "task already in progress for lineage %s — coalescing",
+                                lineage_key,
+                            )
+                        else:
+                            log.info(
+                                "task already exists for lineage %s (status: %s)",
+                                lineage_key,
+                                t["status"],
+                            )
                         return t
-                elif t["status"] == TaskStatus.PENDING and t["title"] == title:
+
+                if (
+                    comment_id is None
+                    and t["status"] == TaskStatus.PENDING
+                    and t["title"] == title
+                ):
                     log.info("task already exists: %s", title[:80])
                     return t
             existing.append(task)
