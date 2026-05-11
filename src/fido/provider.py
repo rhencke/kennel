@@ -1299,37 +1299,3 @@ class Provider(Protocol):
     def agent(self) -> ProviderAgent:
         """Return the provider's interactive runtime collaborator."""
         ...
-
-
-class ProviderStatsPublisher(Protocol):
-    """Injected collaborator for requesting a provider-stats snapshot publication.
-
-    Sessions and agents hold this collaborator and call :meth:`publish` when
-    they want the registry to refresh the immutable
-    :class:`~fido.registry.ProviderSnapshot` in
-    :class:`~fido.registry.FidoState`.
-
-    Provider modules must **not** import
-    :class:`~fido.registry.WorkerRegistry` directly — this Protocol is the
-    only legal publication path from the provider side.  The real
-    implementation is wired at construction time by
-    :class:`~fido.provider_factory.DefaultProviderFactory`; tests inject a
-    fake that records calls.
-    """
-
-    def publish(self) -> None:
-        """Request a fresh provider-stats snapshot publication."""
-        ...
-
-
-class NullProviderStatsPublisher:
-    """No-op :class:`ProviderStatsPublisher`.
-
-    Used when publication is not wired — for example, standalone agent
-    construction in tests that are not exercising the publication boundary,
-    or in contexts where no registry is available.  Calling :meth:`publish`
-    is a silent no-op.
-    """
-
-    def publish(self) -> None:
-        """Silently ignore the publication request."""

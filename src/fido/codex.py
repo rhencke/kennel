@@ -10,9 +10,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, NoReturn, Protocol
+from typing import IO, TYPE_CHECKING, Any, NoReturn, Protocol
 
 from fido import provider
+from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
@@ -26,11 +27,13 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
-    ProviderStatsPublisher,
     coerce_provider_model,
     model_name,
 )
 from fido.session_agent import SessionBackedAgent
+
+if TYPE_CHECKING:
+    from fido.registry import FidoState
 
 log = logging.getLogger(__name__)
 
@@ -1140,7 +1143,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
-        stats_publisher: ProviderStatsPublisher | None = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
     ) -> None:
         self._runner = runner
         self._session_factory = (
@@ -1152,7 +1155,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
-            stats_publisher=stats_publisher,
+            state_updater=state_updater,
         )
 
     @property

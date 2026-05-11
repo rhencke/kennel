@@ -5,15 +5,18 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from fido.atomic import AtomicUpdater
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
-    NullProviderStatsPublisher,
     PromptSession,
     ProviderModel,
-    ProviderStatsPublisher,
     TurnSessionMode,
 )
+
+if TYPE_CHECKING:
+    from fido.registry import FidoState
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ class SessionBackedAgent:
         work_dir: Path | str | None,
         repo_name: str | None,
         session: PromptSession | None,
-        stats_publisher: ProviderStatsPublisher | None = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
     ) -> None:
         self._session_fn = session_fn
         self._session_system_file = session_system_file
@@ -40,16 +43,12 @@ class SessionBackedAgent:
         self._repo_name = repo_name
         self._session_lock = threading.Lock()
         self._session: PromptSession | None = session
-        self._stats_publisher: ProviderStatsPublisher = (
-            stats_publisher
-            if stats_publisher is not None
-            else NullProviderStatsPublisher()
-        )
+        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
 
     @property
-    def stats_publisher(self) -> ProviderStatsPublisher:
-        """Return the injected :class:`~fido.provider.ProviderStatsPublisher`."""
-        return self._stats_publisher
+    def state_updater(self) -> "AtomicUpdater[FidoState] | None":
+        """Return the injected :class:`~fido.atomic.AtomicUpdater`, if any."""
+        return self._state_updater
 
     @property
     def session(self) -> PromptSession | None:

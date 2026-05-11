@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from fido.atomic import AtomicUpdater
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLIAPI, CopilotCLIClient
-from fido.provider import NullProviderStatsPublisher, ProviderID
+from fido.provider import ProviderID
 from fido.provider_factory import DefaultProviderFactory
 
 
@@ -197,10 +199,10 @@ class TestProviderSessionIdExtraction:
         )
 
 
-class TestProviderStatsPublisherWiring:
-    """create_provider threads ProviderStatsPublisher through to every agent type."""
+class TestProviderStateUpdaterWiring:
+    """create_provider threads AtomicUpdater[FidoState] through to every agent type."""
 
-    def test_default_publisher_is_null_for_all_providers(self, tmp_path: Path) -> None:
+    def test_default_updater_is_none_for_all_providers(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         factory = DefaultProviderFactory(session_system_file=system_file)
@@ -215,11 +217,11 @@ class TestProviderStatsPublisherWiring:
                 repo_name="owner/repo",
                 session=None,
             )
-            assert isinstance(prov.agent.stats_publisher, NullProviderStatsPublisher), (
-                f"{provider_id}: expected NullProviderStatsPublisher by default"
+            assert prov.agent.state_updater is None, (
+                f"{provider_id}: expected None state_updater by default"
             )
 
-    def test_injected_publisher_reachable_on_all_agent_types(
+    def test_injected_updater_reachable_on_all_agent_types(
         self, tmp_path: Path
     ) -> None:
         system_file = tmp_path / "persona.md"
@@ -230,14 +232,14 @@ class TestProviderStatsPublisherWiring:
             ProviderID.CODEX,
             ProviderID.COPILOT_CLI,
         ):
-            fake = NullProviderStatsPublisher()
+            fake: AtomicUpdater = MagicMock(spec=AtomicUpdater)
             prov = factory.create_provider(
                 RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
                 work_dir=tmp_path,
                 repo_name="owner/repo",
                 session=None,
-                stats_publisher=fake,
+                state_updater=fake,
             )
-            assert prov.agent.stats_publisher is fake, (
-                f"{provider_id}: injected publisher not reachable on agent"
+            assert prov.agent.state_updater is fake, (
+                f"{provider_id}: injected state_updater not reachable on agent"
             )

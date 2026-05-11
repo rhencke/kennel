@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from fido.provider import (
-    NullProviderStatsPublisher,
     ProviderID,
     ProviderInterruptTimeout,
     ProviderLimitSnapshot,
@@ -278,12 +277,8 @@ class TestSafeVoiceTurn:
         assert kwargs["system_prompt"] == "be brief"
 
 
-class TestProviderStatsPublisherBoundary:
-    """Structural invariants for the ProviderStatsPublisher boundary."""
-
-    def test_null_publisher_publish_is_a_no_op(self) -> None:
-        """Calling NullProviderStatsPublisher.publish() raises nothing."""
-        NullProviderStatsPublisher().publish()
+class TestProviderModuleBoundary:
+    """Structural invariants for the provider module boundary."""
 
     def test_provider_modules_do_not_import_worker_registry(self) -> None:
         """Provider and session modules must not reach through to WorkerRegistry."""
