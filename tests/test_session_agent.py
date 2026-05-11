@@ -1,15 +1,43 @@
+import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from frozendict import frozendict
 
-from fido.appstate import FidoState
-from fido.atomic import AtomicUpdater
+from fido.appstate import (
+    FidoState,
+    ProviderSnapshot,
+    RepoState,
+    WorkerActivity,
+    WorkerCrash,
+)
+from fido.atomic import AtomicUpdater, create_atomic
 from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
+from fido.rate_limit import GitHubLimit
 from fido.session_agent import SessionBackedAgent
+
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _make_fido_state_with_repo(repo_name: str) -> FidoState:
+    """Return a minimal :class:`FidoState` with one pre-initialised repo entry."""
+    repo = RepoState(
+        key=repo_name,
+        started_at=_EPOCH,
+        activity=WorkerActivity(
+            repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
+        ),
+        crash_record=WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH),
+        webhook_activities=(),
+    )
+    return FidoState(
+        repos=frozendict({repo_name: repo}),
+        github_limits=GitHubLimit(),
+    )
 
 
 class _FakeAgent(SessionBackedAgent):
@@ -282,3 +310,86 @@ class TestSessionBackedAgent:
         fake: AtomicUpdater[FidoState] = MagicMock()
         agent = _FakeAgent(state_updater=fake)
         assert agent.state_updater is fake
+
+    # ── _publish_provider_snapshot ─────────────────────────────────────────
+
+    def test_publish_provider_snapshot_noop_without_updater(self) -> None:
+        """_publish_provider_snapshot does nothing when state_updater is None."""
+        session = MagicMock(
+            owner="worker",
+            pid=42,
+            session_id="s1",
+            dropped_session_count=0,
+            sent_count=3,
+            received_count=1,
+        )
+        session.is_alive.return_value = True
+        agent = _FakeAgent(session=session, repo_name="test/repo")
+        # No state_updater → must not raise.
+        agent._publish_provider_snapshot()
+
+    def test_publish_provider_snapshot_noop_without_repo_name(self) -> None:
+        """_publish_provider_snapshot does nothing when repo_name is None."""
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        session = MagicMock(sent_count=5)
+        session.is_alive.return_value = True
+        agent = _FakeAgent(session=session, state_updater=updater)
+        # repo_name is None → must not raise (no lens path to navigate).
+        agent._publish_provider_snapshot()
+
+    def test_publish_provider_snapshot_writes_snapshot_fields(self) -> None:
+        """_publish_provider_snapshot installs a ProviderSnapshot with correct fields."""
+        repo_name = "owner/myrepo"
+        reader, updater = create_atomic(_make_fido_state_with_repo(repo_name))
+        session = MagicMock(
+            owner="worker-thread",
+            pid=99,
+            session_id="sess-xyz",
+            dropped_session_count=1,
+            sent_count=7,
+            received_count=4,
+        )
+        session.is_alive.return_value = True
+        agent = _FakeAgent(
+            session=session,
+            repo_name=repo_name,
+            state_updater=updater,
+        )
+        agent._publish_provider_snapshot()
+        provider = reader.get().repos[repo_name].provider
+        assert provider is not None
+        assert isinstance(provider, ProviderSnapshot)
+        assert provider.session_owner == "worker-thread"
+        assert provider.session_alive is True
+        assert provider.session_pid == 99
+        assert provider.session_dropped_count == 1
+        assert provider.session_sent_count == 7
+        assert provider.session_received_count == 4
+
+    def test_publish_provider_snapshot_reflects_updated_sent_count(self) -> None:
+        """A second publish after the count changes reflects the new value."""
+        repo_name = "owner/myrepo"
+        reader, updater = create_atomic(_make_fido_state_with_repo(repo_name))
+        session = MagicMock(
+            owner=None,
+            pid=None,
+            session_id=None,
+            dropped_session_count=0,
+            sent_count=0,
+            received_count=0,
+        )
+        session.is_alive.return_value = True
+        agent = _FakeAgent(
+            session=session,
+            repo_name=repo_name,
+            state_updater=updater,
+        )
+        agent._publish_provider_snapshot()
+        assert reader.get().repos[repo_name].provider is not None
+        assert reader.get().repos[repo_name].provider.session_sent_count == 0  # type: ignore[union-attr]
+
+        session.sent_count = 3
+        agent._publish_provider_snapshot()
+        assert reader.get().repos[repo_name].provider.session_sent_count == 3  # type: ignore[union-attr]

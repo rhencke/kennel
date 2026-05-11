@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from fido.appstate import FidoState
+from fido.appstate import FidoState, ProviderSnapshot
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
@@ -46,6 +46,31 @@ class SessionBackedAgent:
     def state_updater(self) -> AtomicUpdater[FidoState] | None:
         """Return the injected :class:`~fido.atomic.AtomicUpdater`, if any."""
         return self._state_updater
+
+    def _publish_provider_snapshot(self) -> None:
+        """Build and publish a fresh :class:`~fido.appstate.ProviderSnapshot`.
+
+        Reads the current session properties and installs a new
+        :class:`~fido.appstate.ProviderSnapshot` at
+        ``repos[repo_name].provider`` in the atomic state cell via
+        :attr:`_state_updater`.
+
+        No-op when :attr:`_state_updater` or :attr:`_repo_name` is ``None``
+        — the agent was either constructed without state-publish wiring
+        (tests, standalone use) or without a known repo identity.
+        """
+        if self._state_updater is None or self._repo_name is None:
+            return
+        snapshot = ProviderSnapshot(
+            session_owner=self.session_owner,
+            session_alive=self.session_alive,
+            session_pid=self.session_pid,
+            session_dropped_count=self.session_dropped_count,
+            session_sent_count=self.session_sent_count,
+            session_received_count=self.session_received_count,
+        )
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)
 
     @property
     def session(self) -> PromptSession | None:
