@@ -2755,6 +2755,30 @@ class TestProcessActionInner:
         # Eyes must be removed before the confused reaction is signalled
         assert remove_order == ["remove_eyes", "signal_error"]
 
+    def test_eyes_reaction_posted_for_queued_comment_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Queued comment actions (thread set, comment_body=None, preempts_worker=True)
+        get the immediate eyes reaction — the production shape from the dispatcher."""
+        action = Action(
+            prompt="Queued review comment on PR #1 by owner (human/owner)",
+            preempts_worker=True,
+            is_bot=False,
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 444,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            # comment_body intentionally None — matches _queued_pr_comment_action shape
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 444, "eyes")
+
     def test_remove_eyes_best_effort_noop_with_missing_fields(
         self, cfg: Config
     ) -> None:

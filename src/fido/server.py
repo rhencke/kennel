@@ -1059,7 +1059,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         _eyes_comment_info: dict[str, Any] | None = None
         if action.reply_to:
             _eyes_comment_info = action.reply_to
-        elif action.comment_body and action.thread:
+        elif action.thread:
             _eyes_comment_info = action.thread
         try:
             handled = False
