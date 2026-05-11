@@ -1344,18 +1344,38 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     def get_review_threads(
         self, owner: str, repo: str, pr: int | str
     ) -> list[dict[str, Any]]:
-        """Return review-thread nodes for a PR."""
+        """Return review-thread nodes for a PR.
+
+        Bot authors (``__typename == "Bot"``) have their ``login``
+        normalized to append the ``[bot]`` suffix.  GitHub's GraphQL
+        strips ``[bot]`` from bot logins while REST and webhook payloads
+        include it; this normalization keeps downstream consumers
+        (``_filter_threads``, allowlists, oracles) on a single
+        identifier shape regardless of which API supplied the data.
+        Closes #1624.
+        """
         query = (
             "query($owner:String!,$repo:String!,$pr:Int!){"
             "repository(owner:$owner,name:$repo){"
             "pullRequest(number:$pr){"
             "reviewThreads(first:100){"
             "nodes{id isResolved"
-            " comments(first:50){nodes{author{login} body url createdAt databaseId}}"
+            " comments(first:50){nodes{author{__typename login} body url createdAt databaseId}}"
             "}}}}}"
         )
         data = self._graphql(query, owner=owner, repo=repo, pr=int(pr))
-        return data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        for node in nodes:
+            for comment in node.get("comments", {}).get("nodes", []):
+                author = comment.get("author")
+                if author is None:
+                    continue
+                if author.get("__typename") != "Bot":
+                    continue
+                login = author.get("login", "")
+                if login and not login.endswith("[bot]"):
+                    author["login"] = f"{login}[bot]"
+        return nodes
 
     def resolve_thread(self, thread_id: str) -> None:
         """Resolve a review thread via GraphQL mutation."""

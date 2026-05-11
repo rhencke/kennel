@@ -2974,6 +2974,133 @@ class TestGitHubClass:
         assert result == nodes
         body = mock_s.post.call_args.kwargs["json"]
         assert body["variables"] == {"owner": "o", "repo": "r", "pr": 10}
+        # Query must fetch __typename so the post-processor can detect
+        # Bot authors (#1624).
+        assert "__typename" in body["query"]
+
+    def test_get_review_threads_normalizes_bot_login(self) -> None:
+        # GitHub's GraphQL returns Bot logins without the [bot] suffix
+        # (e.g. "chatgpt-codex-connector"), but the REST API and webhook
+        # payloads include it.  `get_review_threads` must normalize Bot
+        # logins to append [bot] so downstream consumers see a single
+        # identifier shape (#1624).
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "id": "T_1",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {
+                                "__typename": "Bot",
+                                "login": "chatgpt-codex-connector",
+                            },
+                            "body": "review note",
+                            "url": "https://example.com",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "databaseId": 1,
+                        }
+                    ]
+                },
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = mock_resp
+        result = gh.get_review_threads("o", "r", 10)
+        author = result[0]["comments"]["nodes"][0]["author"]
+        assert author["login"] == "chatgpt-codex-connector[bot]"
+
+    def test_get_review_threads_leaves_user_login_alone(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "id": "T_1",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"__typename": "User", "login": "rhencke"},
+                            "body": "review note",
+                            "url": "https://example.com",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "databaseId": 2,
+                        }
+                    ]
+                },
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = mock_resp
+        result = gh.get_review_threads("o", "r", 10)
+        author = result[0]["comments"]["nodes"][0]["author"]
+        assert author["login"] == "rhencke"
+
+    def test_get_review_threads_does_not_double_bot_suffix(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "id": "T_1",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {
+                                "__typename": "Bot",
+                                "login": "already-suffixed[bot]",
+                            },
+                            "body": "x",
+                            "url": "https://example.com",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "databaseId": 3,
+                        }
+                    ]
+                },
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = mock_resp
+        result = gh.get_review_threads("o", "r", 10)
+        author = result[0]["comments"]["nodes"][0]["author"]
+        assert author["login"] == "already-suffixed[bot]"
+
+    def test_get_review_threads_handles_null_author(self) -> None:
+        # GitHub returns ``author: null`` for comments by deleted users.
+        gh, mock_s = self._gh()
+        nodes = [
+            {
+                "id": "T_1",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": None,
+                            "body": "x",
+                            "url": "https://example.com",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "databaseId": 4,
+                        }
+                    ]
+                },
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = mock_resp
+        # Should not raise.
+        result = gh.get_review_threads("o", "r", 10)
+        assert result[0]["comments"]["nodes"][0]["author"] is None
 
     def test_resolve_thread(self) -> None:
         gh, mock_s = self._gh()
