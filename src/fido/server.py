@@ -28,6 +28,7 @@ from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
+    FIDO_LOGINS,
     Action,
     Dispatcher,
     WebhookIngressOracle,
@@ -62,6 +63,7 @@ from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
 from fido.store import FidoStore, ReplyPromiseRecord
+from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks
 from fido.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -1050,8 +1052,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # list (via :meth:`~fido.registry.WorkerRegistry.webhook_activity`).
         # Writing here would clobber the worker thread's own state, which is
         # what caused the old ``Doing: handling webhook action`` display bug.
+        gh = cast(GitHub, self.gh)  # always set by serve() before first request
+        # Determine which comment (if any) will receive the eyes reaction.
+        # Resolved before the try block so both the main path and the
+        # recoverable-exception handler can reference _eyes_comment_info.
+        _eyes_comment_info: dict[str, Any] | None = None
+        if action.reply_to:
+            _eyes_comment_info = action.reply_to
+        elif action.comment_body and action.thread:
+            _eyes_comment_info = action.thread
         try:
-            gh = cast(GitHub, self.gh)  # always set by serve() before first request
             handled = False
             category: str | None = None
             titles: list[str] = []
@@ -1063,11 +1073,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Best-effort — a failed reaction must never abort the handler.
             # Skipped for bot-authored actions (don't react to other bots).
             _eyes_posted = False
-            _eyes_comment_info: dict[str, Any] | None = None
-            if action.reply_to:
-                _eyes_comment_info = action.reply_to
-            elif action.comment_body and action.thread:
-                _eyes_comment_info = action.thread
             if not action.is_bot and _eyes_comment_info is not None:
                 _eyes_repo = _eyes_comment_info.get("repo")
                 _eyes_ctype = str(_eyes_comment_info.get("comment_type", "issues"))
@@ -1088,6 +1093,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 if promise is None:
                     handled = True
                     category, titles = None, []
+                    # Dedup skip — another handler owns this comment.  Clean up
+                    # the eyes reaction posted above so it doesn't linger.
+                    if _eyes_comment_info is not None:
+                        self._remove_eyes_best_effort(gh, _eyes_comment_info)
                 else:
                     activity.set_description("triaging review comment")
                     try:
@@ -1136,6 +1145,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 promise = self._prepare_reply(repo_cfg, action)
                 if promise is None:
                     category, titles = None, []
+                    # Dedup skip — clean up the eyes reaction posted above.
+                    if _eyes_comment_info is not None:
+                        self._remove_eyes_best_effort(gh, _eyes_comment_info)
                 else:
                     activity.set_description("triaging PR comment")
                     try:
@@ -1200,7 +1212,38 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Logic bugs (KeyError, TypeError, AttributeError, etc.) are NOT
             # caught here — they propagate and crash the thread loudly.
             log.exception("error processing action")
+            if _eyes_comment_info is not None:
+                self._remove_eyes_best_effort(gh, _eyes_comment_info)
             self._signal_action_error(action)
+
+    def _remove_eyes_best_effort(
+        self,
+        gh: GitHub,
+        eyes_comment_info: dict[str, Any],
+    ) -> None:
+        """Remove Fido's eyes reaction from a comment (best-effort).
+
+        Builds a minimal :class:`~fido.synthesis_executor.CommentTarget` from
+        *eyes_comment_info* and delegates to
+        :meth:`~fido.synthesis_executor.SynthesisExecutor.remove_eyes_reaction`,
+        which lists reactions, finds Fido's ``eyes`` entries, and deletes them.
+        Called on all non-reply exit paths in :meth:`_process_action_inner` so
+        the eyes reaction never lingers when no reply is posted.
+
+        Silently no-ops if the required fields are absent.
+        """
+        repo = eyes_comment_info.get("repo")
+        comment_id = eyes_comment_info.get("comment_id")
+        comment_type = str(eyes_comment_info.get("comment_type", "issues"))
+        if not repo or not isinstance(comment_id, int):
+            return
+        target = CommentTarget(
+            repo=str(repo),
+            pr=0,
+            comment_id=comment_id,
+            comment_type=comment_type,
+        )
+        SynthesisExecutor(gh, fido_logins=FIDO_LOGINS).remove_eyes_reaction(target)
 
     def _signal_action_error(self, action: Action) -> None:
         """Post a 'confused' reaction on the triggering comment, if any.

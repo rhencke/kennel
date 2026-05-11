@@ -2660,6 +2660,115 @@ class TestProcessActionInner:
         # Should not raise — eyes failure is best-effort.
         handler._process_action_inner(action, repo_cfg, self._activity())
 
+    def test_eyes_removed_on_review_comment_dedup_skip(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When _prepare_reply returns None (dedup skip), the eyes reaction is
+        removed so it doesn't linger on a comment that won't receive a reply."""
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 111,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        # Simulate dedup skip: _prepare_reply returns None
+        with patch.object(handler, "_prepare_reply", return_value=None):
+            with patch(
+                "fido.server.SynthesisExecutor.remove_eyes_reaction"
+            ) as mock_remove:
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_remove.assert_called_once()
+
+    def test_eyes_removed_on_pr_comment_dedup_skip(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When _prepare_reply returns None for a top-level PR comment (dedup skip),
+        the eyes reaction is removed."""
+        action = Action(
+            prompt="pr comment",
+            comment_body="please fix",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 222,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            is_bot=False,
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        with patch.object(handler, "_prepare_reply", return_value=None):
+            with patch(
+                "fido.server.SynthesisExecutor.remove_eyes_reaction"
+            ) as mock_remove:
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_remove.assert_called_once()
+
+    def test_eyes_removed_on_recoverable_exception(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When a recoverable exception is raised during action processing, the
+        eyes reaction is removed before signalling the confused reaction."""
+        import requests
+
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 333,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=requests.RequestException("network down")
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        remove_order: list[str] = []
+        with patch(
+            "fido.server.SynthesisExecutor.remove_eyes_reaction",
+            side_effect=lambda _t: remove_order.append("remove_eyes"),
+        ):
+            with patch.object(
+                handler,
+                "_signal_action_error",
+                side_effect=lambda _a: remove_order.append("signal_error"),
+            ):
+                # Recoverable exception — should not propagate
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        # Eyes must be removed before the confused reaction is signalled
+        assert remove_order == ["remove_eyes", "signal_error"]
+
+    def test_remove_eyes_best_effort_noop_with_missing_fields(
+        self, cfg: Config
+    ) -> None:
+        """_remove_eyes_best_effort is a no-op when repo or comment_id is absent."""
+        handler = self._handler(cfg)
+        # Missing repo — should not call remove_eyes_reaction at all.
+        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
+            handler._remove_eyes_best_effort(handler.gh, {"comment_id": 99})
+        mock_remove.assert_not_called()
+        # Missing comment_id — same.
+        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
+            handler._remove_eyes_best_effort(handler.gh, {"repo": "owner/repo"})
+        mock_remove.assert_not_called()
+
     def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
         """Cover all branches of _describe_action."""
         handler = self._handler(cfg)

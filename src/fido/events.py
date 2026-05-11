@@ -46,7 +46,7 @@ from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
 
-_FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
+FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
 
 
 class _BackgroundRescopeTrigger:
@@ -1532,27 +1532,8 @@ def reply_to_comment(
     # replies posted by concurrent handlers during the synthesis window
     # (compared against the re-fetched thread below).
     initial_fido_ids: set[int] = {
-        c["id"] for c in thread_comments if c.get("author", "").lower() in _FIDO_LOGINS
+        c["id"] for c in thread_comments if c.get("author", "").lower() in FIDO_LOGINS
     }
-
-    # Add eyes reaction immediately at pickup to signal work-in-progress.
-    # Best-effort: never fail the reply if the reaction post fails.
-    _eyes_posted = False
-    if info.get("repo") and info.get("comment_id"):
-        try:
-            gh.add_reaction(
-                info["repo"],
-                "pulls",
-                info["comment_id"],
-                "eyes",
-            )
-            log.info("added eyes reaction to comment %s", info["comment_id"])
-            _eyes_posted = True
-        except Exception:
-            log.exception(
-                "failed to add eyes reaction to comment %s — continuing",
-                info["comment_id"],
-            )
 
     issue_ctx, pr_ctx = _load_active_context_for_rescope(
         repo_cfg.work_dir, repo_cfg.name, gh
@@ -1574,7 +1555,7 @@ def reply_to_comment(
         gh,
         rescope=rescope_trigger,
         insight_filer=_GitHubInsightFiler(gh),
-        fido_logins=_FIDO_LOGINS,
+        fido_logins=FIDO_LOGINS,
     )
     target: CommentTarget | None = None
     if isinstance(info.get("comment_id"), int):
@@ -1614,7 +1595,7 @@ def reply_to_comment(
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
             # "Fido is looking" signal, then re-raise.
-            if _eyes_posted and target is not None:
+            if target is not None:
                 executor.remove_eyes_reaction(target)
             raise
     log.info(
@@ -1657,7 +1638,7 @@ def reply_to_comment(
     current_fido_target_ids: set[int] = {
         c["id"]
         for c in thread_comments
-        if c.get("author", "").lower() in _FIDO_LOGINS
+        if c.get("author", "").lower() in FIDO_LOGINS
         and c.get("in_reply_to_id") == target_id
     }
     if current_fido_target_ids - initial_fido_ids:
@@ -1857,20 +1838,7 @@ def reply_to_issue_comment(
     if conversation_context:
         context["conversation"] = conversation_context
 
-    # Add eyes reaction immediately at pickup to signal work-in-progress.
-    # Best-effort: never fail the reply if the reaction post fails.
-    _eyes_posted_issue = False
     _cid = context.get("comment_id")
-    if _cid and repo_full:
-        try:
-            gh.add_reaction(repo_full, "issues", _cid, "eyes")
-            log.info("added eyes reaction to issue comment %s on PR #%s", _cid, number)
-            _eyes_posted_issue = True
-        except Exception:
-            log.exception(
-                "failed to add eyes reaction to issue comment %s — continuing", _cid
-            )
-
     issue_ctx, pr_ctx = _load_active_context_for_rescope(
         repo_cfg.work_dir, repo_cfg.name, gh
     )
@@ -1891,7 +1859,7 @@ def reply_to_issue_comment(
         gh,
         rescope=rescope_trigger,
         insight_filer=_GitHubInsightFiler(gh),
-        fido_logins=_FIDO_LOGINS,
+        fido_logins=FIDO_LOGINS,
     )
     issue_target: CommentTarget | None = None
     if _cid and repo_full:
@@ -1928,7 +1896,7 @@ def reply_to_issue_comment(
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
             # "Fido is looking" signal, then re-raise.
-            if _eyes_posted_issue and issue_target is not None:
+            if issue_target is not None:
                 executor.remove_eyes_reaction(issue_target)
             raise
     log.info(
@@ -2506,7 +2474,7 @@ def _resolved_thread_comment_author_for_oracle(
 ) -> thread_resolve_oracle.ThreadCommentAuthor:
     return thread_comment_author_for_auto_resolve_oracle(
         login,
-        fido_logins=_FIDO_LOGINS,
+        fido_logins=FIDO_LOGINS,
         owner=owner,
         collaborators=collaborators,
         allowed_bots=allowed_bots,

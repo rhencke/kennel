@@ -2698,9 +2698,6 @@ class TestReplyToCommentSynthesisFallback:
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 556, "author": "rhencke", "body": "please rephrase"},
         ]
-        # Eyes reaction posted successfully so the failure-path cleanup is
-        # exercised.
-        mock_gh.add_reaction.return_value = None
 
         with (
             patch(
@@ -2768,38 +2765,6 @@ class TestReplyToCommentSynthesisFallback:
         assert mock_gh.comment_issue.called
         body = mock_gh.comment_issue.call_args.args[2]
         assert "please rephrase" in body
-
-    def test_issue_comment_continues_when_eyes_add_fails(self, tmp_path: Path) -> None:
-        # events.py:1765-1766 — gh.add_reaction raising for the eyes
-        # reaction must not abort the synthesis turn, just log + continue.
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="PR top-level comment on #7 by owner:\n\nplease fix",
-            comment_body="please fix",
-            is_bot=False,
-            context={"pr_title": "My PR", "comment_id": 701},
-        )
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        mock_gh.comment_issue.return_value = {"id": 8889}
-        mock_gh.add_reaction.side_effect = RuntimeError("eyes failed")
-
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("ok"),
-        ):
-            cat, _titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
-        assert cat == "ANSWER"
-        # Reply still posted despite eyes-add failure.
-        assert mock_gh.comment_issue.called
 
 
 class TestReplyToIssueComment:
@@ -6073,158 +6038,6 @@ class TestReplyToCommentElseBranch:
         assert cat == "ACT"
         assert titles == ["Fix it"]
         mock_gh.reply_to_review_comment.assert_not_called()
-
-
-class TestReplyToCommentEyesReaction:
-    """Eyes reaction lifecycle in reply_to_comment."""
-
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-
-    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
-        return RepoConfig(name="owner/repo", work_dir=tmp_path)
-
-    def test_eyes_reaction_added_before_synthesis(self, tmp_path: Path) -> None:
-        """Eyes reaction is added immediately at comment pickup, before synthesis."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
-            comment_body="please add logging",
-            is_bot=False,
-        )
-        call_order: list[str] = []
-
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = []
-        mock_gh.reply_to_review_comment.return_value = {"id": 999}
-        mock_gh.add_reaction.side_effect = lambda *a, **kw: call_order.append(
-            "reaction"
-        )
-
-        def capture_synthesis(*args: object, **kwargs: object) -> object:
-            call_order.append("synthesis")
-            return _synthesis_response("On it!")
-
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
-
-        # Eyes reaction must come before synthesis
-        assert "reaction" in call_order
-        assert "synthesis" in call_order
-        reaction_idx = next(i for i, v in enumerate(call_order) if v == "reaction")
-        synthesis_idx = next(i for i, v in enumerate(call_order) if v == "synthesis")
-        assert reaction_idx < synthesis_idx
-
-    def test_eyes_reaction_uses_correct_args(self, tmp_path: Path) -> None:
-        """Eyes reaction is posted with the correct repo, comment_type, and comment_id."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
-            comment_body="please add logging",
-            is_bot=False,
-        )
-
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = []
-        mock_gh.reply_to_review_comment.return_value = {"id": 999}
-
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("On it!"),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
-
-        # First add_reaction call should be the eyes reaction
-        first_reaction_call = mock_gh.add_reaction.call_args_list[0]
-        args = first_reaction_call.args
-        assert args[0] == "owner/repo"
-        assert args[1] == "pulls"
-        assert args[2] == 200
-        assert args[3] == "eyes"
-
-    def test_eyes_reaction_failure_does_not_block_reply(self, tmp_path: Path) -> None:
-        """Eyes reaction failure is swallowed; reply still posts."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 201},
-            comment_body="please add logging",
-            is_bot=False,
-        )
-
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = []
-        mock_gh.reply_to_review_comment.return_value = {"id": 999}
-        mock_gh.add_reaction.side_effect = RuntimeError("API down")
-
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("On it!"),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
-
-        # Reply still posted despite reaction failure
-        mock_gh.reply_to_review_comment.assert_called()
-        assert cat == "ANSWER"
-
-    def test_no_eyes_reaction_without_comment_id(self, tmp_path: Path) -> None:
-        """No eyes reaction when comment_id is None."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": None},
-            comment_body="please add logging",
-            is_bot=False,
-        )
-
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = []
-        mock_gh.reply_to_review_comment.return_value = {"id": 999}
-
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("On it!"),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
-
-        mock_gh.add_reaction.assert_not_called()
 
 
 # ── reply_to_comment: thread re-fetch before posting ─────────────────────────
