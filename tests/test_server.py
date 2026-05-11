@@ -2087,55 +2087,67 @@ class TestProcessAction:
     def test_publish_provider_snapshot_inside_hold_for_handler(
         self, tmp_path: Path
     ) -> None:
-        """publish_provider_snapshot is called inside the hold_for_handler window.
+        """Snapshot published inside hold_for_handler carries the thread's actual session state.
 
-        The snapshot publishes must bracket the hold_for_handler ownership —
-        one immediately after hold_for_handler enters (ownership acquired) and
-        one in the finally before hold_for_handler exits (still held).  This
-        ensures the status display reflects current session state while the
-        webhook handler actually holds the session.
+        Both publish calls fire inside the hold_for_handler block (enter then
+        exit).  The important thing is not just that publish was called — it's
+        that the FidoState snapshot at each publish point contains the real
+        session field values from the WorkerThread, not stale data or a
+        no-op placeholder.
         """
         from contextlib import contextmanager
 
         from fido.events import Action
-        from fido.registry import WorkerRegistry, create_fido_atomic
+        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
-        _, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), updater)
+
+        reader, updater = create_fido_atomic()
+
+        # Build a mock thread with known, non-default session field values so
+        # we can verify the snapshot contains exactly these values.
+        thread_mock = MagicMock()
+        thread_mock.session_owner = "the-worker"
+        thread_mock.session_alive = True
+        thread_mock.session_pid = 42
+        thread_mock.session_dropped_count = 0
+        thread_mock.session_sent_count = 5
+        thread_mock.session_received_count = 3
+
+        reg = WorkerRegistry(MagicMock(return_value=thread_mock), updater)
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
 
-        call_log: list[str] = []
+        # Install the spy AFTER start() so start()'s own publish isn't counted.
+        # server.py calls publish_provider_snapshot (public) which delegates to
+        # _publish_provider_snapshot (private); patching the private method
+        # intercepts both the enter and exit publishes.
+        captured_snapshots: list[ProviderSnapshot | None] = []
+        original_private_publish = reg._publish_provider_snapshot  # type: ignore[method-assign]
 
-        @contextmanager  # type: ignore[misc]
-        def tracked_hold_for_handler() -> object:
-            call_log.append("hold_enter")
-            try:
-                yield mock_session
-            finally:
-                call_log.append("hold_exit")
+        def spy_private_publish(repo_name: str) -> None:
+            original_private_publish(repo_name)
+            captured_snapshots.append(reader.get().repos[repo_name].provider)
+
+        reg._publish_provider_snapshot = spy_private_publish  # type: ignore[method-assign]
 
         mock_session = MagicMock()
-        mock_session.hold_for_handler = tracked_hold_for_handler
+
+        @contextmanager  # type: ignore[misc]
+        def noop_hold_for_handler() -> object:
+            yield mock_session
+
+        mock_session.hold_for_handler = noop_hold_for_handler
 
         def patched_get_session(repo_name: str) -> object:
             del repo_name
             return mock_session
 
         reg.get_session = patched_get_session  # type: ignore[method-assign]
-
-        original_publish = reg.publish_provider_snapshot
-
-        def spy_publish(repo_name: str) -> None:
-            call_log.append("publish")
-            original_publish(repo_name)
-
-        reg.publish_provider_snapshot = spy_publish  # type: ignore[method-assign]
 
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(  # type: ignore[assignment]
             return_value=("ACT", [])
@@ -2156,57 +2168,83 @@ class TestProcessAction:
             },
         )
 
-        reg.get_session = patched_get_session  # type: ignore[method-assign]
         handler._process_action(action, cfg.repos["owner/repo"])
 
-        # publish(enter) must happen AFTER hold_enter, and publish(exit) before hold_exit
-        assert call_log == ["hold_enter", "publish", "publish", "hold_exit"]
+        # Exactly two publishes from _process_action: one on hold enter, one on exit.
+        assert len(captured_snapshots) == 2
+
+        # Both snapshots must carry the mock thread's real session field values.
+        expected = ProviderSnapshot(
+            session_owner="the-worker",
+            session_alive=True,
+            session_pid=42,
+            session_dropped_count=0,
+            session_sent_count=5,
+            session_received_count=3,
+        )
+        assert captured_snapshots[0] == expected  # published on hold enter
+        assert captured_snapshots[1] == expected  # published on hold exit (finally)
 
     def test_publish_provider_snapshot_inside_hold_for_handler_on_exception(
         self, tmp_path: Path
     ) -> None:
-        """publish_provider_snapshot fires on both enter and exit even when the action raises."""
+        """Snapshot carries real values on both publishes even when the action raises.
+
+        The finally block in _process_action guarantees the exit publish fires
+        whether or not _process_action_inner raises.  Verify the snapshot
+        actually contains the thread's session state on both captures — not just
+        that publish was called twice.
+        """
         from contextlib import contextmanager
 
         from fido.events import Action
-        from fido.registry import WorkerRegistry, create_fido_atomic
+        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
-        _, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), updater)
+
+        reader, updater = create_fido_atomic()
+
+        # Use session_owner=None to exercise the provider-returns-None path
+        # (providers filter out non-worker talkers; clearing stale worker info
+        # is still correct even without a positive "owned by webhook" value).
+        thread_mock = MagicMock()
+        thread_mock.session_owner = None
+        thread_mock.session_alive = True
+        thread_mock.session_pid = 99
+        thread_mock.session_dropped_count = 1
+        thread_mock.session_sent_count = 2
+        thread_mock.session_received_count = 4
+
+        reg = WorkerRegistry(MagicMock(return_value=thread_mock), updater)
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
 
-        call_log: list[str] = []
+        captured_snapshots: list[ProviderSnapshot | None] = []
+        original_private_publish = reg._publish_provider_snapshot  # type: ignore[method-assign]
 
-        @contextmanager  # type: ignore[misc]
-        def tracked_hold_for_handler() -> object:
-            call_log.append("hold_enter")
-            try:
-                yield mock_session
-            finally:
-                call_log.append("hold_exit")
+        def spy_private_publish(repo_name: str) -> None:
+            original_private_publish(repo_name)
+            captured_snapshots.append(reader.get().repos[repo_name].provider)
+
+        reg._publish_provider_snapshot = spy_private_publish  # type: ignore[method-assign]
 
         mock_session = MagicMock()
-        mock_session.hold_for_handler = tracked_hold_for_handler
+
+        @contextmanager  # type: ignore[misc]
+        def noop_hold_for_handler() -> object:
+            yield mock_session
+
+        mock_session.hold_for_handler = noop_hold_for_handler
 
         def patched_get_session(repo_name: str) -> object:
             del repo_name
             return mock_session
 
         reg.get_session = patched_get_session  # type: ignore[method-assign]
-
-        original_publish = reg.publish_provider_snapshot
-
-        def spy_publish(repo_name: str) -> None:
-            call_log.append("publish")
-            original_publish(repo_name)
-
-        reg.publish_provider_snapshot = spy_publish  # type: ignore[method-assign]
 
         def raise_in_handler(*args: object, **kwargs: object) -> tuple[str, list[str]]:
             del args, kwargs
@@ -2232,8 +2270,21 @@ class TestProcessAction:
         with pytest.raises(RuntimeError, match="boom"):
             handler._process_action(action, cfg.repos["owner/repo"])
 
-        # Even on exception: publish on enter, publish on exit (finally), then hold_exit
-        assert call_log == ["hold_enter", "publish", "publish", "hold_exit"]
+        # Two publishes must have fired even though the action raised.
+        assert len(captured_snapshots) == 2
+
+        # Both snapshots must carry the mock thread's real session field values,
+        # including session_owner=None (the provider-returns-None case).
+        expected = ProviderSnapshot(
+            session_owner=None,
+            session_alive=True,
+            session_pid=99,
+            session_dropped_count=1,
+            session_sent_count=2,
+            session_received_count=4,
+        )
+        assert captured_snapshots[0] == expected  # published on hold enter
+        assert captured_snapshots[1] == expected  # published on hold exit (finally)
 
 
 class TestProcessActionInner:
