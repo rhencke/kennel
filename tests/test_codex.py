@@ -862,6 +862,79 @@ class TestCodexSession:
         assert params["threadId"] == "thread-new"
         assert params["excludeTurns"] is True
 
+    def test_snapshot_publisher_fires_after_send(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "ok"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        published: list[dict[str, object]] = []
+
+        class Recorder:
+            def publish_metrics(self, **kwargs: object) -> None:
+                published.append(kwargs)
+
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+            snapshot_publisher=Recorder(),
+        )
+        assert session.prompt("hello") == "ok"
+        assert len(published) == 1
+        assert published[0]["sent_count"] == 1
+
+    def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "ok"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        # No publisher — prompt must not raise.
+        assert session.prompt("hello") == "ok"
+        assert session.sent_count == 1
+
 
 class TestCodexClient:
     def test_model_slots_and_provider_id(self) -> None:
@@ -892,6 +965,7 @@ class TestCodexClient:
             model=client.voice_model,
             repo_name="owner/repo",
             session_id="thread-1",
+            snapshot_publisher=client,
         )
         assert client.session is session
 

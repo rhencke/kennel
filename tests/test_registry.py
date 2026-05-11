@@ -883,6 +883,7 @@ class TestMakeThread:
             repo_cfg=cfg,
             dispatcher=fake_dispatcher,
             issue_cache=mock_registry.get_issue_cache.return_value,
+            state_updater=None,
         )
         mock_registry.get_issue_cache.assert_called_once_with("foo/bar")
         assert result is mock_wt_cls.return_value
@@ -935,6 +936,36 @@ class TestMakeThread:
             _WorkerThread=mock_wt_cls,
         )
         assert mock_wt_cls.call_args.kwargs["repo_cfg"] is cfg
+
+    def test_state_updater_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
+        """_make_thread passes state_updater through to WorkerThread."""
+        cfg = _repo("foo/bar", tmp_path)
+        mock_wt_cls = MagicMock()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        _make_thread(
+            cfg,
+            MagicMock(),
+            gh=MagicMock(),
+            dispatchers={"foo/bar": _FakeDispatcher()},
+            state_updater=updater,
+            _WorkerThread=mock_wt_cls,
+        )
+        assert mock_wt_cls.call_args.kwargs["state_updater"] is updater
+
+    def test_state_updater_defaults_to_none(self, tmp_path: Path) -> None:
+        """_make_thread passes state_updater=None when not provided."""
+        cfg = _repo("foo/bar", tmp_path)
+        mock_wt_cls = MagicMock()
+        _make_thread(
+            cfg,
+            MagicMock(),
+            gh=MagicMock(),
+            dispatchers={"foo/bar": _FakeDispatcher()},
+            _WorkerThread=mock_wt_cls,
+        )
+        assert mock_wt_cls.call_args.kwargs["state_updater"] is None
 
 
 class TestMakeRegistry:
@@ -1020,6 +1051,22 @@ class TestMakeRegistry:
             _thread_factory=mock_factory,
         )
         assert mock_factory.call_args.kwargs["config"] is config
+
+    def test_state_updater_forwarded_to_thread_factory(self, tmp_path: Path) -> None:
+        """make_registry passes state_updater through to the thread factory."""
+        cfg = _repo("foo/bar", tmp_path)
+        mock_factory = MagicMock(return_value=MagicMock())
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        make_registry(
+            {"foo/bar": cfg},
+            MagicMock(),
+            dispatchers={},
+            state_updater=updater,
+            _thread_factory=mock_factory,
+        )
+        assert mock_factory.call_args.kwargs["state_updater"] is updater
 
 
 class TestWebhookActivity:

@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from fido.appstate import FidoState
+    from fido.atomic import AtomicUpdater
     from fido.events import Action, Dispatcher
 
 import requests as _requests
@@ -1219,6 +1221,7 @@ class Worker:
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
         nudges: Nudges | None = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -1252,6 +1255,7 @@ class Worker:
             if provider_factory is None
             else provider_factory
         )
+        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
         self._bootstrap_session: PromptSession | None = session
         if provider is not None:
             self._provider = provider
@@ -1265,6 +1269,7 @@ class Worker:
                 work_dir=work_dir,
                 repo_name=repo_name,
                 session=session,
+                state_updater=state_updater,
             )
         else:
             self._provider = None
@@ -1282,6 +1287,7 @@ class Worker:
                 work_dir=self.work_dir,
                 repo_name=self._repo_name,
                 session=self._bootstrap_session,
+                state_updater=self._state_updater,
             )
             self._provider = provider
         return provider
@@ -4494,6 +4500,7 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -4524,6 +4531,7 @@ class WorkerThread(threading.Thread):
             if provider_factory is None
             else provider_factory
         )
+        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
         self._provider: Provider | None
         if provider is not None:
             self._provider = provider
@@ -4535,6 +4543,7 @@ class WorkerThread(threading.Thread):
                 work_dir=work_dir,
                 repo_name=repo_name,
                 session=session,
+                state_updater=state_updater,
             )
         else:
             self._provider = None
@@ -4686,6 +4695,7 @@ class WorkerThread(threading.Thread):
                     work_dir=self.work_dir,
                     repo_name=self._repo_name,
                     session=self._bootstrap_session,
+                    state_updater=self._state_updater,
                 )
                 self._provider = provider
             return provider
@@ -4827,6 +4837,7 @@ class WorkerThread(threading.Thread):
                     first_iteration=self._is_first_iteration,
                     dispatcher=self._dispatcher,
                     issue_cache=self._issue_cache,
+                    state_updater=self._state_updater,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]

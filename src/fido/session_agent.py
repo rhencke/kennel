@@ -6,19 +6,20 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from fido.appstate import FidoState
+from fido.appstate import FidoState, ProviderSnapshot
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     PromptSession,
     ProviderModel,
+    SnapshotPublisher,
     TurnSessionMode,
 )
 
 log = logging.getLogger(__name__)
 
 
-class SessionBackedAgent:
+class SessionBackedAgent(SnapshotPublisher):
     """Common session attachment and lifecycle logic for provider agents."""
 
     voice_model: ProviderModel
@@ -46,6 +47,40 @@ class SessionBackedAgent:
     def state_updater(self) -> AtomicUpdater[FidoState] | None:
         """Return the injected :class:`~fido.atomic.AtomicUpdater`, if any."""
         return self._state_updater
+
+    def publish_metrics(
+        self,
+        *,
+        owner: str | None,
+        alive: bool,
+        pid: int | None,
+        dropped_count: int,
+        sent_count: int,
+        received_count: int,
+    ) -> None:
+        """Publish a fresh :class:`~fido.appstate.ProviderSnapshot`.
+
+        Called by provider sessions after incrementing counters.  Installs a
+        new :class:`~fido.appstate.ProviderSnapshot` at
+        ``repos[repo_name].provider`` in the atomic state cell via
+        :attr:`_state_updater`.
+
+        No-op when :attr:`_state_updater` or :attr:`_repo_name` is ``None``
+        — the agent was either constructed without state-publish wiring
+        (tests, standalone use) or without a known repo identity.
+        """
+        if self._state_updater is None or self._repo_name is None:
+            return
+        snapshot = ProviderSnapshot(
+            session_owner=owner,
+            session_alive=alive,
+            session_pid=pid,
+            session_dropped_count=dropped_count,
+            session_sent_count=sent_count,
+            session_received_count=received_count,
+        )
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)
 
     @property
     def session(self) -> PromptSession | None:

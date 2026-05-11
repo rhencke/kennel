@@ -784,6 +784,7 @@ def _make_thread(
     session_issue: int | None = None,
     config: Config | None = None,
     dispatchers: "dict[str, Dispatcher]",
+    state_updater: AtomicUpdater[FidoState] | None = None,
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client.
@@ -804,6 +805,7 @@ def _make_thread(
         repo_cfg=repo_cfg,
         dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
+        state_updater=state_updater,
     )
 
 
@@ -839,6 +841,7 @@ def make_registry(
             session_issue=session_issue,
             config=config,
             dispatchers=dispatchers,
+            state_updater=state_updater,
         )
 
     registry = WorkerRegistry(factory, state_updater)

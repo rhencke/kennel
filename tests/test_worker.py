@@ -1041,6 +1041,59 @@ class TestWorker:
         assert worker._provider is not None  # pyright: ignore[reportPrivateUsage]
         assert agent is worker._provider.agent  # pyright: ignore[reportPrivateUsage]
 
+    def test_state_updater_passed_to_create_provider_in_ensure_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """Worker._ensure_provider passes state_updater to create_provider."""
+        from frozendict import frozendict
+
+        from fido.appstate import FidoState, GitHubLimit
+        from fido.atomic import create_atomic
+
+        cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        mock_factory = MagicMock()
+        mock_factory.create_provider.return_value = MagicMock()
+        worker = Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=cfg,
+            provider_factory=mock_factory,
+            state_updater=updater,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        # Force _ensure_provider to create a new provider (clear existing).
+        worker._provider = None  # pyright: ignore[reportPrivateUsage]
+        worker._ensure_provider()  # pyright: ignore[reportPrivateUsage]
+        assert mock_factory.create_provider.call_args.kwargs["state_updater"] is updater
+
+    def test_state_updater_passed_to_create_provider_at_init(
+        self, tmp_path: Path
+    ) -> None:
+        """Worker.__init__ passes state_updater to create_provider when repo_cfg is given."""
+        from frozendict import frozendict
+
+        from fido.appstate import FidoState, GitHubLimit
+        from fido.atomic import create_atomic
+
+        cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        mock_factory = MagicMock()
+        mock_factory.create_provider.return_value = MagicMock()
+        Worker(
+            tmp_path,
+            MagicMock(),
+            repo_cfg=cfg,
+            provider_factory=mock_factory,
+            state_updater=updater,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        assert mock_factory.create_provider.call_args.kwargs["state_updater"] is updater
+
     def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
         worker = Worker(
             tmp_path,
@@ -16383,10 +16436,17 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
+            state_updater: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, dispatcher, first_iteration, issue_cache
+            del (
+                provider_factory,
+                dispatcher,
+                first_iteration,
+                issue_cache,
+                state_updater,
+            )
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -16601,10 +16661,17 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
+            state_updater: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, dispatcher, first_iteration, issue_cache
+            del (
+                provider_factory,
+                dispatcher,
+                first_iteration,
+                issue_cache,
+                state_updater,
+            )
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -16656,10 +16723,17 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
+            state_updater: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, dispatcher, first_iteration, issue_cache
+            del (
+                provider_factory,
+                dispatcher,
+                first_iteration,
+                issue_cache,
+                state_updater,
+            )
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -17117,10 +17191,17 @@ class TestWorkerThread:
             repo_cfg: object = None,
             provider_factory: object = None,
             first_iteration: bool = False,
+            state_updater: object = None,
             dispatcher: object = None,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, dispatcher, first_iteration, issue_cache
+            del (
+                provider_factory,
+                dispatcher,
+                first_iteration,
+                issue_cache,
+                state_updater,
+            )
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -17141,6 +17222,94 @@ class TestWorkerThread:
 
         assert received_config == [config]
         assert received_repo_cfg == [cfg]
+
+    def test_state_updater_forwarded_to_worker(self, tmp_path: Path) -> None:
+        """WorkerThread passes state_updater to Worker on each loop iteration."""
+        from frozendict import frozendict
+
+        from fido.appstate import FidoState, GitHubLimit
+        from fido.atomic import create_atomic
+
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            state_updater=updater,
+        )
+        wt._wake = MagicMock()
+        received_updaters: list = []
+
+        def fake_worker_init(
+            self_w: object,
+            work_dir: Path,
+            gh: MagicMock,
+            abort_task: object = None,
+            repo_name: str = "",
+            registry: object = None,
+            membership: object = None,
+            session: object = None,
+            session_issue: int | None = None,
+            config: object = None,
+            repo_cfg: object = None,
+            provider_factory: object = None,
+            first_iteration: bool = False,
+            state_updater: object = None,
+            dispatcher: object = None,
+            issue_cache: object = None,
+        ) -> None:
+            del provider_factory, dispatcher, first_iteration, issue_cache
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._bootstrap_session = session  # pyright: ignore[reportPrivateUsage]
+            self_w._session_issue = session_issue
+            received_updaters.append(state_updater)
+
+        def fake_worker_run(self_w: object) -> int:
+            wt._stop.set()
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            self._run_thread(wt)
+
+        assert len(received_updaters) == 1
+        assert received_updaters[0] is updater
+
+    def test_state_updater_passed_to_create_provider_in_ensure_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """WorkerThread._ensure_provider passes state_updater to create_provider."""
+        from frozendict import frozendict
+
+        from fido.appstate import FidoState, GitHubLimit
+        from fido.atomic import create_atomic
+
+        cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
+        mock_factory = MagicMock()
+        mock_factory.create_provider.return_value = MagicMock()
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            repo_cfg=cfg,
+            provider_factory=mock_factory,
+            state_updater=updater,
+        )
+        # Force _ensure_provider to create a new provider (clear existing).
+        wt._provider = None  # pyright: ignore[reportPrivateUsage]
+        wt._ensure_provider()  # pyright: ignore[reportPrivateUsage]
+        assert mock_factory.create_provider.call_args.kwargs["state_updater"] is updater
 
 
 class TestIsLeakedTaskComment:
