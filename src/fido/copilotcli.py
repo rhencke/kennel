@@ -948,7 +948,7 @@ class CopilotCLISession(OwnedSession):
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
         session_id: str | None = None,
-        on_metrics_changed: Callable[[], None] | None = None,
+        snapshot_publisher: provider.SnapshotPublisher | None = None,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
@@ -965,7 +965,7 @@ class CopilotCLISession(OwnedSession):
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
-        self._on_metrics_changed = on_metrics_changed
+        self._snapshot_publisher = snapshot_publisher
         # _metrics_lock guards both counters: they are written by the worker
         # thread (send / prompt) and read from other threads (status,
         # registry).  Python 3.14t has no GIL, so += is not atomic.
@@ -1173,8 +1173,7 @@ class CopilotCLISession(OwnedSession):
         )
         with self._metrics_lock:
             self._sent_count += 1
-        if self._on_metrics_changed is not None:
-            self._on_metrics_changed()
+        self._notify_snapshot_publisher()
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
             prompt,
@@ -1202,6 +1201,20 @@ class CopilotCLISession(OwnedSession):
         if cancelled:
             return ""
         return result
+
+    def _notify_snapshot_publisher(self) -> None:
+        """Push current metrics to the :class:`~fido.provider.SnapshotPublisher`."""
+        pub = self._snapshot_publisher
+        if pub is None:
+            return
+        pub.publish_metrics(
+            owner=self.owner,
+            alive=self.is_alive(),
+            pid=self.pid,
+            dropped_count=self.dropped_session_count,
+            sent_count=self.sent_count,
+            received_count=self.received_count,
+        )
 
 
 class CopilotCLIAPI(ProviderAPI):
@@ -1330,7 +1343,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             model=model,
             repo_name=self._repo_name,
             session_id=session_id,
-            on_metrics_changed=self._publish_provider_snapshot,
+            snapshot_publisher=self,
         )
 
     def _should_retry_prompt_failure(

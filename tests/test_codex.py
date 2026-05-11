@@ -862,7 +862,7 @@ class TestCodexSession:
         assert params["threadId"] == "thread-new"
         assert params["excludeTurns"] is True
 
-    def test_on_metrics_changed_fires_after_send(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_fires_after_send(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("base")
         fake = _FakeAppServer()
@@ -885,18 +885,24 @@ class TestCodexSession:
                 },
             ]
         )
-        calls: list[int] = []
+        published: list[dict[str, object]] = []
+
+        class Recorder:
+            def publish_metrics(self, **kwargs: object) -> None:
+                published.append(kwargs)
+
         session = CodexSession(
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
             client_factory=lambda **_: fake,
-            on_metrics_changed=lambda: calls.append(session.sent_count),
+            snapshot_publisher=Recorder(),
         )
         assert session.prompt("hello") == "ok"
-        assert calls == [1]
+        assert len(published) == 1
+        assert published[0]["sent_count"] == 1
 
-    def test_on_metrics_changed_none_is_noop(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("base")
         fake = _FakeAppServer()
@@ -925,7 +931,7 @@ class TestCodexSession:
             model=ProviderModel("gpt-5.5", "medium"),
             client_factory=lambda **_: fake,
         )
-        # No callback — prompt must not raise.
+        # No publisher — prompt must not raise.
         assert session.prompt("hello") == "ok"
         assert session.sent_count == 1
 
@@ -959,7 +965,7 @@ class TestCodexClient:
             model=client.voice_model,
             repo_name="owner/repo",
             session_id="thread-1",
-            on_metrics_changed=client._publish_provider_snapshot,
+            snapshot_publisher=client,
         )
         assert client.session is session
 

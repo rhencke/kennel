@@ -298,6 +298,29 @@ GLOBAL_DISALLOWED_TOOLS = (
 )
 
 
+class SnapshotPublisher(Protocol):
+    """Typed callback for sessions to publish metrics to the status cell.
+
+    Sessions accept an optional ``SnapshotPublisher`` at construction time
+    and call :meth:`publish_metrics` after incrementing counters.  The agent
+    (or test double) implements this protocol — sessions never import
+    :class:`~fido.appstate.ProviderSnapshot` or :class:`~fido.atomic.AtomicUpdater`.
+    """
+
+    def publish_metrics(
+        self,
+        *,
+        owner: str | None,
+        alive: bool,
+        pid: int | None,
+        dropped_count: int,
+        sent_count: int,
+        received_count: int,
+    ) -> None:
+        """Publish a fresh provider metrics snapshot."""
+        ...
+
+
 class PromptSession(Protocol):
     """Persistent prompt/session collaborator owned by a repo worker thread."""
 

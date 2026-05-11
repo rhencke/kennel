@@ -12,13 +12,14 @@ from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     PromptSession,
     ProviderModel,
+    SnapshotPublisher,
     TurnSessionMode,
 )
 
 log = logging.getLogger(__name__)
 
 
-class SessionBackedAgent:
+class SessionBackedAgent(SnapshotPublisher):
     """Common session attachment and lifecycle logic for provider agents."""
 
     voice_model: ProviderModel
@@ -47,11 +48,20 @@ class SessionBackedAgent:
         """Return the injected :class:`~fido.atomic.AtomicUpdater`, if any."""
         return self._state_updater
 
-    def _publish_provider_snapshot(self) -> None:
-        """Build and publish a fresh :class:`~fido.appstate.ProviderSnapshot`.
+    def publish_metrics(
+        self,
+        *,
+        owner: str | None,
+        alive: bool,
+        pid: int | None,
+        dropped_count: int,
+        sent_count: int,
+        received_count: int,
+    ) -> None:
+        """Publish a fresh :class:`~fido.appstate.ProviderSnapshot`.
 
-        Reads the current session properties and installs a new
-        :class:`~fido.appstate.ProviderSnapshot` at
+        Called by provider sessions after incrementing counters.  Installs a
+        new :class:`~fido.appstate.ProviderSnapshot` at
         ``repos[repo_name].provider`` in the atomic state cell via
         :attr:`_state_updater`.
 
@@ -62,12 +72,12 @@ class SessionBackedAgent:
         if self._state_updater is None or self._repo_name is None:
             return
         snapshot = ProviderSnapshot(
-            session_owner=self.session_owner,
-            session_alive=self.session_alive,
-            session_pid=self.session_pid,
-            session_dropped_count=self.session_dropped_count,
-            session_sent_count=self.session_sent_count,
-            session_received_count=self.session_received_count,
+            session_owner=owner,
+            session_alive=alive,
+            session_pid=pid,
+            session_dropped_count=dropped_count,
+            session_sent_count=sent_count,
+            session_received_count=received_count,
         )
         _name = self._repo_name
         self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)

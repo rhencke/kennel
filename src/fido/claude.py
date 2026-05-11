@@ -482,7 +482,7 @@ class ClaudeSession(OwnedSession):
         repo_name: str | None = None,
         session_id: str | None = None,
         tools: str | None = None,
-        on_metrics_changed: Callable[[], None] | None = None,
+        snapshot_publisher: provider.SnapshotPublisher | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -501,7 +501,7 @@ class ClaudeSession(OwnedSession):
         # which respawns the subprocess while keeping ``--resume`` so
         # conversation context survives the mode transition (#1042).
         self._tools: str | None = tools
-        self._on_metrics_changed = on_metrics_changed
+        self._snapshot_publisher = snapshot_publisher
         # Latest session_id seen in a stream-json event.  Updated inside
         # :meth:`iter_events` so :meth:`recover`, :meth:`reset`, and
         # :meth:`switch_model` can pass ``--resume <sid>``
@@ -889,8 +889,21 @@ class ClaudeSession(OwnedSession):
         self._proc.stdin.flush()
         with self._metrics_lock:
             self._sent_count += 1
-        if self._on_metrics_changed is not None:
-            self._on_metrics_changed()
+        self._notify_snapshot_publisher()
+
+    def _notify_snapshot_publisher(self) -> None:
+        """Push current metrics to the :class:`~fido.provider.SnapshotPublisher`."""
+        pub = self._snapshot_publisher
+        if pub is None:
+            return
+        pub.publish_metrics(
+            owner=self.owner,
+            alive=self.is_alive(),
+            pid=self.pid,
+            dropped_count=self.dropped_session_count,
+            sent_count=self.sent_count,
+            received_count=self.received_count,
+        )
 
     def _drain_to_boundary(self, deadline: float = 10.0) -> None:
         """Abort the in-flight turn and read events until ``type=result`` /
@@ -1711,7 +1724,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             repo_name=self._repo_name,
             model=model,
             session_id=session_id,
-            on_metrics_changed=self._publish_provider_snapshot,
+            snapshot_publisher=self,
         )
 
     def ensure_session(

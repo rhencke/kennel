@@ -912,7 +912,7 @@ class TestClaudeSessionMessageCounts:
         assert session.sent_count == 1
         assert session.received_count == 1
 
-    def test_on_metrics_changed_fires_after_send(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_fires_after_send(self, tmp_path: Path) -> None:
         import json as _json
 
         system_file = tmp_path / "system.md"
@@ -920,25 +920,31 @@ class TestClaudeSessionMessageCounts:
         proc = _make_session_proc(
             [_json.dumps({"type": "result", "result": "ok"}) + "\n"]
         )
-        calls: list[int] = []
+        published: list[dict[str, object]] = []
+
+        class Recorder:
+            def publish_metrics(self, **kwargs: object) -> None:
+                published.append(kwargs)
+
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
             popen=MagicMock(return_value=proc),
             selector=MagicMock(return_value=([proc.stdout], [], [])),
-            on_metrics_changed=lambda: calls.append(session.sent_count),
+            snapshot_publisher=Recorder(),
         )
         session.send("hello")
-        assert calls == [1]
+        assert len(published) == 1
+        assert published[0]["sent_count"] == 1
 
-    def test_on_metrics_changed_none_is_noop(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         import json as _json
 
         proc = _make_session_proc(
             [_json.dumps({"type": "result", "result": "ok"}) + "\n"]
         )
         session = _make_session(tmp_path, proc)
-        # No callback — send must not raise.
+        # No publisher — send must not raise.
         session.send("hello")
         assert session.sent_count == 1
 
@@ -2821,7 +2827,7 @@ class TestClaudeClientSessionAttachment:
             repo_name=None,
             model="claude-opus-4-6",
             session_id=None,
-            on_metrics_changed=client._publish_provider_snapshot,
+            snapshot_publisher=client,
         )
         session.reset.assert_not_called()
 

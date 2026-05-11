@@ -1264,23 +1264,29 @@ class TestCopilotCLISession:
         assert "persona\n\n---\n\nsystem\n\n---\n\ntask" in caplog.text
         assert "copilot result >>>\ndone\n<<< copilot result" in caplog.text
 
-    def test_on_metrics_changed_fires_after_send(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_fires_after_send(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         runtime = FakeRuntime()
         runtime.next_prompt = ("ok", "end_turn", "sess-2")
-        calls: list[int] = []
+        published: list[dict[str, object]] = []
+
+        class Recorder:
+            def publish_metrics(self, **kwargs: object) -> None:
+                published.append(kwargs)
+
         session = CopilotCLISession(
             system_file,
             work_dir=tmp_path,
             model=CopilotCLIClient.voice_model,
             runtime=runtime,
-            on_metrics_changed=lambda: calls.append(session.sent_count),
+            snapshot_publisher=Recorder(),
         )
         session.prompt("hello", model=None, system_prompt=None)
-        assert calls == [1]
+        assert len(published) == 1
+        assert published[0]["sent_count"] == 1
 
-    def test_on_metrics_changed_none_is_noop(self, tmp_path: Path) -> None:
+    def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         runtime = FakeRuntime()
@@ -1291,7 +1297,7 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.voice_model,
             runtime=runtime,
         )
-        # No callback — prompt must not raise.
+        # No publisher — prompt must not raise.
         session.prompt("hello", model=None, system_prompt=None)
         assert session.sent_count == 1
 
@@ -1525,7 +1531,7 @@ class TestCopilotCLIClient:
             model=client.voice_model,
             repo_name=None,
             session_id=None,
-            on_metrics_changed=client._publish_provider_snapshot,
+            snapshot_publisher=client,
         )
         session.reset.assert_called_once_with(client.work_model)
         session.switch_model.assert_not_called()
@@ -1562,7 +1568,7 @@ class TestCopilotCLIClient:
             model=client.voice_model,
             repo_name=None,
             session_id=None,
-            on_metrics_changed=client._publish_provider_snapshot,
+            snapshot_publisher=client,
         )
         session.reset.assert_not_called()
 

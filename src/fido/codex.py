@@ -672,7 +672,7 @@ class CodexSession(OwnedSession):
         session_id: str | None = None,
         turn_idle_timeout: float = _CODEX_TURN_IDLE_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
-        on_metrics_changed: Callable[[], None] | None = None,
+        snapshot_publisher: provider.SnapshotPublisher | None = None,
     ) -> None:
         self._work_dir = Path(work_dir).resolve()
         self._repo_name = repo_name
@@ -684,7 +684,7 @@ class CodexSession(OwnedSession):
         self._model = coerce_provider_model(model)
         self._turn_idle_timeout = turn_idle_timeout
         self._clock = clock
-        self._on_metrics_changed = on_metrics_changed
+        self._snapshot_publisher = snapshot_publisher
         self._state_lock = threading.Lock()
         self._session_id: str | None = None
         self._turn_lock = threading.Lock()
@@ -783,8 +783,21 @@ class CodexSession(OwnedSession):
             self._active_turn_id = turn_id
         with self._state_lock:
             self._sent_count += 1
-        if self._on_metrics_changed is not None:
-            self._on_metrics_changed()
+        self._notify_snapshot_publisher()
+
+    def _notify_snapshot_publisher(self) -> None:
+        """Push current metrics to the :class:`~fido.provider.SnapshotPublisher`."""
+        pub = self._snapshot_publisher
+        if pub is None:
+            return
+        pub.publish_metrics(
+            owner=self.owner,
+            alive=self.is_alive(),
+            pid=self.pid,
+            dropped_count=self.dropped_session_count,
+            sent_count=self.sent_count,
+            received_count=self.received_count,
+        )
 
     def consume_until_result(self) -> str:
         with self._turn_lock:
@@ -1181,7 +1194,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             model=model,
             repo_name=self._repo_name,
             session_id=session_id,
-            on_metrics_changed=self._publish_provider_snapshot,
+            snapshot_publisher=self,
         )
 
     def _prompt_failure_is_passthrough(self, exc: Exception) -> bool:
