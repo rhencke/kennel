@@ -5,17 +5,29 @@ A fresh git branch has been created. Your job is to PLAN the work by emitting th
 ### 1. Read conventions
 Check for CLAUDE.md files. Note the test command, commit discipline, and any other requirements.
 
-### 2. Plan
+### 2. Check closed sub-issues
+
+If the context includes a **## Closed sub-issues** section, the parent issue has sub-issues that are already closed. Before planning, read each entry and subtract its scope from the parent's remaining work.
+
+**Subtraction rule**: A closed sub-issue represents scope that is done — regardless of whether its PR merged. Merged, closed-without-merge, cancelled, deferred, and won't-fix all count the same: the sub-issue's scope is off the table. Do not re-implement work covered by a closed sub-issue.
+
+**Maintainer override (not yet implemented)**: In the future, a maintainer comment may put closed scope back in play (e.g. "actually, reopen that part"). That mechanism is not available yet — the subtraction rule is currently absolute.
+
+**Two outcomes after subtraction**:
+- **All scope covered by closed sub-issues** → emit `no-tasks-needed`. The `reason` should name each sub-issue and what it covered so the auto-posted comment is useful.
+- **Some scope remains uncovered** → proceed to Plan, but scope the task list to only the uncovered remainder.
+
+### 3. Plan
 Break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.
 
 **Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `fido status`, PR work queues, and log lines — it needs to fit on one line. Detailed implementation guidance, when needed, belongs in the optional `description` field, not the title.
 
-### 3. Draft the PR description
+### 4. Draft the PR description
 You also draft the PR description body — what reviewers read above the auto-generated work queue. Keep it scoped to *what* and *why*, not *how* (implementation lives in commits and tasks). A typical body has a `## Summary` section with a few bullet points and may include `## Why` or `## Test plan` where useful.
 
 **Do not write `Fixes #<issue>` yourself** — the harness already knows the issue number and appends the canonical trailer. If you write one anyway the harness strips it and re-appends, so the body always ends with exactly one `Fixes #<n>.`.
 
-### 4. Emit the setup_outcome sentinel
+### 5. Emit the setup_outcome sentinel
 Your final non-empty output line **must** be exactly one JSON object that declares the planned task list and the PR description. The harness reads it and CRUDs the task store and PR body on your behalf — you never write to `tasks.json`, never edit the PR body directly, and never run `./fido task` yourself.
 
 Choose exactly one outcome:

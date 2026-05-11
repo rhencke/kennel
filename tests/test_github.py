@@ -9,6 +9,8 @@ from fido.github import (
     GitHub,
     GraphQLError,
     _gh_token,
+    _has_closing_keyword,  # noqa: PLC2701
+    _pr_state_str,  # noqa: PLC2701
     _TimeoutSession,  # noqa: PLC2701
 )
 
@@ -40,6 +42,108 @@ class TestGhToken:
         mock_run = MagicMock(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
             _gh_token(runner=mock_run, environ={})
+
+
+class TestHasClosingKeyword:
+    """Unit tests for _has_closing_keyword — all keyword variants, colon form, cross-repo."""
+
+    # ── bare #N matches ──────────────────────────────────────────────────────
+
+    def test_closes_matches(self) -> None:
+        assert _has_closing_keyword("closes #5", 5) is True
+
+    def test_close_singular_matches(self) -> None:
+        assert _has_closing_keyword("Close #5", 5) is True
+
+    def test_closed_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Closed #5", 5) is True
+
+    def test_fixes_matches(self) -> None:
+        assert _has_closing_keyword("fixes #5", 5) is True
+
+    def test_fix_singular_matches(self) -> None:
+        assert _has_closing_keyword("Fix #5", 5) is True
+
+    def test_fixed_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Fixed #5", 5) is True
+
+    def test_resolves_matches(self) -> None:
+        assert _has_closing_keyword("resolves #5", 5) is True
+
+    def test_resolve_singular_matches(self) -> None:
+        assert _has_closing_keyword("Resolve #5", 5) is True
+
+    def test_resolved_past_tense_matches(self) -> None:
+        assert _has_closing_keyword("Resolved #5", 5) is True
+
+    def test_uppercase_keyword_matches(self) -> None:
+        assert _has_closing_keyword("CLOSES #5", 5) is True
+
+    # ── colon form ───────────────────────────────────────────────────────────
+
+    def test_colon_after_keyword_matches(self) -> None:
+        assert _has_closing_keyword("Fixes: #5", 5) is True
+
+    def test_colon_without_space_before_matches(self) -> None:
+        assert _has_closing_keyword("Fixes: #5", 5) is True
+
+    # ── wrong number does not match ──────────────────────────────────────────
+
+    def test_wrong_number_does_not_match(self) -> None:
+        assert _has_closing_keyword("closes #10", 100) is False
+
+    def test_prefix_number_does_not_match(self) -> None:
+        """#10 must not match when target is #100."""
+        assert _has_closing_keyword("closes #10", 100) is False
+
+    # ── word boundary ────────────────────────────────────────────────────────
+
+    def test_word_boundary_prevents_underscore_prefix_match(self) -> None:
+        """prefix_closes #N must not match due to \b word boundary."""
+        assert _has_closing_keyword("prefix_closes #5", 5) is False
+
+    # ── no closing keyword ───────────────────────────────────────────────────
+
+    def test_bare_mention_does_not_match(self) -> None:
+        assert _has_closing_keyword("see #5 for context", 5) is False
+
+    # ── cross-repo references ─────────────────────────────────────────────────
+
+    def test_cross_repo_matches_when_repo_matches(self) -> None:
+        assert _has_closing_keyword("Fixes owner/repo#5", 5, repo="owner/repo") is True
+
+    def test_cross_repo_matches_case_insensitively(self) -> None:
+        assert _has_closing_keyword("Fixes Owner/Repo#5", 5, repo="owner/repo") is True
+
+    def test_cross_repo_does_not_match_when_repo_differs(self) -> None:
+        assert _has_closing_keyword("Fixes other/repo#5", 5, repo="owner/repo") is False
+
+    def test_cross_repo_does_not_match_when_repo_not_provided(self) -> None:
+        """When caller passes no repo, cross-repo refs are skipped (can't verify)."""
+        assert _has_closing_keyword("Fixes owner/repo#5", 5) is False
+
+    def test_cross_repo_does_not_match_when_repo_is_none(self) -> None:
+        assert _has_closing_keyword("Fixes owner/repo#5", 5, repo=None) is False
+
+
+class TestPrStateStr:
+    """Unit tests for _pr_state_str."""
+
+    def test_returns_state_field_when_present(self) -> None:
+        assert _pr_state_str({"state": "MERGED", "merged": True}) == "MERGED"
+        assert _pr_state_str({"state": "CLOSED", "merged": False}) == "CLOSED"
+        assert _pr_state_str({"state": "OPEN", "merged": False}) == "OPEN"
+
+    def test_falls_back_to_merged_bool_when_state_absent(self) -> None:
+        assert _pr_state_str({"merged": True}) == "MERGED"
+        assert _pr_state_str({"merged": False}) == "CLOSED"
+
+    def test_falls_back_when_state_is_none(self) -> None:
+        assert _pr_state_str({"state": None, "merged": True}) == "MERGED"
+        assert _pr_state_str({"state": None, "merged": False}) == "CLOSED"
+
+    def test_empty_dict_returns_closed(self) -> None:
+        assert _pr_state_str({}) == "CLOSED"
 
 
 class TestTimeoutSession:
@@ -401,6 +505,44 @@ class TestGitHubClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_s.post.call_args.kwargs["json"]["body"] == "hello"
 
+    def test_close_issue_patches_state_closed(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.patch.return_value = mock_resp
+        gh.close_issue("owner/repo", 42)
+        url = mock_s.patch.call_args.args[0]
+        assert "repos/owner/repo/issues/42" in url
+        assert mock_s.patch.call_args.kwargs["json"]["state"] == "closed"
+
+    def test_close_issue_raises_on_error(self) -> None:
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = _requests.HTTPError("404")
+        mock_s.patch.return_value = mock_resp
+        with pytest.raises(_requests.HTTPError, match="404"):
+            gh.close_issue("owner/repo", 99)
+
+    def test_close_pr_patches_pulls_state_closed(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.patch.return_value = mock_resp
+        gh.close_pr("owner/repo", 77)
+        url = mock_s.patch.call_args.args[0]
+        assert "repos/owner/repo/pulls/77" in url
+        assert mock_s.patch.call_args.kwargs["json"]["state"] == "closed"
+
+    def test_close_pr_raises_on_error(self) -> None:
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = _requests.HTTPError("422")
+        mock_s.patch.return_value = mock_resp
+        with pytest.raises(_requests.HTTPError, match="422"):
+            gh.close_pr("owner/repo", 33)
+
     def test_fetch_sibling_threads_returns_threads(self) -> None:
         gh, mock_s = self._gh()
         comments = [
@@ -742,10 +884,14 @@ class TestGitHubClass:
         pr_no_body = {k: v for k, v in pr.items() if k != "body"}
         return {"__typename": "ConnectedEvent", "subject": pr_no_body}
 
-    def _disconnected_node(self, pr_number: int) -> dict:
+    def _disconnected_node(self, pr_number: int, repo: str = "o/r") -> dict:
         return {
             "__typename": "DisconnectedEvent",
-            "subject": {"__typename": "PullRequest", "number": pr_number},
+            "subject": {
+                "__typename": "PullRequest",
+                "number": pr_number,
+                "repository": {"nameWithOwner": repo},
+            },
         }
 
     def test_find_pr_returns_match(self) -> None:
@@ -1104,6 +1250,39 @@ class TestGitHubClass:
         }
         assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
 
+    # --- colon-form closing keyword regression tests ---
+
+    def test_find_pr_matches_colon_form(self) -> None:
+        """'Fixes: #N' (colon form) must match, not just 'Fixes #N'."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr(10, "feat", "OPEN", "fido", "Fixes: #5")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        result = gh.find_pr("o/r", 5, "fido")
+        assert result is not None
+        assert result["number"] == 10
+
+    def test_find_pr_matches_closes_colon_form(self) -> None:
+        """'Closes: #N' (colon form) must match."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr(11, "feat", "OPEN", "fido", "Closes: #7")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        result = gh.find_pr("o/r", 7, "fido")
+        assert result is not None
+        assert result["number"] == 11
+
+    def test_find_closed_unmerged_matches_colon_form(self) -> None:
+        """'Resolves: #N' (colon form) must match for closed-unmerged lookup."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(300, "CLOSED", "fido", "Resolves: #42", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 42, "fido") == [300]
+
     # --- find_closed_prs_as_context ---
 
     def test_find_closed_prs_as_context_returns_empty_when_no_closed_prs(self) -> None:
@@ -1167,6 +1346,676 @@ class TestGitHubClass:
         assert result == [
             ClosedPR(number=215, title="Old attempt", body="", close_reason="")
         ]
+
+    # --- _find_linked_pr_for_issue ---
+
+    def _gql_pr_simple(
+        self, number: int, state: str, merged: bool = False, repo: str = "o/r"
+    ) -> dict:
+        """Build a minimal PR node for timeline scan helpers."""
+        return {
+            "__typename": "PullRequest",
+            "number": number,
+            "state": state,
+            "merged": merged,
+            "repository": {"nameWithOwner": repo},
+        }
+
+    def _gql_sub_timeline(
+        self,
+        nodes: list[dict],
+        has_next: bool = False,
+        cursor: str | None = None,
+    ) -> dict:
+        """Same shape as _gql_timeline — reuse the same helper."""
+        return self._gql_timeline(nodes, has_next=has_next, cursor=cursor)
+
+    def test_find_linked_pr_returns_none_when_no_timeline(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = {
+            "data": {"repository": {"issue": {"timelineItems": {}}}}
+        }
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_returns_none_when_empty_nodes(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def _gql_cross_ref(self, pr: dict, *, will_close: bool = True) -> dict:
+        """Build a CrossReferencedEvent node with willCloseTarget set."""
+        return {
+            "__typename": "CrossReferencedEvent",
+            "willCloseTarget": will_close,
+            "source": pr,
+        }
+
+    def test_find_linked_pr_finds_merged_cross_ref(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_finds_closed_unmerged_cross_ref(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is False
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_skips_open_cross_ref(self) -> None:
+        """An OPEN linked PR must not be returned — a sub-issue manually closed
+        while its PR is still open has no completed/abandoned PR to classify."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "OPEN", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_prefers_closed_over_open(self) -> None:
+        """When candidates include both an OPEN and a CLOSED PR, return the
+        CLOSED one — OPEN PRs are skipped in favour of completed ones."""
+        gh, mock_s = self._gh()
+        open_pr = self._gql_pr_simple(50, "OPEN", merged=False)
+        closed_pr = self._gql_pr_simple(99, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(open_pr),
+                self._gql_cross_ref(closed_pr),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 99
+        assert merged is False
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_finds_sidebar_pr(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [{"__typename": "ConnectedEvent", "subject": pr}]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_prefers_keyword_over_sidebar(self) -> None:
+        gh, mock_s = self._gh()
+        kw_pr = self._gql_pr_simple(300, "MERGED", merged=True)
+        sb_pr = self._gql_pr_simple(200, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {"__typename": "ConnectedEvent", "subject": sb_pr},
+                self._gql_cross_ref(kw_pr),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 300
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_merged_sidebar_beats_open_keyword(self) -> None:
+        """An all-OPEN keyword bucket must not starve a merged sidebar PR."""
+        gh, mock_s = self._gh()
+        kw_pr = self._gql_pr_simple(50, "OPEN", merged=False)
+        sb_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(kw_pr),
+                {"__typename": "ConnectedEvent", "subject": sb_pr},
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_merged_sidebar_beats_closed_keyword(self) -> None:
+        """A merged sidebar PR must beat a closed-unmerged keyword PR —
+        merge state takes priority over keyword vs sidebar origin."""
+        gh, mock_s = self._gh()
+        kw_pr = self._gql_pr_simple(50, "CLOSED", merged=False)
+        sb_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(kw_pr),
+                {"__typename": "ConnectedEvent", "subject": sb_pr},
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_prefers_merged_over_closed(self) -> None:
+        gh, mock_s = self._gh()
+        pr1 = self._gql_pr_simple(400, "MERGED", merged=True)
+        pr2 = self._gql_pr_simple(300, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(pr1),
+                self._gql_cross_ref(pr2),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 400
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_lowest_number_among_same_merge_state(self) -> None:
+        gh, mock_s = self._gh()
+        pr1 = self._gql_pr_simple(500, "MERGED", merged=True)
+        pr2 = self._gql_pr_simple(400, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(pr1),
+                self._gql_cross_ref(pr2),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 400
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_keys_keyword_candidates_by_repo(self) -> None:
+        gh, mock_s = self._gh()
+        same_number_closed = self._gql_pr_simple(
+            77, "CLOSED", merged=False, repo="other/repo"
+        )
+        same_number_merged = self._gql_pr_simple(
+            77, "MERGED", merged=True, repo="owner/proj"
+        )
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(same_number_closed),
+                self._gql_cross_ref(same_number_merged),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 77
+        assert merged is True
+        assert pr_repo == "owner/proj"
+
+    def test_find_linked_pr_removes_disconnected_sidebar(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(200, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {"__typename": "ConnectedEvent", "subject": pr},
+                self._disconnected_node(200),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_disconnects_sidebar_by_repo_and_number(self) -> None:
+        gh, mock_s = self._gh()
+        disconnected_pr = self._gql_pr_simple(
+            77, "MERGED", merged=True, repo="other/repo"
+        )
+        kept_pr = self._gql_pr_simple(77, "MERGED", merged=True, repo="owner/proj")
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {"__typename": "ConnectedEvent", "subject": disconnected_pr},
+                {"__typename": "ConnectedEvent", "subject": kept_pr},
+                self._disconnected_node(77, repo="other/repo"),
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 77
+        assert merged is True
+        assert pr_repo == "owner/proj"
+
+    def test_find_linked_pr_skips_non_pr_cross_ref(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {
+                    "__typename": "CrossReferencedEvent",
+                    "willCloseTarget": True,
+                    "source": {"__typename": "Issue", "number": 99},
+                }
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert pr_repo is None
+
+    def test_find_linked_pr_bare_mention_not_treated_as_keyword(self) -> None:
+        """A CrossReferencedEvent with willCloseTarget=False and no closing
+        keyword in body/title is a bare mention ('see #123') — must not be
+        added to keyword_prs."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        # No body/title → no closing keyword → bare mention → skip.
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_keyword_in_body_accepted_when_will_close_false(
+        self,
+    ) -> None:
+        """A CrossReferencedEvent with willCloseTarget=False but a closing
+        keyword in the PR body is treated as a keyword PR.  This handles
+        already-closed sub-issues where willCloseTarget is always false."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Closes #42\n\nSome implementation notes.",
+            "title": "Add feature",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_keyword_in_title_accepted_when_will_close_false(
+        self,
+    ) -> None:
+        """A closing keyword in the PR title (rather than body) is also
+        sufficient when willCloseTarget is false."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Just some notes.",
+            "title": "Fixes #42: add the thing",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_keyword_wrong_number_skipped(self) -> None:
+        """A closing keyword referencing a different issue number does not
+        count — the PR is still treated as a bare mention and skipped."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Closes #99",
+            "title": "Something unrelated",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    def test_find_linked_pr_keyword_case_insensitive(self) -> None:
+        """The closing keyword regex is case-insensitive (CLOSES, fixes, etc.)."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "RESOLVES #42",
+            "title": "",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_bare_mention_falls_back_to_sidebar(self) -> None:
+        """A bare mention (willCloseTarget=False) is skipped; a sidebar
+        ConnectedEvent for a different PR is still returned as fallback."""
+        gh, mock_s = self._gh()
+        mention_pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        sidebar_pr = self._gql_pr_simple(200, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                self._gql_cross_ref(mention_pr, will_close=False),
+                {"__typename": "ConnectedEvent", "subject": sidebar_pr},
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 200
+        assert merged is True
+        assert pr_repo == "o/r"
+
+    def test_find_linked_pr_follows_pagination(self) -> None:
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_simple(500, "MERGED", merged=True)
+        mock_s.post.return_value.json.side_effect = [
+            self._gql_sub_timeline([], has_next=True, cursor="cur1"),
+            self._gql_sub_timeline([self._gql_cross_ref(pr)]),
+        ]
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 500
+        assert merged is True
+        assert pr_repo == "o/r"
+        assert mock_s.post.call_count == 2
+
+    def test_find_linked_pr_does_not_filter_by_author(self) -> None:
+        """Unlike find_pr, _find_linked_pr_for_issue accepts PRs from any user."""
+        gh, mock_s = self._gh()
+        # PR by a human, not fido — should still be returned.
+        pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        # The simple node has no author field; that's intentional — the helper
+        # doesn't look at author at all.
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr)]
+        )
+        pr_num, _, _repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+
+    def test_find_linked_pr_skips_non_pr_connected_subject(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [
+                {
+                    "__typename": "ConnectedEvent",
+                    "subject": {"__typename": "Issue", "number": 99},
+                }
+            ]
+        )
+        pr_num, merged, pr_repo = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+        assert pr_repo is None
+
+    # --- fetch_closed_sub_issues ---
+
+    def _sub_issues_page(
+        self,
+        items: list[dict],
+        has_next: bool = False,
+        next_url: str | None = None,
+    ) -> MagicMock:
+        """Build a mock REST response for the sub_issues endpoint."""
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = items
+        resp.raise_for_status.return_value = None
+        link = f'<{next_url}>; rel="next"' if (has_next and next_url) else ""
+        resp.headers = {"Link": link}
+        return resp
+
+    def _sub_issue_item(
+        self,
+        number: int,
+        state: str = "closed",
+        title: str = "sub title",
+        body: str = "sub body",
+    ) -> dict:
+        return {"number": number, "state": state, "title": title, "body": body}
+
+    def test_fetch_closed_sub_issues_returns_empty_when_no_sub_issues(
+        self,
+    ) -> None:
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = self._sub_issues_page([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == []
+        mock_s.post.assert_not_called()
+
+    def test_fetch_closed_sub_issues_skips_open(self) -> None:
+        gh, mock_s = self._gh()
+        open_item = self._sub_issue_item(5, state="open")
+        mock_s.get.return_value = self._sub_issues_page([open_item])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == []
+        mock_s.post.assert_not_called()
+
+    def test_fetch_closed_sub_issues_closed_no_pr(self) -> None:
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = self._sub_issues_page(
+            [self._sub_issue_item(5, state="closed", title="T", body="B")]
+        )
+        # Timeline returns empty — no linked PR.
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_repo=None,
+                pr_body="",
+            )
+        ]
+
+    def test_fetch_closed_sub_issues_merged_pr(self) -> None:
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(5, state="closed", title="T", body="B")
+        sub_issues_resp = self._sub_issues_page([sub])
+        pr_rest_resp = MagicMock()
+        pr_rest_resp.status_code = 200
+        pr_rest_resp.raise_for_status.return_value = None
+        pr_rest_resp.headers = {}
+        pr_rest_resp.json.return_value = {"body": "pr body text"}
+        # First GET is sub_issues list, second GET is the PR body.
+        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        pr_node = self._gql_pr_simple(99, "MERGED", merged=True)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="merged",
+                pr_number=99,
+                pr_repo="o/r",
+                pr_body="pr body text",
+            )
+        ]
+
+    def test_fetch_closed_sub_issues_closed_unmerged_pr(self) -> None:
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(7, state="closed", title="T2", body="B2")
+        sub_issues_resp = self._sub_issues_page([sub])
+        pr_rest_resp = MagicMock()
+        pr_rest_resp.status_code = 200
+        pr_rest_resp.raise_for_status.return_value = None
+        pr_rest_resp.headers = {}
+        pr_rest_resp.json.return_value = {"body": "rejected"}
+        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        pr_node = self._gql_pr_simple(88, "CLOSED", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=7,
+                title="T2",
+                body="B2",
+                close_state="closed_unmerged",
+                pr_number=88,
+                pr_repo="o/r",
+                pr_body="rejected",
+            )
+        ]
+
+    def test_fetch_closed_sub_issues_preserves_api_order(self) -> None:
+        gh, mock_s = self._gh()
+        # API returns [20, 5, 12] — GitHub's priority order, not numeric order.
+        items = [
+            self._sub_issue_item(20, state="closed"),
+            self._sub_issue_item(5, state="closed"),
+            self._sub_issue_item(12, state="closed"),
+        ]
+        mock_s.get.return_value = self._sub_issues_page(items)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert [r.number for r in result] == [20, 5, 12]
+
+    def test_fetch_closed_sub_issues_state_reason_populated(self) -> None:
+        """state_reason from the API payload is carried onto ClosedSubIssue."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = {
+            "number": 5,
+            "state": "closed",
+            "title": "T",
+            "body": "B",
+            "state_reason": "not_planned",
+        }
+        mock_s.get.return_value = self._sub_issues_page([sub])
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="closed_no_pr",
+                state_reason="not_planned",
+                pr_number=None,
+                pr_repo=None,
+                pr_body="",
+            )
+        ]
+
+    def test_fetch_closed_sub_issues_state_reason_none_when_absent(self) -> None:
+        """state_reason is None when not present in the API payload."""
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = self._sub_issues_page(
+            [self._sub_issue_item(5, state="closed", title="T", body="B")]
+        )
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result[0].state_reason is None
+
+    def test_fetch_closed_sub_issues_handles_none_body(self) -> None:
+        gh, mock_s = self._gh()
+        sub = {"number": 3, "state": "closed", "title": "T", "body": None}
+        mock_s.get.return_value = self._sub_issues_page([sub])
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result[0].body == ""
+
+    def test_fetch_closed_sub_issues_pagination(self) -> None:
+        gh, mock_s = self._gh()
+        page1_resp = self._sub_issues_page(
+            [self._sub_issue_item(1, state="closed")],
+            has_next=True,
+            next_url="https://api.github.com/repos/o/r/issues/10/sub_issues?page=2",
+        )
+        page2_resp = self._sub_issues_page([self._sub_issue_item(2, state="closed")])
+        mock_s.get.side_effect = [page1_resp, page2_resp]
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert [r.number for r in result] == [1, 2]
+        # Two pages fetched.
+        assert mock_s.get.call_count == 2
+
+    def test_fetch_closed_sub_issues_calls_correct_url(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.get.return_value = self._sub_issues_page([])
+        gh.fetch_closed_sub_issues("o/r", 42)
+        url = mock_s.get.call_args.args[0]
+        assert "/repos/o/r/issues/42/sub_issues" in url
+
+    def test_fetch_closed_sub_issues_uses_linked_pr_repo_for_body_fetch(self) -> None:
+        """When the linked PR lives in a different repo, fetch the body from
+        that repo's REST endpoint, not the parent issue's repo."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(5, state="closed", title="T", body="B")
+        sub_issues_resp = self._sub_issues_page([sub])
+        pr_rest_resp = MagicMock()
+        pr_rest_resp.status_code = 200
+        pr_rest_resp.raise_for_status.return_value = None
+        pr_rest_resp.headers = {}
+        pr_rest_resp.json.return_value = {"body": "cross-repo body"}
+        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        # PR lives in "other/repo", not "o/r".
+        pr_node = self._gql_pr_simple(77, "MERGED", merged=True, repo="other/repo")
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=5,
+                title="T",
+                body="B",
+                close_state="merged",
+                pr_number=77,
+                pr_repo="other/repo",
+                pr_body="cross-repo body",
+            )
+        ]
+        # The PR body fetch must use the linked PR's repo, not the parent's.
+        pr_fetch_url = mock_s.get.call_args_list[1].args[0]
+        assert "/repos/other/repo/pulls/77" in pr_fetch_url
+
+    def test_fetch_closed_sub_issues_open_linked_pr_treated_as_no_pr(self) -> None:
+        """A sub-issue manually closed while its linked PR is still OPEN must
+        not be classified as closed_unmerged.  The open PR is skipped and the
+        sub-issue gets close_state='closed_no_pr' (no completed PR body)."""
+        from fido.types import ClosedSubIssue
+
+        gh, mock_s = self._gh()
+        sub = self._sub_issue_item(9, state="closed", title="T", body="B")
+        mock_s.get.return_value = self._sub_issues_page([sub])
+        # Only candidate is an OPEN PR.
+        pr_node = self._gql_pr_simple(55, "OPEN", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr_node)]
+        )
+        result = gh.fetch_closed_sub_issues("o/r", 10)
+        assert result == [
+            ClosedSubIssue(
+                number=9,
+                title="T",
+                body="B",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_repo=None,
+                pr_body="",
+            )
+        ]
+        # Must NOT have fetched a PR body via REST.
+        assert mock_s.get.call_count == 1
 
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()

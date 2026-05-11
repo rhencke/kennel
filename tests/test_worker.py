@@ -1768,6 +1768,40 @@ class TestWorker:
         # handle_ci was only called on iteration 2
         assert ci_calls == [2]
 
+    def test_run_returns_one_when_find_or_create_pr_returns_sentinel(
+        self, tmp_path: Path
+    ) -> None:
+        """When find_or_create_pr returns None (all-covered terminal close),
+        _run_iteration returns 1 (completed work) immediately without running
+        task execution or merge logic."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Issue", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
+        mock_execute = MagicMock(return_value=False)
+        mock_merge = MagicMock(return_value=0)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=5),
+            patch.object(worker, "post_pickup_comment"),
+            # Terminal sentinel — all-covered close path fired
+            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(worker, "execute_task", mock_execute),
+            patch.object(worker, "handle_promote_merge", mock_merge),
+        ):
+            result = worker.run()
+        # Must return 1 (completed work — closed PR + issue)
+        assert result == 1
+        # Must not try to execute tasks or promote/merge on a closed PR
+        mock_execute.assert_not_called()
+        mock_merge.assert_not_called()
+
 
 class TestWorkerFindNextIssue:
     """Tests for Worker.find_next_issue."""
@@ -4953,6 +4987,7 @@ class TestFindOrCreatePr:
         # retry-acknowledgement comment on every test.
         gh.find_closed_unmerged_prs_for_issue.return_value = []
         gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = []
         return Worker(
             tmp_path,
             gh,
@@ -5022,15 +5057,19 @@ class TestFindOrCreatePr:
         mock_client = _client(return_value="No work needed.")
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
-        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value=("sess-1", ""))
+        mock_start = MagicMock(
+            return_value=(
+                "sess-1",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", mock_start),
         ):
@@ -5049,16 +5088,21 @@ class TestFindOrCreatePr:
         mock_client = _client(return_value="No work needed.")
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
-        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5078,7 +5122,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "Issue title"
@@ -5107,7 +5157,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
@@ -5252,7 +5308,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5282,11 +5344,17 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="fido"),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "new branch" in caplog.text
@@ -5299,14 +5367,16 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value=("s", ""))
+        mock_start = MagicMock(
+            return_value=("s", '{"setup_outcome": "no-tasks-needed", "reason": "test"}')
+        )
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", mock_start),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
@@ -5330,10 +5400,16 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5350,7 +5426,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5385,10 +5467,16 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         # _reset_local_workspace fires first: checkout default, fetch, reset
@@ -5425,10 +5513,16 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["branch", "-D", "slug"] in git_calls
@@ -5450,7 +5544,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5479,7 +5579,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "_reset_local_workspace"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
         ):
             result = worker.find_or_create_pr(
@@ -5506,7 +5612,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5536,7 +5648,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch.object(worker, "_post_retry_acknowledgement", mock_retry),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5559,8 +5677,14 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5584,8 +5708,14 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
         _, _, context = mock_build.call_args.args
@@ -5603,9 +5733,15 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5628,13 +5764,195 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Active PR" not in context
+
+    def test_fetch_closed_sub_issues_not_called_when_tasks_exist(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is NOT called when the open PR already has tasks."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=["a task"]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        gh.fetch_closed_sub_issues.assert_not_called()
+
+    def test_fetch_closed_sub_issues_called_for_open_pr_no_tasks_path(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is called when open PR has no tasks (setup path)."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 7)
+
+    def test_fetch_closed_sub_issues_called_for_new_pr_path(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_closed_sub_issues is called with the correct repo and issue on the new-PR path."""
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 9, "title")
+        gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 9)
+
+    def test_open_pr_setup_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues fetched for the issue appear in the setup context (open-PR path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=55,
+                title="Closed child",
+                body="Implemented the thing.",
+                close_state="merged",
+                pr_number=60,
+                pr_body="",
+            )
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#55: Closed child" in context
+        assert "Implemented the thing." in context
+
+    def test_no_pr_setup_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues fetched for the issue appear in the setup context (new-PR path)."""
+        from fido.types import ClosedSubIssue
+
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=33,
+                title="Already done",
+                body="Covers the auth layer.",
+                close_state="merged",
+                pr_number=34,
+                pr_body="",
+            )
+        ]
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#33: Already done" in context
+        assert "Covers the auth layer." in context
+
+    def test_no_sub_issues_omits_closed_sub_issues_section(
+        self, tmp_path: Path
+    ) -> None:
+        """When there are no closed sub-issues, the context has no ## Closed sub-issues section."""
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.fetch_closed_sub_issues.return_value = []
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" not in context
 
     def test_no_pr_setup_context_includes_prior_attempts(self, tmp_path: Path) -> None:
         """Prior closed PRs appear in the setup context for the fresh-PR path."""
@@ -5657,9 +5975,15 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5686,14 +6010,82 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
         assert "PR #88" in context
         assert "First attempt" in context
+
+    # ── Terminal sentinel (None return) ───────────────────────────────────────
+
+    def test_new_pr_returns_none_when_terminal_close_fires(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr returns None (new-PR path) when _finalize_setup_with_no_tasks
+        returns True (all-covered terminal close path)."""
+        mock_client = _client(return_value="All covered.")
+        mock_client.generate_branch_name.return_value = "fix-bug"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch.object(worker, "_reset_local_workspace"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            # Simulate the all-covered terminal close path
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result is None
+
+    def test_open_pr_returns_none_when_terminal_close_fires(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr returns None (open-PR resume path) when
+        _finalize_setup_with_no_tasks returns True."""
+        mock_client = _client(return_value="All covered.")
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="fix-bug")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
+                ),
+            ),
+            # Simulate the all-covered terminal close path
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result is None
 
 
 class TestApplySetupOutcome:
@@ -5711,14 +6103,16 @@ class TestApplySetupOutcome:
             '{"title": "Add bar", "description": "with details"}'
             "]}"
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         tasks = worker._tasks.list()  # type: ignore[attr-defined]
         assert [t["title"] for t in tasks] == ["Add foo", "Add bar"]
         assert all(t["status"] == "pending" for t in tasks)
         assert all(t["type"] == "spec" for t in tasks)
         assert tasks[0]["description"] == ""
         assert tasks[1]["description"] == "with details"
-        assert result == ""
+        assert desc == ""
+        assert explicit is False
+        assert reason == ""
 
     def test_pr_description_returned_when_present(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -5727,15 +6121,19 @@ class TestApplySetupOutcome:
             '"pr_description": "## Summary\\n\\n- bullet\\n\\nFixes #1.", '
             '"tasks": [{"title": "task"}]}'
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
-        assert result == "## Summary\n\n- bullet\n\nFixes #1."
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert desc == "## Summary\n\n- bullet\n\nFixes #1."
+        assert explicit is False
+        assert reason == ""
 
     def test_no_tasks_needed_creates_no_tasks(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
         sentinel = '{"setup_outcome": "no-tasks-needed", "reason": "already covered"}'
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
         assert worker._tasks.list() == []  # type: ignore[attr-defined]
-        assert result == ""
+        assert desc == ""
+        assert explicit is True
+        assert reason == "already covered"
 
     def test_no_tasks_needed_returns_pr_description(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -5744,16 +6142,17 @@ class TestApplySetupOutcome:
             '"reason": "no-op", '
             '"pr_description": "## Why\\n\\nNothing to do.\\n\\nFixes #2."}'
         )
-        result = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
-        assert result == "## Why\n\nNothing to do.\n\nFixes #2."
+        desc, explicit, reason = worker._apply_setup_outcome(sentinel)  # type: ignore[attr-defined]
+        assert desc == "## Why\n\nNothing to do.\n\nFixes #2."
+        assert explicit is True
+        assert reason == "no-op"
 
-    def test_invalid_sentinel_creates_no_tasks(self, tmp_path: Path) -> None:
-        """Parse failure is non-fatal — log + return; existing no-tasks
-        finalize path takes over."""
+    def test_invalid_sentinel_raises(self, tmp_path: Path) -> None:
+        """Parse failure raises RuntimeError — fail closed rather than becoming
+        a silent empty plan."""
         worker = self._make_worker(tmp_path)
-        result = worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
-        assert worker._tasks.list() == []  # type: ignore[attr-defined]
-        assert result == ""
+        with pytest.raises(RuntimeError, match="setup sentinel parse failed"):
+            worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
 
     def test_sentinel_with_narration_above(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -5815,7 +6214,7 @@ class TestFinalizeSetupWithNoTasks:
         )
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         agent.run_turn.assert_called_once()
         gh.comment_issue.assert_called_once()
@@ -5832,26 +6231,28 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         gh.comment_issue.assert_called_once()
         gh.pr_ready.assert_not_called()
         gh.add_pr_reviewers.assert_not_called()
 
     def test_idempotent_on_marker(self, tmp_path: Path) -> None:
-        """Re-entry when finalize comment already exists — no-op."""
+        """Re-entry when finalize comment already exists — comment is skipped
+        but pr_ready and add_pr_reviewers still fire (crash-retry safety)."""
         worker, gh, agent = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = [
             {"body": "earlier finalize\n\n<!-- fido:no-tasks-finalize -->"},
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         agent.run_turn.assert_not_called()
         gh.comment_issue.assert_not_called()
-        gh.pr_ready.assert_not_called()
-        gh.add_pr_reviewers.assert_not_called()
+        # pr_ready and add_pr_reviewers are API-idempotent and must still fire
+        gh.pr_ready.assert_called_once_with("owner/proj", 42)
+        gh.add_pr_reviewers.assert_called_once()
 
     def test_handles_none_body_in_existing_comments(self, tmp_path: Path) -> None:
         """A None body field on an existing comment must not crash the marker check."""
@@ -5862,7 +6263,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         gh.comment_issue.assert_called_once()
 
@@ -5870,6 +6271,7 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(collaborators=frozenset()),
                 5,
                 "Issue title",
@@ -5879,6 +6281,771 @@ class TestFinalizeSetupWithNoTasks:
         gh.comment_issue.assert_called_once()
         gh.pr_ready.assert_called_once()
         gh.add_pr_reviewers.assert_not_called()
+
+    # ── Closed sub-issue coverage ─────────────────────────────────────────
+
+    def test_sub_issue_prompt_includes_sub_issue_numbers_and_titles(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues are provided, the voice prompt lists them."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(
+            tmp_path, comment_text="Already covered by sub-issues."
+        )
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            ),
+            ClosedSubIssue(
+                number=11,
+                title="Handle storage",
+                body="",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_body="",
+            ),
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+            )
+        # The voice turn must have been called — extract the prompt
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10" in prompt_arg
+        assert "Handle auth" in prompt_arg
+        assert "#11" in prompt_arg
+        assert "Handle storage" in prompt_arg
+
+    def test_sub_issue_prompt_includes_pr_number_for_linked_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """Linked PR numbers appear in the prompt for sub-issues that have one."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=7,
+                title="Feature A",
+                body="",
+                close_state="merged",
+                pr_number=99,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "PR #99" in prompt_arg
+
+    def test_sub_issue_prompt_omits_pr_for_no_pr_sub_issue(
+        self, tmp_path: Path
+    ) -> None:
+        """Sub-issues with no linked PR show close_state only (no 'PR #None')."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=3,
+                title="Deferred task",
+                body="",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "closed_no_pr" in prompt_arg
+        assert "PR #None" not in prompt_arg
+
+    def test_sub_issue_prompt_cross_repo_pr_renders_owner_repo_ref(
+        self, tmp_path: Path
+    ) -> None:
+        """When a linked PR is in a different repo, renders as owner/repo#N."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=7,
+                title="Feature A",
+                body="",
+                close_state="merged",
+                pr_number=99,
+                pr_repo="other/repo",
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "other/repo#99" in prompt_arg
+        # Must NOT render as bare #99 (that would point to the wrong repo)
+        assert "PR #99" not in prompt_arg
+
+    def test_sub_issue_prompt_pr_ready_path_mentions_branch_and_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """PR-ready path (has_real_diff=True) prompt credits both branch and sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        # Must mention the existing branch diff, not just the sub-issues alone
+        assert "branch" in prompt_arg.lower() or "combination" in prompt_arg.lower()
+        # Must NOT use the issue-close "fully covered by the following closed sub-issues" framing
+        assert "fully covered by the following closed sub-issues" not in prompt_arg
+
+    def test_sub_issue_prompt_no_diff_path_uses_fully_covered_wording(
+        self, tmp_path: Path
+    ) -> None:
+        """No-diff, non-explicit-no-tasks path still uses 'fully covered' wording for sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        # has_real_diff=False, explicit_no_tasks=False (not an issue-close path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=False,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "fully covered by the following closed sub-issues" in prompt_arg
+
+    def test_sub_issue_prompt_state_reason_shown_for_no_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """state_reason is appended to close_state in the prompt for no-PR sub-issues."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=3,
+                title="Deferred task",
+                body="",
+                close_state="closed_no_pr",
+                state_reason="not_planned",
+                pr_number=None,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "not_planned" in prompt_arg
+        assert "closed_no_pr" in prompt_arg
+
+    def test_sub_issue_comment_posted_with_marker(self, tmp_path: Path) -> None:
+        """The comment generated from sub-issue context still carries the idempotency marker."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Sub-issues handled everything."
+        )
+        subs = [
+            ClosedSubIssue(
+                number=5,
+                title="First sub",
+                body="",
+                close_state="merged",
+                pr_number=6,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        assert "Sub-issues handled everything." in body
+        assert "<!-- fido:no-tasks-finalize -->" in body
+
+    def test_generic_prompt_used_when_no_sub_issues(self, tmp_path: Path) -> None:
+        """With closed_sub_issues=None (default), the original generic prompt is used."""
+        worker, gh, agent = self._make_worker(
+            tmp_path, comment_text="Branch covers it."
+        )
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path, self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        # Generic prompt talks about the branch covering the issue
+        assert "branch" in prompt_arg.lower()
+        # No sub-issue list in prompt
+        assert (
+            "sub-issues" not in prompt_arg.lower()
+            or "closed sub-issues" not in prompt_arg
+        )
+
+    def test_no_tasks_reason_included_in_pr_path_prompt(self, tmp_path: Path) -> None:
+        """When no_tasks_reason is provided, it appears in the voice prompt (PR path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                no_tasks_reason="#10 handled the full auth migration",
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10 handled the full auth migration" in prompt_arg
+
+    def test_no_tasks_reason_included_in_issue_close_path_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """When no_tasks_reason is provided, it appears in the voice prompt (issue-close path)."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        gh.get_issue_comments.return_value = []
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+                no_tasks_reason="#10 covered the authentication surface completely",
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10 covered the authentication surface completely" in prompt_arg
+
+    def test_no_tasks_reason_absent_does_not_add_section(self, tmp_path: Path) -> None:
+        """When no_tasks_reason is empty (default), no extra section is injected."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path, comment_text="Covered.")
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+                # no_tasks_reason omitted (defaults to "")
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "planner's analysis" not in prompt_arg
+
+    # ── sub-issue all-covered path, no diff: close issue directly ─────────────
+
+    def _make_subs(self) -> list:
+        from fido.types import ClosedSubIssue
+
+        return [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+
+    def test_sub_issue_no_diff_posts_comment_to_issue_not_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues covers all scope and no real diff, comment
+        goes to the parent issue number — not the PR number."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Already covered."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        gh.comment_issue.assert_called_once()
+        repo_arg, num_arg, _body_arg = gh.comment_issue.call_args.args
+        assert repo_arg == "owner/proj"
+        # Must post to the issue (5), NOT the PR (42)
+        assert num_arg == 5
+
+    def test_sub_issue_no_diff_closes_pr(self, tmp_path: Path) -> None:
+        """The empty draft PR is closed on the sub-issue all-covered path."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        gh.close_pr.assert_called_once_with("owner/proj", 42)
+
+    def test_sub_issue_no_diff_closes_issue(self, tmp_path: Path) -> None:
+        """The parent issue is closed directly on the sub-issue all-covered path."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        gh.close_issue.assert_called_once_with("owner/proj", 5)
+
+    def test_sub_issue_no_diff_does_not_mark_pr_ready(self, tmp_path: Path) -> None:
+        """On the sub-issue all-covered path, pr_ready is never called."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        gh.pr_ready.assert_not_called()
+
+    def test_sub_issue_no_diff_idempotent_skips_comment_but_still_closes(
+        self, tmp_path: Path
+    ) -> None:
+        """If the parent issue already has the finalize marker, skip the
+        comment but still close the PR and issue (crash-retry safety)."""
+        worker, gh, agent = self._make_worker(tmp_path)
+        # Return the marker on the ISSUE comments (get_issue_comments called
+        # with issue number 5, not PR number 42)
+        gh.get_issue_comments.return_value = [
+            {"body": "Already done.\n\n<!-- fido:no-tasks-finalize -->"},
+        ]
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        agent.run_turn.assert_not_called()
+        gh.comment_issue.assert_not_called()
+        # Close calls still fire — they are API-idempotent
+        gh.close_pr.assert_called_once_with("owner/proj", 42)
+        gh.close_issue.assert_called_once_with("owner/proj", 5)
+
+    def test_sub_issue_no_diff_without_explicit_uses_pr_path(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues is set and no diff but explicit_no_tasks is
+        False (parse failure), fall through to the standard PR path instead
+        of closing the parent issue."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Can't tell what happened."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=False,
+            )
+        # Falls through to the standard PR path — comment on PR, not issue
+        gh.comment_issue.assert_called_once()
+        _repo, num_arg, _body = gh.comment_issue.call_args.args
+        assert num_arg == 42
+        # No close calls — parent issue must not be closed on parse failure
+        gh.close_pr.assert_not_called()
+        gh.close_issue.assert_not_called()
+
+    def test_sub_issue_with_real_diff_uses_pr_path(self, tmp_path: Path) -> None:
+        """When closed_sub_issues is set but the branch HAS a real diff, use
+        the existing PR-ready path (comment on PR, mark ready, request review)."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Sub-issues covered it."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        gh.comment_issue.assert_called_once()
+        _repo, num_arg, _body = gh.comment_issue.call_args.args
+        # Comment goes on the PR (42), not the issue (5)
+        assert num_arg == 42
+        gh.pr_ready.assert_called_once_with("owner/proj", 42)
+        # No close calls
+        gh.close_pr.assert_not_called()
+        gh.close_issue.assert_not_called()
+
+    # ── Return value / terminal sentinel ──────────────────────────────────────
+
+    def test_returns_true_on_all_covered_no_diff_close_path(
+        self, tmp_path: Path
+    ) -> None:
+        """_finalize_setup_with_no_tasks returns True when the all-covered
+        terminal close path fires (sub-issues + no diff + explicit_no_tasks)."""
+        worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        assert result is True
+
+    def test_returns_false_on_standard_pr_path(self, tmp_path: Path) -> None:
+        """_finalize_setup_with_no_tasks returns False on the ordinary PR-ready path."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Branch covers it."
+        )
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        assert result is False
+
+    def test_returns_false_on_no_diff_standard_path(self, tmp_path: Path) -> None:
+        """_finalize_setup_with_no_tasks returns False when no diff but NOT
+        the all-covered path (e.g. explicit_no_tasks=False)."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        assert result is False
+
+    def test_clears_durable_state_on_all_covered_close_path(
+        self, tmp_path: Path
+    ) -> None:
+        """When the terminal close path fires, state.json keys are cleared
+        so a restart does not re-adopt the now-closed issue."""
+        from fido.state import State
+
+        worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        # Pre-populate state with issue/PR tracking keys
+        with State(tmp_path).modify() as state:
+            state["issue"] = 5
+            state["issue_title"] = "My issue"
+            state["issue_started_at"] = "2026-01-01T00:00:00Z"
+            state["pr_number"] = 42
+            state["pr_title"] = "My issue (closes #5)"
+            state["current_task_id"] = "abc-123"
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        remaining = State(tmp_path).load()
+        assert "issue" not in remaining
+        assert "issue_title" not in remaining
+        assert "issue_started_at" not in remaining
+        assert "pr_number" not in remaining
+        assert "pr_title" not in remaining
+        assert "current_task_id" not in remaining
+
+    def test_no_pr_setup_no_tasks_passes_sub_issues_to_finalize(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr (new-PR path) passes closed_sub_issues to finalize."""
+        from fido.types import ClosedSubIssue
+
+        mock_client = _client(return_value="Nothing to plan — already done.")
+        mock_client.generate_branch_name.return_value = "fix-bug"
+
+        class MockGH(MagicMock):
+            pass
+
+        gh = MockGH()
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        gh.get_issue_comments.return_value = []
+        gh.find_closed_prs_as_context.return_value = []
+        gh.find_closed_unmerged_prs_for_issue.return_value = []
+        subs = [
+            ClosedSubIssue(
+                number=1,
+                title="Sub A",
+                body="",
+                close_state="merged",
+                pr_number=2,
+                pr_body="",
+            )
+        ]
+        gh.fetch_closed_sub_issues.return_value = subs
+
+        from fido.worker import Worker
+
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider_agent=mock_client,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        finalize_calls: list[dict] = []
+
+        def capture_finalize(*args: object, **kwargs: object) -> None:
+            finalize_calls.append({"args": args, "kwargs": kwargs})
+
+        with (
+            patch.object(worker, "_git"),
+            patch.object(worker, "_reset_local_workspace"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(
+                worker, "_finalize_setup_with_no_tasks", side_effect=capture_finalize
+            ),
+        ):
+            from fido.worker import RepoContext, RepoMembership
+
+            repo_ctx = RepoContext(
+                repo="owner/proj",
+                owner="owner",
+                repo_name="proj",
+                gh_user="fido-bot",
+                default_branch="main",
+                membership=RepoMembership(collaborators=frozenset()),
+            )
+            worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
+        assert len(finalize_calls) == 1
+        assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
+        # provider_start returned NoTasksNeeded sentinel → explicit_no_tasks=True
+        assert finalize_calls[0]["kwargs"].get("explicit_no_tasks") is True
+        # The planner's reason must be threaded through to the finalize call
+        assert finalize_calls[0]["kwargs"].get("no_tasks_reason") == "test"
 
 
 class TestResetLocalWorkspaceAndRetryAck:
@@ -9676,6 +10843,7 @@ class TestExecuteTask:
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = []
         return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
 
     def _repo_ctx(self) -> RepoContext:
@@ -11076,6 +12244,111 @@ class TestExecuteTask:
         assert "## Prior attempts" in context
         assert "PR #77" in context
         assert "Previous fix" in context
+
+    def test_execute_task_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues fetched from the API appear in the task-execution context."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh.view_issue.return_value = {
+            "title": "Parent issue",
+            "body": "Do the thing",
+            "state": "OPEN",
+        }
+        gh.get_pr.return_value = {"title": "", "body": ""}
+        gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=42,
+                title="Sub: already done",
+                body="Implemented the widget.",
+                close_state="merged",
+                pr_number=55,
+                pr_body="Adds widget.",
+                state_reason=None,
+                pr_repo=None,
+            )
+        ]
+        task = self._pending_task("Do remaining work")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#42" in context
+        assert "Sub: already done" in context
+        assert "Implemented the widget." in context
+
+    def test_execute_task_fetches_closed_sub_issues_fresh_each_call(
+        self, tmp_path: Path
+    ) -> None:
+        """On restart/resume, closed sub-issues are fetched from the API
+        in execute_task — not carried over from instance state."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh.view_issue.return_value = {
+            "title": "Parent issue",
+            "body": "The parent.",
+            "state": "OPEN",
+        }
+        gh.get_pr.return_value = {"title": "PR title", "body": "PR body"}
+        gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = [
+            ClosedSubIssue(
+                number=10,
+                title="Sub: first half",
+                body="Did the first half.",
+                close_state="merged",
+                pr_number=11,
+                pr_body="First half PR.",
+                state_reason=None,
+                pr_repo=None,
+            )
+        ]
+        task = self._pending_task("Do remaining work")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        gh.fetch_closed_sub_issues.assert_called_once_with("owner/repo", 7)
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#10" in context
+        assert "Sub: first half" in context
 
     # ── sentinel behavior tests ───────────────────────────────────────────
 
@@ -15157,6 +16430,116 @@ class TestWorkerThread:
 
         with patch.object(Worker, "run", fake_worker_run):
             self._run_thread(wt)  # must not raise
+
+    # ── publish_provider_snapshot ─────────────────────────────────────────
+
+    def test_publish_provider_snapshot_called_after_ensure_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called after _ensure_provider at each iteration start."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        mock_registry.publish_provider_snapshot.assert_called_with("owner/repo")
+        # At least once at the top of the iteration
+        assert mock_registry.publish_provider_snapshot.call_count >= 1
+
+    def test_publish_provider_snapshot_called_in_finally_after_worker_run(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called in the finally block after worker.run()."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        publish_calls_at_run_time: list[int] = []
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            # Capture the call count at the point worker.run() starts — the
+            # finally-block publish has not fired yet (it fires after run returns).
+            publish_calls_at_run_time.append(
+                mock_registry.publish_provider_snapshot.call_count
+            )
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        # Three calls per iteration: after _ensure_provider (A), after session
+        # create/attach (B), and in the finally block (C).
+        assert mock_registry.publish_provider_snapshot.call_count == 3
+        # Points A and B both fired before worker.run() was entered.
+        assert publish_calls_at_run_time == [2]
+
+    def test_publish_provider_snapshot_called_after_session_attach(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot is called after session create/attach so the first-iteration
+        snapshot reflects the live session immediately rather than waiting for the finally block."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        publish_calls_at_run_time: list[int] = []
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            # By the time worker.run() is entered, two publishes must have fired:
+            # one after _ensure_provider and one after session create/attach.
+            publish_calls_at_run_time.append(
+                mock_registry.publish_provider_snapshot.call_count
+            )
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        # Two publishes before worker.run(): after _ensure_provider and after attach.
+        assert publish_calls_at_run_time == [2]
+
+    def test_publish_provider_snapshot_not_called_when_no_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """WorkerThread with registry=None must not crash on publish_provider_snapshot path."""
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=None)
+        wt._wake = MagicMock()
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            wt._stop.set()
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)  # must not raise
+
+    def test_publish_provider_snapshot_called_per_iteration(
+        self, tmp_path: Path
+    ) -> None:
+        """publish_provider_snapshot fires three times per loop iteration (top + after-attach + finally)."""
+        mock_registry = MagicMock()
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), registry=mock_registry)
+        wt._wake = MagicMock()
+        call_count = 0
+
+        def fake_worker_run(self_ignored: object = None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                wt._stop.set()
+            return 1  # did work, loop immediately
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        assert call_count == 2
+        # 2 iterations × 3 publishes each = 6
+        assert mock_registry.publish_provider_snapshot.call_count == 6
 
     # ── session lifecycle ─────────────────────────────────────────────────
 

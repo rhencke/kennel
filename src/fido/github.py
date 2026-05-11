@@ -12,11 +12,66 @@ from typing import Any
 
 import requests as _requests
 
-from fido.types import ClosedPR, GitIdentity
+from fido.types import ClosedPR, ClosedSubIssue, GitIdentity
 
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
+
+# Matches GitHub's closing-keyword syntax in PR body/title text.
+# Used to identify closing PRs for already-closed issues, where
+# willCloseTarget is always false once the target is closed.
+#
+# GitHub's full set of closing keywords (all tenses/numbers):
+#   close, closes, closed
+#   fix, fixes, fixed
+#   resolve, resolves, resolved
+# Optional colon after the keyword (e.g. "Fixes: #123").
+# Optional owner/repo prefix for cross-repo references (e.g. "Fixes owner/repo#123").
+# Word boundary \b before keyword prevents false matches like "prefix_closes #N".
+_CLOSING_KEYWORD_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+"
+    r"(?:([\w.-]+/[\w.-]+)#|#)(\d+)"
+)
+
+
+def _has_closing_keyword(
+    text: str, issue_number: int | str, repo: str | None = None
+) -> bool:
+    """Return ``True`` when *text* contains a closing keyword referencing *issue_number*.
+
+    For bare ``#N`` references, the match is unconditional.  For cross-repo
+    references (``owner/repo#N``), the reference only matches when *repo* is
+    provided and equals the prefix (case-insensitive).  When *repo* is
+    ``None`` and a cross-repo ref is found, it is skipped — the caller must
+    supply *repo* to validate cross-repo refs.
+    """
+    target = str(issue_number)
+    for m in _CLOSING_KEYWORD_RE.finditer(text):
+        ref_repo = m.group(1)  # None for bare #N refs; "owner/repo" otherwise
+        ref_num = m.group(2)
+        if ref_num != target:
+            continue
+        if ref_repo is None:
+            return True  # bare #N — matches regardless of repo context
+        # Cross-repo ref: only match when the caller supplied a repo to compare
+        if repo is not None and ref_repo.lower() == repo.lower():
+            return True
+    return False
+
+
+def _pr_state_str(pr: dict[str, object]) -> str:
+    """Return the GitHub PR state string ("OPEN", "CLOSED", or "MERGED").
+
+    Prefers the explicit ``state`` field from the GraphQL response.  Falls
+    back to deriving the state from the ``merged`` boolean when ``state`` is
+    absent or ``None`` (defensive for older query shapes).
+    """
+    state = pr.get("state")
+    if state:
+        return str(state)
+    return "MERGED" if pr.get("merged") else "CLOSED"
+
 
 # Retry schedule for transient GitHub failures on idempotent GETs (#664).
 # Delays in seconds between successive attempts.  Total retry budget is
@@ -405,8 +460,6 @@ class GitHub:
         Returns the first open PR found in timeline order.
         """
         owner, name = repo.split("/", 1)
-        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
-        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
         query = (
             "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
             "repository(owner:$owner,name:$repo){"
@@ -451,7 +504,10 @@ class GitHub:
                         continue
                     body = pr.get("body", "") or ""
                     title = pr.get("title", "") or ""
-                    if not (pattern.search(body) or pattern.search(title)):
+                    if not (
+                        _has_closing_keyword(body, issue_number)
+                        or _has_closing_keyword(title, issue_number)
+                    ):
                         continue
                     pr_cache.setdefault(pr["number"], pr)
                     keyword_prs.add(pr["number"])
@@ -501,8 +557,6 @@ class GitHub:
         PR on the same branch never triggers a retry comment.
         """
         owner, name = repo.split("/", 1)
-        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
-        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
         query = (
             "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
             "repository(owner:$owner,name:$repo){"
@@ -547,7 +601,10 @@ class GitHub:
                         continue
                     body = pr.get("body", "") or ""
                     title = pr.get("title", "") or ""
-                    if not (pattern.search(body) or pattern.search(title)):
+                    if not (
+                        _has_closing_keyword(body, issue_number)
+                        or _has_closing_keyword(title, issue_number)
+                    ):
                         continue
                     pr_cache.setdefault(pr["number"], pr)
                     keyword_prs.add(pr["number"])
@@ -601,9 +658,238 @@ class GitHub:
             )
         return result
 
+    def _find_linked_pr_for_issue(
+        self, repo: str, number: int | str
+    ) -> tuple[int | None, bool, str | None]:
+        """Scan the timeline of *number* in *repo* for any linked PR.
+
+        Unlike :meth:`find_pr` and :meth:`find_closed_unmerged_prs_for_issue`,
+        this helper does **not** filter by author — sub-issue PRs may have been
+        authored by anyone (a human, a bot, or a different fido user).
+
+        Returns ``(pr_number, merged, pr_repo)`` for the best linked PR found,
+        where *merged* is ``True`` when the PR was merged and *pr_repo* is the
+        ``"owner/name"`` repository the PR lives in (which may differ from
+        *repo* for cross-repo sub-issues).  Returns ``(None, False, None)``
+        when no PR is linked.
+
+        Priority is tiered: merged PRs beat closed-unmerged ones regardless of
+        keyword vs sidebar origin.  Within the same merge tier, keyword PRs
+        (``CrossReferencedEvent`` with a closing keyword) take priority over
+        sidebar PRs (``ConnectedEvent``).  Ties broken by lowest PR number.
+        ``DisconnectedEvent`` removes sidebar links.
+        """
+        owner, name = repo.split("/", 1)
+        query = """\
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      timelineItems(
+        first: 100
+        itemTypes: [
+          CROSS_REFERENCED_EVENT
+          CONNECTED_EVENT
+          DISCONNECTED_EVENT
+        ]
+        after: $cursor
+      ) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            willCloseTarget
+            source {
+              __typename
+              ... on PullRequest {
+                number
+                state
+                merged
+                body
+                title
+                repository {
+                  nameWithOwner
+                }
+              }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+                state
+                merged
+                repository {
+                  nameWithOwner
+                }
+              }
+            }
+          }
+          ... on DisconnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+                repository {
+                  nameWithOwner
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+        # GitHub PR numbers are only unique inside a repository.  Key linked
+        # candidates by repo and number so cross-repo sub-issue PRs cannot
+        # collide while we choose or disconnect candidates.  Values are the
+        # GitHub PR state string: "OPEN", "CLOSED", or "MERGED".
+        keyword_prs: dict[tuple[str, int], str] = {}
+        sidebar_prs: dict[tuple[str, int], str] = {}
+        cursor: str | None = None
+        while True:
+            data = self._graphql(
+                query,
+                owner=owner,
+                repo=name,
+                number=int(number),
+                cursor=cursor,
+            )
+            items = data["data"]["repository"]["issue"]["timelineItems"]
+            if not items:
+                break
+            for node in items["nodes"]:
+                typename = node["__typename"]
+                if typename == "CrossReferencedEvent":
+                    pr = node.get("source") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    # Treat as a keyword/closing PR when willCloseTarget is
+                    # true, OR when the PR body/title contains a closing
+                    # keyword referencing this issue.  willCloseTarget is
+                    # false once the target issue is already closed, so a
+                    # pure willCloseTarget check incorrectly rejects real
+                    # closing PRs for already-closed sub-issues.  The
+                    # keyword fallback catches those; bare mentions ("see
+                    # #42") that lack a keyword are still skipped.
+                    will_close = node.get("willCloseTarget", False)
+                    pr_body = pr.get("body") or ""
+                    pr_title = pr.get("title") or ""
+                    if not will_close and not _has_closing_keyword(
+                        pr_body + " " + pr_title, number, repo
+                    ):
+                        continue
+                    pr_num = pr["number"]
+                    pr_repo_val = (pr.get("repository") or {}).get(
+                        "nameWithOwner"
+                    ) or repo
+                    pr_key = (pr_repo_val, pr_num)
+                    if pr_key not in keyword_prs:
+                        keyword_prs[pr_key] = _pr_state_str(pr)
+                elif typename == "ConnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") != "PullRequest":
+                        continue
+                    pr_num = pr["number"]
+                    pr_repo_val = (pr.get("repository") or {}).get(
+                        "nameWithOwner"
+                    ) or repo
+                    pr_key = (pr_repo_val, pr_num)
+                    if pr_key not in sidebar_prs:
+                        sidebar_prs[pr_key] = _pr_state_str(pr)
+                elif typename == "DisconnectedEvent":
+                    pr = node.get("subject") or {}
+                    if pr.get("__typename") == "PullRequest":
+                        pr_repo_val = (pr.get("repository") or {}).get(
+                            "nameWithOwner"
+                        ) or repo
+                        sidebar_prs.pop((pr_repo_val, pr["number"]), None)
+            page_info = items["pageInfo"]
+            if not page_info["hasNextPage"]:
+                break
+            cursor = page_info["endCursor"]
+        # Filter OPEN PRs from each bucket first — a sub-issue manually
+        # closed while its PR is still open has no completed PR body worth
+        # including.
+        kw_candidates = {k: s for k, s in keyword_prs.items() if s != "OPEN"}
+        sb_candidates = {k: s for k, s in sidebar_prs.items() if s != "OPEN"}
+        # Tier by merge state across both buckets: merged beats
+        # closed-unmerged regardless of keyword vs sidebar origin.  Within
+        # the same merge tier, keyword PRs take priority over sidebar PRs.
+        kw_merged = {k: s for k, s in kw_candidates.items() if s == "MERGED"}
+        sb_merged = {k: s for k, s in sb_candidates.items() if s == "MERGED"}
+        chosen = kw_merged or sb_merged or kw_candidates or sb_candidates
+        if not chosen:
+            return None, False, None
+        # Break ties by lowest number, then repository.
+        pr_repo, pr_num = min(chosen, key=lambda pr_key: (pr_key[1], pr_key[0]))
+        pr_merged = chosen[(pr_repo, pr_num)] == "MERGED"
+        return pr_num, pr_merged, pr_repo
+
+    def fetch_closed_sub_issues(
+        self, repo: str, number: int | str
+    ) -> list[ClosedSubIssue]:
+        """Return :class:`~fido.types.ClosedSubIssue` entries for each closed
+        direct sub-issue of *number* in *repo*, oldest-first.
+
+        Calls ``GET /repos/{repo}/issues/{number}/sub_issues`` and filters to
+        items whose ``state`` is ``"closed"``.  For each, walks the timeline
+        via :meth:`_find_linked_pr_for_issue` to discover any linked PR (any
+        author — sub-issue PRs are not filtered by user).  Fetches the PR body
+        via the REST API when a PR is found.
+
+        No recursion — direct children only.  Every parent issue summarises
+        its children; traversing further would be prohibitively expensive.
+        """
+        items = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/sub_issues")
+        )
+        result: list[ClosedSubIssue] = []
+        for item in items:
+            if item.get("state") != "closed":
+                continue
+            sub_num = int(item["number"])
+            sub_title = item.get("title") or ""
+            sub_body = item.get("body") or ""
+            state_reason: str | None = item.get("state_reason") or None
+            pr_num, pr_merged, pr_repo = self._find_linked_pr_for_issue(repo, sub_num)
+            if pr_num is None:
+                close_state = "closed_no_pr"
+                pr_body = ""
+            else:
+                close_state = "merged" if pr_merged else "closed_unmerged"
+                pr_data = self._get(f"/repos/{pr_repo}/pulls/{pr_num}")
+                pr_body = pr_data.get("body") or ""
+            result.append(
+                ClosedSubIssue(
+                    number=sub_num,
+                    title=sub_title,
+                    body=sub_body,
+                    close_state=close_state,
+                    state_reason=state_reason,
+                    pr_number=pr_num,
+                    pr_repo=pr_repo,
+                    pr_body=pr_body,
+                )
+            )
+        return result
+
     def comment_issue(self, repo: str, number: int | str, body: str) -> dict[str, Any]:
         """Post a comment on an issue."""
         return self._post_json(f"/repos/{repo}/issues/{number}/comments", body=body)
+
+    def close_issue(self, repo: str, number: int | str) -> None:
+        """Close an issue by setting state=closed."""
+        self._patch(f"/repos/{repo}/issues/{number}", state="closed")
+
+    def close_pr(self, repo: str, pr: int | str) -> None:
+        """Close a PR (without merging) by setting state=closed."""
+        self._patch(f"/repos/{repo}/pulls/{pr}", state="closed")
 
     def delete_issue_comment(self, repo: str, comment_id: int | str) -> None:
         """Delete an issue/PR top-level comment by id.

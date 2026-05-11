@@ -1289,7 +1289,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             crash_record = repo_state.crash_record
             started_at = repo_state.started_at
             repo_cfg = self.config.repos.get(repo_state.key)
-            dropped_count = int(self.registry.get_session_dropped_count(repo_state.key))
+            _provider_snap = repo_state.provider
+            dropped_count = int(
+                _provider_snap.session_dropped_count
+                if _provider_snap is not None
+                else 0
+            )
             worker_uptime = (now - started_at).total_seconds()
             webhooks = [
                 {
@@ -1337,15 +1342,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         if repo_cfg is not None
                         else None
                     ),
-                    "session_owner": self.registry.get_session_owner(repo_state.key),
-                    "session_alive": self.registry.get_session_alive(repo_state.key),
-                    "session_pid": self.registry.get_session_pid(repo_state.key),
+                    "session_owner": _provider_snap.session_owner
+                    if _provider_snap is not None
+                    else None,
+                    "session_alive": _provider_snap.session_alive
+                    if _provider_snap is not None
+                    else False,
+                    "session_pid": _provider_snap.session_pid
+                    if _provider_snap is not None
+                    else None,
                     "session_dropped_count": dropped_count,
                     "session_sent_count": int(
-                        self.registry.get_session_sent_count(repo_state.key)
+                        _provider_snap.session_sent_count
+                        if _provider_snap is not None
+                        else 0
                     ),
                     "session_received_count": int(
-                        self.registry.get_session_received_count(repo_state.key)
+                        _provider_snap.session_received_count
+                        if _provider_snap is not None
+                        else 0
                     ),
                     "claude_talker": _serialize_talker(
                         provider.get_talker(a.repo_name)

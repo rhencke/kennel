@@ -6,7 +6,14 @@ from fido.prompts import (
     render_active_context,
     triage_context_block,
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    ClosedPR,
+    ClosedSubIssue,
+    RescopeIntent,
+    TaskSnapshot,
+)
 
 # ── triage_context_block ──────────────────────────────────────────────────────
 
@@ -1039,24 +1046,303 @@ class TestRenderActiveContext:
         assert "New task" in after
         assert "Old task" not in after
 
+    # ── Closed sub-issues block ─────────────────────────────────────────────
+
+    def _sub_issue(
+        self,
+        number: int = 100,
+        title: str = "Sub-task A",
+        body: str = "Handle the A case.",
+        close_state: str = "merged",
+        pr_number: int | None = 200,
+        pr_repo: str | None = None,
+        pr_body: str = "Implements sub-task A.",
+        state_reason: str | None = None,
+    ) -> ClosedSubIssue:
+        return ClosedSubIssue(
+            number=number,
+            title=title,
+            body=body,
+            close_state=close_state,
+            state_reason=state_reason,
+            pr_number=pr_number,
+            pr_repo=pr_repo,
+            pr_body=pr_body,
+        )
+
+    def test_closed_sub_issues_header_present(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue()],
+        )
+        assert "## Closed sub-issues" in result
+
+    def test_closed_sub_issues_absent_when_none(self) -> None:
+        result = render_active_context(self._issue(), None, [], None, [])
+        assert "## Closed sub-issues" not in result
+
+    def test_closed_sub_issues_absent_when_empty(self) -> None:
+        result = render_active_context(
+            self._issue(), None, [], None, [], closed_sub_issues=[]
+        )
+        assert "## Closed sub-issues" not in result
+
+    def test_closed_sub_issue_number_title_and_state(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(42, "Fix widget", close_state="merged")],
+        )
+        assert "### #42: Fix widget (merged)" in result
+
+    def test_closed_sub_issue_linked_pr(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77)],
+        )
+        assert "Linked PR: #77" in result
+
+    def test_closed_sub_issue_linked_pr_same_repo(self) -> None:
+        """When pr_repo matches parent_repo, renders as bare #N (no owner/repo prefix)."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="owner/proj")],
+            parent_repo="owner/proj",
+        )
+        assert "Linked PR: #77" in result
+        assert "owner/proj#77" not in result
+
+    def test_closed_sub_issue_linked_pr_cross_repo(self) -> None:
+        """When pr_repo differs from parent_repo, renders as owner/repo#N."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="other/repo")],
+            parent_repo="owner/proj",
+        )
+        assert "Linked PR: other/repo#77" in result
+
+    def test_closed_sub_issue_linked_pr_cross_repo_no_parent(self) -> None:
+        """When parent_repo is None (not provided), pr_repo is shown if set."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_number=77, pr_repo="other/repo")],
+        )
+        assert "Linked PR: other/repo#77" in result
+
+    def test_closed_sub_issue_no_linked_pr(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(close_state="closed_no_pr", pr_number=None)
+            ],
+        )
+        assert "Linked PR:" not in result
+
+    def test_closed_sub_issue_body_included(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(body="Details here.")],
+        )
+        assert "Details here." in result
+
+    def test_closed_sub_issue_empty_body_omitted(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(body="")],
+        )
+        # PR body still present, but no spurious blank for missing issue body
+        lines = result.split("## Closed sub-issues")[1]
+        assert "\n\n\n" not in lines  # no triple newline from missing body
+
+    def test_closed_sub_issue_pr_body_included(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_body="Added the handler.")],
+        )
+        assert "PR description: Added the handler." in result
+
+    def test_closed_sub_issue_empty_pr_body_omitted(self) -> None:
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[self._sub_issue(pr_body="")],
+        )
+        assert "PR description:" not in result
+
+    def test_multiple_closed_sub_issues(self) -> None:
+        subs = [
+            self._sub_issue(10, "First sub"),
+            self._sub_issue(20, "Second sub"),
+        ]
+        result = render_active_context(
+            self._issue(), None, [], None, [], closed_sub_issues=subs
+        )
+        assert "### #10: First sub" in result
+        assert "### #20: Second sub" in result
+
+    def test_closed_sub_issue_close_states(self) -> None:
+        subs = [
+            self._sub_issue(1, "Merged one", close_state="merged"),
+            self._sub_issue(2, "Closed unmerged", close_state="closed_unmerged"),
+            self._sub_issue(
+                3, "No PR", close_state="closed_no_pr", pr_number=None, pr_body=""
+            ),
+        ]
+        result = render_active_context(
+            self._issue(), None, [], None, [], closed_sub_issues=subs
+        )
+        assert "(merged)" in result
+        assert "(closed_unmerged)" in result
+        assert "(closed_no_pr)" in result
+
+    def test_closed_sub_issue_state_reason_shown_for_no_pr(self) -> None:
+        """state_reason is appended to close_state for closed_no_pr sub-issues."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    3,
+                    "Deferred task",
+                    close_state="closed_no_pr",
+                    pr_number=None,
+                    pr_body="",
+                    state_reason="not_planned",
+                )
+            ],
+        )
+        assert "(closed_no_pr (not_planned))" in result
+
+    def test_closed_sub_issue_state_reason_omitted_when_none(self) -> None:
+        """When state_reason is None the label is just the close_state."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    4,
+                    "Finished task",
+                    close_state="closed_no_pr",
+                    pr_number=None,
+                    pr_body="",
+                    state_reason=None,
+                )
+            ],
+        )
+        assert "(closed_no_pr)" in result
+        assert "(closed_no_pr (None))" not in result
+
+    def test_closed_sub_issue_state_reason_not_shown_for_merged(self) -> None:
+        """state_reason is not appended when close_state is merged (has a PR)."""
+        result = render_active_context(
+            self._issue(),
+            None,
+            [],
+            None,
+            [],
+            closed_sub_issues=[
+                self._sub_issue(
+                    5,
+                    "Done via PR",
+                    close_state="merged",
+                    pr_number=50,
+                    pr_body="",
+                    state_reason="completed",
+                )
+            ],
+        )
+        assert "(merged)" in result
+        assert "(merged (completed))" not in result
+
+    def test_closed_sub_issues_in_stable_prefix(self) -> None:
+        """Closed sub-issues are stable context — they don't change during a session."""
+        subs = [self._sub_issue()]
+        before = render_active_context(
+            self._issue(),
+            None,
+            [self._task("Task A")],
+            None,
+            [],
+            closed_sub_issues=subs,
+        )
+        after = render_active_context(
+            self._issue(),
+            None,
+            [self._task("Task A"), self._task("Task B")],
+            None,
+            [],
+            closed_sub_issues=subs,
+        )
+        assert before.split("## Tasks")[0] == after.split("## Tasks")[0]
+
     # ── Section order ─────────────────────────────────────────────────────────
 
     def test_section_order_stable_prefix_before_dynamic(self) -> None:
-        """Stable prefix (issue, PR, attempts) must appear before Tasks / Right now."""
+        """Stable prefix (issue, PR, attempts, sub-issues) must appear before Tasks / Right now."""
         result = render_active_context(
             self._issue(),
             self._pr(),
             [self._task()],
             self._task("current"),
             [self._closed_pr()],
+            closed_sub_issues=[self._sub_issue()],
         )
         issue_pos = result.index("## Active issue")
         pr_pos = result.index("## Active PR")
         attempts_pos = result.index("## Prior attempts")
+        subs_pos = result.index("## Closed sub-issues")
         tasks_pos = result.index("## Tasks")
         now_pos = result.index("## Right now")
 
-        assert issue_pos < pr_pos < attempts_pos < tasks_pos < now_pos
+        assert issue_pos < pr_pos < attempts_pos < subs_pos < tasks_pos < now_pos
 
     # ── Returns a string ──────────────────────────────────────────────────────
 

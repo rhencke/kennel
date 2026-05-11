@@ -3,7 +3,14 @@
 import json
 from typing import Any
 
-from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    ClosedPR,
+    ClosedSubIssue,
+    RescopeIntent,
+    TaskSnapshot,
+)
 
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
@@ -67,20 +74,24 @@ def render_active_context(
     tasks: list[TaskSnapshot],
     current_task: TaskSnapshot | None,
     prior_attempts: list[ClosedPR],
+    *,
+    closed_sub_issues: list[ClosedSubIssue] | None = None,
+    parent_repo: str | None = None,
 ) -> str:
     """Render active-work context blocks for injection into any LLM system prompt.
 
-    Produces up to five markdown sections in this order:
+    Produces up to six markdown sections in this order:
 
-    1. ``## Active issue``  — stable; issue number, title, and body
-    2. ``## Active PR``     — stable; PR number, title, URL, and body
-    3. ``## Prior attempts``— stable; closed PRs that referenced this issue
-    4. ``## Tasks``         — dynamic; full task list with status and type markers
-    5. ``## Right now``     — dynamic; current task title and description
+    1. ``## Active issue``      — stable; issue number, title, and body
+    2. ``## Active PR``         — stable; PR number, title, URL, and body
+    3. ``## Prior attempts``    — stable; closed PRs that referenced this issue
+    4. ``## Closed sub-issues`` — stable; already-closed child issues
+    5. ``## Tasks``             — dynamic; full task list with status and type markers
+    6. ``## Right now``         — dynamic; current task title and description
 
-    Sections 1–3 form the **stable prefix**: their content is byte-identical
+    Sections 1–4 form the **stable prefix**: their content is byte-identical
     across every prompt rebuild during a session, which keeps them warm in
-    provider prompt caches.  Sections 4–5 are the **dynamic suffix** that
+    provider prompt caches.  Sections 5–6 are the **dynamic suffix** that
     changes when tasks are added, completed, or switched.
 
     Any section whose data is absent is omitted entirely so the output stays
@@ -117,6 +128,27 @@ def render_active_context(
                 entry += f"\n\n{attempt.body}"
             attempt_blocks.append(entry)
         parts.append("## Prior attempts\n\n" + "\n\n".join(attempt_blocks))
+
+    if closed_sub_issues:
+        sub_blocks: list[str] = []
+        for sub in closed_sub_issues:
+            if sub.close_state == "closed_no_pr" and sub.state_reason:
+                close_label = f"{sub.close_state} ({sub.state_reason})"
+            else:
+                close_label = sub.close_state
+            entry = f"### #{sub.number}: {sub.title} ({close_label})"
+            if sub.pr_number is not None:
+                if sub.pr_repo is not None and sub.pr_repo != parent_repo:
+                    pr_ref = f"{sub.pr_repo}#{sub.pr_number}"
+                else:
+                    pr_ref = f"#{sub.pr_number}"
+                entry += f"\n\nLinked PR: {pr_ref}"
+            if sub.body:
+                entry += f"\n\n{sub.body}"
+            if sub.pr_body:
+                entry += f"\n\nPR description: {sub.pr_body}"
+            sub_blocks.append(entry)
+        parts.append("## Closed sub-issues\n\n" + "\n\n".join(sub_blocks))
 
     # ── dynamic suffix ────────────────────────────────────────────────────────
 

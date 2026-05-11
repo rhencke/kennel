@@ -107,6 +107,29 @@ class WebhookActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderSnapshot:
+    """Immutable snapshot of one repo's provider (ClaudeSession) state.
+
+    Captures provider session metadata as primitive values at the moment of
+    each provider lifecycle event (session start, recovery).  Stored on
+    :class:`RepoState` so the SCADA display path reads stale-free values
+    without holding the provider lock.
+
+    Fields mirror the public session properties on
+    :class:`~fido.worker.WorkerThread` that are read by the status display
+    path.  Published by :meth:`WorkerRegistry._publish_provider_snapshot`
+    at lifecycle boundaries where session state actually changes.
+    """
+
+    session_owner: str | None
+    session_alive: bool
+    session_pid: int | None
+    session_dropped_count: int
+    session_sent_count: int
+    session_received_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -128,8 +151,18 @@ class RepoState:
     repo.  Published from the authoritative ``_webhook_activities`` dict on
     :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
 
-    No field is ``None`` — the full tree is prepopulated by :meth:`start`
-    with zero values so lens-path writes never encounter missing keys.
+    *thread* is the immutable :class:`ThreadSnapshot` for the repo's
+    :class:`~fido.worker.WorkerThread`.  ``None`` until the first
+    :meth:`~WorkerRegistry.start` call; refreshed by
+    :meth:`~WorkerRegistry._publish_thread_snapshot` immediately after the
+    thread is started.  No mutable thread reference is stored here — the
+    snapshot captures primitive values only.
+
+    *provider* is the immutable :class:`ProviderSnapshot` for the repo's
+    provider (ClaudeSession).  ``None`` until the first
+    :meth:`~WorkerRegistry.start` call; refreshed by
+    :meth:`~WorkerRegistry._publish_provider_snapshot` at provider lifecycle
+    events (session start, recovery).
 
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
@@ -142,6 +175,28 @@ class RepoState:
     activity: WorkerActivity
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
+    thread: "ThreadSnapshot | None" = None
+    provider: "ProviderSnapshot | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadSnapshot:
+    """Immutable snapshot of one :class:`~fido.worker.WorkerThread`'s lifecycle state.
+
+    Captures thread lifecycle metadata as primitive values — no handles to the
+    mutable :class:`~fido.worker.WorkerThread` object itself.  Stored inside
+    the frozen :class:`FidoState` so the SCADA display invariant is preserved:
+    a snapshot reader can never reach through to a live thread and observe
+    partial mutations.
+
+    Provider session state (session_owner, session_alive, session_pid, and
+    the message counters) lives on :class:`ProviderSnapshot` instead so it can
+    be published independently at provider lifecycle boundaries.
+    """
+
+    is_alive: bool
+    was_stopped: bool
+    crash_error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +206,10 @@ class FidoState:
     ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
     a :class:`frozendict` so stale readers that hold a reference to an old
     snapshot can never accidentally mutate the mapping — the immutability
-    guarantee holds even on the free-threaded (no-GIL) build.
+    guarantee holds even on the free-threaded (no-GIL) build.  Each
+    :class:`RepoState` carries a :class:`ThreadSnapshot` at its ``thread``
+    field — an immutable copy of the thread's observable state at the last
+    :meth:`WorkerRegistry.start` call.
 
     The atomic cell is owned by the composition root (``run()`` in
     ``server.py``), not by :class:`WorkerRegistry`.  The root creates both
@@ -373,6 +431,8 @@ class WorkerRegistry:
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()
+        self._publish_thread_snapshot(repo_cfg.name)
+        self._publish_provider_snapshot(repo_cfg.name)
         log.info("started WorkerThread for %s", repo_cfg.name)
 
     def wake(self, repo_name: str) -> None:
@@ -398,11 +458,19 @@ class WorkerRegistry:
             thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
-        """Recover the attached provider session for *repo_name*, if present."""
+        """Recover the attached provider session for *repo_name*, if present.
+
+        Publishes a fresh :class:`ThreadSnapshot` and :class:`ProviderSnapshot`
+        after recovery so the SCADA display reflects the post-recovery session
+        state (e.g. a previously detached provider is now reattached).
+        """
         thread = self._threads.get(repo_name)
         if thread is None:
             return False
-        return thread.recover_provider()
+        result = thread.recover_provider()
+        self._publish_thread_snapshot(repo_name)
+        self._publish_provider_snapshot(repo_name)
+        return result
 
     def report_activity(
         self,
@@ -446,6 +514,62 @@ class WorkerRegistry:
         self._state_updater.update(
             lambda root: root.repos[_name].crash_record, new_crash
         )
+        self._publish_thread_snapshot(repo_name)
+
+    def _publish_thread_snapshot(self, repo_name: str) -> None:
+        """Publish an immutable :class:`ThreadSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Reads lifecycle state values from the thread in ``_threads`` and
+        installs a fresh :class:`ThreadSnapshot` at
+        ``repos[repo_name].thread`` via a single lens write.  No mutable
+        thread reference is stored in the snapshot.
+
+        Must be called only after the thread has been inserted into
+        ``_threads`` and the repo's :class:`RepoState` has been written to
+        ``FidoState`` (i.e. at the end of :meth:`start`).
+        """
+        thread = self._threads[repo_name]
+        snapshot = ThreadSnapshot(
+            is_alive=thread.is_alive(),
+            was_stopped=thread.was_stopped,
+            crash_error=thread.crash_error,
+        )
+        _name = repo_name
+        self._state_updater.update(lambda root: root.repos[_name].thread, snapshot)
+
+    def _publish_provider_snapshot(self, repo_name: str) -> None:
+        """Publish an immutable :class:`ProviderSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Reads provider session state from the thread in ``_threads`` and
+        installs a fresh :class:`ProviderSnapshot` at
+        ``repos[repo_name].provider`` via a single lens write.  No mutable
+        thread or session reference is stored in the snapshot.
+
+        Must be called only after the thread has been inserted into
+        ``_threads`` and the repo's :class:`RepoState` has been written to
+        ``FidoState`` (i.e. at the end of :meth:`start`).
+        """
+        thread = self._threads[repo_name]
+        snapshot = ProviderSnapshot(
+            session_owner=thread.session_owner,
+            session_alive=thread.session_alive,
+            session_pid=thread.session_pid,
+            session_dropped_count=thread.session_dropped_count,
+            session_sent_count=thread.session_sent_count,
+            session_received_count=thread.session_received_count,
+        )
+        _name = repo_name
+        self._state_updater.update(lambda root: root.repos[_name].provider, snapshot)
+
+    def publish_provider_snapshot(self, repo_name: str) -> None:
+        """Publish a fresh :class:`ProviderSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Public wrapper around :meth:`_publish_provider_snapshot`, satisfying the
+        :class:`~fido.worker.ActivityReporter` protocol so workers can trigger
+        snapshot publication at loop-iteration boundaries — after session attach
+        and after each :class:`~fido.worker.Worker` turn.
+        """
+        self._publish_provider_snapshot(repo_name)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.
@@ -567,6 +691,7 @@ class WorkerRegistry:
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
+            self._publish_thread_snapshot(repo_name)
 
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
@@ -576,51 +701,6 @@ class WorkerRegistry:
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
         return self._threads[repo_name].crash_error
-
-    def get_session_owner(self, repo_name: str) -> str | None:
-        """Return the name of the thread currently holding the ClaudeSession lock.
-
-        Delegates to :attr:`~fido.worker.WorkerThread.session_owner` on the
-        registered thread.  Returns ``None`` when no thread is registered for
-        the repo, no session exists, or the lock is currently free.
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_owner if thread is not None else None
-
-    def get_session_alive(self, repo_name: str) -> bool:
-        """Return True if the persistent ClaudeSession subprocess is alive.
-
-        Distinct from :meth:`get_session_owner` — an idle session that nobody
-        currently holds still reports ``session_alive=True`` so status display
-        can distinguish "session exists, idle" from "no session".
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_alive if thread is not None else False
-
-    def get_session_pid(self, repo_name: str) -> int | None:
-        """Return the PID of the persistent ClaudeSession subprocess, or None.
-
-        Read authoritatively from the fido-tracked session rather than
-        pgrep — the system prompt file path changed in #456 so the pgrep
-        heuristic in :mod:`fido.status` can no longer locate it.
-        """
-        thread = self._threads.get(repo_name)
-        return thread.session_pid if thread is not None else None
-
-    def get_session_dropped_count(self, repo_name: str) -> int:
-        """Return how many stale persistent session ids were dropped for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_dropped_count if thread is not None else 0
-
-    def get_session_sent_count(self, repo_name: str) -> int:
-        """Return the number of messages sent to the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_sent_count if thread is not None else 0
-
-    def get_session_received_count(self, repo_name: str) -> int:
-        """Return the number of events received from the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
-        return thread.session_received_count if thread is not None else 0
 
     def set_rescoping(self, repo_name: str, active: bool) -> None:
         """Set the rescoping-active flag for *repo_name*.

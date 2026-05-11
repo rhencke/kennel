@@ -55,6 +55,52 @@ class ClosedPR:
 
 
 @dataclass(frozen=True)
+class ClosedSubIssue:
+    """A closed direct sub-issue of the parent issue being worked on.
+
+    Fetched during setup so the agent can subtract already-covered scope
+    from the parent's task list (or declare ``NoTasksNeeded`` when all
+    scope is covered).
+
+    Attributes
+    ----------
+    number:
+        GitHub issue number of the sub-issue.
+    title:
+        Title of the sub-issue.
+    body:
+        Body text of the sub-issue.
+    close_state:
+        One of ``"merged"`` (a linked PR was merged), ``"closed_unmerged"``
+        (a linked PR was closed without merging), or ``"closed_no_pr"``
+        (no linked PR — cancelled, won't-fix, or deferred).
+    state_reason:
+        GitHub's ``state_reason`` for the sub-issue (``"completed"``,
+        ``"not_planned"``, ``"reopened"``, or ``None`` when absent).  Only
+        meaningful when ``close_state`` is ``"closed_no_pr"`` — used to
+        distinguish "completed without a PR" from "won't fix / deferred".
+    pr_number:
+        GitHub PR number of the linked pull request, or ``None`` when
+        ``close_state`` is ``"closed_no_pr"``.
+    pr_repo:
+        ``"owner/repo"`` of the linked pull request, or ``None`` when
+        ``close_state`` is ``"closed_no_pr"``.  May differ from the parent
+        issue's repo for cross-repo sub-issue PRs.
+    pr_body:
+        Body text of the linked PR, or ``""`` when no PR exists.
+    """
+
+    number: int
+    title: str
+    body: str
+    close_state: str
+    state_reason: str | None = None
+    pr_number: int | None = None
+    pr_repo: str | None = None
+    pr_body: str = ""
+
+
+@dataclass(frozen=True)
 class TaskSnapshot:
     """Projection of a task dict for LLM context rendering.
 
