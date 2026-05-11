@@ -18,6 +18,8 @@ from typing import Any
 import requests as _requests
 
 from fido import provider
+from fido.appstate import FidoState
+from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
@@ -1664,6 +1666,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
         self._streaming_runner = streaming_runner
@@ -1677,6 +1680,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            state_updater=state_updater,
         )
 
     @property

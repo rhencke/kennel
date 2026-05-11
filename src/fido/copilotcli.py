@@ -32,6 +32,8 @@ from acp.schema import (
 )
 
 from fido import provider
+from fido.appstate import FidoState
+from fido.atomic import AtomicUpdater
 from fido.provider import (
     OwnedSession,
     PromptSession,
@@ -1284,6 +1286,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         repo_name: str | None = None,
         session: PromptSession | None = None,
         api: CopilotCLIAPI | None = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
         self._sleep_fn = sleep_fn
@@ -1299,6 +1302,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            state_updater=state_updater,
         )
 
     @property

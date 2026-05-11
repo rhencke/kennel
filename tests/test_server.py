@@ -1853,13 +1853,17 @@ class TestProcessAction:
         mock_gh.add_reaction.assert_not_called()
 
     def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
+        from fido.appstate import FidoState
+        from fido.atomic import create_atomic
         from fido.events import Action
-        from fido.registry import WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
@@ -2097,14 +2101,18 @@ class TestProcessAction:
         """
         from contextlib import contextmanager
 
+        from fido.appstate import FidoState, ProviderSnapshot
+        from fido.atomic import create_atomic
         from fido.events import Action
-        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
 
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
 
         # Build a mock thread with known, non-default session field values so
         # we can verify the snapshot contains exactly these values.
@@ -2197,14 +2205,18 @@ class TestProcessAction:
         """
         from contextlib import contextmanager
 
+        from fido.appstate import FidoState, ProviderSnapshot
+        from fido.atomic import create_atomic
         from fido.events import Action
-        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
 
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
 
         # Use session_owner=None to exercise the provider-returns-None path
         # (providers filter out non-worker talkers; clearing stale worker info
@@ -3679,7 +3691,7 @@ class TestRun:
             _RateLimitMonitor=mock_rl_cls,
         )
 
-        # The state_updater is the second element returned by _create_fido_atomic().
+        # The state_updater is the second element returned by create_atomic(...).
         # RateLimitMonitor must be wired with the same updater that was passed to
         # make_registry — verify positional args rather than the updater value.
         assert mock_rl_cls.call_count == 1

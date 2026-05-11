@@ -7,16 +7,16 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from frozendict import frozendict
 
+from fido.appstate import FidoState, ProviderSnapshot, ThreadSnapshot, WorkerCrash
+from fido.atomic import create_atomic
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
+from fido.rate_limit import GitHubLimit
 from fido.registry import (
-    ProviderSnapshot,
-    ThreadSnapshot,
-    WorkerCrash,
     WorkerRegistry,
     _make_thread,
-    create_fido_atomic,
     make_registry,
 )
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -42,7 +42,9 @@ class TestWorkerRegistry:
         self, *, repos: list[str] | None = None
     ) -> tuple[WorkerRegistry, MagicMock, object]:
         factory = MagicMock()
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         if repos:
             for name in repos:
@@ -60,7 +62,9 @@ class TestWorkerRegistry:
         mock_provider = MagicMock()
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         # First start — no prior thread
@@ -90,7 +94,9 @@ class TestWorkerRegistry:
         mock_provider = MagicMock()
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
@@ -106,7 +112,9 @@ class TestWorkerRegistry:
         """No provider rescue when the old thread exited via orderly stop()."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
@@ -147,7 +155,9 @@ class TestWorkerRegistry:
 
     def test_stop_all_calls_stop_on_every_thread(self, tmp_path: Path) -> None:
         factory = MagicMock(side_effect=[MagicMock(), MagicMock()])
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
@@ -166,7 +176,9 @@ class TestWorkerRegistry:
     def test_stop_all_calls_stop_count(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
@@ -221,7 +233,9 @@ class TestWorkerRegistry:
         self, tmp_path: Path
     ) -> None:
         """recover_provider() refreshes the ProviderSnapshot after recovery."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -246,7 +260,9 @@ class TestWorkerRegistry:
 
     def test_publish_provider_snapshot_updates_fido_state(self, tmp_path: Path) -> None:
         """publish_provider_snapshot() publishes a fresh ProviderSnapshot into FidoState."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -470,8 +486,8 @@ class TestWorkerRegistry:
 
         assert max_concurrent == 1
 
-    def test_create_fido_atomic_reader_sees_state(self) -> None:
-        """create_fido_atomic reader reflects writes made via the updater."""
+    def test_atomic_reader_sees_registry_writes(self) -> None:
+        """Atomic reader reflects writes made via the updater."""
         reg, _, reader = self._make_registry(repos=["foo/bar"])
         # reader sees the repo populated by start()
         assert "foo/bar" in reader.get().repos
@@ -545,7 +561,9 @@ class TestWorkerRegistry:
         """crash_record is preserved across start() so history accumulates."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
@@ -561,7 +579,9 @@ class TestWorkerRegistry:
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
@@ -578,13 +598,17 @@ class TestWorkerRegistry:
     # ── ThreadSnapshot / RepoState.thread ────────────────────────────────
 
     def test_thread_snapshot_none_before_any_start(self) -> None:
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         WorkerRegistry(MagicMock(), updater)
         assert reader.get().repos == {}
 
     def test_start_publishes_thread_snapshot(self, tmp_path: Path) -> None:
         """start() sets thread on the repo's RepoState in FidoState."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -602,7 +626,9 @@ class TestWorkerRegistry:
         assert isinstance(snap, ThreadSnapshot)
 
     def test_thread_snapshot_is_alive_field(self, tmp_path: Path) -> None:
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -620,7 +646,9 @@ class TestWorkerRegistry:
         assert snap.is_alive is True
 
     def test_thread_snapshot_was_stopped_field(self, tmp_path: Path) -> None:
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = False
         factory.return_value.was_stopped = True
@@ -638,7 +666,9 @@ class TestWorkerRegistry:
         assert snap.was_stopped is True
 
     def test_provider_snapshot_fields(self, tmp_path: Path) -> None:
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -662,7 +692,9 @@ class TestWorkerRegistry:
         assert provider.session_received_count == 5
 
     def test_thread_snapshot_crash_error_field(self, tmp_path: Path) -> None:
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = False
         factory.return_value.was_stopped = False
@@ -681,7 +713,9 @@ class TestWorkerRegistry:
 
     def test_thread_snapshot_no_mutable_thread_ref(self, tmp_path: Path) -> None:
         """ThreadSnapshot stores only primitive values — no WorkerThread handle."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -722,7 +756,9 @@ class TestWorkerRegistry:
             t.session_received_count = 0
             t.crash_error = None
         factory = MagicMock(side_effect=threads)
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
@@ -734,7 +770,9 @@ class TestWorkerRegistry:
         """ThreadSnapshot is frozen — stored safely inside frozen FidoState."""
         import dataclasses
 
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -755,7 +793,9 @@ class TestWorkerRegistry:
 
     def test_record_crash_republishes_thread_snapshot(self, tmp_path: Path) -> None:
         """record_crash refreshes the ThreadSnapshot so is_alive and crash_error reflect the crash."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -779,7 +819,9 @@ class TestWorkerRegistry:
 
     def test_stop_and_join_republishes_thread_snapshot(self, tmp_path: Path) -> None:
         """stop_and_join refreshes the ThreadSnapshot so is_alive and was_stopped reflect the stop."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
@@ -803,7 +845,9 @@ class TestWorkerRegistry:
 
     def test_stop_and_join_unknown_repo_skips_snapshot(self) -> None:
         """stop_and_join on an unknown repo must not attempt to publish a snapshot."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         factory = MagicMock()
         reg = WorkerRegistry(factory, updater)
         reg.stop_and_join("unknown/repo")  # must not raise
@@ -897,7 +941,9 @@ class TestMakeRegistry:
     def test_returns_worker_registry(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         result = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
@@ -912,7 +958,9 @@ class TestMakeRegistry:
         cfg2 = _repo("foo/baz", tmp_path)
         mock_thread = MagicMock()
         mock_factory = MagicMock(return_value=mock_thread)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         make_registry(
             {"foo/bar": cfg1, "foo/baz": cfg2},
             MagicMock(),
@@ -924,7 +972,9 @@ class TestMakeRegistry:
         assert mock_thread.start.call_count == 2
 
     def test_empty_repos_returns_empty_registry(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         result = make_registry({}, MagicMock(), dispatchers={}, state_updater=updater)
         assert isinstance(result, WorkerRegistry)
         assert result.is_alive("anything") is False
@@ -933,7 +983,9 @@ class TestMakeRegistry:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
         mock_thread.is_alive.return_value = True
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
@@ -956,7 +1008,9 @@ class TestMakeRegistry:
             sub_dir=tmp_path,
         )
         mock_factory = MagicMock(return_value=MagicMock())
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         make_registry(
             {"foo/bar": cfg},
             MagicMock(),
@@ -970,7 +1024,9 @@ class TestMakeRegistry:
 
 class TestWebhookActivity:
     def test_registers_and_unregisters(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_webhook_activities("foo/bar") == []
@@ -983,7 +1039,9 @@ class TestWebhookActivity:
     def test_unregisters_on_exception(self, tmp_path: Path) -> None:
         import pytest as _pytest
 
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with _pytest.raises(RuntimeError):
@@ -992,7 +1050,9 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_multiple_concurrent_activities(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "first"):
@@ -1004,7 +1064,9 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_activities_isolated_per_repo(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("a/b", tmp_path))
         reg.start(_repo("c/d", tmp_path))
@@ -1016,12 +1078,16 @@ class TestWebhookActivity:
                 assert [x.description for x in c] == ["work-cd"]
 
     def test_unknown_repo_returns_empty_list(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_handle_can_update_description(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
@@ -1030,7 +1096,9 @@ class TestWebhookActivity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "triaging"
 
     def test_handle_update_after_exit_is_noop(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
@@ -1039,7 +1107,9 @@ class TestWebhookActivity:
         assert reg.get_webhook_activities("foo/bar") == []
 
     def test_unknown_handle_update_is_noop(self, tmp_path: Path) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
@@ -1047,14 +1117,18 @@ class TestWebhookActivity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
 
     def test_unknown_repo_handle_update_is_noop(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_publishes_to_fido_state_when_repo_started(self, tmp_path: Path) -> None:
         """webhook_activity publishes activities into FidoState when start() has run."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
@@ -1065,7 +1139,9 @@ class TestWebhookActivity:
 
     def test_publishes_description_update_to_fido_state(self, tmp_path: Path) -> None:
         """set_webhook_description publishes the update into FidoState."""
-        reader, updater = create_fido_atomic()
+        reader, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "original") as handle:
@@ -1077,25 +1153,33 @@ class TestWebhookActivity:
 
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         assert reg.is_rescoping("unknown/repo") is False
 
     def test_set_rescoping_true(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
 
     def test_set_rescoping_false_clears_flag(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         reg.set_rescoping("foo/bar", False)
         assert reg.is_rescoping("foo/bar") is False
 
     def test_rescoping_is_per_repo(self) -> None:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
@@ -1103,7 +1187,9 @@ class TestRescoping:
 
     def test_rescoping_is_threadsafe(self) -> None:
         """Concurrent set_rescoping and is_rescoping calls must not corrupt state."""
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(MagicMock(), updater)
         errors: list[Exception] = []
 
@@ -1136,7 +1222,9 @@ class TestUntriagedInbox:
     """Tests for the per-repo untriaged-webhook inbox (fix #1067)."""
 
     def _reg(self) -> WorkerRegistry:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         return WorkerRegistry(MagicMock(), updater)
 
     # ── has_untriaged ─────────────────────────────────────────────────────
@@ -1367,7 +1455,9 @@ class TestPreemptionFsmOracle:
     """
 
     def _reg(self) -> WorkerRegistry:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         return WorkerRegistry(MagicMock(), updater)
 
     # ── worker_blocked_when_nonempty ─────────────────────────────────────
@@ -1593,7 +1683,9 @@ class TestRegistryFsmOracle:
     """
 
     def _reg(self) -> WorkerRegistry:
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         return WorkerRegistry(MagicMock(), updater)
 
     def _cfg(self, tmp_path: Path, name: str = "foo/bar") -> RepoConfig:
@@ -1681,7 +1773,9 @@ class TestRegistryFsmOracle:
         """start() after crash fires ThreadDies then Rescue: Active → Crashed → Active."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
@@ -1704,7 +1798,9 @@ class TestRegistryFsmOracle:
         """start() after orderly stop fires ThreadStops then Launch: Active → Stopped → Active."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
@@ -1728,7 +1824,9 @@ class TestRegistryFsmOracle:
         """
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
@@ -1741,7 +1839,9 @@ class TestRegistryFsmOracle:
         """FSM state is independent for each repo — no cross-repo contamination."""
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
-        _, updater = create_fido_atomic()
+        _, updater = create_atomic(
+            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        )
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("org/a", tmp_path))
         reg.start(_repo("org/b", tmp_path))

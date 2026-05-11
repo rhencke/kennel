@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import IO, Any, NoReturn, Protocol
 
 from fido import provider
+from fido.appstate import FidoState
+from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
@@ -1139,6 +1141,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
         self._session_factory = (
@@ -1150,6 +1153,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            state_updater=state_updater,
         )
 
     @property

@@ -24,7 +24,7 @@ from fido.github import GitHub
 from fido.provider import ProviderLimitWindow
 
 if TYPE_CHECKING:
-    from fido.registry import FidoState
+    from fido.appstate import FidoState
 
 log = logging.getLogger(__name__)
 

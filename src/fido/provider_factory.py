@@ -3,6 +3,8 @@
 import threading
 from pathlib import Path
 
+from fido.appstate import FidoState
+from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
@@ -48,6 +50,7 @@ class DefaultProviderFactory:
         work_dir: Path,
         repo_name: str,
         session: PromptSession | None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> Provider:
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:
@@ -57,6 +60,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        state_updater=state_updater,
                     )
                 )
             case ProviderID.COPILOT_CLI:
@@ -70,6 +74,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        state_updater=state_updater,
                     ),
                 )
             case ProviderID.CODEX:
@@ -79,6 +84,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        state_updater=state_updater,
                     )
                 )
             case _:

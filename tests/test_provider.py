@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -274,3 +275,45 @@ class TestSafeVoiceTurn:
         _, kwargs = agent.run_turn.call_args
         assert kwargs["model"] == model
         assert kwargs["system_prompt"] == "be brief"
+
+
+class TestProviderModuleBoundary:
+    """Structural invariants for the provider module boundary."""
+
+    def test_provider_modules_do_not_import_worker_registry(self) -> None:
+        """Provider and session modules must not reach through to WorkerRegistry."""
+        import fido.claude as claude_mod
+        import fido.codex as codex_mod
+        import fido.copilotcli as copilotcli_mod
+        import fido.provider_factory as factory_mod
+        import fido.session_agent as session_agent_mod
+
+        for mod in (
+            claude_mod,
+            codex_mod,
+            copilotcli_mod,
+            factory_mod,
+            session_agent_mod,
+        ):
+            assert not hasattr(mod, "WorkerRegistry"), (
+                f"{mod.__name__} must not import WorkerRegistry"
+            )
+
+    def test_provider_snapshot_holds_only_primitive_values(self) -> None:
+        """ProviderSnapshot must contain only primitive types — no live session refs."""
+        from fido.appstate import ProviderSnapshot
+
+        snap = ProviderSnapshot(
+            session_owner="worker",
+            session_alive=True,
+            session_pid=42,
+            session_dropped_count=1,
+            session_sent_count=5,
+            session_received_count=3,
+        )
+        for field in dataclasses.fields(snap):
+            value = getattr(snap, field.name)
+            assert isinstance(value, (str, int, bool, type(None))), (
+                f"ProviderSnapshot.{field.name} = {value!r} is not a primitive — "
+                "live session references must not appear in status snapshots"
+            )

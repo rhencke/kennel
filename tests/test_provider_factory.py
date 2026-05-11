@@ -1,5 +1,7 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from fido.atomic import AtomicUpdater
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLIAPI, CopilotCLIClient
 from fido.provider import ProviderID
@@ -195,3 +197,49 @@ class TestProviderSessionIdExtraction:
             )
             == "codex-sess"
         )
+
+
+class TestProviderStateUpdaterWiring:
+    """create_provider threads AtomicUpdater[FidoState] through to every agent type."""
+
+    def test_default_updater_is_none_for_all_providers(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        for provider_id in (
+            ProviderID.CLAUDE_CODE,
+            ProviderID.CODEX,
+            ProviderID.COPILOT_CLI,
+        ):
+            prov = factory.create_provider(
+                RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
+                work_dir=tmp_path,
+                repo_name="owner/repo",
+                session=None,
+            )
+            assert prov.agent.state_updater is None, (
+                f"{provider_id}: expected None state_updater by default"
+            )
+
+    def test_injected_updater_reachable_on_all_agent_types(
+        self, tmp_path: Path
+    ) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        for provider_id in (
+            ProviderID.CLAUDE_CODE,
+            ProviderID.CODEX,
+            ProviderID.COPILOT_CLI,
+        ):
+            fake: AtomicUpdater = MagicMock(spec=AtomicUpdater)
+            prov = factory.create_provider(
+                RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
+                work_dir=tmp_path,
+                repo_name="owner/repo",
+                session=None,
+                state_updater=fake,
+            )
+            assert prov.agent.state_updater is fake, (
+                f"{provider_id}: injected state_updater not reachable on agent"
+            )

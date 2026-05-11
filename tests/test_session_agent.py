@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.provider import ProviderModel, TurnSessionMode
+from fido.appstate import FidoState
+from fido.atomic import AtomicUpdater
+from fido.provider import (
+    ProviderModel,
+    TurnSessionMode,
+)
 from fido.session_agent import SessionBackedAgent
 
 
@@ -20,6 +25,7 @@ class _FakeAgent(SessionBackedAgent):
         repo_name: str | None = None,
         session: object = None,
         session_factory: object = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._session_factory = (
             MagicMock() if session_factory is None else session_factory
@@ -30,6 +36,7 @@ class _FakeAgent(SessionBackedAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            state_updater=state_updater,
         )
 
     def _spawn_owned_session(
@@ -266,3 +273,12 @@ class TestSessionBackedAgent:
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", retry_on_preempt=True) == "done"
         assert session.prompt.call_count == 2
+
+    def test_state_updater_defaults_to_none(self) -> None:
+        agent = _FakeAgent()
+        assert agent.state_updater is None
+
+    def test_state_updater_stores_injected_updater(self) -> None:
+        fake: AtomicUpdater[FidoState] = MagicMock()
+        agent = _FakeAgent(state_updater=fake)
+        assert agent.state_updater is fake

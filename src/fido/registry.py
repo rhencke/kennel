@@ -9,64 +9,31 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from frozendict import frozendict
-
+from fido.appstate import (
+    FidoState,
+    ProviderSnapshot,
+    RepoState,
+    ThreadSnapshot,
+    WebhookActivity,
+    WorkerActivity,
+    WorkerCrash,
+)
 from fido.atomic import AtomicUpdater
-from fido.atomic import create_atomic as _create_atomic
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.provider import PromptSession, Provider
-from fido.rate_limit import GitHubLimit
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
-    from fido.atomic import AtomicReader
     from fido.events import Dispatcher
 
 log = logging.getLogger(__name__)
 
 
-def _utcnow() -> datetime:
-    """Return the current UTC time as a timezone-aware datetime."""
-    return datetime.now(tz=timezone.utc)
-
-
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerActivity:
-    """Snapshot of what one worker is currently doing.
-
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
-    """
-
-    repo_name: str
-    what: str
-    busy: bool
-    last_progress_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerCrash:
-    """Running record of unexpected worker deaths for one repo.
-
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
-
-    The zero value (``_ZERO_CRASH``) represents "never crashed" — readers
-    check ``death_count == 0`` rather than testing for ``None``.
-    """
-
-    death_count: int
-    last_error: str
-    last_crash_time: datetime
-
-
 _ZERO_CRASH = WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH)
 
 
@@ -81,163 +48,9 @@ def _zero_activity(repo_name: str) -> WorkerActivity:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class WebhookActivity:
-    """One in-flight webhook handler running alongside the worker.
-
-    Created when ``_process_action`` starts handling a webhook action; removed
-    when that handler returns (success or failure).  Surfaced in ``fido
-    status`` as a sub-bullet under the repo so we can see what's being
-    handled beyond the worker's own task.
-
-    *thread_id* is :func:`threading.get_ident` captured at context entry so
-    status display can match this webhook to the active
-    :class:`~fido.provider.SessionTalker` (whose ``thread_id`` field is from
-    the same call) — letting the CLI attach claude stats to the specific
-    webhook line that's driving claude.
-
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
-    """
-
-    handle_id: int
-    description: str
-    started_at: datetime
-    thread_id: int
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderSnapshot:
-    """Immutable snapshot of one repo's provider (ClaudeSession) state.
-
-    Captures provider session metadata as primitive values at the moment of
-    each provider lifecycle event (session start, recovery).  Stored on
-    :class:`RepoState` so the SCADA display path reads stale-free values
-    without holding the provider lock.
-
-    Fields mirror the public session properties on
-    :class:`~fido.worker.WorkerThread` that are read by the status display
-    path.  Published by :meth:`WorkerRegistry._publish_provider_snapshot`
-    at lifecycle boundaries where session state actually changes.
-    """
-
-    session_owner: str | None
-    session_alive: bool
-    session_pid: int | None
-    session_dropped_count: int
-    session_sent_count: int
-    session_received_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class RepoState:
-    """Per-repo sub-snapshot within :class:`FidoState`.
-
-    *key* is the repo slug (e.g. ``"rhencke/confusio"``), matching the key
-    under which this record is stored in :attr:`FidoState.repos`.
-
-    *started_at* is the UTC timestamp when the most recent
-    :class:`~fido.worker.WorkerThread` for this repo was started.
-
-    *activity* is the current :class:`WorkerActivity` for this repo.
-    Initialised to the zero sentinel (``what=""``) by :meth:`start`; the
-    worker replaces it on its first :meth:`report_activity` call.
-
-    *crash_record* is the accumulated :class:`WorkerCrash` history for this
-    repo.  Initialised to ``_ZERO_CRASH`` (``death_count=0``) by
-    :meth:`start`; the watchdog replaces it on each crash.
-
-    *webhook_activities* is the tuple of in-flight webhook handlers for this
-    repo.  Published from the authoritative ``_webhook_activities`` dict on
-    :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
-
-    *thread* is the immutable :class:`ThreadSnapshot` for the repo's
-    :class:`~fido.worker.WorkerThread`.  ``None`` until the first
-    :meth:`~WorkerRegistry.start` call; refreshed by
-    :meth:`~WorkerRegistry._publish_thread_snapshot` immediately after the
-    thread is started.  No mutable thread reference is stored here — the
-    snapshot captures primitive values only.
-
-    *provider* is the immutable :class:`ProviderSnapshot` for the repo's
-    provider (ClaudeSession).  ``None`` until the first
-    :meth:`~WorkerRegistry.start` call; refreshed by
-    :meth:`~WorkerRegistry._publish_provider_snapshot` at provider lifecycle
-    events (session start, recovery).
-
-    As subsequent lock-free PRs migrate fields out of the per-lock dicts in
-    :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
-    Each migration removes the corresponding lock and dict from
-    ``WorkerRegistry.__init__``.
-    """
-
-    key: str
-    started_at: datetime
-    activity: WorkerActivity
-    crash_record: WorkerCrash
-    webhook_activities: tuple[WebhookActivity, ...]
-    thread: "ThreadSnapshot | None" = None
-    provider: "ProviderSnapshot | None" = None
-
-
-@dataclass(frozen=True, slots=True)
-class ThreadSnapshot:
-    """Immutable snapshot of one :class:`~fido.worker.WorkerThread`'s lifecycle state.
-
-    Captures thread lifecycle metadata as primitive values — no handles to the
-    mutable :class:`~fido.worker.WorkerThread` object itself.  Stored inside
-    the frozen :class:`FidoState` so the SCADA display invariant is preserved:
-    a snapshot reader can never reach through to a live thread and observe
-    partial mutations.
-
-    Provider session state (session_owner, session_alive, session_pid, and
-    the message counters) lives on :class:`ProviderSnapshot` instead so it can
-    be published independently at provider lifecycle boundaries.
-    """
-
-    is_alive: bool
-    was_stopped: bool
-    crash_error: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class FidoState:
-    """Atomically-swapped coordination snapshot.
-
-    ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
-    a :class:`frozendict` so stale readers that hold a reference to an old
-    snapshot can never accidentally mutate the mapping — the immutability
-    guarantee holds even on the free-threaded (no-GIL) build.  Each
-    :class:`RepoState` carries a :class:`ThreadSnapshot` at its ``thread``
-    field — an immutable copy of the thread's observable state at the last
-    :meth:`WorkerRegistry.start` call.
-
-    The atomic cell is owned by the composition root (``run()`` in
-    ``server.py``), not by :class:`WorkerRegistry`.  The root creates both
-    faces via :func:`~fido.atomic.create_atomic`, passes the
-    :class:`~fido.atomic.AtomicUpdater` to ``WorkerRegistry`` and
-    :class:`~fido.rate_limit.RateLimitMonitor`, and passes the
-    :class:`~fido.atomic.AtomicReader` to the status serialisation path.
-
-    **Convergence target**: ``FidoState`` is intended to grow to cover all
-    coordination fields currently scattered across the per-lock dicts in
-    :class:`WorkerRegistry` (worker activities, crash records, webhook
-    activities, rescoping flags, …).  As each field migrates here, the
-    corresponding lock disappears.
-
-    **Replaces FidoStatus long-term**: :class:`~fido.status.FidoStatus` in
-    ``status.py`` is a display-oriented dataclass shaped by the old
-    ``/status.json`` schema.  The end-state is to serialise ``FidoState``
-    directly to JSON — even where that changes the wire format — and retire
-    ``FidoStatus``.  The ``./fido status`` CLI output serves as the living
-    requirement: whatever ``FidoState`` carries must be sufficient to render
-    everything that ``./fido status`` currently shows.
-    """
-
-    repos: frozendict[str, RepoState]
-    github_limits: GitHubLimit
-
-
-_EMPTY_FIDO_STATE = FidoState(repos=frozendict(), github_limits=GitHubLimit())
+def _utcnow() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(tz=timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,7 +82,7 @@ class WorkerRegistry:
 
     Usage::
 
-        state_reader, state_updater = create_fido_atomic()
+        state_reader, state_updater = create_atomic(FidoState(repos=frozendict(), github_limits=GitHubLimit()))
         registry = WorkerRegistry(my_factory, state_updater)
         registry.start(repo_cfg)   # create + start thread
         registry.wake("owner/repo")  # nudge thread to check for work
@@ -962,20 +775,6 @@ class WorkerRegistry:
             return list(self._issue_caches.values())
 
 
-def create_fido_atomic() -> tuple[
-    "AtomicReader[FidoState]", "AtomicUpdater[FidoState]"
-]:
-    """Create the atomic cell for :class:`FidoState` and return both faces.
-
-    Thin wrapper around :func:`~fido.atomic.create_atomic` with the correct
-    initial value.  Call this once at the composition root (``run()``), pass
-    the updater to :class:`WorkerRegistry` and
-    :class:`~fido.rate_limit.RateLimitMonitor`, and keep the reader in the
-    composition root for the status serialisation path.
-    """
-    return _create_atomic(_EMPTY_FIDO_STATE)
-
-
 def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
@@ -1021,7 +820,7 @@ def make_registry(
 
     Uses :func:`_make_thread` as the factory; all threads share the provided
     :class:`~fido.github.GitHub` client.  The caller (composition root) is
-    responsible for creating the atomic cell via :func:`create_fido_atomic`
+    responsible for creating the atomic cell via :func:`~fido.atomic.create_atomic`
     and passing the updater face here.  Pass a custom registry directly
     (with a mock factory) in tests instead of calling this.
     """

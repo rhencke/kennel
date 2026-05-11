@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from frozendict import frozendict
 
+from fido.appstate import FidoState
 from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
 from fido.provider import ProviderLimitWindow
 from fido.rate_limit import (
@@ -15,12 +16,11 @@ from fido.rate_limit import (
     RateLimitMonitor,
     _parse_window,  # noqa: PLC2701
 )
-from fido.registry import FidoState
 
 
 def _make_state() -> tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]:
     """Return a fresh ``(reader, updater)`` pair seeded with an empty
-    :class:`~fido.registry.FidoState` for use in monitor tests."""
+    :class:`~fido.appstate.FidoState` for use in monitor tests."""
     return create_atomic(
         FidoState(
             repos=frozendict(),
