@@ -948,6 +948,7 @@ class CopilotCLISession(OwnedSession):
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
         session_id: str | None = None,
+        on_metrics_changed: Callable[[], None] | None = None,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
@@ -964,6 +965,7 @@ class CopilotCLISession(OwnedSession):
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
+        self._on_metrics_changed = on_metrics_changed
         # _metrics_lock guards both counters: they are written by the worker
         # thread (send / prompt) and read from other threads (status,
         # registry).  Python 3.14t has no GIL, so += is not atomic.
@@ -1171,6 +1173,8 @@ class CopilotCLISession(OwnedSession):
         )
         with self._metrics_lock:
             self._sent_count += 1
+        if self._on_metrics_changed is not None:
+            self._on_metrics_changed()
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
             prompt,
@@ -1326,6 +1330,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             model=model,
             repo_name=self._repo_name,
             session_id=session_id,
+            on_metrics_changed=self._publish_provider_snapshot,
         )
 
     def _should_retry_prompt_failure(

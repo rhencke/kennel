@@ -862,6 +862,73 @@ class TestCodexSession:
         assert params["threadId"] == "thread-new"
         assert params["excludeTurns"] is True
 
+    def test_on_metrics_changed_fires_after_send(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "ok"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        calls: list[int] = []
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+            on_metrics_changed=lambda: calls.append(session.sent_count),
+        )
+        assert session.prompt("hello") == "ok"
+        assert calls == [1]
+
+    def test_on_metrics_changed_none_is_noop(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "ok"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        # No callback — prompt must not raise.
+        assert session.prompt("hello") == "ok"
+        assert session.sent_count == 1
+
 
 class TestCodexClient:
     def test_model_slots_and_provider_id(self) -> None:
@@ -892,6 +959,7 @@ class TestCodexClient:
             model=client.voice_model,
             repo_name="owner/repo",
             session_id="thread-1",
+            on_metrics_changed=client._publish_provider_snapshot,
         )
         assert client.session is session
 
