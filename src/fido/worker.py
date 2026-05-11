@@ -3029,9 +3029,11 @@ class Worker:
         the ``close_pr`` / ``close_issue`` calls still fire (they are
         API-idempotent) so a crash between the comment and the close calls
         is retried correctly.  On the PR-based path, the marker suppresses
-        both the comment and the ready/review calls.  The diff guard from
-        #1194 still applies on the PR-based path — if the branch has no diff
-        vs base, the PR is left as draft.
+        only the comment repost; ``pr_ready`` / ``add_pr_reviewers`` still
+        fire unconditionally (they are API-idempotent) so a crash between
+        the comment and the ready call is retried correctly.  The diff guard
+        from #1194 still applies on the PR-based path — if the branch has
+        no diff vs base, the PR is left as draft.
         """
         has_real_diff = self._pr_has_real_diff("origin", slug, repo_ctx.default_branch)
 

@@ -667,17 +667,17 @@ class GitHub:
         this helper does **not** filter by author — sub-issue PRs may have been
         authored by anyone (a human, a bot, or a different fido user).
 
-        Returns ``(pr_number, merged, pr_repo)`` for the best linked PR found
-        (keyword PRs preferred; sidebar PRs as fallback), where *merged* is
-        ``True`` when the PR was merged and *pr_repo* is the
+        Returns ``(pr_number, merged, pr_repo)`` for the best linked PR found,
+        where *merged* is ``True`` when the PR was merged and *pr_repo* is the
         ``"owner/name"`` repository the PR lives in (which may differ from
         *repo* for cross-repo sub-issues).  Returns ``(None, False, None)``
         when no PR is linked.
 
-        Keyword PRs (``CrossReferencedEvent`` with a closing keyword) take
-        priority over sidebar PRs (``ConnectedEvent``).  Within each bucket,
-        merged PRs are preferred over closed-unmerged ones; ties broken by
-        lowest PR number.  ``DisconnectedEvent`` removes sidebar links.
+        Priority is tiered: merged PRs beat closed-unmerged ones regardless of
+        keyword vs sidebar origin.  Within the same merge tier, keyword PRs
+        (``CrossReferencedEvent`` with a closing keyword) take priority over
+        sidebar PRs (``ConnectedEvent``).  Ties broken by lowest PR number.
+        ``DisconnectedEvent`` removes sidebar links.
         """
         owner, name = repo.split("/", 1)
         query = """\
