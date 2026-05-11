@@ -1057,6 +1057,32 @@ class WebhookHandler(BaseHTTPRequestHandler):
             titles: list[str] = []
             queued_tasks = 0
 
+            # Post eyes reaction immediately to signal work-in-progress.
+            # Fires before any triage / rescope / reply work so the comment
+            # author sees acknowledgement within ~1s of their comment (#1243).
+            # Best-effort — a failed reaction must never abort the handler.
+            # Skipped for bot-authored actions (don't react to other bots).
+            _eyes_posted = False
+            _eyes_comment_info: dict[str, Any] | None = None
+            if action.reply_to:
+                _eyes_comment_info = action.reply_to
+            elif action.comment_body and action.thread:
+                _eyes_comment_info = action.thread
+            if not action.is_bot and _eyes_comment_info is not None:
+                _eyes_repo = _eyes_comment_info.get("repo")
+                _eyes_ctype = str(_eyes_comment_info.get("comment_type", "issues"))
+                _eyes_cid = _eyes_comment_info.get("comment_id")
+                if _eyes_repo and isinstance(_eyes_cid, int):
+                    try:
+                        gh.add_reaction(_eyes_repo, _eyes_ctype, _eyes_cid, "eyes")
+                        log.info("eyes reaction posted for comment %d", _eyes_cid)
+                        _eyes_posted = True
+                    except Exception:
+                        log.exception(
+                            "failed to post eyes reaction for comment %d — continuing",
+                            _eyes_cid,
+                        )
+
             if action.reply_to:
                 promise = self._prepare_reply(repo_cfg, action)
                 if promise is None:

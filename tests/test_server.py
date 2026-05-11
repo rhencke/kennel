@@ -2552,6 +2552,114 @@ class TestProcessActionInner:
             "owner/repo", "issues", 500, "confused"
         )
 
+    def test_eyes_reaction_posted_for_review_comment(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """review-comment action → eyes posted before triage begins (#1243)."""
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 101,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix this",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 101, "eyes")
+
+    def test_eyes_reaction_posted_for_top_level_pr_comment(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """top-level PR comment action → eyes posted before triage begins (#1243)."""
+        action = Action(
+            prompt="issue comment",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 301,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            comment_body="any thoughts?",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "issues", 301, "eyes")
+
+    def test_eyes_reaction_skipped_for_bot_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """is_bot=True → eyes reaction must not be posted."""
+        action = Action(
+            prompt="bot comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 201,
+                "url": "https://example.com",
+                "author": "somebot[bot]",
+                "comment_type": "pulls",
+            },
+            comment_body="automated feedback",
+            is_bot=True,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        for call in handler.gh.add_reaction.call_args_list:
+            assert call.args[3] != "eyes", f"eyes was posted for bot action: {call}"
+
+    def test_eyes_reaction_skipped_for_non_comment_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Non-comment webhook actions (no reply_to, no comment_body) → no reaction."""
+        action = Action(prompt="push event")
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_not_called()
+
+    def test_eyes_reaction_failure_does_not_abort_handler(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """add_reaction failure for eyes must not abort the webhook handler."""
+        import requests
+
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 102,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler.gh.add_reaction.side_effect = requests.RequestException("network down")
+        # Should not raise — eyes failure is best-effort.
+        handler._process_action_inner(action, repo_cfg, self._activity())
+
     def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
         """Cover all branches of _describe_action."""
         handler = self._handler(cfg)
