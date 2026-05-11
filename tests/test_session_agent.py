@@ -396,3 +396,32 @@ class TestSessionBackedAgent:
             received_count=0,
         )
         assert reader.get().repos[repo_name].provider.session_sent_count == 3  # type: ignore[union-attr]
+
+    def test_publish_metrics_reflects_updated_received_count(self) -> None:
+        """A second publish with a new received count reflects the new value."""
+        repo_name = "owner/myrepo"
+        reader, updater = create_atomic(_make_fido_state_with_repo(repo_name))
+        agent = _FakeAgent(
+            repo_name=repo_name,
+            state_updater=updater,
+        )
+        agent.publish_metrics(
+            owner=None,
+            alive=True,
+            pid=None,
+            dropped_count=0,
+            sent_count=0,
+            received_count=0,
+        )
+        assert reader.get().repos[repo_name].provider is not None
+        assert reader.get().repos[repo_name].provider.session_received_count == 0  # type: ignore[union-attr]
+
+        agent.publish_metrics(
+            owner=None,
+            alive=True,
+            pid=None,
+            dropped_count=0,
+            sent_count=0,
+            received_count=5,
+        )
+        assert reader.get().repos[repo_name].provider.session_received_count == 5  # type: ignore[union-attr]

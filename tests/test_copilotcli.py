@@ -1291,30 +1291,6 @@ class TestCopilotCLISession:
         assert published[1]["sent_count"] == 1
         assert published[1]["received_count"] == 1
 
-    def test_snapshot_publisher_fires_after_receive(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "persona.md"
-        system_file.write_text("")
-        runtime = FakeRuntime()
-        runtime.next_prompt = ("ok", "end_turn", "sess-2")
-        published: list[dict[str, object]] = []
-
-        class Recorder:
-            def publish_metrics(self, **kwargs: object) -> None:
-                published.append(kwargs)
-
-        session = CopilotCLISession(
-            system_file,
-            work_dir=tmp_path,
-            model=CopilotCLIClient.voice_model,
-            runtime=runtime,
-            snapshot_publisher=Recorder(),
-        )
-        session.prompt("hello", model=None, system_prompt=None)
-        # The receive publication must reflect the incremented received_count.
-        receive_pubs = [p for p in published if p.get("received_count", 0) > 0]
-        assert len(receive_pubs) >= 1
-        assert receive_pubs[0]["received_count"] == 1
-
     def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
