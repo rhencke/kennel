@@ -244,6 +244,21 @@ class TestRunCodexExec:
         assert mock_run.call_args.kwargs["timeout"] == 17
         assert mock_run.call_args.kwargs["cwd"] == tmp_path.resolve()
 
+    def test_handler_phase_uses_read_only_sandbox(self, tmp_path: Path) -> None:
+        """Non-persistent exec with allowed_tools set runs read-only (#1672)."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        run_codex_exec(
+            "hello",
+            model="gpt-5.5",
+            cwd=tmp_path,
+            runner=mock_run,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+
     def test_normalizes_relative_work_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -622,6 +637,56 @@ class TestCodexSession:
         ]
         assert session.sent_count == 1
         assert session.received_count == 1
+
+    def test_prompt_with_allowed_tools_uses_read_only_sandbox(
+        self, tmp_path: Path
+    ) -> None:
+        """Handler / synthesis / rescope / voice / status phases pass an
+        explicit allowlist; codex's per-turn sandbox runs read-only so
+        the model cannot Edit/Write/Bash even though the codex runtime
+        has no `--allowedTools` primitive (#1672)."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("base")
+        fake = _FakeAppServer()
+        fake.notifications.extend(
+            [
+                {
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "inProgress"},
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "text": "reply"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+            ]
+        )
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        assert session.prompt("hello", allowed_tools=READ_ONLY_ALLOWED_TOOLS) == (
+            "reply"
+        )
+        turn_params = fake.requests[1][1]
+        assert turn_params["sandboxPolicy"] == {"type": "readOnly"}
 
     def test_resumes_persisted_thread_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
