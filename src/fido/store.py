@@ -647,6 +647,31 @@ class FidoStore:
         """Return whether *repo* has currently retryable queued comments."""
         return bool(self.pending_pr_comments(repo=repo, pr_number=pr_number))
 
+    def has_other_open_pr_comments(self, *, repo: str, exclude_comment_id: int) -> bool:
+        """Return whether *repo* has any other open queue entries.
+
+        "Open" means ``state IN ('pending', 'in_progress', 'retryable_failed')``
+        — anything that isn't completed.  Used by the dispatcher's eager-eyes
+        path to detect batch-arrival vs. solo: if there's any other open
+        comment for the same repo, this comment is part of a batch and the
+        worker will post eyes when it claims the comment in pickup order
+        (#1662).
+        """
+        self.ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM pr_comment_queue
+                WHERE repo = ?
+                  AND comment_id != ?
+                  AND state IN ('pending', 'in_progress', 'retryable_failed')
+                LIMIT 1
+                """,
+                (repo, int(exclude_comment_id)),
+            ).fetchone()
+        return row is not None
+
     def claim_next_pr_comment(
         self, *, owner: str, repo: str | None = None, pr_number: int | None = None
     ) -> PRCommentQueueRecord | None:
