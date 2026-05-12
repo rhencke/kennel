@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from fido.github import (
     _HTTP_TIMEOUT,  # noqa: PLC2701
@@ -147,22 +148,22 @@ class TestPrStateStr:
 
 
 class TestTimeoutSession:
-    def test_injects_default_timeout(self) -> None:
-        from unittest.mock import patch
-
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = MagicMock()
-            s = _TimeoutSession()
-            s.request("GET", "https://example.com")
+    def test_injects_default_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_req = MagicMock()
+        monkeypatch.setattr(requests.Session, "request", mock_req)
+        mock_req.return_value = MagicMock()
+        s = _TimeoutSession()
+        s.request("GET", "https://example.com")
         assert mock_req.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
 
-    def test_does_not_override_caller_timeout(self) -> None:
-        from unittest.mock import patch
-
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = MagicMock()
-            s = _TimeoutSession()
-            s.request("GET", "https://example.com", timeout=5)
+    def test_does_not_override_caller_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_req = MagicMock()
+        monkeypatch.setattr(requests.Session, "request", mock_req)
+        mock_req.return_value = MagicMock()
+        s = _TimeoutSession()
+        s.request("GET", "https://example.com", timeout=5)
         assert mock_req.call_args.kwargs.get("timeout") == 5
 
     def test_uses_timeout_session_when_no_session_injected(self) -> None:
