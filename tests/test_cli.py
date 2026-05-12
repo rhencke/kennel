@@ -208,11 +208,15 @@ class TestCmdComplete:
 
         mock_github = MagicMock()
         mock_github.get_user.return_value = "fido-bot"
+        # The originating commenter is the repo owner ("a") so the
+        # auto-resolve oracle classifies them as CommentByActionable.
+        # Resolution requires at least one actionable comment in the
+        # chain that Fido has answered (#1663).
         mock_github.get_pull_comments.return_value = [
             {
                 "id": 42,
                 "in_reply_to_id": None,
-                "user": {"login": "reviewer"},
+                "user": {"login": "a"},
                 "created_at": "2024-01-01T00:00:00Z",
             },
             {
@@ -232,7 +236,7 @@ class TestCmdComplete:
                 "isResolved": False,
                 "comments": {
                     "nodes": [
-                        {"databaseId": 42, "author": {"login": "reviewer"}},
+                        {"databaseId": 42, "author": {"login": "a"}},
                         {"databaseId": 99, "author": {"login": "fido-bot"}},
                     ],
                 },

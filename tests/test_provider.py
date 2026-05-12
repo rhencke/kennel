@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fido.provider import (
+    GLOBAL_DISALLOWED_TOOLS,
     ProviderID,
     ProviderInterruptTimeout,
     ProviderLimitSnapshot,
@@ -14,6 +15,30 @@ from fido.provider import (
     is_recoverable_provider_wedge,
     safe_voice_turn,
 )
+
+
+class TestGlobalDisallowedTools:
+    def test_denies_top_level_pr_comment_post(self) -> None:
+        """Top-level PR/issue comment posting must be denied at the
+        capability layer — the harness owns reply delivery via the
+        synthesis path, and `sub/task.md`'s "Never post a top-level PR
+        comment" prompt rule isn't enough on its own (#1675)."""
+        assert "Bash(gh api *issues/*/comments*)" in GLOBAL_DISALLOWED_TOOLS
+
+    def test_review_thread_reply_path_not_denied(self) -> None:
+        """The review-thread reply path
+        (`gh api .../pulls/<n>/comments`) must remain available — that's
+        the prescribed channel for `sub/task.md`'s "PR comment:" task
+        instructions."""
+        assert "pulls/" not in GLOBAL_DISALLOWED_TOOLS
+
+    def test_denies_raw_curl(self) -> None:
+        """Raw curl is the loophole one layer below the gh-api deny:
+        `curl -X POST https://api.github.com/...` bypasses both the
+        gh-api pattern (different binary) and codex's read-only sandbox
+        (network is allowed).  Capability-layer enforcement closes it
+        (#1679)."""
+        assert "Bash(curl *)" in GLOBAL_DISALLOWED_TOOLS
 
 
 class TestProviderLimitWindow:

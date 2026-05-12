@@ -2584,6 +2584,26 @@ class Worker:
         repo_cfg = self._repo_cfg
         if config is None or repo_cfg is None:
             raise RuntimeError("queued comment handling requires explicit config")
+        # Post eyes on claim so the comment carries the work-in-progress
+        # signal exactly while it's being processed.  Covers comments that
+        # the dispatcher skipped because the repo had other open work at
+        # webhook time (#1662).  Idempotent at GitHub: re-posting the same
+        # reaction is a no-op.  Bot-authored comments don't get eyes
+        # (matches dispatcher behaviour).
+        if not queued.is_bot:
+            try:
+                self.gh.add_reaction(
+                    repo_ctx.repo,
+                    queued.comment_type,
+                    queued.comment_id,
+                    "eyes",
+                )
+                log.info("eyes reaction posted for comment %d", queued.comment_id)
+            except Exception:
+                log.exception(
+                    "failed to post eyes reaction for comment %d — continuing",
+                    queued.comment_id,
+                )
         pr_data = self.gh.get_pr(repo_ctx.repo, queued.pr_number)
         pr_title = pr_data["title"]
         pr_body = pr_data["body"] or ""

@@ -1072,21 +1072,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # author sees acknowledgement within ~1s of their comment (#1243).
             # Best-effort — a failed reaction must never abort the handler.
             # Skipped for bot-authored actions (don't react to other bots).
+            #
+            # Skipped for batch arrivals (#1662): if there's any other open
+            # comment for this repo (pending or in-progress), this comment is
+            # part of a batch — the worker posts eyes on claim instead, so at
+            # most one comment per repo carries eyes at a time.  Solo comments
+            # (no other open work) still get the sub-1s ack.
             _eyes_posted = False
             if not action.is_bot and _eyes_comment_info is not None:
                 _eyes_repo = _eyes_comment_info.get("repo")
                 _eyes_ctype = str(_eyes_comment_info.get("comment_type", "issues"))
                 _eyes_cid = _eyes_comment_info.get("comment_id")
                 if _eyes_repo and isinstance(_eyes_cid, int):
-                    try:
-                        gh.add_reaction(_eyes_repo, _eyes_ctype, _eyes_cid, "eyes")
-                        log.info("eyes reaction posted for comment %d", _eyes_cid)
-                        _eyes_posted = True
-                    except Exception:
-                        log.exception(
-                            "failed to post eyes reaction for comment %d — continuing",
+                    if FidoStore(repo_cfg.work_dir).has_other_open_pr_comments(
+                        repo=_eyes_repo, exclude_comment_id=_eyes_cid
+                    ):
+                        log.debug(
+                            "eager eyes skipped for comment %d — repo has "
+                            "other open comments; worker posts eyes on claim",
                             _eyes_cid,
                         )
+                    else:
+                        try:
+                            gh.add_reaction(_eyes_repo, _eyes_ctype, _eyes_cid, "eyes")
+                            log.info("eyes reaction posted for comment %d", _eyes_cid)
+                            _eyes_posted = True
+                        except Exception:
+                            log.exception(
+                                "failed to post eyes reaction for comment %d "
+                                "— continuing",
+                                _eyes_cid,
+                            )
 
             if action.reply_to:
                 promise = self._prepare_reply(repo_cfg, action)

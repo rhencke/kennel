@@ -157,6 +157,24 @@ Definition latest_comment_is_fido (thread : ReviewThread) : bool :=
   | _ => false
   end.
 
+(** [thread_has_actionable_comment] is true when the thread contains at least
+    one [CommentByActionable] (owner / collaborator) comment.  A thread that
+    only contains [CommentByBot] / [CommentByFido] / [CommentIgnored]
+    interactions has no human in the conversation, and a human must mark such
+    a thread done — Fido does not auto-resolve it.  Bot feedback is
+    informational; closing it silently throws away signal a human should
+    weigh in on (#1663). *)
+Fixpoint thread_has_actionable_comment
+    (comments : list ThreadComment) : bool :=
+  match comments with
+  | [] => false
+  | comment :: rest =>
+      match thread_comment_author comment with
+      | CommentByActionable => true
+      | _ => thread_has_actionable_comment rest
+      end
+  end.
+
 (** [should_resolve_thread] is true exactly when the worker may emit a
     [resolveReviewThread] effect for the visible thread and current durable
     task state. *)
@@ -168,7 +186,9 @@ Definition should_resolve_thread
   let thread_open := negb (review_thread_resolved thread) in
   let fido_last := latest_comment_is_fido thread in
   let followup_done := negb (has_pending_thread_task comment_ids tasks) in
-  andb thread_open (andb fido_last followup_done).
+  let has_actionable := thread_has_actionable_comment
+    (review_thread_comments thread) in
+  andb thread_open (andb fido_last (andb followup_done has_actionable)).
 
 Definition resolution_decision
     (thread : ReviewThread)
@@ -234,7 +254,7 @@ Definition bot_feedback_resolves_thread
   end.
 
 Python File Extraction thread_auto_resolve
-  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision bot_feedback_decision".
+  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido thread_has_actionable_comment should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision bot_feedback_decision".
 
 (** * Proved invariants *)
 
@@ -352,6 +372,35 @@ Qed.
     owner/collaborator comments, but still modeled thread input. *)
 Lemma bot_comment_after_fido_blocks_resolve :
   resolution_decision sample_thread_bot_last [] = KeepReviewThreadOpen.
+Proof.
+  reflexivity.
+Qed.
+
+(** [bot_only_thread_does_not_resolve]: a thread with only bot+fido comments
+    has no [CommentByActionable] in the chain.  Even when Fido posted last
+    and no follow-up tasks remain, resolution is blocked — bot feedback is
+    informational and a real human must mark the thread done.  This is the
+    fix for #1663: previously such threads auto-resolved, silently dropping
+    the bot's input from the open-thread list before any human reviewed it. *)
+Definition sample_thread_bot_only : ReviewThread := {|
+  review_thread_resolved := false;
+  review_thread_comments := [sample_bot_comment; sample_fido_comment]
+|}.
+
+Lemma bot_only_thread_does_not_resolve :
+  resolution_decision sample_thread_bot_only [] = KeepReviewThreadOpen.
+Proof.
+  reflexivity.
+Qed.
+
+(** [bot_only_thread_stays_open_after_completed_task]: same invariant after
+    the ACT-path follow-up task completes.  Without an actionable comment in
+    the chain, the thread stays open even when Fido implemented the bot's
+    suggestion and the work landed.  Bot threads always need a human to mark
+    them resolved (#1663). *)
+Lemma bot_only_thread_stays_open_after_completed_task :
+  resolution_decision sample_thread_bot_only [sample_completed_task] =
+    KeepReviewThreadOpen.
 Proof.
   reflexivity.
 Qed.
