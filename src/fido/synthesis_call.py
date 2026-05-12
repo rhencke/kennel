@@ -60,7 +60,7 @@ _VERIFY_CHANGE_REQUEST_PROMPT: str = (
 )
 
 _DERIVE_CHANGE_REQUEST_PROMPT: str = (
-    "You answered No.  In one concise sentence, state the request you omitted from "
+    "You answered No.  In one concise sentence, state the request(s) you omitted from "
     "``change_request`` — no preamble, no trailing text."
 )
 
