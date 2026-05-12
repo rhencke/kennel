@@ -634,14 +634,29 @@ class ClaudeSession(OwnedSession):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
             "--model",
             self._model,
             "--system-prompt-file",
             str(self._system_file),
         ]
+        # Per-phase permission mode (#1669).  Handler/synthesis/rescope/voice
+        # phases pass an explicit allowlist; pair it with `--permission-mode
+        # dontAsk` so anything outside the allowlist is silently denied —
+        # that's the gate that keeps synthesis turns away from
+        # Edit/Write/arbitrary Bash.  Worker phase passes `_tools=None` and
+        # keeps `--dangerously-skip-permissions` so it retains full
+        # implementation access; `dontAsk` without an allowlist would deny
+        # everything and break the worker.  `GLOBAL_DISALLOWED_TOOLS` still
+        # applies on top in both phases.
         if self._tools is not None:
-            cmd += ["--allowedTools", self._tools]
+            cmd += [
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                self._tools,
+            ]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
         # GLOBAL_DISALLOWED_TOOLS applies to every spawn regardless of
         # which phase's allowlist is active — these are tools no phase can
         # legitimately use (harness owns commit/push, bypass-prone Agent /
@@ -1829,13 +1844,20 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
             "--system-prompt-file",
             str(system_file),
             "--print",
         ]
+        # Per-phase permission mode — see _spawn for the full rationale (#1669).
         if allowed_tools is not None:
-            cmd += ["--allowedTools", allowed_tools]
+            cmd += [
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                allowed_tools,
+            ]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
         cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)
@@ -1864,13 +1886,20 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
             "--resume",
             session_id,
             "--print",
         ]
+        # Per-phase permission mode — see _spawn for the full rationale (#1669).
         if allowed_tools is not None:
-            cmd += ["--allowedTools", allowed_tools]
+            cmd += [
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                allowed_tools,
+            ]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
         cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         output = "".join(
             self._streaming_runner(cmd, prompt_file, idle_timeout, cwd=cwd)

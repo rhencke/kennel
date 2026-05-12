@@ -716,9 +716,45 @@ class TestClaudeSessionInit:
         assert "--output-format" in cmd
         assert "stream-json" in cmd[cmd.index("--output-format") + 1]
         assert "--verbose" in cmd
+        # Default ClaudeSession has _tools=None (worker phase) — keeps
+        # full implementation access via --dangerously-skip-permissions
+        # so Edit/Write/Bash all work for code-implementing turns (#1669).
         assert "--dangerously-skip-permissions" in cmd
+        assert "--permission-mode" not in cmd
+        assert "--allowedTools" not in cmd
         assert "--system-prompt-file" in cmd
         assert str(system_file) in cmd
+
+    def test_spawns_with_dontask_when_handler_allowlist_passed(
+        self, tmp_path: Path
+    ) -> None:
+        """Handler/synthesis phase (tools=READ_ONLY) → dontAsk + allowlist.
+
+        --permission-mode dontAsk makes --allowedTools the actual gate;
+        anything outside the allowlist is silently denied.  This is what
+        keeps synthesis turns away from Edit/Write/arbitrary Bash (#1669).
+        """
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        cmd = fake_popen.call_args.args[0]
+        assert "--permission-mode" in cmd
+        assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+        assert "--allowedTools" in cmd
+        assert cmd[cmd.index("--allowedTools") + 1] == READ_ONLY_ALLOWED_TOOLS
+        # Worker-only flag must NOT appear in handler mode.
+        assert "--dangerously-skip-permissions" not in cmd
 
     def test_opens_stdin_stdout_pipes(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
@@ -1967,7 +2003,8 @@ class TestClaudeSessionIsAliveAndReset:
         session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
         assert fake_popen.call_count == 2
-        assert fake_popen.call_args.args[0][8] == "claude-sonnet-4-6"
+        cmd = fake_popen.call_args.args[0]
+        assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
 
     def test_reset_registers_new_proc_in_active_children(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
@@ -3325,6 +3362,24 @@ class TestClaudeClientPrintPromptFromFile:
         )
         assert mock_stream.call_args[0][2] == 600.0
 
+    def test_uses_dangerous_skip_when_allowed_tools_none(self, tmp_path: Path) -> None:
+        """Worker phase (allowed_tools=None) keeps full implementation access.
+
+        --permission-mode dontAsk without an allowlist would deny everything;
+        worker turns need Edit/Write/Bash, so this path uses
+        --dangerously-skip-permissions instead (#1669).
+        """
+        sys, prompt = self._files(tmp_path)
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        client = ClaudeClient(streaming_runner=mock_stream)
+        client.print_prompt_from_file(
+            sys, prompt, "claude-sonnet-4-6", allowed_tools=None
+        )
+        cmd = mock_stream.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--permission-mode" not in cmd
+        assert "--allowedTools" not in cmd
+
     def test_passes_cwd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["out"]))
@@ -3414,6 +3469,20 @@ class TestClaudeClientResumeSession:
         assert "--resume" in cmd
         assert "sess-123" in cmd
         assert "--print" in cmd
+
+    def test_uses_dangerous_skip_when_allowed_tools_none(self, tmp_path: Path) -> None:
+        """Worker phase resume — keeps full implementation access (#1669)."""
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("continue")
+        mock_stream = MagicMock(return_value=iter(["out"]))
+        client = ClaudeClient(streaming_runner=mock_stream)
+        client.resume_session(
+            "sess-123", prompt_file, "claude-sonnet-4-6", allowed_tools=None
+        )
+        cmd = mock_stream.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--permission-mode" not in cmd
+        assert "--allowedTools" not in cmd
 
     def test_raises_on_provider_error_output(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
