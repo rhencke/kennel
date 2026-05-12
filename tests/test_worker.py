@@ -1189,6 +1189,9 @@ class TestWorker:
             order.append("queued_comments")
             return False
 
+        def mark_rescope(*args: object, **kwargs: object) -> None:
+            order.append("rescope")
+
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -1208,13 +1211,16 @@ class TestWorker:
             patch.object(
                 worker, "handle_queued_comments", side_effect=mark_queued_comments
             ),
+            patch.object(worker, "rescope_before_pick", side_effect=mark_rescope),
             patch.object(worker, "handle_ci", side_effect=mark_ci),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        assert order[:3] == ["recover", "queued_comments", "ci"]
+        # Drain queued comments before rescope so synthesis-produced tasks
+        # are visible when rescope rewrites the list (#1689).
+        assert order[:4] == ["recover", "queued_comments", "rescope", "ci"]
 
     def test_run_does_not_switch_model_for_carry_over_session(
         self, tmp_path: Path
@@ -10789,8 +10795,12 @@ class TestRunRescopeIntegration:
             worker.run()
         mock_rescope.assert_called_once_with()
 
-    def test_rescope_called_before_queued_comments(self, tmp_path: Path) -> None:
-        """rescope_before_pick must execute before queued comments drain."""
+    def test_queued_comments_drained_before_rescope(self, tmp_path: Path) -> None:
+        """Queued PR comments must drain before rescope_before_pick (#1689)
+        so synthesis-produced tasks are visible when rescope rewrites the
+        list — otherwise rescope spends an Opus call on a stale list and
+        the human waits minutes for a reply that should arrive in seconds.
+        """
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
@@ -10823,7 +10833,7 @@ class TestRunRescopeIntegration:
             patch.object(worker, "execute_task", return_value=False),
         ):
             worker.run()
-        assert call_order == ["rescope", "handle_queued_comments"]
+        assert call_order == ["handle_queued_comments", "rescope"]
 
 
 class TestEnsurePushed:

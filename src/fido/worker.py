@@ -4434,6 +4434,15 @@ class Worker:
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
             else:
+                # Drain durable PR-comment FIFO before rescope so synthesis-
+                # produced tasks are visible when rescope rewrites the list
+                # (#1689).  Otherwise rescope spends an Opus call on a list
+                # that the queued comment is about to invalidate, and the
+                # human waits minutes for a reply that should arrive in
+                # seconds.  The drain is a single SQLite SELECT when the
+                # queue is empty, so this is cheap on the steady-state path.
+                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
                 self.rescope_before_pick()
                 if self.handle_merge_conflict(
                     ctx.fido_dir,
@@ -4442,8 +4451,6 @@ class Worker:
                     slug,
                     issue_labels=issue_labels,
                 ):
-                    return 1
-                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_ci(
                     ctx.fido_dir,
