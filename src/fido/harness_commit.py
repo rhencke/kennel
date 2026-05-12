@@ -15,12 +15,10 @@ Type definitions live in Rocq-extracted modules — importers should get
 
 import logging
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from fido.infra import ProcessRunner
-from fido.rocq import harness_commit_decision as _hcd_mod
-from fido.rocq import turn_outcome as _to_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -28,6 +26,7 @@ from fido.rocq.commit_result import (
     CommitSkipped,
     CommitSuccess,
 )
+from fido.rocq.harness_commit_decision import GitEnv
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
@@ -54,12 +53,21 @@ class HarnessCommitter:
 
     Dependencies are injected through the constructor so tests can supply
     a fake :class:`~fido.infra.ProcessRunner` without patching
-    :mod:`subprocess`.
+    :mod:`subprocess`, and fake oracle functions without patching the
+    Rocq-extracted modules.
     """
 
-    def __init__(self, work_dir: Path, runner: ProcessRunner) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        runner: ProcessRunner,
+        decision_oracle: Callable[[TurnOutcome, GitEnv], CommitResult],
+        commit_dispatch_oracle: Callable[[TurnOutcome], bool],
+    ) -> None:
         self._work_dir = work_dir
         self._runner = runner
+        self._decision_oracle = decision_oracle
+        self._commit_dispatch_oracle = commit_dispatch_oracle
 
     def _git(
         self,
@@ -113,13 +121,15 @@ class HarnessCommitter:
         commit_output: str = "",
     ) -> None:
         """Assert that the Rocq-proven harness_commit_decision agrees."""
-        env = _hcd_mod.MkGitEnv(
+        from fido.rocq.harness_commit_decision import MkGitEnv
+
+        env = MkGitEnv(
             has_staged=has_staged,
             commit_ok=commit_ok,
             commit_sha=commit_sha,
             commit_output=commit_output,
         )
-        oracle = _hcd_mod.harness_commit_decision(outcome, env)
+        oracle = self._decision_oracle(outcome, env)
         if result != oracle:
             raise AssertionError(
                 f"harness_commit_decision oracle mismatch: "
@@ -130,7 +140,7 @@ class HarnessCommitter:
         self, outcome: TurnOutcome, *, dispatched_to_commit: bool
     ) -> None:
         """Assert that the Rocq-proven outcome_is_commit agrees with our dispatch."""
-        oracle = _to_mod.outcome_is_commit(outcome)
+        oracle = self._commit_dispatch_oracle(outcome)
         if oracle != dispatched_to_commit:
             raise AssertionError(
                 f"outcome_is_commit oracle mismatch: "

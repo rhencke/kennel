@@ -3586,7 +3586,15 @@ class Worker:
                 "task no longer current after webhook turn admission — restarting loop"
             )
             return True
-        harness_committer = HarnessCommitter(self.work_dir, RealProcessRunner())
+        from fido.rocq.harness_commit_decision import harness_commit_decision
+        from fido.rocq.turn_outcome import outcome_is_commit
+
+        harness_committer = HarnessCommitter(
+            self.work_dir,
+            RealProcessRunner(),
+            decision_oracle=harness_commit_decision,
+            commit_dispatch_oracle=outcome_is_commit,
+        )
         session_id, output = provider_run(
             fido_dir,
             agent=self._provider_agent,
