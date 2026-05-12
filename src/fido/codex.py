@@ -47,6 +47,33 @@ _CODEX_CLIENT_INFO = {
 }
 
 
+def _sandbox_acp_policy_for_phase(allowed_tools: str | None) -> dict[str, str]:
+    """Return the ACP-protocol ``sandboxPolicy`` for a turn based on phase.
+
+    Codex's app-server takes a ``sandboxPolicy`` field per ``turn/start``.
+    We use it to apply the same per-phase tool restriction the claude
+    provider gets from ``--allowedTools``: handler / synthesis / rescope /
+    voice / status phases pass an explicit allowlist (any non-None value)
+    and run with read-only sandbox so they cannot Edit/Write/Bash; worker
+    phase passes ``allowed_tools=None`` and keeps full implementation
+    access (#1672).
+    """
+    if allowed_tools is None:
+        return {"type": "dangerFullAccess"}
+    return {"type": "readOnly"}
+
+
+def _sandbox_cli_value_for_phase(allowed_tools: str | None) -> str:
+    """Return the ``--sandbox`` CLI value for a one-shot codex invocation.
+
+    Mirrors :func:`_sandbox_acp_policy_for_phase` for the non-persistent
+    exec paths (``run_codex_exec`` and ``run_codex_exec_resume``).
+    """
+    if allowed_tools is None:
+        return "danger-full-access"
+    return "read-only"
+
+
 class CodexCLIError(RuntimeError):
     """Raised when the Codex CLI process exits unsuccessfully."""
 
@@ -743,24 +770,40 @@ class CodexSession(OwnedSession):
         content: str,
         *,
         model: ProviderModel | None = None,
-        allowed_tools: str | None = None,  # see comment below
+        allowed_tools: str | None = None,
         system_prompt: str | None = None,
     ) -> str:
         # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
-        # #1413), but Codex's runtime has no equivalent of ``--allowedTools``
-        # so the kwarg is informational here.  Default differs from the
-        # protocol's READ_ONLY default because there's nothing to enforce.
-        del allowed_tools
+        # #1413).  Codex has no per-tool primitive but it does have
+        # per-turn sandbox modes — we translate the protocol's allowlist
+        # into a sandbox policy: any non-None value means "handler /
+        # synthesis / rescope / voice / status" and gets read-only;
+        # ``None`` is "worker phase" and keeps full implementation access
+        # (#1672).
+        sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
         with self:
             if model is not None:
                 self.switch_model(model)
-            self.send(_combine_prompt(content, self._base_system_prompt, system_prompt))
+            self.send(
+                _combine_prompt(content, self._base_system_prompt, system_prompt),
+                sandbox_policy=sandbox_policy,
+            )
             return self.consume_until_result()
 
-    def send(self, content: str) -> None:
+    def send(
+        self,
+        content: str,
+        *,
+        sandbox_policy: dict[str, str] | None = None,
+    ) -> None:
         thread_id = self._require_thread_id()
         with self._state_lock:
             self._last_turn_cancelled = False
+        # Default to full-access when no policy is provided so direct
+        # ``send`` callers (rare; ``prompt`` is the normal entry point)
+        # behave the same as today.
+        if sandbox_policy is None:
+            sandbox_policy = {"type": "dangerFullAccess"}
         result = self._client.request(
             "turn/start",
             {
@@ -772,7 +815,7 @@ class CodexSession(OwnedSession):
                 "effort": self._model.efforts[0] if self._model.efforts else None,
                 "cwd": str(self._work_dir),
                 "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "sandboxPolicy": sandbox_policy,
             },
         )
         turn = result.get("turn") if isinstance(result, dict) else None
@@ -1081,8 +1124,14 @@ def run_codex_exec(
     timeout: int = 30,
     cwd: Path | str = ".",
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    allowed_tools: str | None = None,
 ) -> str:
-    """Run one non-persistent Codex exec turn and return raw JSONL output."""
+    """Run one non-persistent Codex exec turn and return raw JSONL output.
+
+    ``allowed_tools`` selects the per-phase sandbox: ``None`` (worker phase)
+    runs with ``danger-full-access``; any non-None value (handler /
+    synthesis / rescope / voice / status) runs with ``read-only`` (#1672).
+    """
     work_dir = Path(cwd).resolve()
     completed = _codex(
         "exec",
@@ -1090,7 +1139,7 @@ def run_codex_exec(
         "--model",
         model_name(model),
         "--sandbox",
-        "danger-full-access",
+        _sandbox_cli_value_for_phase(allowed_tools),
         "--ask-for-approval",
         "never",
         "--skip-git-repo-check",
@@ -1116,8 +1165,13 @@ def run_codex_exec_resume(
     timeout: int = 300,
     cwd: Path | str = ".",
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    allowed_tools: str | None = None,
 ) -> str:
-    """Run one non-persistent Codex exec resume turn and return raw JSONL output."""
+    """Run one non-persistent Codex exec resume turn and return raw JSONL output.
+
+    ``allowed_tools`` selects the per-phase sandbox — see
+    :func:`run_codex_exec` for the mapping.
+    """
     work_dir = Path(cwd).resolve()
     completed = _codex(
         "exec",
@@ -1125,7 +1179,7 @@ def run_codex_exec_resume(
         "--model",
         model_name(model),
         "--sandbox",
-        "danger-full-access",
+        _sandbox_cli_value_for_phase(allowed_tools),
         "--ask-for-approval",
         "never",
         "--skip-git-repo-check",
@@ -1213,9 +1267,9 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
         *,
-        allowed_tools: str | None = None,  # informational; Codex has no equivalent
+        allowed_tools: str | None = None,
     ) -> str:
-        del idle_timeout, allowed_tools
+        del idle_timeout
         prompt = _combine_prompt(prompt_file.read_text(), system_file.read_text(), None)
         return run_codex_exec(
             prompt,
@@ -1223,6 +1277,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             timeout=timeout,
             cwd=cwd,
             runner=self._runner,
+            allowed_tools=allowed_tools,
         )
 
     def resume_session(
@@ -1234,9 +1289,9 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         idle_timeout: float = 1800.0,
         cwd: Path | str = ".",
         *,
-        allowed_tools: str | None = None,  # informational; Codex has no equivalent
+        allowed_tools: str | None = None,
     ) -> str:
-        del idle_timeout, allowed_tools
+        del idle_timeout
         return run_codex_exec_resume(
             session_id,
             prompt_file.read_text(),
@@ -1244,6 +1299,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             timeout=timeout,
             cwd=cwd,
             runner=self._runner,
+            allowed_tools=allowed_tools,
         )
 
     def extract_session_id(self, output: str) -> str:
