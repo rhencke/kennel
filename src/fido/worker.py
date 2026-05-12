@@ -4332,8 +4332,12 @@ class Worker:
         :class:`IssueSnapshot` to :class:`FidoState`.  Best-effort —
         a missing or partially-written state file must never break the
         worker iteration return path.
+
+        Construction lives here (not in :mod:`fido.appstate`) because
+        Worker owns the State and Tasks files this method scrapes.
+        ``IssueSnapshot`` itself is just a frozen dataclass shape.
         """
-        from fido.appstate import make_issue_snapshot
+        from fido.appstate import IssueSnapshot
 
         if self._registry is None or not self._repo_name:
             return
@@ -4345,8 +4349,48 @@ class Worker:
             task_list = self._tasks.list()
         except Exception:  # noqa: BLE001  # missing/corrupt tasks.json — fall back to []
             task_list = []
-        snapshot = make_issue_snapshot(state_data, task_list)
-        self._registry.publish_issue_snapshot(self._repo_name, snapshot)
+
+        pending = sum(1 for t in task_list if t.get("status") == "pending")
+        completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+        current_task: str | None = None
+        for t in task_list:
+            if t.get("status") == "in_progress":
+                current_task = t.get("title")
+                break
+        if current_task is None:
+            for t in task_list:
+                if t.get("status") == "pending":
+                    current_task = t.get("title")
+                    break
+
+        non_completed = [t for t in task_list if t.get("status") != "completed"]
+        task_number: int | None = None
+        task_total: int | None = None
+        if non_completed:
+            task_total = len(non_completed)
+            for idx, t in enumerate(non_completed, start=1):
+                if t.get("status") == "in_progress":
+                    task_number = idx
+                    break
+            if task_number is None:
+                task_number = 1
+
+        self._registry.publish_issue_snapshot(
+            self._repo_name,
+            IssueSnapshot(
+                issue=state_data.get("issue"),
+                issue_title=state_data.get("issue_title"),
+                issue_started_at=state_data.get("issue_started_at"),
+                pr_number=state_data.get("pr_number"),
+                pr_title=state_data.get("pr_title"),
+                pending_task_count=pending,
+                completed_task_count=completed,
+                current_task=current_task,
+                task_number=task_number,
+                task_total=task_total,
+            ),
+        )
 
     def _run_iteration(self, ctx: WorkerContext) -> int:
         """Body of :meth:`run` — guaranteed to run between the pre- and

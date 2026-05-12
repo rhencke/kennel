@@ -7,6 +7,7 @@ from frozendict import frozendict
 
 from fido.appstate import (
     FidoState,
+    GitHubLimit,
     ProviderSnapshot,
     RepoState,
     WorkerActivity,
@@ -17,7 +18,6 @@ from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
-from fido.rate_limit import GitHubLimit
 from fido.session_agent import SessionBackedAgent
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)

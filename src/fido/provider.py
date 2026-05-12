@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
 
 import fido.rocq.transition as fsm
+from fido.appstate import ProviderLimitWindow
 
 log = logging.getLogger(__name__)
 
@@ -165,24 +166,6 @@ def coerce_provider_model(model: ProviderModel | str) -> ProviderModel:
 def model_name(model: ProviderModel | str) -> str:
     """Return the provider-native model id for *model*."""
     return coerce_provider_model(model).model
-
-
-@dataclass(frozen=True)
-class ProviderLimitWindow:
-    """One provider-specific limit window normalized for shared policy/UI use."""
-
-    name: str
-    used: int | None = None
-    limit: int | None = None
-    resets_at: datetime | None = None
-    unit: str | None = None
-
-    @property
-    def pressure(self) -> float | None:
-        """Return ``used / limit`` when both sides are known and limit is positive."""
-        if self.used is None or self.limit is None or self.limit <= 0:
-            return None
-        return self.used / self.limit
 
 
 @dataclass(frozen=True)

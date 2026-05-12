@@ -17,6 +17,7 @@ from frozendict import frozendict
 
 from fido.appstate import (
     FidoState,
+    GitHubLimit,
     ProviderSnapshot,
     RepoState,
     WorkerActivity,
@@ -25,7 +26,6 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.claude import ClaudeSession
 from fido.provider import SnapshotPublisher
-from fido.rate_limit import GitHubLimit
 from fido.status import FidoStatus, RepoStatus, format_status
 
 _REPO = "owner/repo"

@@ -11,6 +11,7 @@ from frozendict import frozendict
 
 from fido.appstate import (
     FidoState,
+    GitHubLimit,
     IssueSnapshot,
     ProviderSnapshot,
     ThreadSnapshot,
@@ -19,7 +20,6 @@ from fido.appstate import (
 from fido.atomic import create_atomic
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
-from fido.rate_limit import GitHubLimit
 from fido.registry import (
     WorkerRegistry,
     _make_thread,

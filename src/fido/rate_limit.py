@@ -15,13 +15,12 @@ snapshot stays put until the next successful refresh.
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from fido.appstate import GitHubLimit, ProviderLimitWindow
 from fido.atomic import AtomicUpdater
 from fido.github import GitHub
-from fido.provider import ProviderLimitWindow
 
 if TYPE_CHECKING:
     from fido.appstate import FidoState
@@ -29,26 +28,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _REFRESH_INTERVAL: float = 60.0
-
-_ZERO_WINDOW_REST = ProviderLimitWindow(name="rest")
-_ZERO_WINDOW_GRAPHQL = ProviderLimitWindow(name="graphql")
-
-
-@dataclass(frozen=True)
-class GitHubLimit:
-    """Normalized GitHub platform rate-limit state (REST + GraphQL windows).
-
-    The zero value (``GitHubLimit()``) is the initial sentinel — both
-    windows have ``used=None``, meaning the monitor has not yet completed
-    a successful poll.  After the first successful :meth:`RateLimitMonitor.refresh`
-    the ``used`` fields will be integers (possibly ``0``).
-
-    Stored at :attr:`~fido.registry.FidoState.github_limits`; updated
-    atomically via :class:`~fido.atomic.AtomicUpdater`.
-    """
-
-    rest: ProviderLimitWindow = _ZERO_WINDOW_REST
-    graphql: ProviderLimitWindow = _ZERO_WINDOW_GRAPHQL
 
 
 class RateLimitMonitor:

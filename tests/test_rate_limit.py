@@ -7,12 +7,10 @@ from unittest.mock import MagicMock
 
 from frozendict import frozendict
 
-from fido.appstate import FidoState
+from fido.appstate import FidoState, GitHubLimit, ProviderLimitWindow
 from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
-from fido.provider import ProviderLimitWindow
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
-    GitHubLimit,
     RateLimitMonitor,
     _parse_window,  # noqa: PLC2701
 )

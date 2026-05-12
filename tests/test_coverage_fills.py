@@ -18,10 +18,9 @@ import pytest
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState
+from fido.appstate import FidoState, GitHubLimit
 from fido.atomic import create_atomic
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import GitHubLimit
 from fido.registry import WorkerRegistry
 from fido.tasks import (
     _merge_thread_lineage,

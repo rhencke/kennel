@@ -1,20 +1,54 @@
 """Coordination snapshot types for FidoState.
 
-All frozen dataclasses that compose :class:`FidoState` — the atomically-swapped
-coordination snapshot shared between :class:`~fido.registry.WorkerRegistry`,
-the composition root, and the status serialisation path.  Extracted from
-``registry.py`` so provider and session modules can import :class:`FidoState`
-directly from this leaf module, with no back-reference to the registry.
+Leaf module: only frozen dataclass definitions and their pure-data helpers.
+Everyone else imports from here — :mod:`fido.appstate` itself imports
+nothing from the rest of the project, so adding a snapshot field never
+risks an import cycle.
 """
 
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 from frozendict import frozendict
 
-from fido.rate_limit import GitHubLimit
+
+@dataclass(frozen=True)
+class ProviderLimitWindow:
+    """One provider-specific limit window normalized for shared policy/UI use."""
+
+    name: str
+    used: int | None = None
+    limit: int | None = None
+    resets_at: datetime | None = None
+    unit: str | None = None
+
+    @property
+    def pressure(self) -> float | None:
+        """Return ``used / limit`` when both sides are known and limit is positive."""
+        if self.used is None or self.limit is None or self.limit <= 0:
+            return None
+        return self.used / self.limit
+
+
+_ZERO_WINDOW_REST = ProviderLimitWindow(name="rest")
+_ZERO_WINDOW_GRAPHQL = ProviderLimitWindow(name="graphql")
+
+
+@dataclass(frozen=True)
+class GitHubLimit:
+    """Normalized GitHub platform rate-limit state (REST + GraphQL windows).
+
+    The zero value (``GitHubLimit()``) is the initial sentinel — both
+    windows have ``used=None``, meaning the monitor has not yet completed
+    a successful poll.  After the first successful refresh the ``used``
+    fields will be integers (possibly ``0``).
+
+    Stored at :attr:`FidoState.github_limits`; updated atomically via
+    :class:`~fido.atomic.AtomicUpdater`.
+    """
+
+    rest: ProviderLimitWindow = _ZERO_WINDOW_REST
+    graphql: ProviderLimitWindow = _ZERO_WINDOW_GRAPHQL
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,60 +178,6 @@ class IssueSnapshot:
     current_task: str | None
     task_number: int | None
     task_total: int | None
-
-
-def make_issue_snapshot(
-    state: Mapping[str, Any], task_list: Iterable[Mapping[str, Any]]
-) -> "IssueSnapshot":
-    """Build an :class:`IssueSnapshot` from a parsed state.json + tasks list.
-
-    Pure data transform: takes the raw state dict and the task records and
-    computes the same fields the legacy disk-reading
-    ``_collect_fido_state`` produced.  Workers call this once per
-    iteration and publish the result to :class:`FidoState` via
-    :meth:`~fido.registry.WorkerRegistry.publish_issue_snapshot`; the
-    SCADA status path then reads the snapshot directly instead of
-    re-reading state.json and tasks.json on every request (#1690).
-    """
-    tasks = list(task_list)
-    pending = sum(1 for t in tasks if t.get("status") == "pending")
-    completed = sum(1 for t in tasks if t.get("status") == "completed")
-
-    current_task: str | None = None
-    for t in tasks:
-        if t.get("status") == "in_progress":
-            current_task = t.get("title")
-            break
-    if current_task is None:
-        for t in tasks:
-            if t.get("status") == "pending":
-                current_task = t.get("title")
-                break
-
-    non_completed = [t for t in tasks if t.get("status") != "completed"]
-    task_number: int | None = None
-    task_total: int | None = None
-    if non_completed:
-        task_total = len(non_completed)
-        for idx, t in enumerate(non_completed, start=1):
-            if t.get("status") == "in_progress":
-                task_number = idx
-                break
-        if task_number is None:
-            task_number = 1
-
-    return IssueSnapshot(
-        issue=state.get("issue"),
-        issue_title=state.get("issue_title"),
-        issue_started_at=state.get("issue_started_at"),
-        pr_number=state.get("pr_number"),
-        pr_title=state.get("pr_title"),
-        pending_task_count=pending,
-        completed_task_count=completed,
-        current_task=current_task,
-        task_number=task_number,
-        task_total=task_total,
-    )
 
 
 @dataclass(frozen=True, slots=True)

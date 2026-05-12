@@ -803,9 +803,8 @@ class TestWorker:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState
+        from fido.appstate import FidoState, GitHubLimit
         from fido.atomic import create_atomic
-        from fido.rate_limit import GitHubLimit
         from fido.registry import WorkerRegistry
 
         _, updater = create_atomic(
@@ -1298,6 +1297,65 @@ class TestWorker:
         worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
         snapshot = registry.publish_issue_snapshot.call_args.args[1]
         assert snapshot.pending_task_count == 0
+
+    def _publish_with_tasks(
+        self, tmp_path: Path, tasks_data: list[dict[str, str]]
+    ) -> object:
+        """Helper for snapshot-projection tests: write tasks_data, call
+        Worker._publish_issue_snapshot, return the published snapshot."""
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        (fido_dir / "tasks.json").write_text(json.dumps(tasks_data))
+        registry = MagicMock(spec=ActivityReporter)
+        worker = Worker(
+            tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
+        )
+        worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
+        return registry.publish_issue_snapshot.call_args.args[1]
+
+    def test_publish_issue_snapshot_counts_pending_and_completed(
+        self, tmp_path: Path
+    ) -> None:
+        snapshot = self._publish_with_tasks(
+            tmp_path,
+            [
+                {"id": "1", "title": "a", "type": "spec", "status": "pending"},
+                {"id": "2", "title": "b", "type": "spec", "status": "pending"},
+                {"id": "3", "title": "c", "type": "spec", "status": "completed"},
+                {"id": "4", "title": "d", "type": "spec", "status": "in_progress"},
+            ],
+        )
+        assert snapshot.pending_task_count == 2
+        assert snapshot.completed_task_count == 1
+
+    def test_publish_issue_snapshot_current_task_falls_back_to_first_pending(
+        self, tmp_path: Path
+    ) -> None:
+        snapshot = self._publish_with_tasks(
+            tmp_path,
+            [
+                {"id": "1", "title": "done", "type": "spec", "status": "completed"},
+                {"id": "2", "title": "do this", "type": "spec", "status": "pending"},
+                {"id": "3", "title": "then that", "type": "spec", "status": "pending"},
+            ],
+        )
+        assert snapshot.current_task == "do this"
+        assert snapshot.task_number == 1
+        assert snapshot.task_total == 2
+
+    def test_publish_issue_snapshot_task_number_and_total_none_when_all_completed(
+        self, tmp_path: Path
+    ) -> None:
+        snapshot = self._publish_with_tasks(
+            tmp_path,
+            [
+                {"id": "1", "title": "a", "type": "spec", "status": "completed"},
+                {"id": "2", "title": "b", "type": "spec", "status": "completed"},
+            ],
+        )
+        assert snapshot.current_task is None
+        assert snapshot.task_number is None
+        assert snapshot.task_total is None
 
     def test_first_iteration_sweep_runs_for_idle_repo_with_no_issue(
         self, tmp_path: Path

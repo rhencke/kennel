@@ -23,7 +23,12 @@ import requests
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState, IssueSnapshot
+from fido.appstate import (
+    FidoState,
+    GitHubLimit,
+    IssueSnapshot,
+    ProviderLimitWindow,
+)
 from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -49,9 +54,8 @@ from fido.infra import (
     ProcessRunner,
     real_infra,
 )
-from fido.provider import ProviderLimitWindow
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import GitHubLimit, RateLimitMonitor
+from fido.rate_limit import RateLimitMonitor
 from fido.registry import (
     WebhookActivityHandle,
     WorkerRegistry,

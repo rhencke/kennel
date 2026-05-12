@@ -18,6 +18,17 @@ import pytest
 from frozendict import frozendict
 
 from fido import provider
+from fido.appstate import (
+    FidoState,
+    GitHubLimit,
+    IssueSnapshot,
+    ProviderLimitWindow,
+    ProviderSnapshot,
+    RepoState,
+    WebhookActivity,
+    WorkerActivity,
+    WorkerCrash,
+)
 from fido.claude import ClaudeClient
 from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
@@ -27,17 +38,7 @@ from fido.events import (
     WebhookIngressOracle,
 )
 from fido.infra import Infra
-from fido.provider import ProviderID, ProviderLimitWindow
-from fido.rate_limit import GitHubLimit
-from fido.registry import (
-    FidoState,
-    IssueSnapshot,
-    ProviderSnapshot,
-    RepoState,
-    WebhookActivity,
-    WorkerActivity,
-    WorkerCrash,
-)
+from fido.provider import ProviderID
 from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
 from fido.store import FidoStore
 from fido.tasks import Tasks
