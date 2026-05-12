@@ -2,33 +2,24 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from fido.main import main
 
 
 class TestMain:
-    def test_no_args_dispatches_to_server(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_args_dispatches_to_server(self) -> None:
         mock_run = MagicMock()
-        monkeypatch.setattr("fido.server.run", mock_run)
-        main([])
+        main([], _server_run=mock_run)
 
         mock_run.assert_called_once_with()
 
-    def test_server_args_dispatches_to_server(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_server_args_dispatches_to_server(self) -> None:
         mock_run = MagicMock()
-        monkeypatch.setattr("fido.server.run", mock_run)
-        main(["--port", "9000"])
+        main(["--port", "9000"], _server_run=mock_run)
 
         mock_run.assert_called_once_with()
 
-    def test_argv_none_uses_server_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_argv_none_uses_server_path(self) -> None:
         mock_run = MagicMock()
-        monkeypatch.setattr("fido.server.run", mock_run)
-        main()
+        main(_server_run=mock_run)
 
         mock_run.assert_called_once_with()

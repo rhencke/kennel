@@ -1,14 +1,22 @@
-import sys
-from unittest.mock import MagicMock
+"""Tests for fido.__main__ — the ``python -m fido`` entry point."""
 
-import pytest
+from pathlib import Path
 
 
-def test_main_calls_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    mock_main = MagicMock()
-    monkeypatch.setattr("fido.main.main", mock_main)
-    # Clear module cache so the import re-executes the module body.
-    monkeypatch.delitem(sys.modules, "fido.__main__", raising=False)
-    import fido.__main__  # noqa: F401 — importing executes main()
+def test_main_module_calls_main() -> None:
+    """``python -m fido`` executes ``main()`` from ``fido.main``.
 
-    mock_main.assert_called_once()
+    The guard (``if __name__ == "__main__"``) prevents ``main()`` from
+    firing on import, so this test can safely import the module to cover
+    line 1 and then verify the structural contract via source-text assertion.
+    """
+    import fido.__main__  # noqa: F401 — import covers line 1; guard prevents server start
+    from fido.main import main
+
+    assert fido.__main__.main is main  # right symbol was imported
+
+    source = Path(__file__).resolve().parent.parent / "src" / "fido" / "__main__.py"
+    text = source.read_text()
+    assert "from fido.main import main" in text
+    assert 'if __name__ == "__main__":' in text
+    assert "main()" in text

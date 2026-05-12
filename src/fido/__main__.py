@@ -1,3 +1,4 @@
 from fido.main import main
 
-main()
+if __name__ == "__main__":  # pragma: no cover
+    main()

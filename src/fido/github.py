@@ -84,6 +84,14 @@ _RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 class _TimeoutSession(_requests.Session):
     """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
 
+    def __init__(
+        self,
+        *,
+        _base_request: Callable[..., _requests.Response] | None = None,
+    ) -> None:
+        super().__init__()
+        self._base_request = _base_request or super().request
+
     def request(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         method: str | bytes,
@@ -91,7 +99,7 @@ class _TimeoutSession(_requests.Session):
         **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to requests.Session.request
     ) -> _requests.Response:  # type: ignore[override]
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
-        return super().request(method, url, **kwargs)
+        return self._base_request(method, url, **kwargs)
 
 
 class GraphQLError(Exception):

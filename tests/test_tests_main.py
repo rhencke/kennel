@@ -1,6 +1,6 @@
 """Tests for the project test entrypoint."""
 
-import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,9 +16,8 @@ def test_ensure_rocq_python_artifacts_skips_prepared_artifacts(
 ) -> None:
     monkeypatch.setenv("FIDO_ROCQ_PYTEST_ARTIFACTS", "prepared")
     mock_run = MagicMock()
-    monkeypatch.setattr("subprocess.run", mock_run)
 
-    ensure_rocq_python_artifacts()
+    ensure_rocq_python_artifacts(_run=mock_run)
 
     mock_run.assert_not_called()
 
@@ -26,13 +25,10 @@ def test_ensure_rocq_python_artifacts_skips_prepared_artifacts(
 def test_ensure_rocq_python_artifacts_runs_export_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pathlib import Path
-
     monkeypatch.delenv("FIDO_ROCQ_PYTEST_ARTIFACTS", raising=False)
     mock_run = MagicMock()
-    monkeypatch.setattr("subprocess.run", mock_run)
 
-    ensure_rocq_python_artifacts()
+    ensure_rocq_python_artifacts(_run=mock_run)
 
     ((args,), kwargs) = mock_run.call_args
     assert args[0].endswith("rocq-python-extraction/export_pytest_generated.sh")
@@ -56,8 +52,6 @@ def test_module_executes_main_under_dunder_main() -> None:
     file text and assert the guard is present so it can never silently
     rot again.
     """
-    from pathlib import Path
-
     source = Path(__file__).resolve().parent.parent / "src" / "fido" / "tests_main.py"
     text = source.read_text()
     assert 'if __name__ == "__main__":' in text, (
@@ -70,16 +64,11 @@ def test_module_executes_main_under_dunder_main() -> None:
     )
 
 
-def test_main_delegates_to_pytest_with_repo_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["tests", "-q"])
+def test_main_delegates_to_pytest_with_repo_defaults() -> None:
     mock_ensure = MagicMock()
-    monkeypatch.setattr("fido.tests_main.ensure_rocq_python_artifacts", mock_ensure)
     mock_pytest_main = MagicMock(return_value=0)
-    monkeypatch.setattr("pytest.main", mock_pytest_main)
 
-    result = main()
+    result = main(["-q"], _ensure=mock_ensure, _pytest_main=mock_pytest_main)
 
     assert result == 0
     mock_ensure.assert_called_once_with()
@@ -99,21 +88,16 @@ def test_main_delegates_to_pytest_with_repo_defaults(
     )
 
 
-def test_main_respects_explicit_n_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_main_respects_explicit_n_flag() -> None:
     """When the caller passes ``-n``, don't inject the default.
 
     Lets ``./fido tests -n 1`` (single worker, max safety) and
     ``./fido tests -n 4`` (full parallelism, when the box has headroom)
     both work without fighting the default.
     """
-    monkeypatch.setattr(sys, "argv", ["tests", "-n", "1", "-q"])
-    monkeypatch.setattr("fido.tests_main.ensure_rocq_python_artifacts", MagicMock())
     mock_pytest_main = MagicMock(return_value=0)
-    monkeypatch.setattr("pytest.main", mock_pytest_main)
 
-    main()
+    main(["-n", "1", "-q"], _ensure=MagicMock(), _pytest_main=mock_pytest_main)
 
     args = mock_pytest_main.call_args[0][0]
     # exactly one ``-n`` should be present — ours, not a duplicate
