@@ -97,6 +97,37 @@ def _is_cancel_sentinel(text: str) -> bool:
     )
 
 
+# #1216: Copilot CLI emits "Info: ...", "Warning: ...", "Error: ..." as
+# agent_message_chunk events when retrying API calls.  These get prepended to
+# the real assistant reply text.  Strip them before the result leaves the
+# session boundary.  The cancel sentinel is excluded from stripping so
+# _is_cancel_sentinel still fires correctly when stop_reason is not set.
+_COPILOT_CHATTER_LINE_RE = re.compile(
+    r"(?:Info|Warning|Error): (?!Operation cancelled by user)[^\n]*\n"
+)
+
+
+def _strip_copilot_chatter(text: str) -> str:
+    """Strip Copilot CLI diagnostic prefix lines from assembled reply text.
+
+    The CLI emits ``Info:``, ``Warning:``, and ``Error:`` status lines as
+    ``agent_message_chunk`` events that are concatenated before the real
+    assistant reply.  Strip any leading run of such newline-terminated lines
+    so they do not appear in GitHub comment bodies.
+
+    The cancel sentinel ``"Info: Operation cancelled by user"`` is preserved
+    so :func:`_is_cancel_sentinel` continues to fire when the stop_reason
+    is not ``"cancelled"``.
+    """
+    result = text
+    while True:
+        m = _COPILOT_CHATTER_LINE_RE.match(result)
+        if m is None:
+            break
+        result = result[m.end() :]
+    return result
+
+
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for line in output.splitlines():
@@ -1185,6 +1216,9 @@ class CopilotCLISession(OwnedSession):
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)
+        # #1216: strip diagnostic chatter ("Info: ...", "Warning: ...",
+        # "Error: ...") that the CLI prepends when retrying API calls.
+        result = _strip_copilot_chatter(result)
         cancelled = stop_reason == "cancelled" or _is_cancel_sentinel(result)
         self._last_turn_cancelled = cancelled
         _log_for_repo(

@@ -32,6 +32,7 @@ from fido.copilotcli import (
     _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
+    _strip_copilot_chatter,
     _TerminalManager,
     _tool_input_preview,
     extract_result_text,
@@ -361,6 +362,68 @@ class TestHelpers:
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         client._run_cli_prompt("body", model="gpt-5", timeout=1)
         assert "gpt-5" in runner.call_args.args[0]
+
+
+class TestStripCopilotChatter:
+    def test_strips_double_info_prefix(self) -> None:
+        # Regression for #1216: two retry-info lines before the real reply.
+        text = (
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "You're right, I missed those details on the first pass."
+        )
+        assert (
+            _strip_copilot_chatter(text)
+            == "You're right, I missed those details on the first pass."
+        )
+
+    def test_strips_warning_and_error_prefix_lines(self) -> None:
+        text = "Warning: something degraded\nError: retry failed\nReal reply here."
+        assert _strip_copilot_chatter(text) == "Real reply here."
+
+    def test_clean_text_passes_through_unchanged(self) -> None:
+        text = "You're right, no chatter here."
+        assert _strip_copilot_chatter(text) == text
+
+    def test_info_in_middle_not_stripped(self) -> None:
+        # Only leading chatter is stripped; Info: that appears after real
+        # content is part of the assistant reply and must be preserved.
+        text = "Real content\nInfo: some status\nMore content"
+        assert _strip_copilot_chatter(text) == text
+
+    def test_empty_string_passes_through(self) -> None:
+        assert _strip_copilot_chatter("") == ""
+
+    def test_chatter_only_returns_empty(self) -> None:
+        text = "Info: Request failed due to a transient API error. Retrying...\n"
+        assert _strip_copilot_chatter(text) == ""
+
+    def test_cancel_sentinel_not_stripped(self) -> None:
+        # The cancel sentinel must survive stripping so _is_cancel_sentinel
+        # still fires when stop_reason is not "cancelled" (#666).
+        text = "Info: Operation cancelled by user\n"
+        assert _strip_copilot_chatter(text) == text
+
+    def test_session_prompt_strips_chatter_prefix(self, tmp_path: Path) -> None:
+        # Integration: chatter emitted by FakeRuntime is stripped before
+        # _prompt_locked returns the result to the caller.
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        runtime.next_prompt = (
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "You're right, the fix is straightforward.",
+            "end_turn",
+            "sess-next",
+        )
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        result = session.prompt("do the thing")
+        assert result == "You're right, the fix is straightforward."
 
 
 class TestTerminalManager:
