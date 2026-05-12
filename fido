@@ -638,6 +638,7 @@ require_host_chat_tools() {
 
 run_host_chat() {
   local persona_file=$repo_root/sub/persona.md
+  local life_file=$repo_root/sub/life.md
   local persona_text
   local chat_args=()
   require_host_chat_tools || return
@@ -646,6 +647,9 @@ run_host_chat() {
     return 1
   fi
   persona_text=$(<"$persona_file")
+  if [ -f "$life_file" ]; then
+    persona_text="$persona_text"$'\n\n---\n\n'"$(<"$life_file")"
+  fi
   if [ "$#" -eq 0 ]; then
     chat_args=(/remote-control)
   else
