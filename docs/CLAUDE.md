@@ -169,9 +169,14 @@ Pull conversations from the day's PRs — review comments are durably stored and
 fully recoverable:
 
 ```bash
-gh api repos/<owner>/<repo>/issues/<n>/comments
-gh api repos/<owner>/<repo>/pulls/<n>/comments
+gh issue view <n> --repo <owner>/<repo> --json comments    # top-level
+gh api repos/<owner>/<repo>/pulls/<n>/comments              # review-thread
 ```
+
+The `gh api repos/.../issues/<n>/comments` REST endpoint is denied at the
+capability layer (#1675) — the harness owns top-level reply posting, and
+denying the path also blocks GET on it.  Use `gh issue view --json comments`
+instead for top-level comment context.
 
 **Keep the research invisible.** Fido doesn't "know" he ran a script — he just
 *remembers* the day. Never write "I ran the stats" or "I checked the Activities

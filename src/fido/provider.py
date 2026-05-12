@@ -292,6 +292,15 @@ GLOBAL_DISALLOWED_TOOLS = (
     " Bash(git reset *)"
     " Bash(git checkout *)"
     " Bash(./fido task *)"
+    # Top-level PR / issue comment posting.  The harness owns reply
+    # delivery via the synthesis path (`_handle_queued_comment`); the
+    # model must not reach for `gh api .../issues/<n>/comments` to post
+    # acknowledgements directly.  `sub/task.md` line 104 already says
+    # "Never post a top-level PR comment" but the model has been
+    # observed doing it anyway via the unrestricted Bash tool — capability-
+    # layer enforcement (#1675) closes the gap that prompt rules can't.
+    # Read paths still work via `gh issue view`/`gh pr view --comments`.
+    " Bash(gh api *issues/*/comments*)"
     " Agent"
     " Skill"
     " TaskCreate TaskUpdate TaskList TodoWrite TodoRead"
