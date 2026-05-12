@@ -767,6 +767,168 @@ def test_claim_next_pr_comment_marks_oldest_in_progress(tmp_path: Path) -> None:
     assert store.pending_pr_comments(repo="owner/repo") == [newer]
 
 
+def test_has_other_open_pr_comments_false_when_only_excluded(
+    tmp_path: Path,
+) -> None:
+    """Solo arrival: only the excluded comment is queued → no other open work."""
+    store = FidoStore(tmp_path)
+    only = store.enqueue_pr_comment(
+        delivery_id="delivery-only",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=500,
+        author="rob",
+        is_bot=False,
+        body="solo",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo", exclude_comment_id=only.comment_id
+        )
+        is False
+    )
+
+
+def test_has_other_open_pr_comments_true_when_other_pending(tmp_path: Path) -> None:
+    """Batch arrival: another pending entry for same repo → True."""
+    store = FidoStore(tmp_path)
+    store.enqueue_pr_comment(
+        delivery_id="delivery-sibling",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=600,
+        author="rob",
+        is_bot=False,
+        body="sibling",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    just_arrived = store.enqueue_pr_comment(
+        delivery_id="delivery-just-arrived",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=601,
+        author="rob",
+        is_bot=False,
+        body="just arrived",
+        github_created_at="2026-04-30T10:00:01Z",
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo", exclude_comment_id=just_arrived.comment_id
+        )
+        is True
+    )
+
+
+def test_has_other_open_pr_comments_true_when_other_in_progress(
+    tmp_path: Path,
+) -> None:
+    """Worker is already processing another comment → True."""
+    store = FidoStore(tmp_path)
+    sibling = store.enqueue_pr_comment(
+        delivery_id="delivery-claimed",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=700,
+        author="rob",
+        is_bot=False,
+        body="being processed",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+    just_arrived = store.enqueue_pr_comment(
+        delivery_id="delivery-arrived",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=701,
+        author="rob",
+        is_bot=False,
+        body="just arrived",
+        github_created_at="2026-04-30T10:00:01Z",
+    )
+    del sibling
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo", exclude_comment_id=just_arrived.comment_id
+        )
+        is True
+    )
+
+
+def test_has_other_open_pr_comments_ignores_completed(tmp_path: Path) -> None:
+    """A completed sibling does not count as 'other open'."""
+    store = FidoStore(tmp_path)
+    completed = store.enqueue_pr_comment(
+        delivery_id="delivery-done",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=800,
+        author="rob",
+        is_bot=False,
+        body="already done",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+    store.complete_pr_comment(completed.queue_id)
+    just_arrived = store.enqueue_pr_comment(
+        delivery_id="delivery-arrived-after",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=801,
+        author="rob",
+        is_bot=False,
+        body="just arrived",
+        github_created_at="2026-04-30T10:00:01Z",
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo", exclude_comment_id=just_arrived.comment_id
+        )
+        is False
+    )
+
+
+def test_has_other_open_pr_comments_scopes_by_repo(tmp_path: Path) -> None:
+    """A pending comment in a different repo does not count."""
+    store = FidoStore(tmp_path)
+    store.enqueue_pr_comment(
+        delivery_id="delivery-other-repo",
+        repo="owner/other-repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=900,
+        author="rob",
+        is_bot=False,
+        body="different repo",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    just_arrived = store.enqueue_pr_comment(
+        delivery_id="delivery-this-repo",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=901,
+        author="rob",
+        is_bot=False,
+        body="this repo",
+        github_created_at="2026-04-30T10:00:01Z",
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo", exclude_comment_id=just_arrived.comment_id
+        )
+        is False
+    )
+
+
 def test_recover_in_progress_pr_comments_requeues_abandoned_claim(
     tmp_path: Path,
 ) -> None:

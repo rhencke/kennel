@@ -10054,6 +10054,120 @@ class TestHandleQueuedComments:
             payload_json="{}",
         )
 
+    def test_posts_eyes_on_claim_for_human_comment(self, tmp_path: Path) -> None:
+        """When the worker claims a comment, it posts the eyes reaction.
+
+        Covers comments that the dispatcher skipped because the repo had
+        other open work at webhook time (#1662).  Idempotent at GitHub —
+        re-posting the same reaction is a no-op, so the dispatcher's eager
+        eyes (when it does fire on a solo arrival) plus the worker's
+        on-claim post don't double-react.
+        """
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="pulls", comment_id=501)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = {
+            "id": 501,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r501",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
+
+        with (
+            patch("fido.events.reply_to_comment", return_value=("ANSWER", [])),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        gh.add_reaction.assert_any_call("owner/repo", "pulls", 501, "eyes")
+
+    def test_skips_eyes_on_claim_for_bot_comment(self, tmp_path: Path) -> None:
+        """Bot-authored comments do not get the eyes reaction on claim.
+
+        Matches the dispatcher's bot-skip behaviour — Fido doesn't react
+        to other bots (#1662).
+        """
+        worker, gh = self._make_worker(tmp_path)
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="delivery-bot",
+            repo="owner/repo",
+            pr_number=7,
+            comment_type="pulls",
+            comment_id=502,
+            author="dependabot[bot]",
+            is_bot=True,
+            body="bumped a dep",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = {
+            "id": 502,
+            "body": "bumped a dep",
+            "user": {"login": "dependabot[bot]"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r502",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
+
+        with (
+            patch("fido.events.reply_to_comment", return_value=("ANSWER", [])),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        for reaction_call in gh.add_reaction.call_args_list:
+            assert reaction_call.args[3] != "eyes", (
+                f"eyes was posted for bot comment on claim: {reaction_call}"
+            )
+
+    def test_eyes_post_failure_on_claim_does_not_abort(self, tmp_path: Path) -> None:
+        """A failed eyes post on claim is best-effort — claim continues.
+
+        Mirrors the dispatcher's eager-eyes failure handling (#1662).
+        """
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="pulls", comment_id=503)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = {
+            "id": 503,
+            "body": "please fix",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r503",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
+
+        # Fail the eyes call; subsequent reactions should still work.
+        def add_reaction_side_effect(
+            *args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            if len(args) >= 4 and args[3] == "eyes":
+                raise RuntimeError("github transient")
+            return {"id": "ok"}
+
+        gh.add_reaction.side_effect = add_reaction_side_effect
+
+        with (
+            patch("fido.events.reply_to_comment", return_value=("ANSWER", [])),
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            result = worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        assert result is True
+        assert FidoStore(tmp_path).claim_state(503) == "completed"
+
     def test_drains_issue_comment_and_queues_tasks(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         self._enqueue(tmp_path, comment_type="issues", comment_id=301)

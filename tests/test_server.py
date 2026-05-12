@@ -2600,6 +2600,54 @@ class TestProcessActionInner:
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_any_call("owner/repo", "issues", 301, "eyes")
 
+    def test_eyes_reaction_skipped_when_other_open_comment_in_queue(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Batch arrival: another pending comment in queue → eager eyes skipped.
+
+        With #1662, when a second comment arrives for a repo that already
+        has an open queued or in-progress comment, the dispatcher does not
+        post eager eyes — the worker posts eyes when claiming each comment
+        in pickup order, so at most one comment per repo carries eyes at a
+        time.
+        """
+        from fido.store import FidoStore
+
+        # Pre-populate the queue with another pending comment for the
+        # same repo — simulates a sibling in a multi-comment review.
+        FidoStore(repo_cfg.work_dir).enqueue_pr_comment(
+            delivery_id="delivery-sibling",
+            repo="owner/repo",
+            pr_number=1,
+            comment_type="pulls",
+            comment_id=400,
+            author="owner",
+            is_bot=False,
+            body="sibling comment",
+            github_created_at="2026-04-30T10:00:00Z",
+        )
+        action = Action(
+            prompt="batch review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 401,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix this",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        for call in handler.gh.add_reaction.call_args_list:
+            assert call.args[3] != "eyes", (
+                f"eyes was posted despite sibling open comment: {call}"
+            )
+
     def test_eyes_reaction_skipped_for_bot_action(
         self, cfg: Config, repo_cfg: RepoConfig
     ) -> None:
