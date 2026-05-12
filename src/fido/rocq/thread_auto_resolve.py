@@ -260,6 +260,22 @@ def latest_comment_is_fido(thread: ReviewThread) -> bool:
     return isinstance(t, CommentByFido)
 
 
+def thread_has_actionable_comment(comments: list[ThreadComment]) -> bool:
+    for comment in comments:
+        match comment.thread_comment_author:
+            case CommentByFido():
+                continue
+            case CommentByActionable():
+                return True
+            case CommentByBot():
+                continue
+            case CommentIgnored():
+                continue
+            case __impossible:
+                assert_never(__impossible)
+    return False
+
+
 def should_resolve_thread(
     thread: ReviewThread,
     tasks: list[ThreadTask],
@@ -268,7 +284,8 @@ def should_resolve_thread(
     thread_open = not thread.review_thread_resolved
     fido_last = latest_comment_is_fido(thread)
     followup_done = not has_pending_thread_task(comment_ids, tasks)
-    return thread_open and fido_last and followup_done
+    has_actionable = thread_has_actionable_comment(thread.review_thread_comments)
+    return thread_open and fido_last and followup_done and has_actionable
 
 
 def resolution_decision(
