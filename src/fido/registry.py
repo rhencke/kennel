@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from fido.appstate import (
     FidoState,
+    IssueSnapshot,
     ProviderSnapshot,
     RepoState,
     ThreadSnapshot,
@@ -383,6 +384,20 @@ class WorkerRegistry:
         and after each :class:`~fido.worker.Worker` turn.
         """
         self._publish_provider_snapshot(repo_name)
+
+    def publish_issue_snapshot(self, repo_name: str, snapshot: IssueSnapshot) -> None:
+        """Publish a fresh :class:`IssueSnapshot` for *repo_name* to :class:`FidoState`.
+
+        Workers call this at iteration boundaries so the SCADA display path
+        (``./fido status`` and ``/status.json``) can read issue/PR/task
+        state from the in-memory snapshot instead of reading state.json
+        and tasks.json from disk on every request (#1690).
+
+        The repo must have been :meth:`start`-ed first (the ``repos[name]``
+        key is prepopulated by :meth:`start`).
+        """
+        _name = repo_name
+        self._state_updater.update(lambda root: root.repos[_name].issue, snapshot)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.

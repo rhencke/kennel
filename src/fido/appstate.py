@@ -7,8 +7,10 @@ the composition root, and the status serialisation path.  Extracted from
 directly from this leaf module, with no back-reference to the registry.
 """
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from frozendict import frozendict
 
@@ -114,6 +116,91 @@ class ThreadSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class IssueSnapshot:
+    """Immutable snapshot of one repo's current issue/PR/task state.
+
+    Captures the disk-resident state.json + tasks.json values that the
+    SCADA display path renders for ``./fido status`` and ``/status.json``.
+    Published by :meth:`~fido.registry.WorkerRegistry._publish_issue_snapshot`
+    at worker iteration boundaries so the status path never has to read
+    state.json or tasks.json from disk on the request thread (#1690).
+
+    ``current_task`` is the title of the in-progress task, falling back to
+    the first pending task when nothing is in progress.  ``task_number``
+    and ``task_total`` count non-completed entries — same semantics as the
+    original ``_collect_fido_state``.
+
+    Frozen so instances can be stored inside the frozen :class:`RepoState`
+    without breaking the immutability guarantee of the atomic snapshot.
+    """
+
+    issue: int | None
+    issue_title: str | None
+    issue_started_at: str | None
+    pr_number: int | None
+    pr_title: str | None
+    pending_task_count: int
+    completed_task_count: int
+    current_task: str | None
+    task_number: int | None
+    task_total: int | None
+
+
+def make_issue_snapshot(
+    state: Mapping[str, Any], task_list: Iterable[Mapping[str, Any]]
+) -> "IssueSnapshot":
+    """Build an :class:`IssueSnapshot` from a parsed state.json + tasks list.
+
+    Pure data transform: takes the raw state dict and the task records and
+    computes the same fields the legacy disk-reading
+    ``_collect_fido_state`` produced.  Workers call this once per
+    iteration and publish the result to :class:`FidoState` via
+    :meth:`~fido.registry.WorkerRegistry.publish_issue_snapshot`; the
+    SCADA status path then reads the snapshot directly instead of
+    re-reading state.json and tasks.json on every request (#1690).
+    """
+    tasks = list(task_list)
+    pending = sum(1 for t in tasks if t.get("status") == "pending")
+    completed = sum(1 for t in tasks if t.get("status") == "completed")
+
+    current_task: str | None = None
+    for t in tasks:
+        if t.get("status") == "in_progress":
+            current_task = t.get("title")
+            break
+    if current_task is None:
+        for t in tasks:
+            if t.get("status") == "pending":
+                current_task = t.get("title")
+                break
+
+    non_completed = [t for t in tasks if t.get("status") != "completed"]
+    task_number: int | None = None
+    task_total: int | None = None
+    if non_completed:
+        task_total = len(non_completed)
+        for idx, t in enumerate(non_completed, start=1):
+            if t.get("status") == "in_progress":
+                task_number = idx
+                break
+        if task_number is None:
+            task_number = 1
+
+    return IssueSnapshot(
+        issue=state.get("issue"),
+        issue_title=state.get("issue_title"),
+        issue_started_at=state.get("issue_started_at"),
+        pr_number=state.get("pr_number"),
+        pr_title=state.get("pr_title"),
+        pending_task_count=pending,
+        completed_task_count=completed,
+        current_task=current_task,
+        task_number=task_number,
+        task_total=task_total,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -162,6 +249,7 @@ class RepoState:
     webhook_activities: tuple[WebhookActivity, ...]
     thread: "ThreadSnapshot | None" = None
     provider: "ProviderSnapshot | None" = None
+    issue: IssueSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)

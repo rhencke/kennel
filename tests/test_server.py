@@ -31,6 +31,7 @@ from fido.provider import ProviderID, ProviderLimitWindow
 from fido.rate_limit import GitHubLimit
 from fido.registry import (
     FidoState,
+    IssueSnapshot,
     ProviderSnapshot,
     RepoState,
     WebhookActivity,
@@ -60,6 +61,7 @@ def _repo_state(
     started_at: datetime | None = None,
     webhook_activities: tuple[WebhookActivity, ...] = (),
     provider: ProviderSnapshot | None = None,
+    issue: IssueSnapshot | None = None,
 ) -> RepoState:
     progress_at = (
         datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -82,6 +84,7 @@ def _repo_state(
         ),
         webhook_activities=webhook_activities,
         provider=provider,
+        issue=issue,
     )
 
 
@@ -641,52 +644,28 @@ class TestGetEndpoint:
         assert entry["task_number"] is None
         assert entry["task_total"] is None
 
-    def test_status_endpoint_includes_fido_state_from_files(
+    def test_status_endpoint_includes_fido_state_from_snapshot(
         self, server: tuple, tmp_path: Path
     ) -> None:
-        """state.json and tasks.json on disk are surfaced in the activity entry."""
-        # Write state.json
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        state = {
-            "issue": 42,
-            "issue_title": "Fix the thing",
-            "issue_started_at": "2026-04-01T00:00:00+00:00",
-            "pr_number": 99,
-            "pr_title": "Fixes the thing",
-        }
-        (fido_dir / "state.json").write_text(json.dumps(state))
-
-        # Write tasks.json
-        tasks_path = fido_dir / "tasks.json"
-        tasks = [
-            {
-                "id": "1",
-                "title": "first task",
-                "type": "spec",
-                "status": "completed",
-                "description": "",
-            },
-            {
-                "id": "2",
-                "title": "active task",
-                "type": "spec",
-                "status": "in_progress",
-                "description": "",
-            },
-            {
-                "id": "3",
-                "title": "later task",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-        ]
-        tasks_path.write_text(json.dumps(tasks))
+        """The IssueSnapshot published by the worker is surfaced in the
+        activity entry — the request thread no longer reads state.json
+        or tasks.json from disk (#1690)."""
+        snapshot = IssueSnapshot(
+            issue=42,
+            issue_title="Fix the thing",
+            issue_started_at="2026-04-01T00:00:00+00:00",
+            pr_number=99,
+            pr_title="Fixes the thing",
+            pending_task_count=1,
+            completed_task_count=1,
+            current_task="active task",
+            task_number=1,
+            task_total=2,
+        )
 
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="Working on: #42")
+            _repo_state("owner/repo", what="Working on: #42", issue=snapshot)
         )
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -724,19 +703,27 @@ class TestGetEndpoint:
 
 
 class TestCollectFidoState:
-    """Unit tests for _collect_fido_state covering edge-case branches."""
+    """Unit tests for _collect_fido_state — the request-thread renderer.
+
+    Disk-resident issue/PR/task state is no longer read by the request
+    thread; the worker publishes an ``IssueSnapshot`` to ``FidoState``
+    once per iteration and this function renders that (#1690).  Logic
+    around what goes into the snapshot lives in :func:`make_issue_snapshot`
+    and is exercised by ``tests/test_appstate.py``.
+    """
 
     def _now(self) -> object:
         from datetime import datetime, timezone
 
         return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
 
-    def test_defaults_when_no_files(self, tmp_path: Path) -> None:
+    def test_defaults_when_snapshot_is_none(self, tmp_path: Path) -> None:
+        """Cold start: worker has not yet published a snapshot."""
         from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
-        result = _collect_fido_state(tmp_path, self._now())
+        result = _collect_fido_state(tmp_path, self._now(), None)
         assert result["fido_running"] is False
         assert result["issue"] is None
         assert result["issue_title"] is None
@@ -749,6 +736,58 @@ class TestCollectFidoState:
         assert result["task_number"] is None
         assert result["task_total"] is None
 
+    def test_passes_through_snapshot_fields(self, tmp_path: Path) -> None:
+        from fido.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        snapshot = IssueSnapshot(
+            issue=42,
+            issue_title="Add a thing",
+            issue_started_at="2026-04-19T11:30:00+00:00",
+            pr_number=99,
+            pr_title="Add a thing (closes #42)",
+            pending_task_count=3,
+            completed_task_count=5,
+            current_task="working on the thing",
+            task_number=2,
+            task_total=4,
+        )
+        result = _collect_fido_state(tmp_path, self._now(), snapshot)
+        assert result["issue"] == 42
+        assert result["issue_title"] == "Add a thing"
+        assert result["pr_number"] == 99
+        assert result["pr_title"] == "Add a thing (closes #42)"
+        assert result["pending"] == 3
+        assert result["completed"] == 5
+        assert result["current_task"] == "working on the thing"
+        assert result["task_number"] == 2
+        assert result["task_total"] == 4
+        # 30 minutes elapsed between issue_started_at and _now().
+        assert result["issue_elapsed_seconds"] == 1800
+
+    def test_invalid_issue_started_at_in_snapshot(self, tmp_path: Path) -> None:
+        """A bad ISO date in the snapshot must not break the request."""
+        from fido.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        snapshot = IssueSnapshot(
+            issue=1,
+            issue_title=None,
+            issue_started_at="not-a-date",
+            pr_number=None,
+            pr_title=None,
+            pending_task_count=0,
+            completed_task_count=0,
+            current_task=None,
+            task_number=None,
+            task_total=None,
+        )
+        result = _collect_fido_state(tmp_path, self._now(), snapshot)
+        assert result["issue"] == 1
+        assert result["issue_elapsed_seconds"] is None
+
     def test_lock_file_exists_not_held(self, tmp_path: Path) -> None:
         """Lock file exists but is not held by another process → fido_running=False."""
         from fido.server import (
@@ -758,7 +797,7 @@ class TestCollectFidoState:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         (fido_dir / "lock").touch()
-        result = _collect_fido_state(tmp_path, self._now())
+        result = _collect_fido_state(tmp_path, self._now(), None)
         assert result["fido_running"] is False
 
     def test_lock_file_held(self, tmp_path: Path) -> None:
@@ -789,7 +828,7 @@ class TestCollectFidoState:
         t.start()
         ready.wait(timeout=5)
         try:
-            result = _collect_fido_state(tmp_path, self._now())
+            result = _collect_fido_state(tmp_path, self._now(), None)
             assert result["fido_running"] is True
         finally:
             release.set()
@@ -805,129 +844,8 @@ class TestCollectFidoState:
         fido_dir.mkdir(parents=True)
         # Create a directory at the lock path to cause OSError on open()
         (fido_dir / "lock").mkdir()
-        result = _collect_fido_state(tmp_path, self._now())
+        result = _collect_fido_state(tmp_path, self._now(), None)
         assert result["fido_running"] is False
-
-    def test_state_load_exception(self, tmp_path: Path) -> None:
-        """If State.load() raises, state fields default gracefully."""
-        from unittest.mock import patch
-
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        with patch("fido.server.State") as mock_state_cls:
-            mock_state_cls.return_value.load.side_effect = RuntimeError("disk error")
-            result = _collect_fido_state(tmp_path, self._now())
-        assert result["issue"] is None
-        assert result["issue_title"] is None
-        assert result["pr_number"] is None
-
-    def test_invalid_issue_started_at(self, tmp_path: Path) -> None:
-        """Malformed issue_started_at is silently ignored."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        (fido_dir / "state.json").write_text(
-            json.dumps({"issue": 1, "issue_started_at": "not-a-date"})
-        )
-        result = _collect_fido_state(tmp_path, self._now())
-        assert result["issue"] == 1
-        assert result["issue_elapsed_seconds"] is None
-
-    def test_tasks_load_exception(self, tmp_path: Path) -> None:
-        """If Tasks.list() raises, task fields default gracefully."""
-        from unittest.mock import patch
-
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        with patch("fido.server.Tasks") as mock_tasks_cls:
-            mock_tasks_cls.return_value.list.side_effect = RuntimeError("disk error")
-            result = _collect_fido_state(tmp_path, self._now())
-        assert result["pending"] == 0
-        assert result["current_task"] is None
-        assert result["task_number"] is None
-
-    def test_current_task_from_pending_when_no_in_progress(
-        self, tmp_path: Path
-    ) -> None:
-        """current_task comes from the first pending task when none are in_progress."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        tasks = [
-            {
-                "id": "1",
-                "title": "do this",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-            {
-                "id": "2",
-                "title": "then that",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-        ]
-        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
-        result = _collect_fido_state(tmp_path, self._now())
-        assert result["current_task"] == "do this"
-        assert result["task_number"] == 1
-        assert result["task_total"] == 2
-
-    def test_task_number_from_in_progress(self, tmp_path: Path) -> None:
-        """task_number correctly reflects the in_progress task's position."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        tasks = [
-            {
-                "id": "1",
-                "title": "done",
-                "type": "spec",
-                "status": "completed",
-                "description": "",
-            },
-            {
-                "id": "2",
-                "title": "first pending",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-            {
-                "id": "3",
-                "title": "active",
-                "type": "spec",
-                "status": "in_progress",
-                "description": "",
-            },
-            {
-                "id": "4",
-                "title": "later",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-        ]
-        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
-        result = _collect_fido_state(tmp_path, self._now())
-        assert result["current_task"] == "active"
-        assert result["task_number"] == 2  # position in non-completed list
-        assert result["task_total"] == 3
 
 
 class TestRepoStatus:
@@ -1163,43 +1081,24 @@ class TestStatusXml:
         non-completed list is reported — so the counter can show "2/3" rather
         than always "1/N".
         """
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        tasks = [
-            {
-                "id": "1",
-                "title": "done",
-                "type": "spec",
-                "status": "completed",
-                "description": "",
-            },
-            {
-                "id": "2",
-                "title": "first pending",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-            {
-                "id": "3",
-                "title": "active task",
-                "type": "spec",
-                "status": "in_progress",
-                "description": "",
-            },
-            {
-                "id": "4",
-                "title": "later task",
-                "type": "spec",
-                "status": "pending",
-                "description": "",
-            },
-        ]
-        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
+        # Snapshot computed from the same logical 4-task set the previous
+        # disk-reading version of this test wrote to tasks.json.
+        snapshot = IssueSnapshot(
+            issue=10,
+            issue_title=None,
+            issue_started_at=None,
+            pr_number=None,
+            pr_title=None,
+            pending_task_count=2,
+            completed_task_count=1,
+            current_task="active task",
+            task_number=2,
+            task_total=3,
+        )
 
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="Working on: #10")
+            _repo_state("owner/repo", what="Working on: #10", issue=snapshot)
         )
         WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status")

@@ -9,7 +9,13 @@ from unittest.mock import MagicMock
 import pytest
 from frozendict import frozendict
 
-from fido.appstate import FidoState, ProviderSnapshot, ThreadSnapshot, WorkerCrash
+from fido.appstate import (
+    FidoState,
+    IssueSnapshot,
+    ProviderSnapshot,
+    ThreadSnapshot,
+    WorkerCrash,
+)
 from fido.atomic import create_atomic
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
@@ -287,6 +293,25 @@ class TestWorkerRegistry:
         assert provider.session_alive is True
         assert provider.session_sent_count == 5
         assert provider.session_received_count == 3
+
+    def test_publish_issue_snapshot_updates_fido_state(self, tmp_path: Path) -> None:
+        """publish_issue_snapshot() publishes a fresh IssueSnapshot into FidoState (#1690)."""
+        reg, factory, reader = self._make_registry()
+        reg.start(_repo("foo/bar", tmp_path))
+        snapshot = IssueSnapshot(
+            issue=42,
+            issue_title="Add a thing",
+            issue_started_at="2026-04-19T12:00:00+00:00",
+            pr_number=99,
+            pr_title="Add a thing (closes #42)",
+            pending_task_count=2,
+            completed_task_count=1,
+            current_task="working on the thing",
+            task_number=1,
+            task_total=3,
+        )
+        reg.publish_issue_snapshot("foo/bar", snapshot)
+        assert reader.get().repos["foo/bar"].issue == snapshot
 
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()

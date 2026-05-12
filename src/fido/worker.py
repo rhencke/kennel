@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from fido.appstate import FidoState
+    from fido.appstate import FidoState, IssueSnapshot
     from fido.atomic import AtomicUpdater
     from fido.events import Action, Dispatcher
 
@@ -245,6 +245,10 @@ class ActivityReporter(Protocol):
     def abort_task(self, repo_name: str, *, task_id: str) -> None: ...
 
     def publish_provider_snapshot(self, repo_name: str) -> None: ...
+
+    def publish_issue_snapshot(
+        self, repo_name: str, snapshot: "IssueSnapshot"
+    ) -> None: ...
 
 
 class LockHeld(Exception):
@@ -4318,6 +4322,31 @@ class Worker:
                 return self._run_iteration(ctx)
             finally:
                 self.assert_git_identity(phase="post")
+                # Publish the latest issue/PR/task snapshot so the SCADA
+                # status path reads in-memory data instead of state.json
+                # and tasks.json from disk on every request (#1690).
+                self._publish_issue_snapshot(ctx.fido_dir)
+
+    def _publish_issue_snapshot(self, fido_dir: Path) -> None:
+        """Read state.json + tasks.json once and publish an
+        :class:`IssueSnapshot` to :class:`FidoState`.  Best-effort —
+        a missing or partially-written state file must never break the
+        worker iteration return path.
+        """
+        from fido.appstate import make_issue_snapshot
+
+        if self._registry is None or not self._repo_name:
+            return
+        try:
+            state_data = State(fido_dir).load()
+        except Exception:  # noqa: BLE001  # missing/corrupt state.json — fall back to {}
+            state_data = {}
+        try:
+            task_list = self._tasks.list()
+        except Exception:  # noqa: BLE001  # missing/corrupt tasks.json — fall back to []
+            task_list = []
+        snapshot = make_issue_snapshot(state_data, task_list)
+        self._registry.publish_issue_snapshot(self._repo_name, snapshot)
 
     def _run_iteration(self, ctx: WorkerContext) -> int:
         """Body of :meth:`run` — guaranteed to run between the pre- and

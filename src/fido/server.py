@@ -23,7 +23,7 @@ import requests
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState
+from fido.appstate import FidoState, IssueSnapshot
 from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -59,7 +59,6 @@ from fido.registry import (
 )
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
-from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
 from fido.store import FidoStore, ReplyPromiseRecord
@@ -336,11 +335,18 @@ def _serialize_issue_cache(cache: object) -> dict[str, Any] | None:
     }
 
 
-def _collect_fido_state(work_dir: Path, now: datetime) -> dict[str, Any]:
-    """Read fido filesystem state (issue, PR, tasks, lock) for the status endpoint.
+def _collect_fido_state(
+    work_dir: Path, now: datetime, snapshot: "IssueSnapshot | None"
+) -> dict[str, Any]:
+    """Render the issue/PR/task fields for the status endpoint.
 
-    Best-effort: returns safe defaults on any I/O or parse error so that a
-    missing or partially-written state file never breaks the status endpoint.
+    Reads the lock-file state directly from disk (cheap flock probe) and
+    pulls every other field from the in-memory :class:`IssueSnapshot`
+    published by the worker (#1690).  No state.json or tasks.json reads
+    on the request thread.
+
+    ``snapshot`` is ``None`` only on cold start before the worker has
+    finished its first iteration — defaults match the legacy behaviour.
     """
     fido_dir = work_dir / ".git" / "fido"
 
@@ -360,69 +366,41 @@ def _collect_fido_state(work_dir: Path, now: datetime) -> dict[str, Any]:
         except OSError:
             pass
 
-    # Load state.json (issue / PR metadata).
-    try:
-        state = State(fido_dir).load()
-    except Exception:  # noqa: BLE001
-        log.warning("_collect_fido_state: failed to load state for %s", work_dir)
-        state = {}
-    issue: int | None = state.get("issue")
-    issue_title: str | None = state.get("issue_title")
+    if snapshot is None:
+        return {
+            "fido_running": fido_running,
+            "issue": None,
+            "issue_title": None,
+            "issue_elapsed_seconds": None,
+            "pr_number": None,
+            "pr_title": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "task_number": None,
+            "task_total": None,
+        }
+
     issue_elapsed_seconds: int | None = None
-    issue_started_at: str | None = state.get("issue_started_at")
-    if issue_started_at:
+    if snapshot.issue_started_at:
         try:
-            started = datetime.fromisoformat(issue_started_at)
+            started = datetime.fromisoformat(snapshot.issue_started_at)
             issue_elapsed_seconds = max(0, int((now - started).total_seconds()))
         except TypeError, ValueError:
             pass
-    pr_number: int | None = state.get("pr_number")
-    pr_title: str | None = state.get("pr_title")
-
-    # Load tasks.json.
-    try:
-        task_list = Tasks(work_dir).list()
-    except Exception:  # noqa: BLE001
-        log.warning("_collect_fido_state: failed to load tasks for %s", work_dir)
-        task_list = []
-    pending = sum(1 for t in task_list if t.get("status") == "pending")
-    completed = sum(1 for t in task_list if t.get("status") == "completed")
-
-    current_task: str | None = None
-    for t in task_list:
-        if t.get("status") == "in_progress":
-            current_task = t.get("title")
-            break
-    if current_task is None:
-        for t in task_list:
-            if t.get("status") == "pending":
-                current_task = t.get("title")
-                break
-
-    non_completed = [t for t in task_list if t.get("status") != "completed"]
-    task_number: int | None = None
-    task_total: int | None = None
-    if non_completed:
-        task_total = len(non_completed)
-        for idx, t in enumerate(non_completed, start=1):
-            if t.get("status") == "in_progress":
-                task_number = idx
-                break
-        if task_number is None:
-            task_number = 1
 
     return {
         "fido_running": fido_running,
-        "issue": issue,
-        "issue_title": issue_title,
+        "issue": snapshot.issue,
+        "issue_title": snapshot.issue_title,
         "issue_elapsed_seconds": issue_elapsed_seconds,
-        "pr_number": pr_number,
-        "pr_title": pr_title,
-        "pending": pending,
-        "completed": completed,
-        "current_task": current_task,
-        "task_number": task_number,
-        "task_total": task_total,
+        "pr_number": snapshot.pr_number,
+        "pr_title": snapshot.pr_title,
+        "pending": snapshot.pending_task_count,
+        "completed": snapshot.completed_task_count,
+        "current_task": snapshot.current_task,
+        "task_number": snapshot.task_number,
+        "task_total": snapshot.task_total,
     }
 
 
@@ -1399,7 +1377,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 for w in repo_state.webhook_activities
             ]
             fido_state = (
-                _collect_fido_state(repo_cfg.work_dir, now)
+                _collect_fido_state(repo_cfg.work_dir, now, repo_state.issue)
                 if repo_cfg is not None
                 else {
                     "fido_running": False,
