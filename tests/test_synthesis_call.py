@@ -644,3 +644,64 @@ class TestCallSynthesisVerificationTurn:
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
         assert result.reasoning == "my private chain-of-thought"
+
+    def test_verify_turn_uses_read_only_allowed_tools(self) -> None:
+        """Verification turns must pass READ_ONLY_ALLOWED_TOOLS, not None."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # The second call is the verification turn.
+        _, kwargs = agent.run_turn.call_args_list[1]
+        assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
+
+    def test_derive_turn_uses_read_only_allowed_tools(self) -> None:
+        """Derive turn (after No) must pass READ_ONLY_ALLOWED_TOOLS, not None."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Third call is the derive turn.
+        _, kwargs = agent.run_turn.call_args_list[2]
+        assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
+
+    def test_verify_turn_exception_returns_original_response(self) -> None:
+        """A transport error in the verify turn must not discard the synthesis result."""
+        raw = _make_raw(reply_text="Original reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [
+            raw,
+            RuntimeError("transport error"),
+        ]
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Original reply."
+        assert result.change_request is None
+        assert agent.run_turn.call_count == 2
+
+    def test_derive_turn_exception_returns_original_response(self) -> None:
+        """A transport error in the derive turn must not discard the synthesis result."""
+        raw = _make_raw(reply_text="Original reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [
+            raw,
+            "No",
+            RuntimeError("derive transport error"),
+        ]
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Original reply."
+        assert result.change_request is None
+        assert agent.run_turn.call_count == 3

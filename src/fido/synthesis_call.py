@@ -76,6 +76,9 @@ def _check_and_promote(
 
     If the agent answers "Yes" (or anything other than "No"), or if the
     derive turn returns an empty string, *response* is returned unchanged.
+    Any exception raised by either turn (transport errors, timeouts, etc.)
+    is caught, logged, and treated as a non-fatal guard failure — *response*
+    is returned unchanged so a valid synthesis result is never discarded.
 
     This enforces the invariant: prose promises must correspond to queued
     tasks (fixes #1218).
@@ -83,35 +86,43 @@ def _check_and_promote(
     if response.change_request is not None:
         return response
 
-    verify_raw = agent.run_turn(
-        _VERIFY_CHANGE_REQUEST_PROMPT,
-        allowed_tools=None,
-    )
-    if not (verify_raw or "").strip().lower().startswith("no"):
-        return response
+    try:
+        verify_raw = agent.run_turn(
+            _VERIFY_CHANGE_REQUEST_PROMPT,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        if not (verify_raw or "").strip().lower().startswith("no"):
+            return response
 
-    log.warning(
-        "synthesis guard: model indicated unrecorded request — "
-        "deriving change_request via follow-up turn"
-    )
-    derived_raw = agent.run_turn(
-        _DERIVE_CHANGE_REQUEST_PROMPT,
-        allowed_tools=None,
-    )
-    derived = (derived_raw or "").strip()
-    if not derived:
         log.warning(
-            "synthesis guard: follow-up turn returned empty — skipping promotion"
+            "synthesis guard: model indicated unrecorded request — "
+            "deriving change_request via follow-up turn"
+        )
+        derived_raw = agent.run_turn(
+            _DERIVE_CHANGE_REQUEST_PROMPT,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        derived = (derived_raw or "").strip()
+        if not derived:
+            log.warning(
+                "synthesis guard: follow-up turn returned empty — skipping promotion"
+            )
+            return response
+
+        return CommentResponse(
+            reasoning=response.reasoning,
+            reply_text=response.reply_text,
+            emoji=response.emoji,
+            change_request=derived,
+            insights=response.insights,
+        )
+    except Exception as exc:
+        log.warning(
+            "synthesis guard: verification turn failed (%s) — "
+            "returning original response unchanged",
+            exc,
         )
         return response
-
-    return CommentResponse(
-        reasoning=response.reasoning,
-        reply_text=response.reply_text,
-        emoji=response.emoji,
-        change_request=derived,
-        insights=response.insights,
-    )
 
 
 class SynthesisExhaustedError(Exception):
