@@ -473,7 +473,7 @@ class SessionTalker:
     thread_id: int
     kind: Literal["worker", "webhook"]
     description: str
-    claude_pid: int
+    subprocess_pid: int | None
     started_at: datetime
 
 
@@ -565,9 +565,9 @@ def register_talker(talker: SessionTalker) -> None:
             raise SessionLeakError(
                 f"provider session leak for repo {talker.repo_name}: "
                 f"tid={existing.thread_id} ({existing.kind}, "
-                f"{existing.description}, pid={existing.claude_pid}) "
+                f"{existing.description}, subprocess_pid={existing.subprocess_pid}) "
                 f"still active when tid={talker.thread_id} ({talker.kind}, "
-                f"{talker.description}, pid={talker.claude_pid}) tried to start"
+                f"{talker.description}, subprocess_pid={talker.subprocess_pid}) tried to start"
             )
         _talkers[talker.repo_name] = talker
 

@@ -647,7 +647,7 @@ class TestRunStreamingTracksChildren:
         # the one-shot pid.
         assert observed[0] is not None
         assert observed[0].kind == "webhook"
-        assert observed[0].claude_pid == 77777
+        assert observed[0].subprocess_pid == 77777
         # Cleanly unregistered after the generator exhausts.
         assert get_talker("owner/repo") is None
 
@@ -2365,7 +2365,7 @@ class TestClaudeSessionLock:
                 thread_id=999,
                 kind="webhook",
                 description="leaked",
-                claude_pid=555,
+                subprocess_pid=555,
                 started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
         )

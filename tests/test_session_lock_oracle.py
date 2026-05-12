@@ -411,7 +411,7 @@ def test_force_release_unregisters_evicted_talker_and_records_tid() -> None:
             thread_id=holder_tid,
             kind="worker",
             description="test holder",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=talker_now(),
         )
     )

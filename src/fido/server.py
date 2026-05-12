@@ -137,7 +137,7 @@ def _serialize_talker(talker: provider.SessionTalker | None) -> dict[str, Any] |
         "thread_id": talker.thread_id,
         "kind": talker.kind,
         "description": talker.description,
-        "claude_pid": talker.claude_pid,
+        "subprocess_pid": talker.subprocess_pid,
         "started_at": talker.started_at.isoformat(),
     }
 

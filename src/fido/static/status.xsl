@@ -262,10 +262,10 @@
         <label>claude</label>
         <kind><xsl:value-of select="k:claude_talker/k:kind"/></kind>
         <desc><xsl:value-of select="k:claude_talker/k:description"/></desc>
-        <xsl:if test="k:claude_talker/k:claude_pid != ''">
+        <xsl:if test="k:claude_talker/k:subprocess_pid != ''">
           <pid>
             <xsl:text>pid </xsl:text>
-            <xsl:value-of select="k:claude_talker/k:claude_pid"/>
+            <xsl:value-of select="k:claude_talker/k:subprocess_pid"/>
           </pid>
         </xsl:if>
       </talker>

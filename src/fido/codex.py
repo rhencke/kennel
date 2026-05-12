@@ -944,7 +944,7 @@ class CodexSession(OwnedSession):
                         thread_id=threading.get_ident(),
                         kind=kind,
                         description="codex session turn",
-                        claude_pid=self.pid or 0,
+                        subprocess_pid=self.pid,
                         started_at=provider.talker_now(),
                     )
                 )

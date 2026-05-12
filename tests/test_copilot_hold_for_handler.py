@@ -96,7 +96,7 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
             thread_id=999_999,
             kind="worker",
             description="fake-worker",
-            claude_pid=0,
+            subprocess_pid=None,
             started_at=provider.talker_now(),
         )
 

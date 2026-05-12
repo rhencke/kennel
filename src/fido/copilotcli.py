@@ -1132,7 +1132,7 @@ class CopilotCLISession(OwnedSession):
                         thread_id=threading.get_ident(),
                         kind=kind,
                         description="copilot-cli session turn",
-                        claude_pid=0,  # no claude subprocess — ACP runtime
+                        subprocess_pid=None,  # no subprocess — ACP runtime
                         started_at=provider.talker_now(),
                     )
                 )

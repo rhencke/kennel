@@ -236,7 +236,7 @@ class TestOwnedSessionPreemptWorker:
             thread_id=1,
             kind="worker",
             description="x",
-            claude_pid=0,
+            subprocess_pid=None,
             started_at=provider.talker_now(),
         )
         with patch("fido.provider.get_talker", return_value=worker_talker):
@@ -250,7 +250,7 @@ class TestOwnedSessionPreemptWorker:
             thread_id=1,
             kind="webhook",
             description="x",
-            claude_pid=0,
+            subprocess_pid=None,
             started_at=provider.talker_now(),
         )
         with patch("fido.provider.get_talker", return_value=webhook_talker):

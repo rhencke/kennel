@@ -1023,7 +1023,7 @@ class TestStatusXml:
             thread_id=42,
             kind="worker",
             description="implementing task",
-            claude_pid=9999,
+            subprocess_pid=9999,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
         WebhookHandler.state_reader.get.return_value = _fido_state(
@@ -1034,7 +1034,7 @@ class TestStatusXml:
             resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<kind>worker</kind>" in body
-        assert "<claude_pid>9999</claude_pid>" in body
+        assert "<subprocess_pid>9999</subprocess_pid>" in body
 
     def test_status_xml_includes_provider_status(self, server: tuple) -> None:
         url, _ = server
@@ -1744,7 +1744,7 @@ class TestProcessAction:
             thread_id=12321,
             kind="worker",
             description="persistent session turn",
-            claude_pid=12345,
+            subprocess_pid=12345,
             started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
         )
         WebhookHandler.state_reader.get.return_value = _fido_state(
@@ -1758,7 +1758,7 @@ class TestProcessAction:
         assert talker_data["repo_name"] == "owner/repo"
         assert talker_data["thread_id"] == 12321
         assert talker_data["kind"] == "worker"
-        assert talker_data["claude_pid"] == 12345
+        assert talker_data["subprocess_pid"] == 12345
 
     def test_claude_leak_halts_process(
         self,

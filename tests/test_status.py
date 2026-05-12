@@ -1411,7 +1411,7 @@ class TestCollect:
                 "thread_id": 1234,
                 "kind": "worker",
                 "description": "persistent session turn",
-                "claude_pid": 42,
+                "subprocess_pid": 42,
                 "started_at": "2026-04-14T18:00:00+00:00",
             },
         }
@@ -1434,9 +1434,55 @@ class TestCollect:
             thread_id=1234,
             kind="worker",
             description="persistent session turn",
-            claude_pid=42,
+            subprocess_pid=42,
         )
         assert kwargs["session_pid"] == 42
+
+    def test_claude_talker_subprocess_pid_none_when_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """subprocess_pid=None in raw talker dict → ClaudeTalkerInfo.subprocess_pid=None."""
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        activity_info = {
+            "what": "running",
+            "crash_count": 0,
+            "last_crash_error": None,
+            "is_stuck": False,
+            "worker_uptime_seconds": None,
+            "webhook_activities": [],
+            "session_owner": None,
+            "session_alive": True,
+            "session_pid": None,
+            "claude_talker": {
+                "repo_name": "owner/repo",
+                "thread_id": 7,
+                "kind": "worker",
+                "description": "copilot session turn",
+                "subprocess_pid": None,
+                "started_at": "2026-04-14T18:00:00+00:00",
+            },
+        }
+        with (
+            patch("fido.status._fido_pid", return_value=42),
+            patch("fido.status._repos_from_pid", return_value=[rc]),
+            patch("fido.status._process_uptime_seconds", return_value=0),
+            patch("fido.status._port_from_pid", return_value=9000),
+            patch(
+                "fido.status._fetch_activities",
+                return_value=({"owner/repo": activity_info}, None),
+            ),
+            patch(
+                "fido.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_rs,
+        ):
+            collect()
+        kwargs = mock_rs.call_args.kwargs
+        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+            thread_id=7,
+            kind="worker",
+            description="copilot session turn",
+            subprocess_pid=None,
+        )
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1916,7 +1962,7 @@ class TestFormatStatus:
                 thread_id=111,
                 kind="worker",
                 description="persistent session turn",
-                claude_pid=9999,
+                subprocess_pid=9999,
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2099,7 +2145,7 @@ class TestFormatStatus:
                 thread_id=2,
                 kind="webhook",
                 description="one-shot claude --print",
-                claude_pid=8888,
+                subprocess_pid=8888,
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2123,7 +2169,7 @@ class TestFormatStatus:
                 thread_id=100,
                 kind="worker",
                 description="persistent session turn",
-                claude_pid=42,
+                subprocess_pid=42,
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2161,7 +2207,7 @@ class TestFormatStatus:
                 thread_id=2,
                 kind="webhook",
                 description="one-shot",
-                claude_pid=99,
+                subprocess_pid=99,
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2421,7 +2467,7 @@ class TestFormatStatusColor:
             session_alive=True,
             worker_what="working",
             claude_talker=ClaudeTalkerInfo(
-                thread_id=1, kind="worker", description="turn", claude_pid=999
+                thread_id=1, kind="worker", description="turn", subprocess_pid=999
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
@@ -2510,7 +2556,7 @@ class TestFormatStatusColor:
                 ),
             ],
             claude_talker=ClaudeTalkerInfo(
-                thread_id=5, kind="webhook", description="one-shot", claude_pid=888
+                thread_id=5, kind="webhook", description="one-shot", subprocess_pid=888
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])

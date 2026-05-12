@@ -63,7 +63,7 @@ class ClaudeTalkerInfo:
     thread_id: int
     kind: str  # "worker" | "webhook"
     description: str
-    claude_pid: int
+    subprocess_pid: int | None
 
 
 @dataclass
@@ -765,11 +765,12 @@ def collect() -> FidoStatus:
             worker_uptime_val = int(wu) if wu is not None else None
             talker_raw = info.get("claude_talker")
             if talker_raw is not None:
+                raw_pid = talker_raw.get("subprocess_pid")
                 talker_info = ClaudeTalkerInfo(
                     thread_id=int(talker_raw["thread_id"]),
                     kind=talker_raw["kind"],
                     description=talker_raw["description"],
-                    claude_pid=int(talker_raw["claude_pid"]),
+                    subprocess_pid=int(raw_pid) if raw_pid is not None else None,
                 )
             sp = info.get("session_pid")
             session_pid_val = int(sp) if sp is not None else None

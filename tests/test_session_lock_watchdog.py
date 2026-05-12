@@ -124,7 +124,7 @@ def test_run_skips_holder_within_deadline(
             thread_id=42,
             kind="worker",
             description="recent turn",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=started_at,
         )
     )
@@ -169,7 +169,7 @@ def test_run_evicts_holder_past_deadline(monkeypatch: pytest.MonkeyPatch) -> Non
             thread_id=99999,
             kind="webhook",
             description="wedged synthesis turn",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=started_at,
         )
     )
@@ -214,7 +214,7 @@ def test_run_handles_multiple_repos_independently(
             thread_id=1,
             kind="webhook",
             description="long",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=started_at,
         )
     )
@@ -224,7 +224,7 @@ def test_run_handles_multiple_repos_independently(
             thread_id=2,
             kind="worker",
             description="short",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=started_at + timedelta(seconds=55),
         )
     )
@@ -332,7 +332,7 @@ def test_module_level_run_evicts_past_deadline(
             thread_id=7,
             kind="worker",
             description="wedged",
-            claude_pid=1,
+            subprocess_pid=1,
             started_at=started_at,
         )
     )

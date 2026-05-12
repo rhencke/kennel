@@ -397,7 +397,7 @@ def _run_streaming(
                 thread_id=thread_id,
                 kind="webhook",
                 description=f"one-shot claude --print (pid {proc.pid})",
-                claude_pid=proc.pid,
+                subprocess_pid=proc.pid,
                 started_at=provider.talker_now(),
             )
         )
@@ -838,7 +838,7 @@ class ClaudeSession(OwnedSession):
                         thread_id=threading.get_ident(),
                         kind=kind,
                         description="persistent session turn",
-                        claude_pid=self._proc.pid,
+                        subprocess_pid=self._proc.pid,
                         started_at=provider.talker_now(),
                     )
                 )

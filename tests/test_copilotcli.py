@@ -1143,7 +1143,7 @@ class TestCopilotCLISession:
                 thread_id=999_999,
                 kind="worker",
                 description="squatter",
-                claude_pid=0,
+                subprocess_pid=None,
                 started_at=provider.talker_now(),
             )
         )

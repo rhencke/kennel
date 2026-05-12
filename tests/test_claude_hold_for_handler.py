@@ -100,7 +100,7 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
             thread_id=999_999,
             kind=kind,  # type: ignore[arg-type]
             description="fake",
-            claude_pid=55555,
+            subprocess_pid=55555,
             started_at=talker_now(),
         )
 
@@ -151,7 +151,7 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(
             thread_id=999_999,
             kind=kind,  # type: ignore[arg-type]
             description="fake",
-            claude_pid=55555,
+            subprocess_pid=55555,
             started_at=talker_now(),
         )
 
@@ -321,7 +321,7 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
             thread_id=999_999,
             kind=kind,  # type: ignore[arg-type]
             description="fake",
-            claude_pid=55555,
+            subprocess_pid=55555,
             started_at=talker_now(),
         )
 
@@ -455,7 +455,7 @@ def test_hold_reraises_leak_error_and_releases_lock(
             thread_id=111_111,  # different tid — triggers leak
             kind="worker",
             description="squatter",
-            claude_pid=0,
+            subprocess_pid=None,
             started_at=talker_now(),
         )
     )
