@@ -2565,8 +2565,7 @@ class Worker:
         store = FidoStore(self.work_dir)
         cleared = 0
         for pr_number in store.pending_pr_numbers(repo=repo):
-            pr_data = self.gh.get_pr(repo, pr_number)
-            if pr_data["state"] != "open":
+            if self.gh.get_pr_state(repo, pr_number) != "open":
                 cleared += store.clear_pr_comment_queue(repo=repo, pr_number=pr_number)
         if cleared:
             log.info(

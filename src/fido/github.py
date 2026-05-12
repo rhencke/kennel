@@ -1139,6 +1139,16 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         data = self._get(f"/repos/{repo}/pulls/{pr}")
         return data.get("body") or ""
 
+    def get_pr_state(self, repo: str, pr: int | str) -> str:
+        """Return just the PR state (``"open"`` or ``"closed"``).
+
+        One ``_get`` call, no review/commit pagination — used by the orphan
+        comment-queue sweep (#1691) which only needs to know whether the PR
+        is still open.
+        """
+        data = self._get(f"/repos/{repo}/pulls/{pr}")
+        return data["state"]
+
     def add_pr_reviewers(self, repo: str, pr: int | str, reviewers: list[str]) -> None:
         """Request review from one or more users on a PR.
 

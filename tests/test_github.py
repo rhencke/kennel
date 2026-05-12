@@ -2535,6 +2535,17 @@ class TestGitHubClass:
         result = gh.get_pr_body("o/r", 10)
         assert result == ""
 
+    def test_get_pr_state_returns_open_or_closed(self) -> None:
+        """Lightweight state-only fetch for the orphan-queue sweep (#1691)."""
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"state": "closed"}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_pr_state("o/r", 10)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/pulls/10" in url
+        assert result == "closed"
+
     def test_add_pr_reviewers(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

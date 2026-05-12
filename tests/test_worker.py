@@ -7716,7 +7716,7 @@ class TestRunSeedTasksIntegration:
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         # Keep the orphan sweep (#1691) from clearing the recovered entry —
         # the recovered comment's PR is still open in this scenario.
-        gh.get_pr.return_value = {"state": "open"}
+        gh.get_pr_state.return_value = "open"
         mock_dispatcher = _FakeDispatcher(backfill_return=0)
         worker = Worker(
             tmp_path,
@@ -13758,10 +13758,10 @@ class TestSweepOrphanPrComments:
         self._enqueue(tmp_path, pr_number=7, comment_id=702)  # closed
         self._enqueue(tmp_path, pr_number=8, comment_id=801)  # still open
 
-        def fake_get_pr(_repo: str, pr: int | str) -> dict[str, str]:
-            return {"state": "closed"} if int(pr) == 7 else {"state": "open"}
+        def fake_get_pr_state(_repo: str, pr: int | str) -> str:
+            return "closed" if int(pr) == 7 else "open"
 
-        gh.get_pr.side_effect = fake_get_pr
+        gh.get_pr_state.side_effect = fake_get_pr_state
 
         cleared = worker.sweep_orphan_pr_comments("owner/repo")
 
@@ -13773,6 +13773,19 @@ class TestSweepOrphanPrComments:
         worker, gh = self._make_worker(tmp_path)
         cleared = worker.sweep_orphan_pr_comments("owner/repo")
         assert cleared == 0
+        gh.get_pr_state.assert_not_called()
+
+    def test_uses_lightweight_get_pr_state_not_get_pr(self, tmp_path: Path) -> None:
+        """Codex P2 (#1695): the sweep only needs open/closed, not the full
+        PR hydration with reviews+commits pagination.  Hit the lightweight
+        ``GitHub.get_pr_state`` path."""
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, pr_number=7, comment_id=701)
+        gh.get_pr_state.return_value = "open"
+
+        worker.sweep_orphan_pr_comments("owner/repo")
+
+        gh.get_pr_state.assert_called_once_with("owner/repo", 7)
         gh.get_pr.assert_not_called()
 
 
