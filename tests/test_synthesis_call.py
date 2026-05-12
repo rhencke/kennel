@@ -286,7 +286,8 @@ class TestCallSynthesis:
         )
 
         assert result.reply_text == "Great feedback!"
-        assert agent.run_turn.call_count == 1
+        # 1 synthesis call + 1 verify call (change_request is None so verify fires)
+        assert agent.run_turn.call_count == 2
 
     def test_passes_system_prompt_to_agent(self) -> None:
         agent = _make_agent(_make_raw())
@@ -294,7 +295,8 @@ class TestCallSynthesis:
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-        _, kwargs = agent.run_turn.call_args
+        # Check the first call (synthesis); the verify turn is the second call.
+        _, kwargs = agent.run_turn.call_args_list[0]
         assert kwargs["system_prompt"] == "my-system-prompt"
 
     def test_passes_user_prompt_to_agent(self) -> None:
@@ -303,24 +305,27 @@ class TestCallSynthesis:
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-        args, _ = agent.run_turn.call_args
+        # Check the first call (synthesis); the verify turn is the second call.
+        args, _ = agent.run_turn.call_args_list[0]
         assert args[0] == "my-user-prompt"
 
     def test_retry_on_parse_failure_then_success(self) -> None:
         raw_bad = "not json"
         raw_good = _make_raw(reply_text="Fixed!")
-        agent = _make_agent([raw_bad, raw_good])
+        # 1 bad synthesis + 1 good synthesis + 1 verify (returns "Yes" → no promotion)
+        agent = _make_agent([raw_bad, raw_good, "Yes"])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
         assert result.reply_text == "Fixed!"
-        assert agent.run_turn.call_count == 2
+        assert agent.run_turn.call_count == 3
 
     def test_retry_appends_suffix_to_prompt(self) -> None:
         raw_bad = "not json"
         raw_good = _make_raw()
-        agent = _make_agent([raw_bad, raw_good])
+        # 1 bad synthesis + 1 good synthesis + 1 verify
+        agent = _make_agent([raw_bad, raw_good, "Yes"])
         prompts = _make_prompts(user="base-prompt")
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
@@ -505,3 +510,246 @@ class TestCallFailureExplanation:
         result = call_failure_explanation("comment", agent=agent, prompts=prompts)
 
         assert result.reply_text == "real reply"
+
+
+# ---------------------------------------------------------------------------
+# call_synthesis — LLM verification turn
+# ---------------------------------------------------------------------------
+
+
+class TestCallSynthesisVerificationTurn:
+    """Tests for the LLM verification turn wired into call_synthesis (fixes #1218).
+
+    After a successful synthesis parse with ``change_request=None``, a
+    brief yes/no turn asks the model whether it recorded every request.
+    A "No" answer triggers a follow-up derive turn that populates
+    ``change_request`` and promotes the response to ACT.
+    """
+
+    def test_verify_yes_no_promotion(self) -> None:
+        """When verify says Yes, change_request stays None."""
+        raw = _make_raw(reply_text="Looks fine as-is.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is None
+        # synthesis + verify
+        assert agent.run_turn.call_count == 2
+
+    def test_verify_no_derives_change_request(self) -> None:
+        """When verify says No, the derive turn populates change_request."""
+        raw = _make_raw(reply_text="This looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Update the test coverage"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Update the test coverage"
+        assert result.reply_text == "This looks fine."
+        # synthesis + verify + derive
+        assert agent.run_turn.call_count == 3
+
+    def test_verify_no_preserves_reply_text(self) -> None:
+        """Promotion via verify must not alter reply_text."""
+        raw = _make_raw(reply_text="Understood.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Understood."
+
+    def test_verify_skipped_when_change_request_set(self) -> None:
+        """When change_request is already populated, verify turn is never called."""
+        raw = _make_raw(reply_text="Got it.", change_request="Fix the tests")
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Fix the tests"
+        # synthesis only — no verify turn
+        assert agent.run_turn.call_count == 1
+
+    def test_verify_no_case_insensitive(self) -> None:
+        """'NO', 'No.', 'no' etc. all trigger promotion."""
+        raw = _make_raw(reply_text="Sure.", change_request=None)
+        agent = _make_agent([raw, "NO.", "Handle the edge case"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Handle the edge case"
+
+    def test_verify_no_with_trailing_text_triggers_promotion(self) -> None:
+        """'No, I missed X' (starts with No) also triggers promotion."""
+        raw = _make_raw(reply_text="Sure.", change_request=None)
+        agent = _make_agent([raw, "No, I did not record it.", "Fix the linting"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Fix the linting"
+
+    def test_verify_no_skips_promotion_when_derive_empty(self) -> None:
+        """When the derive turn returns empty, no promotion — original returned."""
+        raw = _make_raw(reply_text="This looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", ""])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is None
+        # synthesis + verify + derive (even though derive is empty)
+        assert agent.run_turn.call_count == 3
+
+    def test_verify_no_preserves_emoji_on_promotion(self) -> None:
+        """Promotion via verify preserves the original emoji."""
+        raw = _make_raw(reply_text="Got it.", emoji="rocket", change_request=None)
+        agent = _make_agent([raw, "No", "Add the missing test"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Add the missing test"
+        assert result.emoji == "rocket"
+
+    def test_verify_no_preserves_insights_on_promotion(self) -> None:
+        """Promotion via verify preserves the original insights list."""
+        insight_data = [{"title": "T", "hook": "H.", "why": "W."}]
+        raw = _make_raw(
+            reply_text="Got it.", change_request=None, insights=insight_data
+        )
+        agent = _make_agent([raw, "No", "Add the missing test"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Add the missing test"
+        assert len(result.insights) == 1
+        assert result.insights[0].title == "T"
+
+    def test_verify_no_preserves_reasoning_on_promotion(self) -> None:
+        """Promotion via verify preserves the original reasoning."""
+        raw = _make_raw(
+            reasoning="my private chain-of-thought",
+            reply_text="Looks good.",
+            change_request=None,
+        )
+        agent = _make_agent([raw, "No", "Fix the thing"])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reasoning == "my private chain-of-thought"
+
+    def test_verify_turn_uses_read_only_allowed_tools(self) -> None:
+        """Verification turns must pass READ_ONLY_ALLOWED_TOOLS, not None."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # The second call is the verification turn.
+        _, kwargs = agent.run_turn.call_args_list[1]
+        assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
+
+    def test_derive_turn_uses_read_only_allowed_tools(self) -> None:
+        """Derive turn (after No) must pass READ_ONLY_ALLOWED_TOOLS, not None."""
+        from fido.provider import READ_ONLY_ALLOWED_TOOLS
+
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Third call is the derive turn.
+        _, kwargs = agent.run_turn.call_args_list[2]
+        assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
+
+    def test_verify_turn_exception_returns_original_response(self) -> None:
+        """A transport error in the verify turn must not discard the synthesis result."""
+        raw = _make_raw(reply_text="Original reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [
+            raw,
+            RuntimeError("transport error"),
+        ]
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Original reply."
+        assert result.change_request is None
+        assert agent.run_turn.call_count == 2
+
+    def test_derive_turn_exception_returns_original_response(self) -> None:
+        """A transport error in the derive turn must not discard the synthesis result."""
+        raw = _make_raw(reply_text="Original reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [
+            raw,
+            "No",
+            RuntimeError("derive transport error"),
+        ]
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Original reply."
+        assert result.change_request is None
+        assert agent.run_turn.call_count == 3
+
+    def test_context_overflow_error_propagates_from_verify_turn(self) -> None:
+        """ContextOverflowError in verify must propagate — not be swallowed."""
+        from fido.provider import ContextOverflowError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, ContextOverflowError("overflow")]
+        prompts = _make_prompts()
+
+        with pytest.raises(ContextOverflowError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_session_leak_error_propagates_from_verify_turn(self) -> None:
+        """SessionLeakError in verify must propagate — not be swallowed."""
+        from fido.provider import SessionLeakError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, SessionLeakError("leak")]
+        prompts = _make_prompts()
+
+        with pytest.raises(SessionLeakError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_context_overflow_error_propagates_from_derive_turn(self) -> None:
+        """ContextOverflowError in derive must propagate — not be swallowed."""
+        from fido.provider import ContextOverflowError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, "No", ContextOverflowError("overflow")]
+        prompts = _make_prompts()
+
+        with pytest.raises(ContextOverflowError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_session_leak_error_propagates_from_derive_turn(self) -> None:
+        """SessionLeakError in derive must propagate — not be swallowed."""
+        from fido.provider import SessionLeakError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, "No", SessionLeakError("leak")]
+        prompts = _make_prompts()
+
+        with pytest.raises(SessionLeakError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)

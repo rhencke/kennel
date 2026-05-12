@@ -6,6 +6,12 @@ malformed JSON up to :data:`MAX_RETRIES` times with a stricter
 instruction appended, then raises :class:`SynthesisExhaustedError`
 (fail-closed per Constraint B: reply text is always required, never
 defaulted).
+
+After a successful parse, a brief verification turn asks the model
+whether it recorded every request into ``change_request``.  A "No"
+answer triggers a follow-up turn that derives the omitted
+``change_request`` text and promotes the response to ACT, ensuring
+prose promises always correspond to queued tasks (fixes #1218).
 """
 
 import json
@@ -13,7 +19,12 @@ import logging
 from typing import Any
 
 from fido.prompts import Prompts
-from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent
+from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
+    ContextOverflowError,
+    ProviderAgent,
+    SessionLeakError,
+)
 from fido.synthesis import (
     VALID_REACTIONS,
     CommentResponse,
@@ -32,6 +43,93 @@ _RETRY_SUFFIX = (
     "Respond with ONLY a JSON object — no preamble, no trailing text, no markdown "
     "code fences.  The reply_text field must be a non-empty string."
 )
+
+
+# ---------------------------------------------------------------------------
+# LLM verification turn (fixes #1218)
+# ---------------------------------------------------------------------------
+#
+# After the synthesis LLM produces a reply, a brief yes/no turn asks whether
+# it recorded every request into ``change_request``.  If the answer is "No",
+# a second short turn derives the missing description so we can promote the
+# response to ACT and ensure a task is always queued behind any prose promise.
+
+_VERIFY_CHANGE_REQUEST_PROMPT: str = (
+    "Did you record every request from the previous reply into ``change_request`` "
+    "(if any)?  Reply only with the single word Yes or No."
+)
+
+_DERIVE_CHANGE_REQUEST_PROMPT: str = (
+    "You answered No.  In one concise sentence, state the request(s) you omitted from "
+    "``change_request`` — no preamble, no trailing text."
+)
+
+
+def _check_and_promote(
+    response: CommentResponse, agent: ProviderAgent
+) -> CommentResponse:
+    """Run a verification turn to detect unrecorded change requests.
+
+    When ``response.change_request`` is already set, returns *response*
+    unchanged — no extra turn is needed.
+
+    Otherwise, asks the agent whether every request was recorded into
+    ``change_request``.  If the agent answers "No" (case-insensitive,
+    with or without trailing punctuation), a follow-up turn derives a
+    concise ``change_request`` string and returns a new
+    :class:`~fido.synthesis.CommentResponse` with that field populated.
+
+    If the agent answers "Yes" (or anything other than "No"), or if the
+    derive turn returns an empty string, *response* is returned unchanged.
+    Any exception raised by either turn (transport errors, timeouts, etc.)
+    is caught, logged, and treated as a non-fatal guard failure — *response*
+    is returned unchanged so a valid synthesis result is never discarded.
+
+    This enforces the invariant: prose promises must correspond to queued
+    tasks (fixes #1218).
+    """
+    if response.change_request is not None:
+        return response
+
+    try:
+        verify_raw = agent.run_turn(
+            _VERIFY_CHANGE_REQUEST_PROMPT,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        if not (verify_raw or "").strip().lower().startswith("no"):
+            return response
+
+        log.warning(
+            "synthesis guard: model indicated unrecorded request — "
+            "deriving change_request via follow-up turn"
+        )
+        derived_raw = agent.run_turn(
+            _DERIVE_CHANGE_REQUEST_PROMPT,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        derived = (derived_raw or "").strip()
+        if not derived:
+            log.warning(
+                "synthesis guard: follow-up turn returned empty — skipping promotion"
+            )
+            return response
+
+        return CommentResponse(
+            reasoning=response.reasoning,
+            reply_text=response.reply_text,
+            emoji=response.emoji,
+            change_request=derived,
+            insights=response.insights,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "synthesis guard: verification turn failed (%s) — "
+            "returning original response unchanged",
+            exc,
+        )
+        return response
 
 
 class SynthesisExhaustedError(Exception):
@@ -169,9 +267,11 @@ def call_synthesis(
 
     Makes up to :data:`MAX_RETRIES` LLM calls.  The first attempt uses
     the base prompt; each subsequent attempt appends a stricter JSON-output
-    instruction.  Raises :class:`SynthesisExhaustedError` if all attempts
-    fail (Constraint B: reply text is always required, never silently
-    defaulted).
+    instruction.  After a successful parse, a brief verification turn checks
+    whether every request was recorded into ``change_request``; a "No"
+    answer triggers a follow-up derive turn and promotes the response to ACT.
+    Raises :class:`SynthesisExhaustedError` if all synthesis attempts fail
+    (Constraint B: reply text is always required, never silently defaulted).
 
     Parameters
     ----------
@@ -226,7 +326,7 @@ def call_synthesis(
 
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
-        return response
+        return _check_and_promote(response, agent)
 
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "
