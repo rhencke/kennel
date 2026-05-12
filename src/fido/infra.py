@@ -160,19 +160,37 @@ class OsProcess(Protocol):
 
 
 class RealOsProcess:
-    """Real :class:`OsProcess` that delegates to :mod:`os` and :mod:`signal`."""
+    """Real :class:`OsProcess` that delegates to injected callables.
+
+    All four OS operations are injected at construction time so tests
+    can substitute fakes without patching module-level names.  Production
+    code passes the real stdlib functions; :func:`real_infra` wires them
+    up from a single place.
+    """
+
+    def __init__(
+        self,
+        _execvp: Callable[[str, list[str]], None],
+        _exit: Callable[[int], NoReturn],
+        _chdir: Callable[[Path | str], None],
+        _install_signal: Callable[[int, Callable[..., object]], object],
+    ) -> None:
+        self._execvp = _execvp
+        self._exit = _exit
+        self._chdir = _chdir
+        self._install_signal = _install_signal
 
     def execvp(self, file: str, args: list[str]) -> None:
-        os.execvp(file, args)
+        self._execvp(file, args)
 
     def exit(self, code: int) -> NoReturn:
-        os._exit(code)
+        self._exit(code)
 
     def chdir(self, path: Path | str) -> None:
-        os.chdir(path)
+        self._chdir(path)
 
     def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
-        return signal.signal(signum, handler)
+        return self._install_signal(signum, handler)
 
 
 # ---------------------------------------------------------------------------
@@ -201,5 +219,10 @@ def real_infra() -> Infra:
         proc=RealProcessRunner(),
         clock=RealClock(),
         fs=RealFilesystem(),
-        os_proc=RealOsProcess(),
+        os_proc=RealOsProcess(
+            _execvp=os.execvp,
+            _exit=os._exit,
+            _chdir=os.chdir,
+            _install_signal=signal.signal,
+        ),
     )

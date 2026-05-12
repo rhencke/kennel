@@ -3,7 +3,8 @@
 import signal
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import NoReturn
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,55 +12,29 @@ from fido.infra import RealClock, RealFilesystem, RealOsProcess, RealProcessRunn
 
 
 class TestRealProcessRunner:
-    def test_run_delegates_to_subprocess_run(self) -> None:
-        mock_result = MagicMock(stdout="v2.43.0\n")
-        with patch("fido.infra.subprocess.run", return_value=mock_result) as mock_run:
-            runner = RealProcessRunner()
-            result = runner.run(
-                ["git", "--version"],
-                cwd="/tmp",
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        mock_run.assert_called_once_with(
-            ["git", "--version"],
-            cwd="/tmp",
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert result is mock_result
+    def test_run_returns_completed_process(self) -> None:
+        result = RealProcessRunner().run(["true"])
+        assert result.returncode == 0
 
-    def test_run_forwards_arbitrary_kwargs(self) -> None:
-        mock_result = MagicMock()
-        with patch("fido.infra.subprocess.run", return_value=mock_result) as mock_run:
-            RealProcessRunner().run(["true"], env={"FOO": "bar"}, timeout=5)
-        mock_run.assert_called_once_with(
-            ["true"], check=True, env={"FOO": "bar"}, timeout=5
-        )
+    def test_run_forwards_kwargs_to_subprocess(self) -> None:
+        result = RealProcessRunner().run(["true"], capture_output=True, text=True)
+        assert result.returncode == 0
+        assert result.stdout == ""
 
     def test_run_propagates_called_process_error(self) -> None:
-        with (
-            patch(
-                "fido.infra.subprocess.run",
-                side_effect=subprocess.CalledProcessError(1, ["bad"]),
-            ),
-            pytest.raises(subprocess.CalledProcessError),
-        ):
-            RealProcessRunner().run(["bad"], check=True)
+        with pytest.raises(subprocess.CalledProcessError):
+            RealProcessRunner().run(["false"])
 
 
 class TestRealClock:
-    def test_sleep_delegates_to_time_sleep(self) -> None:
-        with patch("fido.infra.time.sleep") as mock_sleep:
-            RealClock().sleep(2.5)
-        mock_sleep.assert_called_once_with(2.5)
+    def test_sleep_accepts_float_seconds(self) -> None:
+        # Verify sleep delegates without raising; zero duration keeps tests fast.
+        RealClock().sleep(0.0)
 
-    def test_monotonic_delegates_to_time_monotonic(self) -> None:
-        with patch("fido.infra.time.monotonic", return_value=123.456):
-            result = RealClock().monotonic()
-        assert result == 123.456
+    def test_monotonic_returns_increasing_values(self) -> None:
+        t1 = RealClock().monotonic()
+        t2 = RealClock().monotonic()
+        assert t2 >= t1
 
     def test_monotonic_returns_float(self) -> None:
         result = RealClock().monotonic()
@@ -69,13 +44,12 @@ class TestRealClock:
 
 class TestRealFilesystem:
     def test_which_returns_path_when_tool_found(self) -> None:
-        with patch("fido.infra.shutil.which", return_value="/usr/bin/git"):
-            result = RealFilesystem().which("git")
-        assert result == "/usr/bin/git"
+        result = RealFilesystem().which("true")
+        assert result is not None
+        assert "true" in result
 
     def test_which_returns_none_when_tool_absent(self) -> None:
-        with patch("fido.infra.shutil.which", return_value=None):
-            result = RealFilesystem().which("no-such-tool")
+        result = RealFilesystem().which("no-such-tool-xyzzy-42")
         assert result is None
 
     def test_is_dir_true_for_existing_directory(self, tmp_path: Path) -> None:
@@ -90,31 +64,56 @@ class TestRealFilesystem:
         assert RealFilesystem().is_dir(f) is False
 
 
+def _make_os_proc(**overrides: object) -> RealOsProcess:
+    """Construct a RealOsProcess with MagicMock defaults for all four callables."""
+
+    def _never_return(_code: int) -> NoReturn:
+        raise AssertionError("unexpected exit call")
+
+    kwargs: dict[str, object] = {
+        "_execvp": MagicMock(),
+        "_exit": _never_return,
+        "_chdir": MagicMock(),
+        "_install_signal": MagicMock(),
+    }
+    kwargs.update(overrides)
+    return RealOsProcess(**kwargs)  # type: ignore[arg-type]
+
+
 class TestRealOsProcess:
     def test_execvp_delegates_to_os_execvp(self) -> None:
-        with patch("fido.infra.os.execvp") as mock_execvp:
-            RealOsProcess().execvp("uv", ["uv", "run", "fido"])
+        mock_execvp = MagicMock()
+        _make_os_proc(_execvp=mock_execvp).execvp("uv", ["uv", "run", "fido"])
         mock_execvp.assert_called_once_with("uv", ["uv", "run", "fido"])
 
     def test_exit_delegates_to_os_exit(self) -> None:
-        with patch("fido.infra.os._exit") as mock_exit:
-            RealOsProcess().exit(75)
-        mock_exit.assert_called_once_with(75)
+        calls: list[int] = []
+
+        def _fake_exit(code: int) -> NoReturn:
+            calls.append(code)
+            raise SystemExit(code)
+
+        with pytest.raises(SystemExit) as exc:
+            _make_os_proc(_exit=_fake_exit).exit(75)
+        assert exc.value.code == 75
+        assert calls == [75]
 
     def test_chdir_delegates_to_os_chdir(self, tmp_path: Path) -> None:
-        with patch("fido.infra.os.chdir") as mock_chdir:
-            RealOsProcess().chdir(tmp_path)
+        mock_chdir = MagicMock()
+        _make_os_proc(_chdir=mock_chdir).chdir(tmp_path)
         mock_chdir.assert_called_once_with(tmp_path)
 
     def test_chdir_accepts_string_path(self) -> None:
-        with patch("fido.infra.os.chdir") as mock_chdir:
-            RealOsProcess().chdir("/tmp")
+        mock_chdir = MagicMock()
+        _make_os_proc(_chdir=mock_chdir).chdir("/tmp")
         mock_chdir.assert_called_once_with("/tmp")
 
-    def test_install_signal_delegates_to_signal_signal(self) -> None:
+    def test_install_signal_returns_previous_handler(self) -> None:
         old_handler = MagicMock()
-        handler = MagicMock()
-        with patch("fido.infra.signal.signal", return_value=old_handler) as mock_sig:
-            result = RealOsProcess().install_signal(signal.SIGTERM, handler)
-        mock_sig.assert_called_once_with(signal.SIGTERM, handler)
+        mock_install = MagicMock(return_value=old_handler)
+        new_handler = MagicMock()
+        result = _make_os_proc(_install_signal=mock_install).install_signal(
+            signal.SIGTERM, new_handler
+        )
+        mock_install.assert_called_once_with(signal.SIGTERM, new_handler)
         assert result is old_handler

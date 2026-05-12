@@ -235,8 +235,8 @@ ignore = ["E501"]
 # construction time instead.  See CLAUDE.md "OO + constructor-DI architecture"
 # and "Migration smells".
 "unittest.mock.patch".msg = "Use constructor-DI: pass a MagicMock or hand-rolled fake at construction time. See CLAUDE.md 'OO + constructor-DI architecture' and 'Migration smells'."
-"unittest.mock.patch.object".msg = "Same — use constructor-DI."
-"unittest.mock.patch.dict".msg = "Same — use constructor-DI or a fixture."
+"unittest.mock.patch.object".msg = "Use constructor-DI: pass a MagicMock or hand-rolled fake at construction time. See CLAUDE.md 'OO + constructor-DI architecture' and 'Migration smells'."
+"unittest.mock.patch.dict".msg = "Use constructor-DI or a fixture: inject the dict at construction time. See CLAUDE.md 'OO + constructor-DI architecture' and 'Migration smells'."
 
 [tool.ruff.lint.per-file-ignores]
 # Generated Rocq extraction output is format-checked by CI, but lint has
@@ -256,7 +256,6 @@ ignore = ["E501"]
 "tests/test_coverage_fills.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
 "tests/test_harness_commit.py" = ["TID251"]
-"tests/test_infra.py" = ["TID251"]
 "tests/test_server.py" = ["TID251"]
 "tests/test_status.py" = ["TID251"]
 "tests/test_turn_outcome.py" = ["TID251"]
