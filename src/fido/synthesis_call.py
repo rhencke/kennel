@@ -95,6 +95,7 @@ def _check_and_promote(
         verify_raw = agent.run_turn(
             _VERIFY_CHANGE_REQUEST_PROMPT,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            retry_on_preempt=True,
         )
         if not (verify_raw or "").strip().lower().startswith("no"):
             return response
@@ -106,6 +107,7 @@ def _check_and_promote(
         derived_raw = agent.run_turn(
             _DERIVE_CHANGE_REQUEST_PROMPT,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            retry_on_preempt=True,
         )
         derived = (derived_raw or "").strip()
         if not derived:
@@ -303,10 +305,20 @@ def call_synthesis(
         user_prompt = (
             base_user_prompt if attempt == 0 else base_user_prompt + _RETRY_SUFFIX
         )
+        # ``retry_on_preempt=True`` (#1687): a preempted (cancelled)
+        # turn returns an empty string from the drain.  Without this,
+        # ``_parse_comment_response`` below would raise "no JSON
+        # objects found", logged as "parse failure" — and three
+        # preemptions in a row would burn the retry budget and trip
+        # the failure-explanation fallback even though the model never
+        # got a chance to answer.  ``session_agent`` re-runs cancelled
+        # turns transparently, so the parse-failure branch only fires
+        # for genuine model misbehavior.
         raw = agent.run_turn(
             user_prompt,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
             system_prompt=system_prompt,
+            retry_on_preempt=True,
         )
         log.debug(
             "synthesis attempt %d/%d raw output: %r", attempt + 1, MAX_RETRIES, raw
@@ -367,6 +379,7 @@ def call_failure_explanation(
         raw = agent.run_turn(
             user_prompt + suffix,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            retry_on_preempt=True,
         )
         log.debug(
             "failure-explanation attempt %d/%d raw output: %r",

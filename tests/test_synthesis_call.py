@@ -511,6 +511,20 @@ class TestCallFailureExplanation:
 
         assert result.reply_text == "real reply"
 
+    def test_uses_retry_on_preempt(self) -> None:
+        """Failure-explanation retry loop must also pass
+        ``retry_on_preempt=True`` (#1687) — otherwise three consecutive
+        cancellations would arrive here as empty strings, exhaust the
+        retry budget, and raise ``SynthesisExhaustedError`` even though
+        the model never produced a real failure."""
+        agent = _make_agent("Sorry, please try again.")
+        prompts = _make_failure_prompts()
+
+        call_failure_explanation("comment", agent=agent, prompts=prompts)
+
+        _, kwargs = agent.run_turn.call_args_list[0]
+        assert kwargs.get("retry_on_preempt") is True
+
 
 # ---------------------------------------------------------------------------
 # call_synthesis — LLM verification turn
@@ -644,6 +658,47 @@ class TestCallSynthesisVerificationTurn:
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
         assert result.reasoning == "my private chain-of-thought"
+
+    def test_synthesis_turn_uses_retry_on_preempt(self) -> None:
+        """Main synthesis turn passes ``retry_on_preempt=True`` so a
+        cancelled/preempted turn is transparently re-tried by the agent
+        instead of arriving here as an empty string and burning a
+        parse-failure retry slot — three consecutive preemptions used
+        to trip the failure-explanation fallback even though the model
+        never got a chance to answer (#1687)."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # First call is the synthesis turn itself.
+        _, kwargs = agent.run_turn.call_args_list[0]
+        assert kwargs.get("retry_on_preempt") is True
+
+    def test_verify_turn_uses_retry_on_preempt(self) -> None:
+        """Verification turn (#1644 self-verification guard) is also
+        on the synthesis retry path — same preempt-eaten-as-empty bug
+        applies if not protected (#1687)."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        _, kwargs = agent.run_turn.call_args_list[1]
+        assert kwargs.get("retry_on_preempt") is True
+
+    def test_derive_turn_uses_retry_on_preempt(self) -> None:
+        """Derive turn (after a "No" verify) — same protection (#1687)."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts()
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        _, kwargs = agent.run_turn.call_args_list[2]
+        assert kwargs.get("retry_on_preempt") is True
 
     def test_verify_turn_uses_read_only_allowed_tools(self) -> None:
         """Verification turns must pass READ_ONLY_ALLOWED_TOOLS, not None."""
