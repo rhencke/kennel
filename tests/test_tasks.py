@@ -1366,7 +1366,14 @@ class TestReorderTasks:
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
         assert task1["status"] == "pending"
 
-    def test_on_changes_called_when_thread_task_modified(self, tmp_path: Path) -> None:
+    def test_on_changes_skipped_when_only_description_changes(
+        self, tmp_path: Path
+    ) -> None:
+        """Pure description rewrites (title preserved) do not fire a
+        reply-back to the commenter.  The reducer currently preserves
+        titles across rescope, so Opus's "Changed title" gets dropped and
+        only the description update lands — that's an internal rephrasing,
+        not a contract change worth notifying the reviewer about (#1388)."""
         thread = {
             "repo": "r/r",
             "pr": 1,
@@ -1388,10 +1395,12 @@ class TestReorderTasks:
             agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
         )
-        assert len(received) == 1
-        assert received[0]["kind"] == "modified"
-        assert received[0]["new_title"] == "Stable title"
-        assert received[0]["new_description"] == "new"
+        assert received == []
+        # The description still gets written; only the reply-back is
+        # suppressed.  Verify the task list reflects the description edit.
+        task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
+        assert task1["description"] == "new"
+        assert task1["title"] == "Stable title"
 
     def test_on_changes_not_called_when_no_thread_tasks_changed(
         self, tmp_path: Path
@@ -1755,13 +1764,15 @@ class TestComputeThreadChanges:
         assert changes[0]["kind"] == "modified"
         assert changes[0]["new_title"] == "New title"
 
-    def test_modified_description(self) -> None:
+    def test_description_only_change_is_silent(self) -> None:
+        """Pure description rewrites (title unchanged) are internal
+        rescope rephrasing — no change record, no reply-back to the
+        commenter.  Only title changes signal a material scope shift
+        worth notifying the reviewer about (#1388)."""
         original = [self._t("1", "Task", thread=self._thread(), description="old")]
         result = [self._t("1", "Task", thread=self._thread(), description="new")]
         changes = _compute_thread_changes(original, result, frozenset({"1"}))
-        assert len(changes) == 1
-        assert changes[0]["kind"] == "modified"
-        assert changes[0]["new_description"] == "new"
+        assert changes == []
 
     def test_unchanged_thread_task_not_reported(self) -> None:
         t = self._t("1", "Task", thread=self._thread())

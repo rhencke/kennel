@@ -841,7 +841,7 @@ def _compute_thread_changes(
     result: list[dict[str, Any]],
     original_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Return change records for thread tasks that were completed or modified.
+    """Return change records for thread tasks that were completed or materially modified.
 
     Only tasks in *original_ids* (those Opus knew about) with a ``thread``
     attachment are reported.  Already-completed tasks are excluded.
@@ -849,6 +849,13 @@ def _compute_thread_changes(
     Each record is one of:
     - ``{"task": ..., "kind": "completed"}`` — Opus omitted or marked it done
     - ``{"task": ..., "kind": "modified", "new_title": ..., "new_description": ...}``
+      — the **title** changed.  Title is the contract Fido committed to in
+      its initial reply; a title change indicates the scope materially
+      shifted.  Pure description rewrites that preserve the title are
+      treated as internal rephrasing and produce no change record — the
+      reviewer's mental model is "I gave feedback, Fido replied, I'll see
+      them again when the work lands," and rescope-internal description
+      edits between those two events are noise (#1388).
 
     Note: the Rocq model (``TaskCompleted`` vs ``TaskCancelled``) distinguishes
     explicit completion from omission.  Here both map to ``"completed"`` because
@@ -871,9 +878,7 @@ def _compute_thread_changes(
         r = result_by_id.get(tid)
         if r is None or r.get("status") == TaskStatus.COMPLETED:
             changes.append({"task": t, "kind": "completed"})
-        elif r.get("title") != t.get("title") or r.get("description") != t.get(
-            "description"
-        ):
+        elif r.get("title") != t.get("title"):
             changes.append(
                 {
                     "task": t,
@@ -1032,9 +1037,12 @@ def reorder_tasks(
         lock.write(result)
 
     if _on_changes is not None:
-        changes = _compute_thread_changes(current, result, original_ids)
-        if changes:
-            _on_changes(changes)
+        # Always call with the (possibly empty) list — the production
+        # callback iterates and a no-change run is a no-op.  Avoids a
+        # branch that's hard to reach in tests now that title
+        # preservation by the reducer means rescope rarely produces a
+        # material change record (#1388).
+        _on_changes(_compute_thread_changes(current, result, original_ids))
 
     if inprogress_affected and _on_inprogress_affected is not None:
         assert inprogress is not None  # inprogress_affected is True
