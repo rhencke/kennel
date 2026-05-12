@@ -2328,14 +2328,14 @@ class TestClaudeSessionLock:
         finally:
             session.stop()
 
-    def test_prompt_resets_stale_fsm_on_acquire(self, tmp_path: Path) -> None:
-        """Defensive cleanup (#1670): if a prior turn left the stream FSM
-        in a non-Idle state (e.g. early return from
-        ``consume_until_result`` after a force-release, idle timeout, or
-        any path that didn't drain to TurnComplete), the next ``prompt``
-        on the recovered session resets the FSM to Idle before the Send
-        instead of crashing the worker thread with
-        ``Send rejected in state AwaitingReply``."""
+    def test_prompt_recovers_on_in_flight_stale_fsm(self, tmp_path: Path) -> None:
+        """Defensive cleanup (#1670): if a prior turn left the FSM in a
+        truly in-flight state (``Sending`` / ``AwaitingReply`` /
+        ``Draining``), the next ``prompt`` respawns the subprocess to
+        clear the leaked turn before the Send.  Just resetting the FSM
+        without respawning would risk writing a new user message to a
+        still-running prior subprocess (per ``OwnedSession.force_release``
+        ownership-handoff window)."""
         from fido.claude import ClaudeSession
         from fido.rocq import claude_session as stream_fsm
 
@@ -2354,14 +2354,55 @@ class TestClaudeSessionLock:
             model="claude-opus-4-6",
         )
         try:
-            # Simulate a leaked AwaitingReply from a prior turn that exited
-            # without draining to TurnComplete.
             with session._stream_lock:
                 session._stream_state = stream_fsm.AwaitingReply()
-            # prompt() must not crash on Send rejection — it must
-            # detect the stale state, reset to Idle, then proceed.
-            result = session.prompt("hi there", model="claude-opus-4-6")
+            spawn_count_before = fake_popen.call_count
+            # ``allowed_tools=None`` matches session._tools so switch_tools
+            # is a no-op — isolates the spawn count to the defensive
+            # ``recover()`` path.
+            result = session.prompt(
+                "hi there", model="claude-opus-4-6", allowed_tools=None
+            )
             assert result == "recovered"
+            assert fake_popen.call_count > spawn_count_before
+        finally:
+            session.stop()
+
+    def test_prompt_does_not_recover_on_cancelled_state(self, tmp_path: Path) -> None:
+        """``Cancelled`` is the steady state after a clean preemption,
+        not a leak.  ``send()`` already handles ``Cancelled → Idle`` via
+        ``TurnReturn``, so the defensive cleanup must not respawn here
+        — that would produce false-leak warnings and bypass the modeled
+        transition every time preemption is working as designed."""
+        from fido.claude import ClaudeSession
+        from fido.rocq import claude_session as stream_fsm
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        proc = _make_session_proc(['{"type":"result","result":"after-cancel"}\n'])
+        proc.pid = 44444
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            repo_name="owner/repo",
+            model="claude-opus-4-6",
+        )
+        try:
+            with session._stream_lock:
+                session._stream_state = stream_fsm.Cancelled()
+            spawn_count_before = fake_popen.call_count
+            # ``allowed_tools=None`` keeps switch_tools a no-op so the
+            # spawn count reflects only what the defensive cleanup does
+            # (which should be: nothing for Cancelled).
+            result = session.prompt(
+                "hi there", model="claude-opus-4-6", allowed_tools=None
+            )
+            assert result == "after-cancel"
+            assert fake_popen.call_count == spawn_count_before
         finally:
             session.stop()
 
