@@ -32,6 +32,14 @@ class TestGlobalDisallowedTools:
         instructions."""
         assert "pulls/" not in GLOBAL_DISALLOWED_TOOLS
 
+    def test_denies_raw_curl(self) -> None:
+        """Raw curl is the loophole one layer below the gh-api deny:
+        `curl -X POST https://api.github.com/...` bypasses both the
+        gh-api pattern (different binary) and codex's read-only sandbox
+        (network is allowed).  Capability-layer enforcement closes it
+        (#1679)."""
+        assert "Bash(curl *)" in GLOBAL_DISALLOWED_TOOLS
+
 
 class TestProviderLimitWindow:
     def test_pressure_returns_ratio(self) -> None:

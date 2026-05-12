@@ -301,6 +301,14 @@ GLOBAL_DISALLOWED_TOOLS = (
     # layer enforcement (#1675) closes the gap that prompt rules can't.
     # Read paths still work via `gh issue view`/`gh pr view --comments`.
     " Bash(gh api *issues/*/comments*)"
+    # Raw curl is the same loophole one layer down: banning `gh api ...
+    # POST` plus codex's read-only sandbox blocks disk and the high-level
+    # GitHub helper, but `curl -X POST https://api.github.com/...`
+    # bypasses both because it's a different binary and codex's
+    # read-only mode allows network (#1679).  The model uses `gh` for
+    # GitHub interactions; curl is rarely necessary and the rare cases
+    # don't justify the loophole.
+    " Bash(curl *)"
     " Agent"
     " Skill"
     " TaskCreate TaskUpdate TaskList TodoWrite TodoRead"
