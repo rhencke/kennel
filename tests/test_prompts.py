@@ -1494,3 +1494,10 @@ class TestSynthesisPrompt:
     def test_insights_empty_array_when_nothing_stood_out(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "Empty array" in result or "empty array" in result or "Empty" in result
+
+    def test_no_promise_without_change_request_constraint(self) -> None:
+        # The prompt must forbid future-tense commitments when change_request
+        # is null, so the LLM doesn't produce "I'll fix this" with no task.
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "change_request" in result
+        assert "future" in result.lower() or "I'll" in result or "I will" in result

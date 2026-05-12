@@ -622,7 +622,12 @@ class Prompts:
             "- Read the full comment thread, not just the last comment.  "
             "Reply to the conversation, not to one isolated line.\n"
             "- Keep the reply brief and direct.  No preamble, no corporate "
-            "prose, no filler phrases.\n\n"
+            "prose, no filler phrases.\n"
+            "- If you are not populating change_request, do not promise future "
+            "action in reply_text.  Describe only what has already been done or "
+            "what cannot be done.  Future-tense commitments "
+            '("I\'ll", "I will", "I\'m going to") are reserved for replies '
+            "where change_request is also populated.\n\n"
             "Respond with ONLY the JSON object.  No text before or after it."
         )
 
