@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.synthesis import Insight
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import (
     MAX_RETRIES,
     SynthesisExhaustedError,
@@ -14,6 +14,8 @@ from fido.synthesis_call import (
     _parse_comment_response,
     call_failure_explanation,
     call_synthesis,
+    detect_unfulfilled_promises,
+    promote_answer_to_act,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -505,3 +507,234 @@ class TestCallFailureExplanation:
         result = call_failure_explanation("comment", agent=agent, prompts=prompts)
 
         assert result.reply_text == "real reply"
+
+
+# ---------------------------------------------------------------------------
+# detect_unfulfilled_promises
+# ---------------------------------------------------------------------------
+
+
+class TestDetectUnfulfilledPromises:
+    def test_detects_ill_pattern(self) -> None:
+        result = detect_unfulfilled_promises("You're right. I'll fix this.")
+        assert result is not None
+
+    def test_detects_i_will_pattern(self) -> None:
+        result = detect_unfulfilled_promises("I will address this in the next commit.")
+        assert result is not None
+
+    def test_detects_im_going_to_pattern(self) -> None:
+        result = detect_unfulfilled_promises("I'm going to update the tests.")
+        assert result is not None
+
+    def test_detects_i_am_going_to_pattern(self) -> None:
+        result = detect_unfulfilled_promises("I am going to rewrite this function.")
+        assert result is not None
+
+    def test_returns_none_when_no_promise(self) -> None:
+        result = detect_unfulfilled_promises("This looks good already.")
+        assert result is None
+
+    def test_returns_none_for_empty_string(self) -> None:
+        result = detect_unfulfilled_promises("")
+        assert result is None
+
+    def test_returns_first_promise_sentence(self) -> None:
+        text = "This looks fine. I'll update the docs. And I'll also add tests."
+        result = detect_unfulfilled_promises(text)
+        assert result == "I'll update the docs."
+
+    def test_case_insensitive(self) -> None:
+        result = detect_unfulfilled_promises("I'LL FIX THIS.")
+        assert result is not None
+
+    # Edge case: quoted promises (Markdown blockquotes)
+    def test_skips_quoted_lines(self) -> None:
+        text = "> I'll fix this\n\nSounds reasonable."
+        result = detect_unfulfilled_promises(text)
+        assert result is None
+
+    def test_skips_indented_quoted_lines(self) -> None:
+        # Leading whitespace before > is also a valid blockquote.
+        text = "  > I will address this\n\nLooks good as-is."
+        result = detect_unfulfilled_promises(text)
+        assert result is None
+
+    def test_detects_promise_when_quote_and_non_quote_mixed(self) -> None:
+        text = "> some quoted context\n\nI'll address this."
+        result = detect_unfulfilled_promises(text)
+        assert result is not None
+
+    # Edge case: negated promises
+    def test_i_will_not_not_detected(self) -> None:
+        # "I will" appears in "I will not", but the negation guard suppresses it.
+        result = detect_unfulfilled_promises("I will not make any changes here.")
+        assert result is None
+
+    def test_i_wont_not_detected(self) -> None:
+        # "I won't" does not match the promise regex at all.
+        result = detect_unfulfilled_promises("I won't make changes here.")
+        assert result is None
+
+    def test_ill_not_not_detected(self) -> None:
+        # "I'll not" — the negation guard suppresses "I'll" when "I'll not" is present.
+        result = detect_unfulfilled_promises("I'll not be adding that feature.")
+        assert result is None
+
+    def test_not_going_to_not_detected(self) -> None:
+        result = detect_unfulfilled_promises("I'm not going to add that here.")
+        assert result is None
+
+    def test_real_world_example(self) -> None:
+        # Reproduces the pattern from rhencke/tracy#54.
+        text = (
+            "You're right, I missed those details on the first pass.  "
+            "I'll make sure the build script, JS bundling, and CI integration "
+            "all match the issue requirements.  Thanks for catching it!"
+        )
+        result = detect_unfulfilled_promises(text)
+        assert result is not None
+        assert "I'll" in result
+
+
+# ---------------------------------------------------------------------------
+# promote_answer_to_act
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteAnswerToAct:
+    def test_promotes_when_promise_detected(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="You're right. I'll make sure all tests pass.",
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.change_request is not None
+        assert promoted.reply_text == response.reply_text
+
+    def test_unchanged_when_no_promise(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="This looks good already.",
+        )
+        result = promote_answer_to_act(response)
+        assert result is response  # same object — no promotion
+
+    def test_unchanged_when_already_act(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="I'll fix it.",
+            change_request="Fix the bug",
+        )
+        result = promote_answer_to_act(response)
+        assert result is response  # original change_request preserved, not replaced
+
+    def test_preserves_emoji_on_promotion(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="I'll update this.",
+            emoji="rocket",
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.change_request is not None
+        assert promoted.emoji == "rocket"
+
+    def test_preserves_insights_on_promotion(self) -> None:
+        insight = Insight(title="T", hook="H", why="W.")
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="I'll fix this.",
+            insights=[insight],
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.change_request is not None
+        assert promoted.insights == [insight]
+
+    def test_preserves_reasoning_on_promotion(self) -> None:
+        response = CommentResponse(
+            reasoning="my private chain-of-thought",
+            reply_text="I'll add the missing tests.",
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.reasoning == "my private chain-of-thought"
+
+    def test_derived_change_request_is_nonempty(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="I'll fix this.",
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.change_request
+        assert promoted.change_request.strip()
+
+
+# ---------------------------------------------------------------------------
+# call_synthesis — promise guard integration
+# ---------------------------------------------------------------------------
+
+
+class TestCallSynthesisPromiseGuard:
+    """Integration tests for the promise-language guard wired into call_synthesis."""
+
+    def test_promotes_answer_with_promise_to_act(self) -> None:
+        # ANSWER reply (no change_request) but reply_text has "I'll" — must be promoted.
+        raw = _make_raw(
+            reply_text="You're right. I'll make sure all tests pass.",
+            change_request=None,
+        )
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is not None
+
+    def test_answer_without_promise_stays_answer(self) -> None:
+        raw = _make_raw(
+            reply_text="This already looks correct.",
+            change_request=None,
+        )
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is None
+
+    def test_act_with_promise_preserves_original_change_request(self) -> None:
+        # When change_request is already set, the guard must not overwrite it.
+        raw = _make_raw(
+            reply_text="I'll update this.",
+            change_request="Fix the existing issue",
+        )
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Fix the existing issue"
+
+    def test_quoted_promise_not_promoted(self) -> None:
+        # Promise language inside a Markdown blockquote must not trigger promotion.
+        raw = _make_raw(
+            reply_text="> I'll fix this\n\nSounds like it's already handled.",
+            change_request=None,
+        )
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is None
+
+    def test_negated_promise_not_promoted(self) -> None:
+        raw = _make_raw(
+            reply_text="I will not make any changes here — this is correct as-is.",
+            change_request=None,
+        )
+        agent = _make_agent(raw)
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request is None

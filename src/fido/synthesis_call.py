@@ -10,6 +10,7 @@ defaulted).
 
 import json
 import logging
+import re
 from typing import Any
 
 from fido.prompts import Prompts
@@ -32,6 +33,102 @@ _RETRY_SUFFIX = (
     "Respond with ONLY a JSON object — no preamble, no trailing text, no markdown "
     "code fences.  The reply_text field must be a non-empty string."
 )
+
+
+# ---------------------------------------------------------------------------
+# Promise-language guard (fixes #1218)
+# ---------------------------------------------------------------------------
+#
+# The synthesis LLM can produce ANSWER replies that contain future-tense
+# commitments ("I'll fix this") even when ``change_request`` is null, meaning
+# no task ever gets queued and the promise is never honoured.  These helpers
+# detect that mismatch and promote the response to ACT so a task is always
+# created to back any prose promise.
+
+#: Matches future-tense commitment phrases (case-insensitive).
+_PROMISE_RE: re.Pattern[str] = re.compile(
+    r"\b(?:I'll|I will|I'm going to|I am going to)\b",
+    re.IGNORECASE,
+)
+
+#: Matches negations that cancel a promise within the same sentence —
+#: e.g. "I will not fix this" or "I'll not do that".
+_NEGATION_RE: re.Pattern[str] = re.compile(
+    r"\b(?:will not|won't|not going to|I'll not)\b",
+    re.IGNORECASE,
+)
+
+#: Splits text into rough sentences at sentence-ending punctuation or blank lines.
+_SENTENCE_SPLIT_RE: re.Pattern[str] = re.compile(r"(?<=[.!?])\s+|\n\n+")
+
+
+def _non_quoted_lines(text: str) -> str:
+    """Return *text* with Markdown block-quote lines (starting with ``>``) removed."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith(">")
+    )
+
+
+def detect_unfulfilled_promises(reply_text: str) -> str | None:
+    """Return a derived change_request if *reply_text* contains promise language.
+
+    Strips Markdown block-quote lines, splits the remainder into sentences,
+    and checks each sentence for future-tense commitment phrases
+    (``I'll``, ``I will``, ``I'm going to``, ``I am going to``) that are
+    not countered by a negation in the same sentence
+    (``will not``, ``won't``, ``not going to``, ``I'll not``).
+
+    Returns the first matching sentence as the derived change_request
+    string, or ``None`` when no unfulfilled promise is found.
+
+    This is a pure function — it reads no mutable state and raises no
+    exceptions.
+    """
+    unquoted = _non_quoted_lines(reply_text)
+    for sentence in _SENTENCE_SPLIT_RE.split(unquoted):
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        if not _PROMISE_RE.search(stripped):
+            continue
+        if _NEGATION_RE.search(stripped):
+            continue
+        return stripped
+    return None
+
+
+def promote_answer_to_act(response: CommentResponse) -> CommentResponse:
+    """Promote an ANSWER response to ACT when its prose contains promise language.
+
+    When ``response.change_request`` is ``None`` but ``response.reply_text``
+    contains unfulfilled future-tense commitments, derives a ``change_request``
+    from the promise text and returns a new
+    :class:`~fido.synthesis.CommentResponse` with that field populated.
+    Logs a warning so the promotion is auditable in the server logs.
+
+    When ``response.change_request`` is already set, or no promise language
+    is detected, returns *response* unchanged (same object, not a copy).
+
+    This enforces the invariant: prose promises must correspond to queued
+    tasks (fixes #1218).
+    """
+    if response.change_request is not None:
+        return response
+    derived = detect_unfulfilled_promises(response.reply_text)
+    if derived is None:
+        return response
+    log.warning(
+        "synthesis guard: ANSWER reply contains promise language — "
+        "promoting to ACT with derived change_request: %r",
+        derived[:80],
+    )
+    return CommentResponse(
+        reasoning=response.reasoning,
+        reply_text=response.reply_text,
+        emoji=response.emoji,
+        change_request=derived,
+        insights=response.insights,
+    )
 
 
 class SynthesisExhaustedError(Exception):
@@ -226,7 +323,7 @@ def call_synthesis(
 
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
-        return response
+        return promote_answer_to_act(response)
 
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "
