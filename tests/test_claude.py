@@ -2328,6 +2328,43 @@ class TestClaudeSessionLock:
         finally:
             session.stop()
 
+    def test_prompt_resets_stale_fsm_on_acquire(self, tmp_path: Path) -> None:
+        """Defensive cleanup (#1670): if a prior turn left the stream FSM
+        in a non-Idle state (e.g. early return from
+        ``consume_until_result`` after a force-release, idle timeout, or
+        any path that didn't drain to TurnComplete), the next ``prompt``
+        on the recovered session resets the FSM to Idle before the Send
+        instead of crashing the worker thread with
+        ``Send rejected in state AwaitingReply``."""
+        from fido.claude import ClaudeSession
+        from fido.rocq import claude_session as stream_fsm
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        proc = _make_session_proc(['{"type":"result","result":"recovered"}\n'])
+        proc.pid = 33333
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            repo_name="owner/repo",
+            model="claude-opus-4-6",
+        )
+        try:
+            # Simulate a leaked AwaitingReply from a prior turn that exited
+            # without draining to TurnComplete.
+            with session._stream_lock:
+                session._stream_state = stream_fsm.AwaitingReply()
+            # prompt() must not crash on Send rejection — it must
+            # detect the stale state, reset to Idle, then proceed.
+            result = session.prompt("hi there", model="claude-opus-4-6")
+            assert result == "recovered"
+        finally:
+            session.stop()
+
     def test_prompt_prepends_system_prompt_to_body(self, tmp_path: Path) -> None:
         from fido.claude import ClaudeSession
 

@@ -1153,6 +1153,28 @@ class ClaudeSession(OwnedSession):
                 tid,
                 time.monotonic() - t_start,
             )
+            # Defensive cleanup on acquire (#1670): if a prior turn left
+            # the FSM in a non-Idle state — e.g. an early return from
+            # ``consume_until_result`` (force-release mid-turn, idle
+            # timeout, network drop), or any other path that exited the
+            # ``with self:`` block without draining all events — clean it
+            # before we Send so the FSM's ``Send rejected in state X``
+            # assertion doesn't crash the worker thread.  Switch_model and
+            # switch_tools both respawn on change (which calls
+            # ``_stream_reset``), but they're no-ops when the state is
+            # already correct, so they don't catch this.
+            with self._stream_lock:
+                stale_state = self._stream_state
+                stale = not isinstance(stale_state, stream_fsm.Idle)
+            if stale:
+                log.warning(
+                    "ClaudeSession[%s]: stream FSM was %s on prompt acquire "
+                    "— resetting to Idle (leaked from prior turn that did "
+                    "not drain to completion)",
+                    self._repo_name or "?",
+                    type(stale_state).__name__,
+                )
+                self._stream_reset()
             if model is not None:
                 self.switch_model(model)
             self.switch_tools(allowed_tools)
