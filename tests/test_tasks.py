@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1218,15 +1218,16 @@ class TestReorderTasks:
         client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
-        from unittest.mock import patch
-
         self._add(tmp_path, "Task A")
-        with patch(
-            "fido.tasks.ClaudeClient",
-            return_value=_client(""),
-        ) as mock_cls:
-            reorder_tasks(tmp_path, "")
-            mock_cls.assert_called_once_with()
+        mock_client = _client("")
+        factory_calls: list[object] = []
+
+        def mock_factory() -> object:
+            factory_calls.append(True)
+            return mock_client
+
+        reorder_tasks(tmp_path, "", _client_factory=mock_factory)
+        assert len(factory_calls) == 1
 
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
@@ -1871,8 +1872,10 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        mock_sync = MagicMock()
+        Tasks(work_dir, _sync_background=mock_sync).complete_with_resolve(
+            task["id"], gh
+        )
         mock_sync.assert_called_once_with(work_dir, gh)
 
     def test_triggers_background_sync_even_for_unknown_id(self, tmp_path: Path) -> None:
@@ -1880,8 +1883,10 @@ class TestTasksCompleteWithResolve:
         intent ('I just tried to complete something') is the trigger."""
         work_dir = self._work_dir(tmp_path)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve("nonexistent-id", gh)
+        mock_sync = MagicMock()
+        Tasks(work_dir, _sync_background=mock_sync).complete_with_resolve(
+            "nonexistent-id", gh
+        )
         mock_sync.assert_called_once_with(work_dir, gh)
 
     def test_resolves_thread_when_we_are_last(

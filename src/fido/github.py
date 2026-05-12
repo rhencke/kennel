@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-import requests as _requests
+import requests
 
 from fido.types import ClosedPR, ClosedSubIssue, GitIdentity
 
@@ -81,13 +81,13 @@ _GET_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0, 10.0)
 _RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 
 
-class _TimeoutSession(_requests.Session):
+class _TimeoutSession(requests.Session):
     """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
 
     def __init__(
         self,
         *,
-        _base_request: Callable[..., _requests.Response] | None = None,
+        _base_request: Callable[..., requests.Response] | None = None,
     ) -> None:
         super().__init__()
         self._base_request = _base_request or super().request
@@ -97,7 +97,7 @@ class _TimeoutSession(_requests.Session):
         method: str | bytes,
         url: str | bytes,
         **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to requests.Session.request
-    ) -> _requests.Response:  # type: ignore[override]
+    ) -> requests.Response:  # type: ignore[override]
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
         return self._base_request(method, url, **kwargs)
 
@@ -164,7 +164,7 @@ class GitHub:
     def __init__(
         self,
         token: str | None = None,
-        session: _requests.Session | None = None,
+        session: requests.Session | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         token_fetcher: Callable[[], str] = _gh_token,
     ) -> None:
@@ -202,7 +202,7 @@ class GitHub:
         self._s.headers["Authorization"] = f"Bearer {new_token}"
         return True
 
-    def _retryable_get(self, url: str) -> _requests.Response:
+    def _retryable_get(self, url: str) -> requests.Response:
         """GET *url* with retry on transient upstream failures (#664).
 
         Retries idempotent GETs on 5xx status codes and on
@@ -214,14 +214,14 @@ class GitHub:
             try:
                 resp = self._s.get(url)
                 if resp.status_code in _RETRYABLE_STATUS:
-                    last_exc = _requests.HTTPError(
+                    last_exc = requests.HTTPError(
                         f"{resp.status_code} {resp.reason} for url: {url}",
                         response=resp,
                     )
                 else:
                     resp.raise_for_status()
                     return resp
-            except (_requests.ConnectionError, _requests.Timeout) as exc:
+            except (requests.ConnectionError, requests.Timeout) as exc:
                 last_exc = exc
             if attempt < len(_GET_RETRY_DELAYS):
                 delay = _GET_RETRY_DELAYS[attempt]
@@ -366,7 +366,7 @@ class GitHub:
         """Return one inline review comment by id, or None if it no longer exists."""
         try:
             return self._get(f"/repos/{repo}/pulls/comments/{comment_id}")
-        except _requests.HTTPError as exc:
+        except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 return None
             raise
@@ -1091,7 +1091,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         """Return one issue comment by id, or None if it no longer exists."""
         try:
             return self._get(f"/repos/{repo}/issues/comments/{comment_id}")
-        except _requests.HTTPError as exc:
+        except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 return None
             raise
@@ -1210,7 +1210,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 f"/repos/{repo}/pulls/{pr}/merge",
                 merge_method=merge_method,
             )
-        except _requests.HTTPError as e:
+        except requests.HTTPError as e:
             # Re-check: if the PR was merged between our initial get_pr and
             # the merge call (race with webhook-triggered self-restart on
             # another process), treat 405 as success.
@@ -1415,7 +1415,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         """Return required status check names for branch, or [] if unprotected."""
         try:
             data = self._get(f"/repos/{repo}/branches/{branch}/protection")
-        except _requests.HTTPError as e:
+        except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
                 return []
             raise

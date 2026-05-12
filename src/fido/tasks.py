@@ -898,6 +898,7 @@ def reorder_tasks(
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[str], None] | None = None,
     _on_done: Callable[[], None] | None = None,
+    _client_factory: Callable[[], ProviderAgent] = ClaudeClient,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -931,7 +932,7 @@ def reorder_tasks(
         return
 
     if agent is None:
-        agent = ClaudeClient()
+        agent = _client_factory()
     if prompts is None:
         prompts = Prompts("")
 
@@ -1072,8 +1073,14 @@ class Tasks(JsonFileStore):
     the entire task list.
     """
 
-    def __init__(self, work_dir: Path) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        _sync_background: Callable[[Path, GitHub], None] = sync_tasks_background,
+    ) -> None:
         self._work_dir = work_dir
+        self._sync_background = _sync_background
 
     @property
     def _data_path(self) -> Path:
@@ -1219,7 +1226,7 @@ class Tasks(JsonFileStore):
         (#988).
         """
         thread = self.complete_by_id(task_id)
-        sync_tasks_background(self._work_dir, gh)
+        self._sync_background(self._work_dir, gh)
         if not thread:
             return
         repo = thread.get("repo", "")
