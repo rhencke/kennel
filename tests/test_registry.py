@@ -1513,6 +1513,35 @@ class TestParityPublishers:
         assert snap.loaded is True
         assert snap.open_issues == 0
 
+    def test_restart_republishes_existing_issue_cache(self, tmp_path: Path) -> None:
+        """Codex parity: ``zero_repo_state`` resets ``issue_cache`` to
+        ``loaded=false`` on every ``start()``, but on crash recovery the
+        existing :class:`IssueTreeCache` instance is preserved.  ``start()``
+        must republish the cache's current metrics so /status.json
+        doesn't regress to an empty snapshot until the next mutation."""
+        from datetime import datetime, timezone
+
+        reg, reader = self._reg(tmp_path)
+        cache = reg.get_issue_cache("foo/bar")
+        cache.load_inventory(
+            issues=[],
+            snapshot_started_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
+        assert reader.get().repos["foo/bar"].issue_cache.loaded is True
+
+        # Simulate watchdog crash recovery — predecessor thread died
+        # but wasn't orderly-stopped, triggering the
+        # ThreadDies → Rescue → start path.  zero_repo_state would
+        # normally reset issue_cache to loaded=false on the restart;
+        # the codex fix republishes the preserved cache's snapshot.
+        reg._threads["foo/bar"].is_alive.return_value = False  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        reg._threads["foo/bar"].was_stopped = False  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        reg.start(_repo("foo/bar", tmp_path))
+        snap = reader.get().repos["foo/bar"].issue_cache
+        assert snap.loaded is True, (
+            "expected start() to republish the preserved cache's snapshot"
+        )
+
     def test_talker_publish_writes_snapshot(self, tmp_path: Path) -> None:
         from datetime import datetime, timezone
 

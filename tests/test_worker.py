@@ -13976,7 +13976,10 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         tasks_file = fido_dir / "tasks.json"
-        tasks_file.write_text('[{"id":"x","status":"completed"}]')
+        # tasks.json must hold valid Tasks (type field required) — the
+        # PR-merge clear path now goes through Tasks.modify() which
+        # validates on read (#1696 codex).
+        tasks_file.write_text('[{"id":"x","status":"completed","type":"spec"}]')
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
@@ -14338,7 +14341,10 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         tasks_file = fido_dir / "tasks.json"
-        tasks_file.write_text('[{"id":"x","status":"completed"}]')
+        # tasks.json must hold valid Tasks (type field required) — the
+        # PR-merge clear path now goes through Tasks.modify() which
+        # validates on read (#1696 codex).
+        tasks_file.write_text('[{"id":"x","status":"completed","type":"spec"}]')
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (

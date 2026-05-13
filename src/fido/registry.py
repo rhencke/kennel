@@ -145,11 +145,18 @@ class WorkerRegistry:
         # all reach those collaborators via :meth:`repo_for` — single
         # source of truth, no scattered ``Tasks(work_dir)`` /
         # ``State(fido_dir)`` constructions that would bypass the
-        # snapshot publisher.  Future per-repo state currently
-        # scattered across the parallel ``dict[str, X]`` fields above
-        # (issue cache, untriaged counter, FSM states, …) should
-        # migrate onto :class:`Repo` so this class stops being a bag
-        # of parallel collections.
+        # snapshot publisher.
+        #
+        # Single-writer + free-threaded dict safety: ``_repos`` follows
+        # the same discipline as ``_threads`` — only :meth:`start`
+        # writes (called sequentially during startup or from the
+        # single watchdog daemon thread on crash recovery), and
+        # :meth:`repo_for` / :meth:`tasks_for` / :meth:`state_for`
+        # only read.  CPython 3.14t's per-object dict lock makes
+        # individual ``dict.get`` / ``dict.__setitem__`` calls safe
+        # without an additional application-level lock, and the
+        # single-writer discipline means readers never observe a
+        # half-installed entry.
         self._repos: dict[str, Repo] = {}
 
     def _registry_fsm_transition(
@@ -287,16 +294,27 @@ class WorkerRegistry:
         # data shares the publish path — no separate seed code (#1696).
         repo.state.on_mutate(repo.state.load())
         repo.tasks.on_mutate(repo.tasks.list())
-        thread.start()
-        self._publish_thread_snapshot(repo_cfg.name)
-        self._publish_provider_snapshot(repo_cfg.name)
-        # Wire the per-repo talker on_change callback so register_talker
-        # / unregister_talker push fresh TalkerSnapshot leaves into
-        # FidoState (#1696 parity).  Idempotent — re-wiring on
-        # start-after-crash overwrites the same key.
+        # Wire the per-repo talker on_change callback BEFORE launching
+        # the worker thread so an immediate ``register_talker`` from
+        # early provider activity has somewhere to publish (#1696
+        # codex).  Idempotent — re-wiring on start-after-crash
+        # overwrites the same key.
         provider_module.set_talker_change_callback(
             repo_cfg.name, self._make_talker_publisher(repo_cfg.name)
         )
+        # On crash recovery the existing IssueTreeCache instance is
+        # preserved in ``_issue_caches`` but ``zero_repo_state(...)``
+        # above reset its snapshot to ``loaded=false``.  Republish the
+        # cache's current metrics so /status.json doesn't regress to
+        # an empty snapshot until the next cache mutation (#1696
+        # codex).
+        with self._issue_cache_lock:
+            existing_cache = self._issue_caches.get(repo_cfg.name)
+        if existing_cache is not None:
+            existing_cache._notify_change()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        thread.start()
+        self._publish_thread_snapshot(repo_cfg.name)
+        self._publish_provider_snapshot(repo_cfg.name)
         log.info("started WorkerThread for %s", repo_cfg.name)
 
     def _make_talker_publisher(

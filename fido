@@ -878,14 +878,16 @@ status_fast_path() {
         end;
       # Parse an ISO-8601 string field into a unix timestamp, returning
       # null for the empty / epoch sentinels (no real data).  The
-      # jq fromdateiso8601 builtin only accepts the Z suffix, so we
-      # normalise +00:00 to Z first.
+      # jq fromdateiso8601 builtin only accepts the Z suffix without
+      # fractional seconds, but Python datetime.isoformat() may emit
+      # microseconds and prefers +00:00 over Z — strip both before
+      # handing the string to fromdateiso8601 (#1696 codex).
       def parse_iso($s):
         if ($s | type) != "string" or ($s | length) == 0
         then null
-        elif $s == "1970-01-01T00:00:00+00:00"
+        elif ($s | startswith("1970-01-01T00:00:00"))
         then null
-        else ($s | sub("\\+00:00$"; "Z") | fromdateiso8601)
+        else ($s | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601)
         end;
       def seconds_since($iso):
         parse_iso($iso) as $t

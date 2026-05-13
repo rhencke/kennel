@@ -4030,7 +4030,12 @@ class Worker:
                 return 0
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
-            (fido_dir / "tasks.json").write_text("[]")
+            # Clear via Tasks.modify so on_mutate fires the
+            # TaskListSnapshot publish — direct file writes bypass the
+            # SCADA leaf and leave /status.json reporting stale task
+            # counters until the next mutation (#1696 codex).
+            with self._tasks.modify() as data:
+                data.clear()
             self._state.clear()
             self._git(["checkout", repo_ctx.default_branch])
             self._git(
@@ -4389,7 +4394,7 @@ class Worker:
                     "state so picker re-descends next iteration (see #780)",
                     issue,
                 )
-                with State(ctx.fido_dir).modify() as state:
+                with self._state.modify() as state:
                     state.pop("issue", None)
                     state.pop("issue_title", None)
                     state.pop("issue_started_at", None)
