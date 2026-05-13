@@ -1114,6 +1114,56 @@ def test_clear_pr_comment_queue_is_pr_scoped(tmp_path: Path) -> None:
     assert removed not in store.pending_pr_comments(repo="owner/repo")
 
 
+def test_pending_pr_numbers_lists_distinct_pr_numbers_with_pending_entries(
+    tmp_path: Path,
+) -> None:
+    """pending_pr_numbers feeds the orphan sweep (#1691) — must return
+    distinct PR numbers with pending or retryable entries, sorted."""
+    store = FidoStore(tmp_path)
+    for delivery, pr_number, comment_id in [
+        ("d1", 7, 701),
+        ("d2", 7, 702),  # duplicate PR
+        ("d3", 9, 901),
+        ("d4", 8, 801),
+    ]:
+        store.enqueue_pr_comment(
+            delivery_id=delivery,
+            repo="owner/repo",
+            pr_number=pr_number,
+            comment_type="pulls",
+            comment_id=comment_id,
+            author="rob",
+            is_bot=False,
+            body="x",
+            github_created_at="2026-04-30T10:00:00Z",
+        )
+
+    assert store.pending_pr_numbers(repo="owner/repo") == [7, 8, 9]
+
+    # Other repos are not included.
+    assert store.pending_pr_numbers(repo="other/repo") == []
+
+
+def test_pending_pr_numbers_excludes_completed_entries(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.enqueue_pr_comment(
+        delivery_id="d1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=701,
+        author="rob",
+        is_bot=False,
+        body="x",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    record = store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+    assert record is not None
+    store.complete_pr_comment(record.queue_id)
+
+    assert store.pending_pr_numbers(repo="owner/repo") == []
+
+
 def test_missing_pr_comment_queue_ids_are_noops(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
 

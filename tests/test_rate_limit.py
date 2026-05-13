@@ -7,12 +7,16 @@ from unittest.mock import MagicMock
 
 from frozendict import frozendict
 
-from fido.appstate import FidoState
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+    GitHubLimit,
+    ProviderLimitWindow,
+)
 from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
-from fido.provider import ProviderLimitWindow
 from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
-    GitHubLimit,
     RateLimitMonitor,
     _parse_window,  # noqa: PLC2701
 )
@@ -24,7 +28,8 @@ def _make_state() -> tuple[AtomicReader[FidoState], AtomicUpdater[FidoState]]:
     return create_atomic(
         FidoState(
             repos=frozendict(),
-            github_limits=GitHubLimit(),
+            github_limits=_ZERO_GITHUB_LIMITS,
+            process_started_at=_EPOCH,
         )
     )
 
@@ -63,32 +68,39 @@ class TestProviderLimitWindowProperties:
             used=used,
             limit=limit,
             resets_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+            unit="",
         )
 
     def test_pressure_basic(self) -> None:
         assert self._w(used=10, limit=100).pressure == 0.1
 
-    def test_pressure_none_when_limit_zero(self) -> None:
-        assert self._w(used=0, limit=0).pressure is None
+    def test_pressure_zero_when_limit_zero(self) -> None:
+        # The unpolled-window sentinel (limit=0) reports zero pressure
+        # so consumers can treat it uniformly without a None check.
+        assert self._w(used=0, limit=0).pressure == 0.0
 
 
 # ── GitHubLimit ───────────────────────────────────────────────────────────────
 
 
 class TestGitHubLimit:
-    def test_zero_value_has_none_used(self) -> None:
-        gl = GitHubLimit()
-        assert gl.rest.used is None
-        assert gl.graphql.used is None
+    def test_zero_value_has_zero_used(self) -> None:
+        gl = _ZERO_GITHUB_LIMITS
+        assert gl.rest.used == 0
+        assert gl.graphql.used == 0
 
     def test_zero_value_window_names(self) -> None:
-        gl = GitHubLimit()
+        gl = _ZERO_GITHUB_LIMITS
         assert gl.rest.name == "rest"
         assert gl.graphql.name == "graphql"
 
     def test_custom_windows(self) -> None:
-        rest = ProviderLimitWindow(name="rest", used=5, limit=5000)
-        gql = ProviderLimitWindow(name="graphql", used=7, limit=5000)
+        rest = ProviderLimitWindow(
+            name="rest", used=5, limit=5000, resets_at=_EPOCH, unit=""
+        )
+        gql = ProviderLimitWindow(
+            name="graphql", used=7, limit=5000, resets_at=_EPOCH, unit=""
+        )
         gl = GitHubLimit(rest=rest, graphql=gql)
         assert gl.rest.used == 5
         assert gl.graphql.used == 7
@@ -120,7 +132,8 @@ class TestRateLimitMonitorRefresh:
         state_reader, state_updater = _make_state()
         RateLimitMonitor(gh, state_updater)
         # Monitor construction does not seed the state; zero-value until refresh
-        assert state_reader.get().github_limits.rest.used is None
+        # (limit=0 marks an unpolled window per #1696 sentinel rules).
+        assert state_reader.get().github_limits.rest.limit == 0
         gh.get_rate_limit.assert_not_called()
 
     def test_refresh_stores_snapshot_in_state(self) -> None:

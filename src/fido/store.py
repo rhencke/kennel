@@ -647,6 +647,24 @@ class FidoStore:
         """Return whether *repo* has currently retryable queued comments."""
         return bool(self.pending_pr_comments(repo=repo, pr_number=pr_number))
 
+    def pending_pr_numbers(self, *, repo: str) -> list[int]:
+        """Return distinct PR numbers that have any pending or retryable
+        queue entries.  Used by the orphan sweep (#1691) to enumerate
+        candidates without loading their full payloads."""
+        self.ensure_schema()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT pr_number
+                FROM pr_comment_queue
+                WHERE repo = ?
+                  AND state IN ('pending', 'retryable_failed')
+                ORDER BY pr_number
+                """,
+                (repo,),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def has_other_open_pr_comments(self, *, repo: str, exclude_comment_id: int) -> bool:
         """Return whether *repo* has any other open queue entries.
 

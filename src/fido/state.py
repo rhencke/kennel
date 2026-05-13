@@ -7,7 +7,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fido.appstate import FidoState
+    from fido.atomic import AtomicUpdater
 
 
 class JsonFileStore(ABC):
@@ -16,8 +20,10 @@ class JsonFileStore(ABC):
     Provides a :meth:`modify` context manager for atomic read-modify-write
     under an exclusive ``flock``.  Subclasses must implement
     :attr:`_data_path`; they may optionally override :attr:`_lock_path`
-    (defaults to the same file as the data) and :meth:`_default` (the value
-    yielded when the data file is absent or empty, defaults to ``{}``).
+    (defaults to the same file as the data), :meth:`_default` (the value
+    yielded when the data file is absent or empty, defaults to ``{}``),
+    and :meth:`on_mutate` (a no-op by default; override to react to
+    every successful write while the exclusive flock is still held).
 
     Usage::
 
@@ -52,6 +58,21 @@ class JsonFileStore(ABC):
         override in subclasses to add schema checks.
         """
 
+    def on_mutate(self, data: object) -> None:  # noqa: ARG002
+        """Hook fired after every successful write, *after* the exclusive
+        flock has been released.  Default is a no-op; override in
+        subclasses that need to react to data changes (for example, a
+        publishing subclass that pushes the new value into a SCADA
+        snapshot).
+
+        Fires post-release rather than under the flock so the callback
+        is free to acquire other locks without risking lock-order
+        inversion.  Per-source leaf publish (#1696): each subclass
+        publishes only its own slice into :class:`~fido.appstate.RepoState`,
+        so concurrent publishers update independent fields and need no
+        shared serialization.
+        """
+
     @contextmanager
     def modify(self) -> Generator[Any, None, None]:
         """Atomic read-modify-write: hold the exclusive flock for the entire block.
@@ -60,6 +81,9 @@ class JsonFileStore(ABC):
         the file is absent or empty).  Any mutations are written back when the
         ``with`` block exits, while the exclusive lock is still held —
         preventing interleaved concurrent modifications.
+
+        Fires :meth:`on_mutate` *after* the flock is released so the
+        callback can safely acquire other locks (#1696 codex P1).
 
         Raises :exc:`ValueError` if the file contains invalid JSON or if
         :meth:`_validate` rejects the loaded data.
@@ -81,6 +105,11 @@ class JsonFileStore(ABC):
             self._validate(data)
             yield data
             data_path.write_text(json.dumps(data))
+        # Flock released — safe to fire callbacks that may acquire
+        # other locks (e.g. read a sibling JsonFileStore for snapshot
+        # composition).  Concurrent publishers must serialize via their
+        # own mechanism, not via this flock (#1696 codex P1).
+        self.on_mutate(data)
 
 
 class State(JsonFileStore):
@@ -93,10 +122,53 @@ class State(JsonFileStore):
     The lock is held on ``state.lock`` (separate from the data file) so that
     shared reads via :meth:`load` are not blocked by concurrent
     ``modify`` calls.
+
+    *state_updater* and *repo_name* (when supplied) wire :meth:`on_mutate`
+    to publish a fresh :class:`~fido.appstate.IssueSnapshot` to the
+    repo's leaf field on :class:`~fido.appstate.RepoState` after every
+    successful write.  Independent leaf — state mutations never touch
+    the task-list leaf or worker/provider leaves, so no shared lock and
+    no cross-source reads (#1696).
     """
 
-    def __init__(self, fido_dir: Path) -> None:
+    def __init__(
+        self,
+        fido_dir: Path,
+        *,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        repo_name: str = "",
+    ) -> None:
         self._fido_dir = fido_dir
+        self._state_updater = state_updater
+        self._repo_name = repo_name
+
+    def on_mutate(self, data: object) -> None:
+        """Publish the new :class:`~fido.appstate.IssueSnapshot` leaf to
+        :class:`~fido.appstate.FidoState` after each state.json write.
+
+        Fires *after* :meth:`modify`/:meth:`save`/:meth:`clear` release
+        the state.lock flock so the lens-write CAS retry doesn't run
+        while we hold any flock.  Pure leaf publish — no cross-source
+        reads, sibling mutators (Tasks for task_list leaf, registry
+        for activity/thread/provider leaves) update independent fields
+        on RepoState.
+
+        No-op when *state_updater* or *repo_name* were not supplied at
+        construction (tests, one-off CLI use)."""
+        if self._state_updater is None or not self._repo_name:
+            return
+        from fido.appstate import IssueSnapshot
+
+        assert isinstance(data, dict), "state.json must hold an object"
+        snapshot = IssueSnapshot(
+            issue=int(data.get("issue") or 0),
+            issue_title=str(data.get("issue_title") or ""),
+            issue_started_at=str(data.get("issue_started_at") or ""),
+            pr_number=int(data.get("pr_number") or 0),
+            pr_title=str(data.get("pr_title") or ""),
+        )
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].issue, snapshot)
 
     @property
     def _data_path(self) -> Path:
@@ -129,11 +201,14 @@ class State(JsonFileStore):
         """Write *data* to state.json."""
         with self._flock(exclusive=True):
             self._data_path.write_text(json.dumps(data))
+        # See JsonFileStore.modify for why on_mutate fires post-release.
+        self.on_mutate(data)
 
     def clear(self) -> None:
         """Remove state.json."""
         with self._flock(exclusive=True):
             self._data_path.unlink(missing_ok=True)
+        self.on_mutate({})
 
 
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker

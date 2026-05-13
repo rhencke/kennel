@@ -10,7 +10,11 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fido.appstate import FidoState, TaskListSnapshot
+    from fido.atomic import AtomicUpdater
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
@@ -408,12 +412,15 @@ def _apply_reorder_with_oracle(
     )
 
 
-def _task_file(work_dir: Path) -> Path:
-    return work_dir / ".git" / "fido" / "tasks.json"
+def _locked(path: Path) -> "_TaskFileLock":
+    """Context manager: flock the task file for a shared read.
 
-
-def _locked(path: Path, write: bool = False) -> "_TaskFileLock":  # noqa: ARG001
-    """Context manager: flock the task file."""
+    Mutators go through :meth:`Tasks.modify` (inherited from
+    :class:`~fido.state.JsonFileStore`), which holds an exclusive flock
+    and fires :meth:`Tasks.on_mutate` automatically.  This helper is
+    only used by the read-only :meth:`Tasks.list` /
+    :meth:`Tasks.has_pending_for_comment` paths.
+    """
     return _TaskFileLock(path)
 
 
@@ -452,13 +459,6 @@ class _TaskFileLock:
             if "type" not in t:
                 raise ValueError(f"task {t.get('id', '?')} missing required type field")
         return result
-
-    def write(self, tasks: list[dict[str, Any]]) -> None:
-        fd = self._fd()
-        fd.seek(0)
-        fd.truncate()
-        json.dump(tasks, fd, indent=2)
-        fd.flush()
 
 
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
@@ -891,7 +891,7 @@ def _compute_thread_changes(
 
 
 def reorder_tasks(
-    work_dir: Path,
+    tasks: "Tasks",
     commit_summary: str,
     *,
     intents: list[RescopeIntent] | None = None,
@@ -931,7 +931,7 @@ def reorder_tasks(
     If *_on_done* is provided, it is called after a successful reorder write so
     callers can trigger follow-up work (e.g. rewriting the PR description).
     """
-    task_list = Tasks(work_dir).list()
+    task_list = tasks.list()
     if not task_list:
         log.info("reorder_tasks: no tasks — skipping")
         return
@@ -1005,10 +1005,19 @@ def reorder_tasks(
             break
         ordered_items = nudge_items
 
-    path = _task_file(work_dir)
+    # Route the write through Tasks's public modify() — its on_mutate
+    # hook (e.g. the SCADA snapshot publisher) fires automatically on
+    # exit while the flock is still held, so concurrent writers
+    # serialize on the same lock.
     inprogress_affected = False
-    with _locked(path, write=True) as lock:
-        current = lock.read()
+    pre_rescope: list[dict[str, Any]] = []
+    with tasks.modify() as current:
+        # Snapshot the pre-rescope list so _compute_thread_changes can
+        # diff against it after the in-place slice-assign below (codex
+        # P2 #1696: comparing post-rescope to itself suppresses
+        # _on_changes notifications for thread tasks Opus completed/
+        # modified).
+        pre_rescope = [dict(t) for t in current]
         inprogress = next(
             (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
         )
@@ -1035,7 +1044,9 @@ def reorder_tasks(
                     "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
                     inprogress_in_result.get("title", "")[:60],
                 )
-        lock.write(result)
+        # Slice-assign so JsonFileStore.modify writes the recomputed
+        # list back (it persists the same dict/list object it yielded).
+        current[:] = result
 
     if _on_changes is not None:
         # Always call with the (possibly empty) list — the production
@@ -1043,7 +1054,7 @@ def reorder_tasks(
         # branch that's hard to reach in tests now that title
         # preservation by the reducer means rescope rarely produces a
         # material change record (#1388).
-        _on_changes(_compute_thread_changes(current, result, original_ids))
+        _on_changes(_compute_thread_changes(pre_rescope, result, original_ids))
 
     if inprogress_affected and _on_inprogress_affected is not None:
         assert inprogress is not None  # inprogress_affected is True
@@ -1071,6 +1082,52 @@ def sync_tasks_background(
     _start(t)
 
 
+def _build_task_list_snapshot(task_list: list[dict[str, Any]]) -> "TaskListSnapshot":
+    """Project a tasks.json list into a :class:`TaskListSnapshot` leaf.
+
+    Pure data transform — used by :meth:`Tasks.on_mutate` to publish
+    after every successful tasks.json write.  Counts, current-task
+    selection, and task position follow the same semantics the legacy
+    flat ``_collect_fido_state`` used: in-progress task wins for
+    ``current_task``; otherwise the first pending entry; ``task_total``
+    counts non-completed entries.
+    """
+    from fido.appstate import TaskListSnapshot
+
+    pending = sum(1 for t in task_list if t.get("status") == "pending")
+    completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+    current_task = ""
+    for t in task_list:
+        if t.get("status") == "in_progress":
+            current_task = t.get("title", "")
+            break
+    if not current_task:
+        for t in task_list:
+            if t.get("status") == "pending":
+                current_task = t.get("title", "")
+                break
+
+    non_completed = [t for t in task_list if t.get("status") != "completed"]
+    task_number = 0
+    task_total = 0
+    if non_completed:
+        task_total = len(non_completed)
+        task_number = 1
+        for idx, t in enumerate(non_completed, start=1):
+            if t.get("status") == "in_progress":
+                task_number = idx
+                break
+
+    return TaskListSnapshot(
+        pending_task_count=pending,
+        completed_task_count=completed,
+        current_task=current_task,
+        task_number=task_number,
+        task_total=task_total,
+    )
+
+
 class Tasks(JsonFileStore):
     """Encapsulates task file operations for a single worker directory.
 
@@ -1079,20 +1136,41 @@ class Tasks(JsonFileStore):
 
     Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write of
     the entire task list.
+
+    *state_updater* and *repo_name* (when supplied) wire :meth:`on_mutate`
+    to publish a fresh :class:`~fido.appstate.TaskListSnapshot` to the
+    repo's leaf field on :class:`~fido.appstate.RepoState` after every
+    successful write.  Independent leaf — task mutations never touch the
+    issue/PR leaf or the worker/provider leaves, so there's no
+    cross-source publish lock and no flock-order inversion (#1696).
+    Tests that don't care about the snapshot leave them at the
+    defaults; the hook becomes a no-op in that case.
     """
 
     def __init__(
         self,
         work_dir: Path,
         *,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        repo_name: str = "",
+        fido_dir: Path | None = None,
         _sync_background: Callable[[Path, GitHub], None] = sync_tasks_background,
     ) -> None:
         self._work_dir = work_dir
+        self._state_updater = state_updater
+        self._repo_name = repo_name
+        # *fido_dir* is the canonical resolved fido directory (under
+        # the registry-resolved git_dir, #1696).  When omitted (test
+        # scaffolding without a registry) fall back to the
+        # conventional layout.
+        self._fido_dir = (
+            fido_dir if fido_dir is not None else work_dir / ".git" / "fido"
+        )
         self._sync_background = _sync_background
 
     @property
     def _data_path(self) -> Path:
-        return _task_file(self._work_dir)
+        return self._fido_dir / "tasks.json"
 
     def _default(self) -> list[dict[str, Any]]:
         return []
@@ -1104,6 +1182,26 @@ class Tasks(JsonFileStore):
             assert isinstance(t, dict), "task entries must be JSON objects"
             if "type" not in t:
                 raise ValueError(f"task {t.get('id', '?')} missing required type field")
+
+    def on_mutate(self, data: object) -> None:
+        """Publish the new :class:`~fido.appstate.TaskListSnapshot` leaf
+        to :class:`~fido.appstate.FidoState` after each task-list write.
+
+        Fires *after* :meth:`~JsonFileStore.modify` releases the
+        tasks.json flock so the lens-write CAS retry doesn't run while
+        we hold any flock.  Pure leaf publish — no cross-source reads,
+        no shared lock with other publishers; sibling mutators
+        (State for the issue/PR leaf, registry for activity/thread/
+        provider leaves) update independent fields on RepoState.
+
+        No-op when *state_updater* or *repo_name* were not supplied at
+        construction (tests, one-off CLI use)."""
+        if self._state_updater is None or not self._repo_name:
+            return
+        assert isinstance(data, list), "tasks.json must hold a list"
+        snapshot = _build_task_list_snapshot(data)
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].task_list, snapshot)
 
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
@@ -1136,8 +1234,7 @@ class Tasks(JsonFileStore):
             task["thread"] = thread
         comment_id = (thread or {}).get("comment_id")
         lineage_key = _thread_lineage_key(thread)
-        with _locked(self._data_path, write=True) as lock:
-            existing = lock.read()
+        with self.modify() as existing:
             for t in existing:
                 existing_thread = t.get("thread") or {}
                 existing_comment_id = existing_thread.get("comment_id")
@@ -1147,7 +1244,6 @@ class Tasks(JsonFileStore):
                 if comment_id is not None and existing_comment_id == comment_id:
                     if _merge_thread_lineage(existing_thread, thread or {}):
                         t["thread"] = existing_thread
-                        lock.write(existing)
                     log.info(
                         "task already exists for comment_id %s (status: %s)",
                         comment_id,
@@ -1169,7 +1265,6 @@ class Tasks(JsonFileStore):
                     if t["status"] == TaskStatus.IN_PROGRESS or lineage_overlaps:
                         if _merge_thread_lineage(existing_thread, thread or {}):
                             t["thread"] = existing_thread
-                            lock.write(existing)
                         if (
                             t["status"] == TaskStatus.IN_PROGRESS
                             and not lineage_overlaps
@@ -1194,7 +1289,6 @@ class Tasks(JsonFileStore):
                     log.info("task already exists: %s", title[:80])
                     return t
             existing.append(task)
-            lock.write(existing)
         log.info("task added: %s", title[:80])
         return task
 
@@ -1203,12 +1297,10 @@ class Tasks(JsonFileStore):
 
         Returns ``None`` silently if no matching task is found.
         """
-        with _locked(self._data_path, write=True) as lock:
-            tasks = lock.read()
+        with self.modify() as tasks:
             for t in tasks:
                 if t["id"] == task_id and t["status"] != TaskStatus.COMPLETED:
                     t["status"] = str(TaskStatus.COMPLETED)
-                    lock.write(tasks)
                     log.info("task completed (id=%s): %s", task_id, t["title"][:80])
                     return t.get("thread")
         return None
@@ -1287,34 +1379,29 @@ class Tasks(JsonFileStore):
         task survives in the queue and can be re-picked under whatever
         scope the rescope cascade gave it (#1357 case B).
         """
-        with _locked(self._data_path, write=True) as lock:
-            tasks = lock.read()
+        with self.modify() as tasks:
             for t in tasks:
                 if t["id"] == task_id:
                     if t.get("status") != str(TaskStatus.PENDING):
                         t["status"] = str(TaskStatus.PENDING)
-                        lock.write(tasks)
                     return True
             return False
 
     def remove(self, task_id: str) -> bool:
         """Remove a task. Returns True if found."""
-        with _locked(self._data_path, write=True) as lock:
-            tasks = lock.read()
+        with self.modify() as tasks:
             new_tasks = [t for t in tasks if t["id"] != task_id]
             if len(new_tasks) < len(tasks):
-                lock.write(new_tasks)
+                tasks[:] = new_tasks
                 return True
         return False
 
     def update(self, task_id: str, status: TaskStatus) -> bool:
         """Update a task's status. Returns True if found."""
-        with _locked(self._data_path, write=True) as lock:
-            tasks = lock.read()
+        with self.modify() as tasks:
             for t in tasks:
                 if t["id"] == task_id:
                     t["status"] = str(status)
-                    lock.write(tasks)
                     log.info("task %s → %s", task_id, status)
                     return True
         return False
@@ -1326,14 +1413,11 @@ class Tasks(JsonFileStore):
         whether it is still blocked.  Returns the number of tasks unblocked.
         """
         count = 0
-        with _locked(self._data_path, write=True) as lock:
-            task_list = lock.read()
+        with self.modify() as task_list:
             for t in task_list:
                 if t.get("status") == TaskStatus.BLOCKED:
                     t["status"] = str(TaskStatus.PENDING)
                     count += 1
-            if count:
-                lock.write(task_list)
         if count:
             log.info("unblocked %d task(s)", count)
         return count

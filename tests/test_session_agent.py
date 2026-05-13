@@ -6,18 +6,16 @@ import pytest
 from frozendict import frozendict
 
 from fido.appstate import (
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     FidoState,
     ProviderSnapshot,
-    RepoState,
-    WorkerActivity,
-    WorkerCrash,
+    zero_repo_state,
 )
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
-from fido.rate_limit import GitHubLimit
 from fido.session_agent import SessionBackedAgent
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -25,18 +23,10 @@ _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 def _make_fido_state_with_repo(repo_name: str) -> FidoState:
     """Return a minimal :class:`FidoState` with one pre-initialised repo entry."""
-    repo = RepoState(
-        key=repo_name,
-        started_at=_EPOCH,
-        activity=WorkerActivity(
-            repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
-        ),
-        crash_record=WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH),
-        webhook_activities=(),
-    )
     return FidoState(
-        repos=frozendict({repo_name: repo}),
-        github_limits=GitHubLimit(),
+        repos=frozendict({repo_name: zero_repo_state(repo_name)}),
+        github_limits=_ZERO_GITHUB_LIMITS,
+        process_started_at=_EPOCH,
     )
 
 
@@ -329,7 +319,11 @@ class TestSessionBackedAgent:
     def test_publish_metrics_noop_without_repo_name(self) -> None:
         """publish_metrics does nothing when repo_name is None."""
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         agent = _FakeAgent(state_updater=updater)
         # repo_name is None → must not raise (no lens path to navigate).

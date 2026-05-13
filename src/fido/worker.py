@@ -17,13 +17,16 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from fido.appstate import FidoState
-    from fido.atomic import AtomicUpdater
     from fido.events import Action, Dispatcher
 
 import requests as _requests
 
 from fido import hooks, tasks
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
+from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
@@ -246,6 +249,10 @@ class ActivityReporter(Protocol):
 
     def publish_provider_snapshot(self, repo_name: str) -> None: ...
 
+    def tasks_for(self, repo_name: str) -> Tasks: ...
+
+    def state_for(self, repo_name: str) -> State: ...
+
 
 class LockHeld(Exception):
     """Raised when the fido lock is already held by another process."""
@@ -401,7 +408,13 @@ def _parse_status_nudge(raw: str) -> tuple[str, str]:
 
 
 def _format_provider_reset_time(resets_at: datetime | None) -> str:
-    if resets_at is None:
+    """Render a provider reset timestamp for the SCADA pause line.
+
+    Treats both ``None`` *and* the epoch sentinel (``1970-01-01``) as
+    "no info", since per #1696 the unpolled
+    :class:`~fido.appstate.ProviderLimitWindow` carries the epoch in
+    ``resets_at`` rather than ``None``."""
+    if resets_at is None or resets_at == _EPOCH:
         return "a little while"
     return resets_at.astimezone(timezone.utc).strftime("%H:%M UTC")
 
@@ -1213,6 +1226,7 @@ class Worker:
         session: PromptSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
+        _state: State | None = None,
         provider_agent: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
@@ -1221,7 +1235,7 @@ class Worker:
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
         nudges: Nudges | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -1245,6 +1259,13 @@ class Worker:
         self._next_turn_session_mode = TurnSessionMode.REUSE
 
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        # Composition root passes the registry-owned State so worker
+        # writes go through the publishing-aware on_mutate hook
+        # (#1696).  Tests bypassing the registry get a bare State
+        # whose on_mutate is a no-op.
+        self._state = (
+            _state if _state is not None else State(work_dir / ".git" / "fido")
+        )
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
@@ -1255,7 +1276,7 @@ class Worker:
             if provider_factory is None
             else provider_factory
         )
-        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
+        self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         self._bootstrap_session: PromptSession | None = session
         if provider is not None:
             self._provider = provider
@@ -1402,7 +1423,7 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state_obj = State(fido_dir)
+        state_obj = self._state
         issue = state_obj.load().get("issue")
         if issue is None:
             return None
@@ -1547,7 +1568,7 @@ class Worker:
             "starting issue #%s: %s (%s)", choice.number, choice.title, choice.reason
         )
         self.gh.add_assignee(repo_ctx.repo, choice.number, repo_ctx.gh_user)
-        State(fido_dir).save(
+        self._state.save(
             {
                 "issue": choice.number,
                 "issue_title": choice.title,
@@ -1575,7 +1596,7 @@ class Worker:
         resumes the issue instead of re-entering ``find_next_issue()``. A
         separate durable bit lets resume retry this idempotent check.
         """
-        state = State(fido_dir)
+        state = self._state
         if state.load().get("pickup_comment_ensured") is True:
             return
         self.post_pickup_comment(repo, issue, issue_title, gh_user)
@@ -1790,7 +1811,7 @@ class Worker:
         with self._tasks.modify() as data:
             data.clear()
         # Clear stale PR / task fields from state.json, keep issue fields.
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("pr_number", None)
             state.pop("pr_title", None)
             state.pop("current_task_id", None)
@@ -1893,7 +1914,7 @@ class Worker:
             pr_number = existing["number"]
             slug = existing["headRefName"]
             pr_title = existing.get("title") or request
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state["pr_number"] = pr_number
                 state["pr_title"] = pr_title
             # Open PR — resume
@@ -2070,7 +2091,7 @@ class Worker:
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state["pr_number"] = pr_number
             state["pr_title"] = request
 
@@ -2550,6 +2571,31 @@ class Worker:
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
+    def sweep_orphan_pr_comments(self, repo: str) -> int:
+        """Drop queued PR-comment entries whose PR is closed (#1691).
+
+        ``clear_pr_comment_queue`` already runs on the ``pull_request/closed``
+        webhook, but comments can arrive *after* the close webhook fires —
+        a Codex bot review on a just-merged PR, for example.  Those entries
+        sit in the queue forever because the worker only ever drains the
+        currently-assigned PR, and Fido has long since moved on.
+
+        Run this once per ``WorkerThread`` lifetime to clean up the orphans
+        from previous runs and from any post-merge comment races.
+        """
+        store = FidoStore(self.work_dir)
+        cleared = 0
+        for pr_number in store.pending_pr_numbers(repo=repo):
+            if self.gh.get_pr_state(repo, pr_number) != "open":
+                cleared += store.clear_pr_comment_queue(repo=repo, pr_number=pr_number)
+        if cleared:
+            log.info(
+                "sweep_orphan_pr_comments: cleared %d entries for closed PRs in %s",
+                cleared,
+                repo,
+            )
+        return cleared
+
     def handle_queued_comments(
         self,
         fido_dir: Path,
@@ -2948,7 +2994,7 @@ class Worker:
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("current_task_id", None)
         tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
         self._delete_leaked_task_comments(
@@ -3160,7 +3206,7 @@ class Worker:
             # Clear durable state after both closes succeed so a crash
             # between close_pr and close_issue retries idempotently
             # instead of orphaning a still-open issue.
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("issue", None)
                 state.pop("issue_title", None)
                 state.pop("issue_started_at", None)
@@ -3377,7 +3423,7 @@ class Worker:
         log.info("task aborted: %s", task_title)
         self.git_clean()
         self._tasks.reset_to_pending(task_id)
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()
         tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
@@ -3463,7 +3509,7 @@ class Worker:
 
     def _task_still_current(self, fido_dir: Path, task_id: str) -> bool:
         """Return true when *task_id* is still the worker's active task."""
-        state_data = State(fido_dir).load()
+        state_data = self._state.load()
         if state_data.get("current_task_id") != task_id:
             return False
         current_task_list = self._tasks.list()
@@ -3529,7 +3575,7 @@ class Worker:
                     + ", ".join(str(comment_id) for comment_id in lineage_ids)
                 )
         state_path = fido_dir / "state.json"
-        state_data = State(fido_dir).load() if state_path.exists() else {}
+        state_data = self._state.load() if state_path.exists() else {}
         issue_number = state_data.get("issue")
         issue_title = ""
         issue_body = ""
@@ -3590,12 +3636,12 @@ class Worker:
         leak_before_ids = self._snapshot_fido_issue_comment_ids(
             repo_ctx.repo, pr_number, repo_ctx.gh_user
         )
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
         if not self._admit_worker_turn(pr_number):
             self._tasks.update(task["id"], TaskStatus.PENDING)
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("current_task_id", None)
             return True
         if self._abort_task.is_active_for(task["id"]):
@@ -3632,7 +3678,7 @@ class Worker:
             )
             self._push_committed_work_before_yield(head_before, slug)
             self._tasks.update(task["id"], TaskStatus.PENDING)
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("current_task_id", None)
             if self._abort_task.is_active_for(task["id"]):
                 log.info("consuming abort signal for preempted task %s", task["id"])
@@ -3670,7 +3716,7 @@ class Worker:
                         pr_number,
                         f"BLOCKED: {outcome.reason}",
                     )
-                    with State(fido_dir).modify() as state:
+                    with self._state.modify() as state:
                         state.pop("current_task_id", None)
                     return True
                 helped_by_identities: list[GitIdentity] = []
@@ -3760,7 +3806,7 @@ class Worker:
                                 "BLOCKED: push to remote failed after "
                                 "retries — manual intervention needed.",
                             )
-                            with State(fido_dir).modify() as state:
+                            with self._state.modify() as state:
                                 state.pop("current_task_id", None)
                             self._delete_leaked_task_comments(
                                 repo_ctx.repo,
@@ -3810,7 +3856,7 @@ class Worker:
                 )
                 self._push_committed_work_before_yield(head_before, slug)
                 self._tasks.update(task["id"], TaskStatus.PENDING)
-                with State(fido_dir).modify() as state:
+                with self._state.modify() as state:
                     state.pop("current_task_id", None)
                 if self._abort_task.is_active_for(task["id"]):
                     log.info("consuming abort signal for preempted task %s", task["id"])
@@ -3992,8 +4038,13 @@ class Worker:
                 return 0
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
-            (fido_dir / "tasks.json").write_text("[]")
-            State(fido_dir).clear()
+            # Clear via Tasks.modify so on_mutate fires the
+            # TaskListSnapshot publish — direct file writes bypass the
+            # SCADA leaf and leave /status.json reporting stale task
+            # counters until the next mutation (#1696 codex).
+            with self._tasks.modify() as data:
+                data.clear()
+            self._state.clear()
             self._git(["checkout", repo_ctx.default_branch])
             self._git(
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False
@@ -4227,7 +4278,7 @@ class Worker:
             _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
-        reorder_tasks(self.work_dir, commit_summary, **kwargs)
+        reorder_tasks(self._tasks, commit_summary, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
@@ -4295,7 +4346,11 @@ class Worker:
 
         with ctx:
             log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
-
+            # No explicit publish_repo_snapshot calls: every Tasks /
+            # State write fires its own on_mutate which publishes the
+            # corresponding leaf on RepoState (#1696).  The initial
+            # seed ran in registry.start when the Repo was created;
+            # subsequent mutations during the iteration auto-publish.
             self.assert_git_identity(phase="pre")
             try:
                 return self._run_iteration(ctx)
@@ -4318,6 +4373,15 @@ class Worker:
         session_fresh = self._provider is None or self._provider.agent.session is None
         if session_fresh:
             self.create_session()
+        if self._first_iteration:
+            # Run before issue selection so idle repos (no current issue,
+            # acquired-sub-issues abandonment, all-covered terminal close)
+            # still get their orphan queue swept (#1691, codex P2 on PR
+            # #1695).  The sibling recover_in_progress_pr_comments inside
+            # the post-find_or_create_pr block runs later because it
+            # reconciles in-progress claim state for the PR about to be
+            # drained — that's appropriate to gate on having a PR.
+            self.sweep_orphan_pr_comments(repo_ctx.repo)
         try:
             issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
             if issue is None:
@@ -4338,7 +4402,7 @@ class Worker:
                     "state so picker re-descends next iteration (see #780)",
                     issue,
                 )
-                with State(ctx.fido_dir).modify() as state:
+                with self._state.modify() as state:
                     state.pop("issue", None)
                     state.pop("issue_title", None)
                     state.pop("issue_started_at", None)
@@ -4442,6 +4506,15 @@ class Worker:
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
             else:
+                # Drain durable PR-comment FIFO before rescope so synthesis-
+                # produced tasks are visible when rescope rewrites the list
+                # (#1689).  Otherwise rescope spends an Opus call on a list
+                # that the queued comment is about to invalidate, and the
+                # human waits minutes for a reply that should arrive in
+                # seconds.  The drain is a single SQLite SELECT when the
+                # queue is empty, so this is cheap on the steady-state path.
+                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
                 self.rescope_before_pick()
                 if self.handle_merge_conflict(
                     ctx.fido_dir,
@@ -4450,8 +4523,6 @@ class Worker:
                     slug,
                     issue_labels=issue_labels,
                 ):
-                    return 1
-                if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_ci(
                     ctx.fido_dir,
@@ -4528,7 +4599,7 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -4559,7 +4630,16 @@ class WorkerThread(threading.Thread):
             if provider_factory is None
             else provider_factory
         )
-        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
+        self._state_updater: AtomicUpdater[FidoState] | None = state_updater
+        # Use the registry-owned State so WorkerThread's session-id
+        # persistence (state.json reads/writes around session_id) goes
+        # through the publishing-aware on_mutate hook (#1696).  Tests
+        # without a registry get a bare State with no-op on_mutate.
+        self._state: State = (
+            registry.state_for(repo_name)
+            if registry is not None and repo_name
+            else State(work_dir / ".git" / "fido")
+        )
         self._provider: Provider | None
         if provider is not None:
             self._provider = provider
@@ -4765,7 +4845,7 @@ class WorkerThread(threading.Thread):
         if fido_dir is None:
             return None
         try:
-            data = State(fido_dir).load()
+            data = self._state.load()
         except OSError:
             return None
         sid = data.get("session_id")
@@ -4790,7 +4870,7 @@ class WorkerThread(threading.Thread):
         if fido_dir is None:
             return
         try:
-            with State(fido_dir).modify() as data:
+            with self._state.modify() as data:
                 if data.get("session_id") != sid:
                     data["session_id"] = sid
         except OSError as exc:
@@ -4815,7 +4895,7 @@ class WorkerThread(threading.Thread):
         fido_dir = self._resolve_fido_dir()
         if fido_dir is not None:
             try:
-                with State(fido_dir).modify() as data:
+                with self._state.modify() as data:
                     data.pop("session_id", None)
             except OSError as exc:
                 log.warning(
@@ -4850,6 +4930,18 @@ class WorkerThread(threading.Thread):
                         provider.agent.attach_session(session)
                 if self._registry is not None:
                     self._registry.publish_provider_snapshot(self._repo_name)
+                # Use the registry-owned Tasks/State so worker writes
+                # go through the publishing-aware on_mutate hooks
+                # rather than bare defaults that bypass the snapshot
+                # publisher (#1696 codex P2 round 2).  Safe because
+                # WorkerThread is only ever started by the registry,
+                # which always seeds the Repo first.
+                if self._registry is not None and self._repo_name:
+                    worker_tasks = self._registry.tasks_for(self._repo_name)
+                    worker_state = self._registry.state_for(self._repo_name)
+                else:
+                    worker_tasks = None
+                    worker_state = None
                 worker = Worker(
                     self.work_dir,
                     self._gh,
@@ -4859,6 +4951,8 @@ class WorkerThread(threading.Thread):
                     self._membership,
                     session=session,
                     session_issue=self._session_issue,
+                    _tasks=worker_tasks,
+                    _state=worker_state,
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,

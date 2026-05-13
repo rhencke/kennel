@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.color import _CODES
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import (
@@ -217,7 +220,15 @@ class TestProviderStatusesForRepoConfigs:
         api = MagicMock()
         api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CODEX,
-            windows=(ProviderLimitWindow(name="codex_primary", used=25, limit=100),),
+            windows=(
+                ProviderLimitWindow(
+                    name="codex_primary",
+                    used=25,
+                    limit=100,
+                    resets_at=_EPOCH,
+                    unit="",
+                ),
+            ),
         )
         factory.create_api.return_value = api
 

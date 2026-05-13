@@ -4,6 +4,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
     ProviderID,
@@ -43,20 +46,19 @@ class TestGlobalDisallowedTools:
 
 class TestProviderLimitWindow:
     def test_pressure_returns_ratio(self) -> None:
-        window = ProviderLimitWindow(name="requests", used=9, limit=10)
+        window = ProviderLimitWindow(
+            name="requests", used=9, limit=10, resets_at=_EPOCH, unit=""
+        )
         assert window.pressure == 0.9
 
-    def test_pressure_returns_none_when_used_missing(self) -> None:
-        window = ProviderLimitWindow(name="requests", used=None, limit=10)
-        assert window.pressure is None
-
-    def test_pressure_returns_none_when_limit_missing(self) -> None:
-        window = ProviderLimitWindow(name="requests", used=9, limit=None)
-        assert window.pressure is None
-
-    def test_pressure_returns_none_when_limit_not_positive(self) -> None:
-        window = ProviderLimitWindow(name="requests", used=9, limit=0)
-        assert window.pressure is None
+    def test_pressure_returns_zero_when_unpolled(self) -> None:
+        # The unpolled-window sentinel (limit=0) reports zero pressure
+        # so consumers can treat it uniformly without a None check
+        # (#1696: no None on appstate types).
+        window = ProviderLimitWindow(
+            name="requests", used=0, limit=0, resets_at=_EPOCH, unit=""
+        )
+        assert window.pressure == 0.0
 
 
 class TestRecoverableProviderWedge:
@@ -70,19 +72,30 @@ class TestRecoverableProviderWedge:
 
 class TestProviderLimitSnapshot:
     def test_closest_to_exhaustion_picks_highest_pressure(self) -> None:
-        low = ProviderLimitWindow(name="tokens", used=20, limit=100)
-        high = ProviderLimitWindow(name="requests", used=95, limit=100)
+        low = ProviderLimitWindow(
+            name="tokens", used=20, limit=100, resets_at=_EPOCH, unit=""
+        )
+        high = ProviderLimitWindow(
+            name="requests", used=95, limit=100, resets_at=_EPOCH, unit=""
+        )
         snapshot = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE, windows=(low, high)
         )
         assert snapshot.closest_to_exhaustion() is high
 
     def test_closest_to_exhaustion_falls_back_to_first_window(self) -> None:
+        # Both windows are unpolled (limit=0): closest_to_exhaustion
+        # falls back to the first one.
         first = ProviderLimitWindow(
             name="requests",
+            used=0,
+            limit=0,
             resets_at=datetime(2026, 4, 16, tzinfo=UTC),
+            unit="",
         )
-        second = ProviderLimitWindow(name="tokens")
+        second = ProviderLimitWindow(
+            name="tokens", used=0, limit=0, resets_at=_EPOCH, unit=""
+        )
         snapshot = ProviderLimitSnapshot(
             provider=ProviderID.COPILOT_CLI,
             windows=(first, second),
@@ -96,12 +109,15 @@ class TestProviderLimitSnapshot:
 
 class TestProviderPressureStatus:
     def test_from_snapshot_uses_closest_window(self) -> None:
-        low = ProviderLimitWindow(name="tokens", used=20, limit=100)
+        low = ProviderLimitWindow(
+            name="tokens", used=20, limit=100, resets_at=_EPOCH, unit=""
+        )
         high = ProviderLimitWindow(
             name="requests",
             used=96,
             limit=100,
             resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+            unit="",
         )
         status = ProviderPressureStatus.from_snapshot(
             ProviderLimitSnapshot(

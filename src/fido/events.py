@@ -2409,7 +2409,12 @@ def _reorder_tasks_background(
             while True:
                 iteration += 1
                 log.info("rescope BG: iteration %d starting", iteration)
-                reorder(work_dir, cs, intents=current_intents or None, **kw)
+                reorder(
+                    registry.tasks_for(repo_cfg.name),
+                    cs,
+                    intents=current_intents or None,
+                    **kw,
+                )
                 log.info("rescope BG: iteration %d complete", iteration)
                 with _reorder_coalesce_lock:
                     pending = state[key].get("pending")
@@ -2555,7 +2560,15 @@ def create_task(
     Returns the new task dict.
     """
     if _tasks is None:
-        _tasks = Tasks(repo_cfg.work_dir)
+        # Production path: prefer the registry-owned Tasks (carries the
+        # on_mutate hook that publishes IssueSnapshot updates).  Test
+        # paths without a registry get a bare Tasks whose on_mutate is
+        # a no-op.
+        _tasks = (
+            registry.tasks_for(repo_cfg.name)
+            if registry is not None
+            else Tasks(repo_cfg.work_dir)
+        )
     # Race guard for thread tasks (#520): if the originating review thread
     # has already been resolved on GitHub (most often because fido completed
     # an earlier task in the same thread and auto-resolved it before this
@@ -2604,6 +2617,11 @@ def create_task(
             )
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
+    # _tasks.add() fires Tasks.on_mutate (under the tasks.json flock)
+    # which publishes a fresh IssueSnapshot — no manual refresh needed
+    # here.  Production callers pass the registry-owned Tasks via
+    # _tasks=registry.tasks_for(repo_cfg.name) so the on_mutate hook is
+    # wired to the snapshot publisher (#1696).
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
     dispatcher.launch_sync()
     if thread:

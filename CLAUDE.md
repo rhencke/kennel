@@ -185,6 +185,19 @@ the pending task list based on dependency analysis.
 
 ## Conventions
 
+- **Strive for ontological correctness** — not "OOP models the real
+  world" (it doesn't).  Ontological correctness here means the code,
+  classes, and fields are factored so the relations between them are
+  *mechanically* clear.  You know you've got it right when the code
+  gets simpler, smaller, clearer, shorter, easier to review and test
+  — *and* the same effect ripples through every caller that consumes
+  it.  When a parameter list is "really" one object (e.g. `repo_cfg +
+  registry + repo_name + work_dir`), that's the factoring leaking —
+  collapse it and watch downstream signatures shed parameters in
+  sympathy.  When you find a class doing two unrelated things, split
+  it; both halves and every caller get easier.  Misfactored data is
+  the seed of every coordination bug; getting the factoring right
+  makes whole categories of race vanish before they're written.
 - **100% test coverage** — CI enforced, no exceptions.
 - **ruff** — lint + format on all Python.
 - **PRs required** — branch protection on main.

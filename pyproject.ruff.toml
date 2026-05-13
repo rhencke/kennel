@@ -53,7 +53,7 @@ select = [
   "B032",
   "B033",
   "B034",
-  # "BLE001", # blind-except: 23 fallback / best-effort sites (codex reader, gh-status provider chain, LSP dispatch, auto-merge, thread-test exception-capture). Per-site audit, not a one-shot batch — defer.
+  # "BLE001", # blind-except: fallback / best-effort sites (codex reader, LSP dispatch, auto-merge, thread-test exception-capture). Per-site audit, not a one-shot batch — defer.
   "C400",
   "C401",
   "C402",

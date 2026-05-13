@@ -18,10 +18,13 @@ import pytest
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
 from fido.atomic import create_atomic
 from fido.provider_factory import DefaultProviderFactory
-from fido.rate_limit import GitHubLimit
 from fido.registry import WorkerRegistry
 from fido.tasks import (
     _merge_thread_lineage,
@@ -68,7 +71,11 @@ class TestWorkerRegistryPreemptionHelpers:
         # WorkerRegistry takes a thread factory callable; tests don't
         # need real WorkerThreads, so a no-op factory is fine.
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         return WorkerRegistry(MagicMock(), updater)
 
@@ -530,10 +537,12 @@ class TestCodexParsers:
         with pytest.raises(ValueError, match="resetsAt must be numeric"):
             _parse_rate_limit_reset("nope")
 
-    def test_parse_rate_limit_reset_returns_none_for_none(self) -> None:
+    def test_parse_rate_limit_reset_returns_epoch_for_none(self) -> None:
+        # ``None`` falls back to the epoch sentinel (#1696, no None on
+        # appstate types).
         from fido.codex import _parse_rate_limit_reset
 
-        assert _parse_rate_limit_reset(None) is None
+        assert _parse_rate_limit_reset(None) == _EPOCH
 
     def test_rate_limit_window_returns_none_for_none(self) -> None:
         from fido.codex import _rate_limit_window

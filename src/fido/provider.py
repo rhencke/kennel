@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
 
 import fido.rocq.transition as fsm
+from fido.appstate import ProviderLimitWindow
 
 log = logging.getLogger(__name__)
 
@@ -168,24 +169,6 @@ def model_name(model: ProviderModel | str) -> str:
 
 
 @dataclass(frozen=True)
-class ProviderLimitWindow:
-    """One provider-specific limit window normalized for shared policy/UI use."""
-
-    name: str
-    used: int | None = None
-    limit: int | None = None
-    resets_at: datetime | None = None
-    unit: str | None = None
-
-    @property
-    def pressure(self) -> float | None:
-        """Return ``used / limit`` when both sides are known and limit is positive."""
-        if self.used is None or self.limit is None or self.limit <= 0:
-            return None
-        return self.used / self.limit
-
-
-@dataclass(frozen=True)
 class ProviderLimitSnapshot:
     """Normalized limit state for one provider at one point in time."""
 
@@ -194,10 +177,13 @@ class ProviderLimitSnapshot:
     unavailable_reason: str | None = None
 
     def closest_to_exhaustion(self) -> ProviderLimitWindow | None:
-        """Return the highest-pressure window, or the first window when pressure is unknown."""
-        pressured = [window for window in self.windows if window.pressure is not None]
-        if pressured:
-            return max(pressured, key=lambda window: window.pressure or 0.0)
+        """Return the highest-pressure *polled* window, or the first
+        window when none have been polled.  Polled windows are those
+        with ``limit > 0``; the unpolled sentinel (``limit == 0``)
+        reports zero pressure and would otherwise dominate ``max``."""
+        polled = [window for window in self.windows if window.limit > 0]
+        if polled:
+            return max(polled, key=lambda window: window.pressure)
         return self.windows[0] if self.windows else None
 
 
@@ -497,6 +483,38 @@ class SessionTalker:
 _talkers: dict[str, SessionTalker] = {}
 _talkers_lock = threading.Lock()
 
+# Per-repo callback fired post-lock-release whenever a talker is
+# registered or unregistered.  The composition root wires this to a
+# :meth:`~fido.registry.WorkerRegistry.publish_talker_for_repo` lambda
+# so the SCADA snapshot's ``RepoState.talker`` leaf updates without
+# the request thread reading the global ``_talkers`` dict (#1696
+# parity).  Default no-op keeps tests and one-off CLI use working
+# without ceremony.
+_talker_change_callbacks: dict[str, "Callable[[SessionTalker | None], None]"] = {}
+_talker_change_callbacks_lock = threading.Lock()
+
+
+def set_talker_change_callback(
+    repo_name: str, callback: "Callable[[SessionTalker | None], None]"
+) -> None:
+    """Wire a per-repo on_change callback for talker register/unregister.
+
+    Composition root wires every managed repo at startup.  The callback
+    runs *outside* :data:`_talkers_lock` so it may acquire other locks
+    (e.g. the atomic FidoState cell) without lock-order inversion.
+    """
+    with _talker_change_callbacks_lock:
+        _talker_change_callbacks[repo_name] = callback
+
+
+def _fire_talker_change(repo_name: str, talker: "SessionTalker | None") -> None:
+    """Invoke the per-repo on_change callback if one is wired."""
+    with _talker_change_callbacks_lock:
+        callback = _talker_change_callbacks.get(repo_name)
+    if callback is not None:
+        callback(talker)
+
+
 # Thread-local coordination state so downstream helpers (events, prompts)
 # know which repo they belong to and whether the caller is a worker or a
 # webhook.  Set at :func:`fido.server.WebhookHandler._process_action`
@@ -575,6 +593,10 @@ def register_talker(talker: SessionTalker) -> None:
     Raises :class:`SessionLeakError` if a talker for the same repo is
     already registered — the guarantee is one provider session per repo
     at a time.
+
+    Fires the per-repo on_change callback (#1696 parity) after the
+    flock is released so the SCADA leaf reflects the new talker
+    without the request thread reading the global dict.
     """
     with _talkers_lock:
         existing = _talkers.get(talker.repo_name)
@@ -587,6 +609,7 @@ def register_talker(talker: SessionTalker) -> None:
                 f"{talker.description}, subprocess_pid={talker.subprocess_pid}) tried to start"
             )
         _talkers[talker.repo_name] = talker
+    _fire_talker_change(talker.repo_name, talker)
 
 
 def unregister_talker(repo_name: str, thread_id: int) -> None:
@@ -595,11 +618,18 @@ def unregister_talker(repo_name: str, thread_id: int) -> None:
     Idempotent — safe to call from cleanup paths that may race the registry.
     Non-matching ``thread_id`` is a no-op (defensive against cross-thread
     cleanup bugs).
+
+    Fires the per-repo on_change callback (#1696 parity) only when the
+    talker was actually removed — non-matching cleanup is a true no-op.
     """
+    removed = False
     with _talkers_lock:
         existing = _talkers.get(repo_name)
         if existing is not None and existing.thread_id == thread_id:
             del _talkers[repo_name]
+            removed = True
+    if removed:
+        _fire_talker_change(repo_name, None)
 
 
 def get_talker(repo_name: str) -> SessionTalker | None:

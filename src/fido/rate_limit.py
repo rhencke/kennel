@@ -15,40 +15,16 @@ snapshot stays put until the next successful refresh.
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from fido.appstate import FidoState, GitHubLimit, ProviderLimitWindow
 from fido.atomic import AtomicUpdater
 from fido.github import GitHub
-from fido.provider import ProviderLimitWindow
-
-if TYPE_CHECKING:
-    from fido.appstate import FidoState
 
 log = logging.getLogger(__name__)
 
 _REFRESH_INTERVAL: float = 60.0
-
-_ZERO_WINDOW_REST = ProviderLimitWindow(name="rest")
-_ZERO_WINDOW_GRAPHQL = ProviderLimitWindow(name="graphql")
-
-
-@dataclass(frozen=True)
-class GitHubLimit:
-    """Normalized GitHub platform rate-limit state (REST + GraphQL windows).
-
-    The zero value (``GitHubLimit()``) is the initial sentinel — both
-    windows have ``used=None``, meaning the monitor has not yet completed
-    a successful poll.  After the first successful :meth:`RateLimitMonitor.refresh`
-    the ``used`` fields will be integers (possibly ``0``).
-
-    Stored at :attr:`~fido.registry.FidoState.github_limits`; updated
-    atomically via :class:`~fido.atomic.AtomicUpdater`.
-    """
-
-    rest: ProviderLimitWindow = _ZERO_WINDOW_REST
-    graphql: ProviderLimitWindow = _ZERO_WINDOW_GRAPHQL
 
 
 class RateLimitMonitor:
@@ -72,7 +48,7 @@ class RateLimitMonitor:
     Single writer: only the poller thread calls :meth:`refresh`.
     """
 
-    def __init__(self, gh: GitHub, state: "AtomicUpdater[FidoState]") -> None:
+    def __init__(self, gh: GitHub, state: AtomicUpdater[FidoState]) -> None:
         self._gh = gh
         self._state = state
 
@@ -138,6 +114,7 @@ def _parse_window(name: str, raw: dict[str, Any]) -> ProviderLimitWindow:
         used=int(raw.get("used", 0)),
         limit=int(raw.get("limit", 0)),
         resets_at=resets_at,
+        unit="",
     )
 
 

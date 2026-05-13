@@ -16,16 +16,15 @@ from unittest.mock import MagicMock
 from frozendict import frozendict
 
 from fido.appstate import (
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_PROVIDER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     FidoState,
     ProviderSnapshot,
-    RepoState,
-    WorkerActivity,
-    WorkerCrash,
+    zero_repo_state,
 )
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.claude import ClaudeSession
 from fido.provider import SnapshotPublisher
-from fido.rate_limit import GitHubLimit
 from fido.status import FidoStatus, RepoStatus, format_status
 
 _REPO = "owner/repo"
@@ -34,18 +33,10 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 def _make_fido_state(repo_name: str) -> FidoState:
     """Return a minimal :class:`FidoState` with one pre-initialised repo entry."""
-    repo = RepoState(
-        key=repo_name,
-        started_at=_EPOCH,
-        activity=WorkerActivity(
-            repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
-        ),
-        crash_record=WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH),
-        webhook_activities=(),
-    )
     return FidoState(
-        repos=frozendict({repo_name: repo}),
-        github_limits=GitHubLimit(),
+        repos=frozendict({repo_name: zero_repo_state(repo_name)}),
+        github_limits=_ZERO_GITHUB_LIMITS,
+        process_started_at=_EPOCH,
     )
 
 
@@ -240,10 +231,12 @@ class TestLiveProviderStats:
         assert not bg_thread.is_alive()
         assert not errors
 
-        # The snapshot should never have been written — provider is still None.
+        # The snapshot should never have been written — provider is still
+        # the zero sentinel (per #1696, no None on appstate; missing data
+        # is the zero ProviderSnapshot, not None).
         snap = reader.get().repos[_REPO].provider
-        assert snap is None, (
-            f"expected provider snapshot to be None without a publisher, got {snap}"
+        assert snap == _ZERO_PROVIDER, (
+            f"expected provider snapshot to remain _ZERO_PROVIDER without a publisher, got {snap}"
         )
 
     def test_display_path_shows_counter_values(self) -> None:

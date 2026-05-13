@@ -16,7 +16,7 @@ independent — pass each repo its own :class:`IssueTreeCache`.
 
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -103,7 +103,23 @@ class IssueTreeCache:
        updates ``last_reconcile_drift`` for visibility.
     """
 
-    def __init__(self, repo_name: str) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        *,
+        on_change: "Callable[[CacheMetrics], None] | None" = None,
+    ) -> None:
+        """Create an empty cache.
+
+        *on_change*, when supplied, is called with a fresh
+        :class:`CacheMetrics` after every mutation (load_inventory,
+        apply_event, reconcile_with_inventory) — *outside* the cache
+        lock so the callback may acquire other locks (e.g. the atomic
+        FidoState cell) without lock-order inversion.  The
+        :class:`~fido.registry.WorkerRegistry` supplies a callback that
+        publishes an :class:`~fido.appstate.IssueCacheSnapshot` into
+        the per-repo SCADA leaf (#1696 parity).
+        """
         self._repo = repo_name
         self._lock = threading.Lock()
         self._nodes: dict[int, IssueNode] = {}
@@ -114,6 +130,17 @@ class IssueTreeCache:
         self._last_reconcile_at: datetime | None = None
         self._last_reconcile_drift = 0
         self._pre_inventory_queue: list[tuple[datetime, str, dict[str, Any]]] = []
+        self._on_change = on_change
+
+    def _notify_change(self) -> None:
+        """Fire :attr:`_on_change` with fresh :class:`CacheMetrics`.
+
+        Called from every mutation path *after* the cache lock is
+        released so the callback is free to acquire other locks.
+        """
+        if self._on_change is None:
+            return
+        self._on_change(self.metrics())
 
     # ── inventory ────────────────────────────────────────────────────────
 
@@ -144,6 +171,7 @@ class IssueTreeCache:
             len(new_nodes),
             len(queued),
         )
+        self._notify_change()
         for _ts, event_type, payload in sorted(queued, key=lambda x: x[0]):
             self.apply_event(event_type, payload)
 
@@ -184,6 +212,7 @@ class IssueTreeCache:
             self._last_reconcile_at = _now()
             self._last_reconcile_drift = drift
         log.info("issue-cache[%s]: reconcile applied %d corrections", self._repo, drift)
+        self._notify_change()
         return drift
 
     @staticmethod
@@ -229,6 +258,13 @@ class IssueTreeCache:
         - Otherwise: dispatched to the matching handler; node's
           ``last_applied_at`` advanced.
         """
+        if self._apply_event_locked(event_type, payload):
+            self._notify_change()
+
+    def _apply_event_locked(self, event_type: str, payload: dict[str, Any]) -> bool:
+        """Locked half of :meth:`apply_event`.  Returns ``True`` if the
+        cache mutated (event applied or dropped as stale) so the caller
+        can fire :meth:`_notify_change` outside the lock."""
         timestamp = payload["timestamp"]
         with self._lock:
             if self._inventory_loaded_at is None:
@@ -240,7 +276,7 @@ class IssueTreeCache:
                     payload.get("issue_number"),
                     len(self._pre_inventory_queue),
                 )
-                return
+                return False
             number = payload["issue_number"]
             existing = self._nodes.get(number)
             if existing is not None and timestamp < existing.last_applied_at:
@@ -254,7 +290,7 @@ class IssueTreeCache:
                     timestamp.isoformat(),
                     existing.last_applied_at.isoformat(),
                 )
-                return
+                return True
             match event_type:
                 case "opened":
                     self._handle_opened(payload)
@@ -280,7 +316,7 @@ class IssueTreeCache:
                         self._repo,
                         event_type,
                     )
-                    return
+                    return False
             after = self._nodes.get(number)
             if after is not None:
                 after.last_applied_at = max(after.last_applied_at, timestamp)
@@ -296,6 +332,7 @@ class IssueTreeCache:
                 self._events_applied,
                 self._events_dropped_stale,
             )
+            return True
 
     # ── handlers (called under self._lock by apply_event) ────────────────
 

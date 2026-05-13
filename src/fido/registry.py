@@ -9,43 +9,40 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from fido import provider as provider_module
 from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_CRASH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_TALKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     FidoState,
+    IssueCacheSnapshot,
     ProviderSnapshot,
-    RepoState,
+    TalkerSnapshot,
     ThreadSnapshot,
     WebhookActivity,
     WorkerActivity,
     WorkerCrash,
+    zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
-from fido.issue_cache import IssueTreeCache
+from fido.issue_cache import CacheMetrics, IssueTreeCache
 from fido.provider import PromptSession, Provider
+from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
+from fido.state import (
+    State,
+    _resolve_git_dir,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
+from fido.tasks import Tasks
 from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
     from fido.events import Dispatcher
 
 log = logging.getLogger(__name__)
-
-
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_ZERO_CRASH = WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH)
-
-
-def _zero_activity(repo_name: str) -> WorkerActivity:
-    """Return a zero-value :class:`WorkerActivity` for *repo_name*.
-
-    Repo-specific because :attr:`WorkerActivity.repo_name` is part of the
-    value.  Readers check ``what == ""`` to detect the zero sentinel.
-    """
-    return WorkerActivity(
-        repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
-    )
 
 
 def _utcnow() -> datetime:
@@ -115,8 +112,6 @@ class WorkerRegistry:
         # (also on the watchdog thread after startup).  No lock needed —
         # single-writer per repo.
         self._crash_records: dict[str, WorkerCrash] = {}
-        self._rescoping: dict[str, bool] = {}
-        self._rescoping_lock = threading.Lock()
         # Per-repo untriaged-webhook inbox (#1067).  Counts model-needing
         # webhook handlers that have arrived but not yet finished processing.
         # Protected by _untriaged_lock; _untriaged_drained events are set when
@@ -142,6 +137,27 @@ class WorkerRegistry:
         # so the snapshot is always up to date.
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
+        # One :class:`~fido.repo.Repo` instance per managed repository,
+        # holding the per-repo collaborators (Tasks, State, …) wired
+        # with the registry + repo_name so their on_mutate hooks
+        # auto-publish IssueSnapshot updates on every disk write
+        # (#1696).  Webhook handlers, the worker, and reorder_tasks
+        # all reach those collaborators via :meth:`repo_for` — single
+        # source of truth, no scattered ``Tasks(work_dir)`` /
+        # ``State(fido_dir)`` constructions that would bypass the
+        # snapshot publisher.
+        #
+        # Single-writer + free-threaded dict safety: ``_repos`` follows
+        # the same discipline as ``_threads`` — only :meth:`start`
+        # writes (called sequentially during startup or from the
+        # single watchdog daemon thread on crash recovery), and
+        # :meth:`repo_for` / :meth:`tasks_for` / :meth:`state_for`
+        # only read.  CPython 3.14t's per-object dict lock makes
+        # individual ``dict.get`` / ``dict.__setitem__`` calls safe
+        # without an additional application-level lock, and the
+        # single-writer discipline means readers never observe a
+        # half-installed entry.
+        self._repos: dict[str, Repo] = {}
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -227,6 +243,38 @@ class WorkerRegistry:
             # Alive predecessor — the FSM rejects Launch from Active, surfacing
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
+        # Construct the per-repo Repo with publishing-aware Tasks and
+        # State so every disk write auto-fires the IssueSnapshot
+        # publisher via on_mutate (#1696).  Created here, single
+        # instance per repo, so every webhook handler / worker /
+        # reorder_tasks gets the same collaborators via :meth:`repo_for`.
+        # Resolve the canonical git_dir once via ``git rev-parse
+        # --absolute-git-dir`` and store it on the Repo — linked
+        # worktrees / submodules have ``work_dir/.git`` as a *file*
+        # pointing to the actual git directory elsewhere, and every
+        # consumer (worker, webhook handlers, status path) needs the
+        # same resolved path (#1696 codex P1 round 5).  Failing
+        # loudly here surfaces a misconfigured workspace at startup
+        # rather than as a confusing flock-on-a-file error later.
+        git_dir = _resolve_git_dir(repo_cfg.work_dir)  # pyright: ignore[reportPrivateUsage]
+        fido_dir = git_dir / "fido"
+        repo = Repo(
+            name=repo_cfg.name,
+            work_dir=repo_cfg.work_dir,
+            git_dir=git_dir,
+            tasks=Tasks(
+                repo_cfg.work_dir,
+                state_updater=self._state_updater,
+                repo_name=repo_cfg.name,
+                fido_dir=fido_dir,
+            ),
+            state=State(
+                fido_dir,
+                state_updater=self._state_updater,
+                repo_name=repo_cfg.name,
+            ),
+        )
+        self._repos[repo_cfg.name] = repo
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
@@ -235,18 +283,62 @@ class WorkerRegistry:
         # comes from the class-owned _crash_records (not from FidoState),
         # so this is a pure write — no read-modify-write CAS.
         crash_record = self._crash_records.get(_name, _ZERO_CRASH)
-        new_repo = RepoState(
-            key=_name,
-            started_at=_now,
-            activity=_zero_activity(_name),
+        new_repo = dc_replace(
+            zero_repo_state(_name, started_at=_now),
             crash_record=crash_record,
-            webhook_activities=(),
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
+        # Seed the initial IssueSnapshot + TaskListSnapshot leaves
+        # from existing on-disk state.json / tasks.json now that the
+        # FidoState entry exists.  Calling on_mutate with the loaded
+        # data shares the publish path — no separate seed code (#1696).
+        repo.state.on_mutate(repo.state.load())
+        repo.tasks.on_mutate(repo.tasks.list())
+        # Wire the per-repo talker on_change callback BEFORE launching
+        # the worker thread so an immediate ``register_talker`` from
+        # early provider activity has somewhere to publish (#1696
+        # codex).  Idempotent — re-wiring on start-after-crash
+        # overwrites the same key.
+        provider_module.set_talker_change_callback(
+            repo_cfg.name, self._make_talker_publisher(repo_cfg.name)
+        )
+        # On crash recovery the existing IssueTreeCache instance is
+        # preserved in ``_issue_caches`` but ``zero_repo_state(...)``
+        # above reset its snapshot to ``loaded=false``.  Republish the
+        # cache's current metrics so /status.json doesn't regress to
+        # an empty snapshot until the next cache mutation (#1696
+        # codex).
+        with self._issue_cache_lock:
+            existing_cache = self._issue_caches.get(repo_cfg.name)
+        if existing_cache is not None:
+            existing_cache._notify_change()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
         log.info("started WorkerThread for %s", repo_cfg.name)
+
+    def _make_talker_publisher(
+        self, repo_name: str
+    ) -> "Callable[[provider_module.SessionTalker | None], None]":
+        """Return a per-repo on_change callback that publishes a fresh
+        :class:`TalkerSnapshot` (or ``None`` for unregister) into
+        FidoState every time the talker for *repo_name* changes."""
+
+        def publish(talker: "provider_module.SessionTalker | None") -> None:
+            snap = (
+                _ZERO_TALKER
+                if talker is None
+                else TalkerSnapshot(
+                    thread_id=talker.thread_id,
+                    kind=talker.kind,
+                    description=talker.description,
+                    subprocess_pid=talker.subprocess_pid or 0,
+                    started_at=talker.started_at,
+                )
+            )
+            self._state_updater.update(lambda root: root.repos[repo_name].talker, snap)
+
+        return publish
 
     def wake(self, repo_name: str) -> None:
         """Wake the thread for *repo_name* so it checks for work immediately.
@@ -345,7 +437,7 @@ class WorkerRegistry:
         snapshot = ThreadSnapshot(
             is_alive=thread.is_alive(),
             was_stopped=thread.was_stopped,
-            crash_error=thread.crash_error,
+            crash_error=thread.crash_error or "",
         )
         _name = repo_name
         self._state_updater.update(lambda root: root.repos[_name].thread, snapshot)
@@ -364,9 +456,9 @@ class WorkerRegistry:
         """
         thread = self._threads[repo_name]
         snapshot = ProviderSnapshot(
-            session_owner=thread.session_owner,
+            session_owner=thread.session_owner or "",
             session_alive=thread.session_alive,
-            session_pid=thread.session_pid,
+            session_pid=thread.session_pid or 0,
             session_dropped_count=thread.session_dropped_count,
             session_sent_count=thread.session_sent_count,
             session_received_count=thread.session_received_count,
@@ -511,6 +603,28 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread is not None and thread.is_alive()
 
+    def repo_for(self, repo_name: str) -> Repo:
+        """Return the registry-owned :class:`~fido.repo.Repo` for *repo_name*.
+
+        One :class:`Repo` per managed repository, holding the
+        publishing-aware :class:`~fido.tasks.Tasks` and
+        :class:`~fido.state.State` (their on_mutate fires the SCADA
+        snapshot publisher on every disk write, #1696).  Webhook
+        handlers, the worker, and ``reorder_tasks`` MUST reach the
+        per-repo collaborators via this accessor — bare
+        ``Tasks(work_dir)`` / ``State(fido_dir)`` constructions would
+        silently bypass the publish hook.
+        """
+        return self._repos[repo_name]
+
+    def tasks_for(self, repo_name: str) -> Tasks:
+        """Convenience accessor for ``self.repo_for(name).tasks``."""
+        return self._repos[repo_name].tasks
+
+    def state_for(self, repo_name: str) -> State:
+        """Convenience accessor for ``self.repo_for(name).state``."""
+        return self._repos[repo_name].state
+
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
         return self._threads[repo_name].crash_error
@@ -521,17 +635,12 @@ class WorkerRegistry:
         Called by the background reorder thread when it starts (``active=True``)
         and when it finishes (``active=False``), so the status display can show
         uncertain task counts while the task list is being rewritten by Opus.
-        """
-        with self._rescoping_lock:
-            self._rescoping[repo_name] = active
 
-    def is_rescoping(self, repo_name: str) -> bool:
-        """Return True if a background rescope is currently in flight for *repo_name*.
-
-        Returns False for unknown repos (no rescope has ever been registered).
+        Single source of truth: a per-repo bool on :class:`RepoState`,
+        published via the atomic lens.  No internal dict / lock — the
+        snapshot is the state (#1696 parity).
         """
-        with self._rescoping_lock:
-            return self._rescoping.get(repo_name, False)
+        self._state_updater.update(lambda root: root.repos[repo_name].rescoping, active)
 
     # ── untriaged-webhook inbox (#1067) ──────────────────────────────────
 
@@ -758,13 +867,48 @@ class WorkerRegistry:
         webhook handler thread (event mutations).  Lifetime is tied to
         the registry, not to any one worker thread — so a worker thread
         crash + restart inherits the same cache.
+
+        New caches are wired with an ``on_change`` callback that
+        publishes a fresh :class:`IssueCacheSnapshot` into the per-repo
+        SCADA leaf after every mutation (#1696 parity).  Repos must be
+        ``start()``-ed first so the lens has a target.
         """
         with self._issue_cache_lock:
             cache = self._issue_caches.get(repo_name)
             if cache is None:
-                cache = IssueTreeCache(repo_name)
+                cache = IssueTreeCache(
+                    repo_name,
+                    on_change=self._make_issue_cache_publisher(repo_name),
+                )
                 self._issue_caches[repo_name] = cache
             return cache
+
+    def _make_issue_cache_publisher(
+        self, repo_name: str
+    ) -> "Callable[[CacheMetrics], None]":
+        """Return a per-repo on_change callback that publishes a fresh
+        :class:`IssueCacheSnapshot` into FidoState every time the cache
+        mutates.
+
+        Pulled out as a helper so the closure binds *repo_name* (not the
+        loop variable) and tests can verify the wiring without touching
+        the snapshot internals."""
+
+        def publish(metrics: "CacheMetrics") -> None:
+            snap = IssueCacheSnapshot(
+                loaded=metrics.inventory_loaded_at is not None,
+                open_issues=metrics.open_issue_count,
+                events_applied=metrics.events_applied,
+                events_dropped_stale=metrics.events_dropped_stale,
+                last_event_at=metrics.last_event_at or _EPOCH,
+                last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
+                last_reconcile_drift=metrics.last_reconcile_drift,
+            )
+            self._state_updater.update(
+                lambda root: root.repos[repo_name].issue_cache, snap
+            )
+
+        return publish
 
     def all_issue_caches(self) -> list[IssueTreeCache]:
         """Snapshot list of every issue cache that has been created.

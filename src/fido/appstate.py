@@ -1,26 +1,94 @@
 """Coordination snapshot types for FidoState.
 
-All frozen dataclasses that compose :class:`FidoState` — the atomically-swapped
-coordination snapshot shared between :class:`~fido.registry.WorkerRegistry`,
-the composition root, and the status serialisation path.  Extracted from
-``registry.py`` so provider and session modules can import :class:`FidoState`
-directly from this leaf module, with no back-reference to the registry.
+Leaf module: only frozen dataclass definitions and their pure-data helpers.
+Everyone else imports from here — :mod:`fido.appstate` itself imports
+nothing from the rest of the project, so adding a snapshot field never
+risks an import cycle.
+
+**No ``None``, no defaults.**  Every constructor parameter on every
+class here is required, and no field is typed ``T | None``.  Absent /
+not-yet-polled / not-yet-started states are represented by
+*precalculated zero constants* (``_ZERO_*``) defined alongside their
+type.  This keeps :class:`~fido.atomic.AtomicUpdater` simple — every
+lens path always points at a real value, so writes are always pure
+replacements with no "create the missing branch first" special case
+— and SCADA readers never have to ``if foo is not None``.
+
+Sentinel conventions per type are documented on each class.  In
+general: ``""`` for absent strings, ``0`` for absent counts and IDs,
+:data:`_EPOCH` for absent timestamps, and a class-specific
+``_ZERO_*`` constant for absent composite values.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from frozendict import frozendict
 
-from fido.rate_limit import GitHubLimit
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class ProviderLimitWindow:
+    """One provider-specific limit window normalized for shared policy/UI use.
+
+    Sentinels: ``limit == 0`` marks an *unpolled* window — no successful
+    poll has populated the values yet.  Real provider windows always
+    report a positive ``limit``, so the zero unambiguously means "no
+    data".  ``used == 0`` with ``limit > 0`` is a perfectly legitimate
+    "fully fresh quota" state.
+    """
+
+    name: str
+    used: int
+    limit: int
+    resets_at: datetime
+    unit: str
+
+    @property
+    def pressure(self) -> float:
+        """Return ``used / limit``, or ``0.0`` for an unpolled window."""
+        if self.limit <= 0:
+            return 0.0
+        return self.used / self.limit
+
+
+_ZERO_WINDOW_REST = ProviderLimitWindow(
+    name="rest", used=0, limit=0, resets_at=_EPOCH, unit=""
+)
+_ZERO_WINDOW_GRAPHQL = ProviderLimitWindow(
+    name="graphql", used=0, limit=0, resets_at=_EPOCH, unit=""
+)
+
+
+@dataclass(frozen=True)
+class GitHubLimit:
+    """Normalized GitHub platform rate-limit state (REST + GraphQL windows).
+
+    The zero value (:data:`_ZERO_GITHUB_LIMITS`) is the initial sentinel
+    — both windows have ``limit=0``, meaning the monitor has not yet
+    completed a successful poll.  After the first successful refresh
+    both windows carry positive limits.
+
+    Stored at :attr:`FidoState.github_limits`; updated atomically via
+    :class:`~fido.atomic.AtomicUpdater`.
+    """
+
+    rest: ProviderLimitWindow
+    graphql: ProviderLimitWindow
+
+
+_ZERO_GITHUB_LIMITS = GitHubLimit(rest=_ZERO_WINDOW_REST, graphql=_ZERO_WINDOW_GRAPHQL)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerActivity:
     """Snapshot of what one worker is currently doing.
 
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
+    Sentinel: ``what == ""`` marks the unpopulated zero — the worker
+    has been registered but has not yet reported its first activity.
+    The per-repo zero is built by :func:`zero_activity` because
+    ``repo_name`` is part of the value.
     """
 
     repo_name: str
@@ -29,20 +97,27 @@ class WorkerActivity:
     last_progress_at: datetime
 
 
+def zero_activity(repo_name: str) -> WorkerActivity:
+    """Return the zero :class:`WorkerActivity` for *repo_name*."""
+    return WorkerActivity(
+        repo_name=repo_name, what="", busy=False, last_progress_at=_EPOCH
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerCrash:
     """Running record of unexpected worker deaths for one repo.
 
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
-
-    Readers check ``death_count == 0`` to detect the "never crashed" zero
-    sentinel (defined as ``_ZERO_CRASH`` in :mod:`fido.registry`).
+    Sentinel: ``death_count == 0`` marks "never crashed".  See
+    :data:`_ZERO_CRASH`.
     """
 
     death_count: int
     last_error: str
     last_crash_time: datetime
+
+
+_ZERO_CRASH = WorkerCrash(death_count=0, last_error="", last_crash_time=_EPOCH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +135,9 @@ class WebhookActivity:
     the same call) — letting the CLI attach claude stats to the specific
     webhook line that's driving claude.
 
-    Frozen so instances can be stored inside frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
+    No precalculated zero — webhook activities are *added* to the
+    :attr:`RepoState.webhook_activities` tuple, never represented by a
+    zero entry.  Absence is the empty tuple ``()``.
     """
 
     handle_id: int
@@ -74,23 +150,27 @@ class WebhookActivity:
 class ProviderSnapshot:
     """Immutable snapshot of one repo's provider (ClaudeSession) state.
 
-    Captures provider session metadata as primitive values at the moment of
-    each provider lifecycle event (session start, recovery).  Stored on
-    :class:`RepoState` so the SCADA display path reads stale-free values
-    without holding the provider lock.
-
-    Fields mirror the public session properties on
-    :class:`~fido.worker.WorkerThread` that are read by the status display
-    path.  Published by :meth:`~fido.registry.WorkerRegistry._publish_provider_snapshot`
-    at lifecycle boundaries where session state actually changes.
+    Sentinel: ``session_owner == ""`` marks "no session has been
+    created yet".  After a session starts, ``session_owner`` is the
+    thread label (e.g. ``"worker-home"``).
     """
 
-    session_owner: str | None
+    session_owner: str
     session_alive: bool
-    session_pid: int | None
+    session_pid: int
     session_dropped_count: int
     session_sent_count: int
     session_received_count: int
+
+
+_ZERO_PROVIDER = ProviderSnapshot(
+    session_owner="",
+    session_alive=False,
+    session_pid=0,
+    session_dropped_count=0,
+    session_sent_count=0,
+    session_received_count=0,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,14 +183,173 @@ class ThreadSnapshot:
     a snapshot reader can never reach through to a live thread and observe
     partial mutations.
 
-    Provider session state (session_owner, session_alive, session_pid, and
-    the message counters) lives on :class:`ProviderSnapshot` instead so it can
-    be published independently at provider lifecycle boundaries.
+    Sentinel: the zero (``is_alive=False``, ``was_stopped=False``,
+    ``crash_error=""``) is what gets published for a freshly-registered
+    repo before its thread has started.
     """
 
     is_alive: bool
     was_stopped: bool
-    crash_error: str | None
+    crash_error: str
+
+
+_ZERO_THREAD = ThreadSnapshot(is_alive=False, was_stopped=False, crash_error="")
+
+
+@dataclass(frozen=True, slots=True)
+class IssueSnapshot:
+    """Immutable snapshot of one repo's current issue / PR fields.
+
+    Captures the disk-resident state.json values (issue id/title/started,
+    pr id/title) that the SCADA display path renders for ``./fido status``
+    and ``/status.json``.  Published by :class:`~fido.state.State` at every
+    state.json write — independent leaf, no cross-source reads (#1696).
+
+    Sentinels: ``issue == 0`` and ``pr_number == 0`` mark "no issue
+    assigned" / "no PR yet" (real GitHub issue/PR numbers are positive).
+    Strings default to ``""``.
+    """
+
+    issue: int
+    issue_title: str
+    issue_started_at: str
+    pr_number: int
+    pr_title: str
+
+
+_ZERO_ISSUE = IssueSnapshot(
+    issue=0, issue_title="", issue_started_at="", pr_number=0, pr_title=""
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskListSnapshot:
+    """Immutable snapshot of one repo's current task-list-derived fields.
+
+    Computed from tasks.json contents at every Tasks mutation;
+    independent leaf in :class:`RepoState`, sibling of
+    :class:`IssueSnapshot`.
+
+    Sentinels: ``current_task == ""`` for "no task selected",
+    ``task_number == 0`` and ``task_total == 0`` for "no tasks at all"
+    or "all completed".
+    """
+
+    pending_task_count: int
+    completed_task_count: int
+    current_task: str
+    task_number: int
+    task_total: int
+
+
+_ZERO_TASK_LIST = TaskListSnapshot(
+    pending_task_count=0,
+    completed_task_count=0,
+    current_task="",
+    task_number=0,
+    task_total=0,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IssueCacheSnapshot:
+    """Immutable snapshot of one repo's :class:`~fido.issue_cache.IssueTreeCache`
+    health for the SCADA display path.
+
+    Mirrors the public fields of :class:`~fido.issue_cache.CacheMetrics`
+    as JSON-friendly primitives.  Published by
+    :class:`~fido.issue_cache.IssueTreeCache` after every mutation
+    (load_inventory / apply_event / reconcile_with_inventory) via the
+    ``on_change`` callback supplied at construction (#1696 parity).
+
+    Sentinel: ``loaded=False`` means inventory has not been loaded;
+    timestamp fields default to :data:`_EPOCH`.
+    """
+
+    loaded: bool
+    open_issues: int
+    events_applied: int
+    events_dropped_stale: int
+    last_event_at: datetime
+    last_reconcile_at: datetime
+    last_reconcile_drift: int
+
+
+_ZERO_ISSUE_CACHE = IssueCacheSnapshot(
+    loaded=False,
+    open_issues=0,
+    events_applied=0,
+    events_dropped_stale=0,
+    last_event_at=_EPOCH,
+    last_reconcile_at=_EPOCH,
+    last_reconcile_drift=0,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TalkerSnapshot:
+    """Immutable snapshot of one repo's currently-driving
+    :class:`~fido.provider.SessionTalker` for the SCADA display path.
+
+    Mirrors the public :class:`~fido.provider.SessionTalker` fields as
+    JSON-friendly primitives.  Published by the provider module's
+    register/unregister hooks via the per-repo on_change callback wired
+    by :class:`~fido.registry.WorkerRegistry` at startup (#1696 parity).
+
+    Sentinel: ``thread_id == 0`` and ``kind == ""`` mark "no thread is
+    currently driving the provider for this repo" — the provider is
+    idle.  Real ``threading.get_ident()`` results are positive.
+    """
+
+    thread_id: int
+    kind: str  # "worker", "webhook", or "" for idle
+    description: str
+    subprocess_pid: int
+    started_at: datetime
+
+
+_ZERO_TALKER = TalkerSnapshot(
+    thread_id=0, kind="", description="", subprocess_pid=0, started_at=_EPOCH
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPressureSnapshot:
+    """Immutable snapshot of one repo's provider-pressure summary.
+
+    Mirrors :class:`~fido.provider.ProviderPressureStatus` as
+    JSON-friendly primitives (the level / warning / paused booleans are
+    pre-computed so the JSON wire format need not re-derive them).
+    Published by :class:`~fido.provider_pressure.ProviderPressureMonitor`
+    to ``RepoState.provider_pressure`` once per polling cycle (#1696
+    parity).
+
+    Sentinel: ``level == "unknown"`` (matched by the ``provider == ""``
+    zero) marks "no successful poll yet".
+    """
+
+    provider: str  # ProviderID enum value, e.g. "claude-code"
+    window_name: str
+    pressure: float
+    percent_used: int
+    resets_at: datetime
+    unavailable_reason: str
+    level: str  # "ok" / "warning" / "paused" / "unavailable" / "unknown"
+    warning: bool
+    paused: bool
+
+
+_ZERO_PROVIDER_PRESSURE = ProviderPressureSnapshot(
+    provider="",
+    window_name="",
+    pressure=0.0,
+    percent_used=0,
+    resets_at=_EPOCH,
+    unavailable_reason="",
+    level="unknown",
+    warning=False,
+    paused=False,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,39 +359,14 @@ class RepoState:
     *key* is the repo slug (e.g. ``"rhencke/confusio"``), matching the key
     under which this record is stored in :attr:`FidoState.repos`.
 
-    *started_at* is the UTC timestamp when the most recent
-    :class:`~fido.worker.WorkerThread` for this repo was started.
+    Every field is required and always carries a real (zero or non-zero)
+    value — there is no ``None``, no defaults, no "absent" representation
+    other than the precalculated zero constants on each leaf type.  This
+    keeps :class:`~fido.atomic.AtomicUpdater` simple: every lens path is
+    always valid, every write is just a replacement of an existing value.
 
-    *activity* is the current :class:`WorkerActivity` for this repo.
-    Initialised to the zero sentinel (``what=""``) by :meth:`~fido.registry.WorkerRegistry.start`; the
-    worker replaces it on its first :meth:`~fido.registry.WorkerRegistry.report_activity` call.
-
-    *crash_record* is the accumulated :class:`WorkerCrash` history for this
-    repo.  Initialised to ``_ZERO_CRASH`` (``death_count=0``) by
-    :meth:`~fido.registry.WorkerRegistry.start`; the watchdog replaces it on each crash.
-
-    *webhook_activities* is the tuple of in-flight webhook handlers for this
-    repo.  Published from the authoritative ``_webhook_activities`` dict on
-    :class:`~fido.registry.WorkerRegistry` via
-    :meth:`~fido.registry.WorkerRegistry._publish_webhook_activities`; starts empty.
-
-    *thread* is the immutable :class:`ThreadSnapshot` for the repo's
-    :class:`~fido.worker.WorkerThread`.  ``None`` until the first
-    :meth:`~fido.registry.WorkerRegistry.start` call; refreshed by
-    :meth:`~fido.registry.WorkerRegistry._publish_thread_snapshot` immediately after the
-    thread is started.  No mutable thread reference is stored here — the
-    snapshot captures primitive values only.
-
-    *provider* is the immutable :class:`ProviderSnapshot` for the repo's
-    provider (ClaudeSession).  ``None`` until the first
-    :meth:`~fido.registry.WorkerRegistry.start` call; refreshed by
-    :meth:`~fido.registry.WorkerRegistry._publish_provider_snapshot` at provider lifecycle
-    events (session start, recovery).
-
-    As subsequent lock-free PRs migrate fields out of the per-lock dicts in
-    :class:`~fido.registry.WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
-    Each migration removes the corresponding lock and dict from
-    ``WorkerRegistry.__init__``.
+    The per-repo zero is built by :func:`zero_repo_state` because ``key``
+    and ``activity`` (which embeds ``repo_name``) carry the repo slug.
     """
 
     key: str
@@ -160,8 +374,38 @@ class RepoState:
     activity: WorkerActivity
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
-    thread: "ThreadSnapshot | None" = None
-    provider: "ProviderSnapshot | None" = None
+    thread: ThreadSnapshot
+    provider: ProviderSnapshot
+    issue: IssueSnapshot
+    task_list: TaskListSnapshot
+    issue_cache: IssueCacheSnapshot
+    talker: TalkerSnapshot
+    provider_pressure: ProviderPressureSnapshot
+    rescoping: bool
+
+
+def zero_repo_state(repo_name: str, started_at: datetime = _EPOCH) -> RepoState:
+    """Return a fresh zero :class:`RepoState` for *repo_name*.
+
+    Used by :meth:`~fido.registry.WorkerRegistry.start` to prepopulate the
+    snapshot when a repo first appears, and by tests that need a baseline
+    state without enumerating every field.
+    """
+    return RepoState(
+        key=repo_name,
+        started_at=started_at,
+        activity=zero_activity(repo_name),
+        crash_record=_ZERO_CRASH,
+        webhook_activities=(),
+        thread=_ZERO_THREAD,
+        provider=_ZERO_PROVIDER,
+        issue=_ZERO_ISSUE,
+        task_list=_ZERO_TASK_LIST,
+        issue_cache=_ZERO_ISSUE_CACHE,
+        talker=_ZERO_TALKER,
+        provider_pressure=_ZERO_PROVIDER_PRESSURE,
+        rescoping=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,10 +415,7 @@ class FidoState:
     ``repos`` maps each repo slug to its :class:`RepoState` snapshot.  It is
     a :class:`frozendict` so stale readers that hold a reference to an old
     snapshot can never accidentally mutate the mapping — the immutability
-    guarantee holds even on the free-threaded (no-GIL) build.  Each
-    :class:`RepoState` carries a :class:`ThreadSnapshot` at its ``thread``
-    field — an immutable copy of the thread's observable state at the last
-    :meth:`~fido.registry.WorkerRegistry.start` call.
+    guarantee holds even on the free-threaded (no-GIL) build.
 
     The atomic cell is owned by the composition root (``run()`` in
     ``server.py``), not by :class:`~fido.registry.WorkerRegistry`.  The root
@@ -184,20 +425,19 @@ class FidoState:
     :class:`~fido.rate_limit.RateLimitMonitor`, and passes the
     :class:`~fido.atomic.AtomicReader` to the status serialisation path.
 
-    **Convergence target**: ``FidoState`` is intended to grow to cover all
-    coordination fields currently scattered across the per-lock dicts in
-    :class:`~fido.registry.WorkerRegistry` (worker activities, crash records,
-    webhook activities, rescoping flags, …).  As each field migrates here,
-    the corresponding lock disappears.
-
-    **Replaces FidoStatus long-term**: :class:`~fido.status.FidoStatus` in
-    ``status.py`` is a display-oriented dataclass shaped by the old
-    ``/status.json`` schema.  The end-state is to serialise ``FidoState``
-    directly to JSON — even where that changes the wire format — and retire
-    ``FidoStatus``.  The ``./fido status`` CLI output serves as the living
-    requirement: whatever ``FidoState`` carries must be sufficient to render
-    everything that ``./fido status`` currently shows.
+    Sentinel: ``process_started_at == _EPOCH`` marks "fido has not
+    started" (used in tests and pre-startup state).  The composition
+    root replaces it with ``datetime.now(...)`` once the server begins
+    serving requests.
     """
 
     repos: frozendict[str, RepoState]
     github_limits: GitHubLimit
+    process_started_at: datetime
+
+
+_ZERO_FIDO_STATE = FidoState(
+    repos=frozendict(),
+    github_limits=_ZERO_GITHUB_LIMITS,
+    process_started_at=_EPOCH,
+)
