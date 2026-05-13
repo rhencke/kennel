@@ -16,8 +16,10 @@ class JsonFileStore(ABC):
     Provides a :meth:`modify` context manager for atomic read-modify-write
     under an exclusive ``flock``.  Subclasses must implement
     :attr:`_data_path`; they may optionally override :attr:`_lock_path`
-    (defaults to the same file as the data) and :meth:`_default` (the value
-    yielded when the data file is absent or empty, defaults to ``{}``).
+    (defaults to the same file as the data), :meth:`_default` (the value
+    yielded when the data file is absent or empty, defaults to ``{}``),
+    and :meth:`on_mutate` (a no-op by default; override to react to
+    every successful write while the exclusive flock is still held).
 
     Usage::
 
@@ -52,6 +54,17 @@ class JsonFileStore(ABC):
         override in subclasses to add schema checks.
         """
 
+    def on_mutate(self, data: object) -> None:  # noqa: ARG002
+        """Hook fired after every successful write while still holding the
+        exclusive flock.  Default is a no-op; override in subclasses that
+        need to react to data changes (for example, a publishing subclass
+        that pushes the new value into a SCADA snapshot).
+
+        Holding the flock through this call means concurrent writers
+        serialize on the same lock — the callback observes a consistent
+        post-write state and downstream notifications never reorder.
+        """
+
     @contextmanager
     def modify(self) -> Generator[Any, None, None]:
         """Atomic read-modify-write: hold the exclusive flock for the entire block.
@@ -60,6 +73,9 @@ class JsonFileStore(ABC):
         the file is absent or empty).  Any mutations are written back when the
         ``with`` block exits, while the exclusive lock is still held —
         preventing interleaved concurrent modifications.
+
+        Fires :meth:`on_mutate` after the write while still holding the
+        flock.
 
         Raises :exc:`ValueError` if the file contains invalid JSON or if
         :meth:`_validate` rejects the loaded data.
@@ -81,6 +97,7 @@ class JsonFileStore(ABC):
             self._validate(data)
             yield data
             data_path.write_text(json.dumps(data))
+            self.on_mutate(data)
 
 
 class State(JsonFileStore):
@@ -93,10 +110,49 @@ class State(JsonFileStore):
     The lock is held on ``state.lock`` (separate from the data file) so that
     shared reads via :meth:`load` are not blocked by concurrent
     ``modify`` calls.
+
+    *registry* and *repo_name* (when supplied) wire :meth:`on_mutate` to
+    publish a fresh :class:`~fido.appstate.IssueSnapshot` after every
+    successful write — same SCADA hook pattern as
+    :class:`~fido.tasks.Tasks`.  Tests that don't care about the
+    snapshot leave them at the defaults; the hook becomes a no-op in
+    that case.
     """
 
-    def __init__(self, fido_dir: Path) -> None:
+    def __init__(
+        self,
+        fido_dir: Path,
+        *,
+        registry: object | None = None,
+        repo_name: str = "",
+        work_dir: Path | None = None,
+    ) -> None:
         self._fido_dir = fido_dir
+        self._registry = registry
+        self._repo_name = repo_name
+        # publish_repo_snapshot wants the work_dir (where tasks.json
+        # lives); fido_dir is the .git/fido under it.  When omitted we
+        # derive it from fido_dir's parent's parent.
+        self._work_dir = work_dir if work_dir is not None else fido_dir.parent.parent
+
+    def on_mutate(self, data: object) -> None:
+        """Publish a fresh :class:`~fido.appstate.IssueSnapshot` to
+        :class:`~fido.appstate.FidoState` after each state.json mutation.
+
+        Fires under the state.lock flock from :meth:`modify`/:meth:`save`,
+        so concurrent writers serialize on it.  No-op when *registry*
+        or *repo_name* were not supplied at construction."""
+        if self._registry is None or not self._repo_name or not isinstance(data, dict):
+            return
+        # Lazy import: state is a leaf module imported broadly.
+        from fido.worker import publish_repo_snapshot
+
+        publish_repo_snapshot(
+            self._work_dir,
+            self._repo_name,
+            self._registry,  # pyright: ignore[reportArgumentType]
+            state_data=data,
+        )
 
     @property
     def _data_path(self) -> Path:
@@ -129,11 +185,13 @@ class State(JsonFileStore):
         """Write *data* to state.json."""
         with self._flock(exclusive=True):
             self._data_path.write_text(json.dumps(data))
+            self.on_mutate(data)
 
     def clear(self) -> None:
         """Remove state.json."""
         with self._flock(exclusive=True):
             self._data_path.unlink(missing_ok=True)
+            self.on_mutate({})
 
 
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker

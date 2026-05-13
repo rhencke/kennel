@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from fido.appstate import FidoState, IssueSnapshot
-    from fido.atomic import AtomicUpdater
     from fido.events import Action, Dispatcher
 
 import requests as _requests
 
 from fido import hooks, tasks
+from fido.appstate import FidoState, IssueSnapshot
+from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
@@ -247,8 +247,10 @@ class ActivityReporter(Protocol):
     def publish_provider_snapshot(self, repo_name: str) -> None: ...
 
     def publish_issue_snapshot(
-        self, repo_name: str, snapshot: "IssueSnapshot"
+        self, repo_name: str, snapshot: IssueSnapshot
     ) -> None: ...
+
+    def tasks_for(self, repo_name: str) -> Tasks: ...
 
 
 class LockHeld(Exception):
@@ -295,23 +297,27 @@ def publish_repo_snapshot(
     work_dir: Path,
     repo_name: str,
     registry: ActivityReporter | None,
-    tasks: Tasks | None = None,
+    *,
+    task_list: list[dict[str, Any]] | None = None,
+    state_data: dict[str, Any] | None = None,
 ) -> None:
     """Refresh *repo_name*'s :class:`IssueSnapshot` in :class:`FidoState`.
 
-    Reads state.json + tasks.json from disk (locks tasks.json briefly,
-    that's fine — collecting state is allowed to block).  Skips
-    publication entirely when either read raises so a transient I/O or
-    parse error never clobbers a previously-valid snapshot for the
-    status renderer (#1696 codex P2).
+    Called from three places — all of them automatic, no manual triggers
+    in worker / event code:
 
-    Called from:
+    - :meth:`fido.tasks.Tasks.on_mutate` after a tasks.json write
+      (passes the just-written list as ``task_list`` to avoid flock
+      recursion)
+    - :meth:`fido.state.State.on_mutate` after a state.json write
+      (passes the just-written dict as ``state_data``)
+    - :meth:`fido.registry.WorkerRegistry.start` to seed the snapshot
+      from existing on-disk state when a repo first comes up (no hints)
 
-    - :meth:`Worker.run` at iteration start, end, and on the
-      ``LockHeld`` early-return path — covers the worker-driven mutations.
-    - :func:`fido.events.create_task` after appending a new task —
-      covers webhook-driven mutations that happen between worker
-      iterations.
+    Whichever side is not supplied is read from disk.  Skips publication
+    entirely when a read raises so a transient I/O or parse error never
+    clobbers a previously-valid snapshot for the status renderer
+    (#1696 codex P2).
 
     Bails out cleanly when ``registry`` is ``None`` or ``repo_name`` is
     empty (unit-test scaffolding that bypasses the composition root).
@@ -321,22 +327,24 @@ def publish_repo_snapshot(
     if registry is None or not repo_name:
         return
     fido_dir = work_dir / ".git" / "fido"
-    try:
-        state_data = State(fido_dir).load()
-    except Exception:  # noqa: BLE001  # don't clobber prior snapshot on transient failure
-        log.warning(
-            "publish_repo_snapshot: failed to load state for %s — keeping prior snapshot",
-            repo_name,
-        )
-        return
-    try:
-        task_list = (tasks or Tasks(work_dir)).list()
-    except Exception:  # noqa: BLE001
-        log.warning(
-            "publish_repo_snapshot: failed to load tasks for %s — keeping prior snapshot",
-            repo_name,
-        )
-        return
+    if state_data is None:
+        try:
+            state_data = State(fido_dir).load()
+        except Exception:  # noqa: BLE001  # don't clobber prior snapshot on transient failure
+            log.warning(
+                "publish_repo_snapshot: failed to load state for %s — keeping prior snapshot",
+                repo_name,
+            )
+            return
+    if task_list is None:
+        try:
+            task_list = Tasks(work_dir).list()
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "publish_repo_snapshot: failed to load tasks for %s — keeping prior snapshot",
+                repo_name,
+            )
+            return
 
     pending = sum(1 for t in task_list if t.get("status") == "pending")
     completed = sum(1 for t in task_list if t.get("status") == "completed")
@@ -1315,7 +1323,7 @@ class Worker:
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
         nudges: Nudges | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -1349,7 +1357,7 @@ class Worker:
             if provider_factory is None
             else provider_factory
         )
-        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
+        self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         self._bootstrap_session: PromptSession | None = session
         if provider is not None:
             self._provider = provider
@@ -4338,7 +4346,7 @@ class Worker:
             _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
-        reorder_tasks(self.work_dir, commit_summary, **kwargs)
+        reorder_tasks(self._tasks, commit_summary, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
@@ -4425,10 +4433,14 @@ class Worker:
                 self._publish_issue_snapshot()
 
     def _publish_issue_snapshot(self) -> None:
-        """Refresh this repo's :class:`IssueSnapshot` in :class:`FidoState`."""
-        publish_repo_snapshot(
-            self.work_dir, self._repo_name, self._registry, self._tasks
-        )
+        """Refresh this repo's :class:`IssueSnapshot` in :class:`FidoState`.
+
+        Used at iteration start (cold-start cover) and on the
+        ``LockHeld`` early-return path.  Steady-state mutations during
+        the iteration auto-publish via the Tasks/State ``on_mutate``
+        hooks, so this serves as a defensive backstop for state changes
+        that don't go through those hooks (yet)."""
+        publish_repo_snapshot(self.work_dir, self._repo_name, self._registry)
 
     def _run_iteration(self, ctx: WorkerContext) -> int:
         """Body of :meth:`run` — guaranteed to run between the pre- and
@@ -4672,7 +4684,7 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
@@ -4703,7 +4715,7 @@ class WorkerThread(threading.Thread):
             if provider_factory is None
             else provider_factory
         )
-        self._state_updater: "AtomicUpdater[FidoState] | None" = state_updater
+        self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         self._provider: Provider | None
         if provider is not None:
             self._provider = provider

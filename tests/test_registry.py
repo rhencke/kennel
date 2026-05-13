@@ -313,6 +313,52 @@ class TestWorkerRegistry:
         reg.publish_issue_snapshot("foo/bar", snapshot)
         assert reader.get().repos["foo/bar"].issue == snapshot
 
+    def test_repo_for_returns_publishing_repo_after_start(self, tmp_path: Path) -> None:
+        """``repo_for`` returns the registry-owned :class:`Repo` whose
+        :class:`Tasks` mutations auto-publish IssueSnapshot updates
+        (#1696).  Mutating tasks via ``repo.tasks.add(...)`` fires the
+        on_mutate hook → registry.publish_issue_snapshot → snapshot
+        appears in FidoState."""
+        from fido.types import TaskType
+
+        reg, factory, reader = self._make_registry()
+        reg.start(_repo("foo/bar", tmp_path))
+        repo = reg.repo_for("foo/bar")
+        assert repo.name == "foo/bar"
+        assert repo.work_dir == tmp_path
+        # tasks_for shorthand returns the same Tasks instance.
+        assert reg.tasks_for("foo/bar") is repo.tasks
+
+        repo.tasks.add(title="thing", task_type=TaskType.SPEC)
+
+        snap = reader.get().repos["foo/bar"].issue
+        assert snap is not None
+        assert snap.pending_task_count == 1
+        assert snap.current_task == "thing"
+
+    def test_state_save_publishes_issue_snapshot(self, tmp_path: Path) -> None:
+        """State.save fires on_mutate → snapshot publishes the new
+        issue/PR fields (#1696)."""
+        reg, factory, reader = self._make_registry()
+        reg.start(_repo("foo/bar", tmp_path))
+        repo = reg.repo_for("foo/bar")
+
+        repo.state.save(
+            {
+                "issue": 7,
+                "issue_title": "Fix it",
+                "pr_number": 13,
+                "pr_title": "Fix it (closes #7)",
+            }
+        )
+
+        snap = reader.get().repos["foo/bar"].issue
+        assert snap is not None
+        assert snap.issue == 7
+        assert snap.issue_title == "Fix it"
+        assert snap.pr_number == 13
+        assert snap.pr_title == "Fix it (closes #7)"
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))

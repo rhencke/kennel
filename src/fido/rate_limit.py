@@ -16,14 +16,11 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from fido.appstate import GitHubLimit, ProviderLimitWindow
+from fido.appstate import FidoState, GitHubLimit, ProviderLimitWindow
 from fido.atomic import AtomicUpdater
 from fido.github import GitHub
-
-if TYPE_CHECKING:
-    from fido.appstate import FidoState
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +48,7 @@ class RateLimitMonitor:
     Single writer: only the poller thread calls :meth:`refresh`.
     """
 
-    def __init__(self, gh: GitHub, state: "AtomicUpdater[FidoState]") -> None:
+    def __init__(self, gh: GitHub, state: AtomicUpdater[FidoState]) -> None:
         self._gh = gh
         self._state = state
 

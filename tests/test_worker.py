@@ -1278,18 +1278,18 @@ class TestWorker:
     def test_publish_issue_snapshot_skips_on_tasks_load_error(
         self, tmp_path: Path
     ) -> None:
-        """Codex P2 (#1696): same preservation guarantee for tasks.json."""
+        """Codex P2 (#1696): same preservation guarantee for tasks.json.
+
+        publish_repo_snapshot constructs its own ``Tasks(work_dir)`` for
+        the disk read so we patch the class-level Tasks rather than the
+        worker's _tasks (which is on the construction-time DI path)."""
         registry = MagicMock(spec=ActivityReporter)
-        tasks = MagicMock()
-        tasks.list.side_effect = RuntimeError("disk")
         worker = Worker(
-            tmp_path,
-            MagicMock(),
-            repo_name="owner/repo",
-            registry=registry,
-            _tasks=tasks,
+            tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
         )
-        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
+        with patch("fido.worker.Tasks") as mock_tasks_cls:
+            mock_tasks_cls.return_value.list.side_effect = RuntimeError("disk")
+            worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
         registry.publish_issue_snapshot.assert_not_called()
 
     def _publish_with_tasks(
@@ -10908,7 +10908,10 @@ class TestRescopeBeforePick:
             worker.rescope_before_pick()
         mock_reorder.assert_called_once()
 
-    def test_passes_work_dir_to_reorder(self, tmp_path: Path) -> None:
+    def test_passes_tasks_to_reorder(self, tmp_path: Path) -> None:
+        """rescope_before_pick passes the worker's Tasks instance (the
+        publishing-aware one) to reorder_tasks so the on_mutate hook
+        fires on rescope writes (#1696)."""
         worker = self._make_worker(tmp_path)
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
@@ -10919,7 +10922,7 @@ class TestRescopeBeforePick:
             patch("fido.events._make_reorder_kwargs", return_value={}),
         ):
             worker.rescope_before_pick()
-        assert mock_reorder.call_args[0][0] == tmp_path
+        assert mock_reorder.call_args[0][0] is worker._tasks
 
     def test_passes_commit_summary_to_reorder(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)

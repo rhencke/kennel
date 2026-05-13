@@ -24,8 +24,10 @@ from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.provider import PromptSession, Provider
+from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
+from fido.tasks import Tasks
 from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
@@ -143,6 +145,20 @@ class WorkerRegistry:
         # so the snapshot is always up to date.
         self._webhook_activities: dict[str, list[WebhookActivity]] = {}
         self._webhook_lock = threading.Lock()
+        # One :class:`~fido.repo.Repo` instance per managed repository,
+        # holding the per-repo collaborators (Tasks, State, …) wired
+        # with the registry + repo_name so their on_mutate hooks
+        # auto-publish IssueSnapshot updates on every disk write
+        # (#1696).  Webhook handlers, the worker, and reorder_tasks
+        # all reach those collaborators via :meth:`repo_for` — single
+        # source of truth, no scattered ``Tasks(work_dir)`` /
+        # ``State(fido_dir)`` constructions that would bypass the
+        # snapshot publisher.  Future per-repo state currently
+        # scattered across the parallel ``dict[str, X]`` fields above
+        # (issue cache, untriaged counter, FSM states, …) should
+        # migrate onto :class:`Repo` so this class stops being a bag
+        # of parallel collections.
+        self._repos: dict[str, Repo] = {}
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -228,6 +244,25 @@ class WorkerRegistry:
             # Alive predecessor — the FSM rejects Launch from Active, surfacing
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
+        # Construct the per-repo Repo with publishing-aware Tasks and
+        # State so every disk write auto-fires the IssueSnapshot
+        # publisher via on_mutate (#1696).  Created here, single
+        # instance per repo, so every webhook handler / worker /
+        # reorder_tasks gets the same collaborators via :meth:`repo_for`.
+        from fido.state import State  # local import to avoid registry → state cycles
+
+        fido_dir = repo_cfg.work_dir / ".git" / "fido"
+        self._repos[repo_cfg.name] = Repo(
+            name=repo_cfg.name,
+            work_dir=repo_cfg.work_dir,
+            tasks=Tasks(repo_cfg.work_dir, registry=self, repo_name=repo_cfg.name),
+            state=State(
+                fido_dir,
+                registry=self,
+                repo_name=repo_cfg.name,
+                work_dir=repo_cfg.work_dir,
+            ),
+        )
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
@@ -525,6 +560,24 @@ class WorkerRegistry:
         """Return True if the thread for *repo_name* is currently alive."""
         thread = self._threads.get(repo_name)
         return thread is not None and thread.is_alive()
+
+    def repo_for(self, repo_name: str) -> Repo:
+        """Return the registry-owned :class:`~fido.repo.Repo` for *repo_name*.
+
+        One :class:`Repo` per managed repository, holding the
+        publishing-aware :class:`~fido.tasks.Tasks` and
+        :class:`~fido.state.State` (their on_mutate fires the SCADA
+        snapshot publisher on every disk write, #1696).  Webhook
+        handlers, the worker, and ``reorder_tasks`` MUST reach the
+        per-repo collaborators via this accessor — bare
+        ``Tasks(work_dir)`` / ``State(fido_dir)`` constructions would
+        silently bypass the publish hook.
+        """
+        return self._repos[repo_name]
+
+    def tasks_for(self, repo_name: str) -> Tasks:
+        """Convenience accessor for ``self.repo_for(name).tasks``."""
+        return self._repos[repo_name].tasks
 
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""

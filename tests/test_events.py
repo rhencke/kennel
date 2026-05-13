@@ -3338,6 +3338,11 @@ class TestCreateTask:
             def abort_task(self, repo_name: str, *, task_id: str) -> None:
                 _ = (repo_name, task_id)
 
+            def tasks_for(self, repo_name: str) -> object:
+                _ = repo_name
+                # Sentinel — mock_reorder ignores this argument.
+                return object()
+
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         registry = _CountingRegistry()
@@ -4302,6 +4307,14 @@ class _FakeRescopeRegistry:
     def abort_task(self, repo_name: str, *, task_id: str | None = None) -> None:
         self.calls.append(("abort_task", repo_name, task_id))
 
+    def tasks_for(self, repo_name: str) -> object:
+        # Sentinel — these tests inject a fake reorder fn so the Tasks
+        # value is never dereferenced.  Don't record this call: tests
+        # in this class assert exact .calls sequencing for inbox/
+        # rescoping ordering (#1280) and tasks_for is incidental.
+        _ = repo_name
+        return object()
+
 
 class TestReorderTasksBackground:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -4361,11 +4374,14 @@ class TestReorderTasksBackground:
         )
         assert tmp_path.name in started[0].name
 
-    def test_thread_calls_reorder_with_work_dir_and_commit_summary(
+    def test_thread_calls_reorder_with_registry_tasks_and_commit_summary(
         self, tmp_path: Path
     ) -> None:
+        """Routes the rescope write through ``registry.tasks_for(name)`` so
+        the publishing-aware Tasks's on_mutate hook fires (#1696)."""
         started: list = []
         calls, mock_reorder = self._capture_reorder_calls()
+        registry = MagicMock(spec=ActivityReporter)
         _reorder_tasks_background(
             tmp_path,
             "feat: add parser",
@@ -4374,12 +4390,13 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
-            registry=MagicMock(spec=ActivityReporter),
+            registry=registry,
             repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert len(calls) == 1
-        assert calls[0][0] == tmp_path
+        assert calls[0][0] is registry.tasks_for.return_value
+        registry.tasks_for.assert_called_with("owner/repo")
         assert calls[0][1] == "feat: add parser"
 
     def test_on_changes_callback_notifies_thread_changes(self, tmp_path: Path) -> None:
