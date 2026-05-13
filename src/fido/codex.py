@@ -846,6 +846,7 @@ class CodexSession(OwnedSession):
             self._active_turn_id = turn_id
         with self._state_lock:
             self._sent_count += 1
+        self._mark_send_outstanding()
         self._notify_snapshot_publisher()
 
     def _notify_snapshot_publisher(self) -> None:
@@ -909,6 +910,7 @@ class CodexSession(OwnedSession):
                     final_text = text
                     with self._state_lock:
                         self._received_count += 1
+                    self._mark_received()
                     self._notify_snapshot_publisher()
             completed = (
                 _extract_completed_turn(params) if method == "turn/completed" else None

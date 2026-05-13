@@ -1236,6 +1236,7 @@ class CopilotCLISession(OwnedSession):
         )
         with self._metrics_lock:
             self._sent_count += 1
+        self._mark_send_outstanding()
         self._notify_snapshot_publisher()
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
@@ -1244,6 +1245,7 @@ class CopilotCLISession(OwnedSession):
         )
         with self._metrics_lock:
             self._received_count += 1
+        self._mark_received()
         self._notify_snapshot_publisher()
         self._session_id = session_id
         if model is not None:

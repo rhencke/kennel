@@ -755,6 +755,45 @@ class OwnedSession:
         # consults this set under ``_fsm_cond`` and skips the normal
         # ``_fsm_release`` so the double-release does not raise.
         self._evicted_tids: set[int] = set()
+        # Per-prompt no-reply watchdog state (#1709).  Send arms the
+        # timer (sets :attr:`_outstanding_send_at` to now); receive
+        # disarms (clears to ``None``).  Multiple sends without a
+        # receive simply restart the clock — the latest send wins.
+        # The :class:`~fido.session_lock_watchdog.SessionLockWatchdog`
+        # polls :attr:`outstanding_send_at` and kills the session when
+        # it stays set for more than ``no_reply_seconds``.  ``None``
+        # means "no send awaiting reply" — idle sessions and sessions
+        # whose last send has been ack'd both look the same to the
+        # watchdog and are left alone forever.
+        self._outstanding_send_lock = threading.Lock()
+        self._outstanding_send_at: datetime | None = None
+
+    def _mark_send_outstanding(self) -> None:
+        """Arm (or restart) the no-reply watchdog clock.  Subclasses
+        call this every time they write a prompt to the provider
+        subprocess's stdin.  Multiple sends without an intervening
+        receive simply reset the clock — we only care about the most
+        recent unanswered send."""
+        with self._outstanding_send_lock:
+            self._outstanding_send_at = datetime.now(tz=timezone.utc)
+
+    def _mark_received(self) -> None:
+        """Disarm the no-reply watchdog clock.  Subclasses call this
+        from their receive loop on every line / message read from the
+        provider subprocess (sibling to bumping ``_received_count``).
+        Once any data arrives, the prior send is considered ACK'd and
+        the watchdog stops counting until the next send re-arms it
+        (closes #1709)."""
+        with self._outstanding_send_lock:
+            self._outstanding_send_at = None
+
+    @property
+    def outstanding_send_at(self) -> datetime | None:
+        """When the most recent unanswered send was issued, or ``None``
+        if nothing is awaiting a reply.  Read by
+        :class:`~fido.session_lock_watchdog.SessionLockWatchdog`."""
+        with self._outstanding_send_lock:
+            return self._outstanding_send_at
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at

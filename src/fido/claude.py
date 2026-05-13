@@ -905,6 +905,7 @@ class ClaudeSession(OwnedSession):
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
+        self._mark_send_outstanding()
         with self._metrics_lock:
             self._sent_count += 1
         self._notify_snapshot_publisher()
@@ -1436,6 +1437,7 @@ class ClaudeSession(OwnedSession):
                 self._log_event(obj)
                 with self._metrics_lock:
                     self._received_count += 1
+                self._mark_received()
                 self._notify_snapshot_publisher()
                 idle_deadline.reset()
                 # First non-empty event after Send transitions Sending →

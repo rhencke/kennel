@@ -13,6 +13,7 @@ holder is present.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -37,13 +38,23 @@ class _RecordingSession(OwnedSession):
     state directly, so a stub that records the calls is enough to
     assert "eviction fired with the expected reason" without spinning
     up a real provider session.
+
+    *outstanding_send_at* lets tests pin the no-reply clock; defaults
+    to ``None`` (idle, no send awaiting reply).  The production
+    session arms it on send and clears it on receive (#1709).
     """
 
     _repo_name: str | None
 
-    def __init__(self, repo_name: str) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        *,
+        outstanding_send_at: datetime | None = None,
+    ) -> None:
         self._repo_name = repo_name
         self._init_handler_reentry()
+        self._outstanding_send_at = outstanding_send_at
         self.force_release_calls: list[str] = []
 
     def _fire_worker_cancel(self) -> None:  # pragma: no cover — abstract hook
@@ -91,7 +102,7 @@ def test_run_skips_repo_without_session() -> None:
     watchdog = SessionLockWatchdog(
         registry,  # type: ignore[arg-type]
         {"FidoCanCode/home": _repo_config("FidoCanCode/home")},
-        hold_deadline_seconds=0.01,
+        no_reply_seconds=0.01,
     )
     assert watchdog.run() == 0
 
@@ -103,7 +114,7 @@ def test_run_skips_repo_without_active_holder() -> None:
     watchdog = SessionLockWatchdog(
         registry,  # type: ignore[arg-type]
         {"FidoCanCode/home": _repo_config("FidoCanCode/home")},
-        hold_deadline_seconds=0.01,
+        no_reply_seconds=0.01,
     )
     # No register_talker call → get_talker returns None.
     watchdog.run()
@@ -113,11 +124,11 @@ def test_run_skips_repo_without_active_holder() -> None:
 def test_run_skips_holder_within_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Holders that have not exceeded the deadline are left alone."""
+    """A send that's still within the no-reply deadline is left alone."""
     repo_name = "FidoCanCode/home"
-    session = _RecordingSession(repo_name)
+    sent_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = _RecordingSession(repo_name, outstanding_send_at=sent_at)
     registry = _StubRegistry({repo_name: session})
-    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     register_talker(
         SessionTalker(
             repo_name=repo_name,
@@ -125,21 +136,22 @@ def test_run_skips_holder_within_deadline(
             kind="worker",
             description="recent turn",
             subprocess_pid=1,
-            started_at=started_at,
+            started_at=sent_at,
         )
     )
     try:
-        # ``talker_now`` is the seam the watchdog uses to compute hold age.
-        # Set it to "5 seconds after started_at" so held_for = 5 s.
+        # ``talker_now`` is the seam the watchdog uses to compute the
+        # silence duration.  Set it to "5 seconds after sent_at" so
+        # the outstanding send has been waiting only 5 s.
         monkeypatch.setattr(
             session_lock_watchdog,
             "talker_now",
-            lambda: started_at + timedelta(seconds=5),
+            lambda: sent_at + timedelta(seconds=5),
         )
         watchdog = SessionLockWatchdog(
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
-            hold_deadline_seconds=10.0,
+            no_reply_seconds=10.0,
         )
         watchdog.run()
         assert session.force_release_calls == []
@@ -153,16 +165,16 @@ def test_run_skips_holder_within_deadline(
 
 
 def test_run_evicts_holder_past_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A holder whose age exceeds the deadline triggers ``force_release``.
+    """A send whose silence exceeds the deadline triggers ``force_release``.
 
-    The watchdog passes a reason string identifying the evicted tid
-    and the actual hold time so the production log makes the
-    eviction unambiguous in a postmortem.
+    The watchdog's reason string identifies the evicted tid and the
+    silence duration so the production log makes the eviction
+    unambiguous in a postmortem.
     """
     repo_name = "FidoCanCode/home"
-    session = _RecordingSession(repo_name)
+    sent_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = _RecordingSession(repo_name, outstanding_send_at=sent_at)
     registry = _StubRegistry({repo_name: session})
-    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     register_talker(
         SessionTalker(
             repo_name=repo_name,
@@ -170,19 +182,19 @@ def test_run_evicts_holder_past_deadline(monkeypatch: pytest.MonkeyPatch) -> Non
             kind="webhook",
             description="wedged synthesis turn",
             subprocess_pid=1,
-            started_at=started_at,
+            started_at=sent_at,
         )
     )
     try:
         monkeypatch.setattr(
             session_lock_watchdog,
             "talker_now",
-            lambda: started_at + timedelta(seconds=120),
+            lambda: sent_at + timedelta(seconds=120),
         )
         watchdog = SessionLockWatchdog(
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
-            hold_deadline_seconds=60.0,
+            no_reply_seconds=60.0,
         )
         watchdog.run()
     finally:
@@ -193,8 +205,8 @@ def test_run_evicts_holder_past_deadline(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "tid=99999" in reason
     assert "kind=webhook" in reason
     assert "wedged synthesis turn" in reason
-    # Reason carries both the threshold (60s) and the observed hold (120s)
-    # so a postmortem can tell what the watchdog actually saw.
+    # Reason carries both the threshold (60s) and the observed silence
+    # (120s) so a postmortem can tell what the watchdog actually saw.
     assert "60s" in reason
     assert "120s" in reason
 
@@ -203,9 +215,11 @@ def test_run_handles_multiple_repos_independently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Watchdog evaluates each configured repo separately on the same tick."""
-    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    home = _RecordingSession("FidoCanCode/home")
-    confusio = _RecordingSession("rhencke/confusio")
+    sent_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    home = _RecordingSession("FidoCanCode/home", outstanding_send_at=sent_at)
+    confusio = _RecordingSession(
+        "rhencke/confusio", outstanding_send_at=sent_at + timedelta(seconds=55)
+    )
     registry = _StubRegistry({"FidoCanCode/home": home, "rhencke/confusio": confusio})
 
     register_talker(
@@ -215,7 +229,7 @@ def test_run_handles_multiple_repos_independently(
             kind="webhook",
             description="long",
             subprocess_pid=1,
-            started_at=started_at,
+            started_at=sent_at,
         )
     )
     register_talker(
@@ -225,14 +239,14 @@ def test_run_handles_multiple_repos_independently(
             kind="worker",
             description="short",
             subprocess_pid=1,
-            started_at=started_at + timedelta(seconds=55),
+            started_at=sent_at + timedelta(seconds=55),
         )
     )
     try:
         monkeypatch.setattr(
             session_lock_watchdog,
             "talker_now",
-            lambda: started_at + timedelta(seconds=60),
+            lambda: sent_at + timedelta(seconds=60),
         )
         watchdog = SessionLockWatchdog(
             registry,  # type: ignore[arg-type]
@@ -240,16 +254,16 @@ def test_run_handles_multiple_repos_independently(
                 "FidoCanCode/home": _repo_config("FidoCanCode/home"),
                 "rhencke/confusio": _repo_config("rhencke/confusio"),
             },
-            hold_deadline_seconds=10.0,
+            no_reply_seconds=10.0,
         )
         watchdog.run()
     finally:
         unregister_talker("FidoCanCode/home", 1)
         unregister_talker("rhencke/confusio", 2)
 
-    # home's holder has been held 60 s (> 10 s) → evicted.
+    # home's send has been outstanding 60 s (> 10 s) → evicted.
     assert len(home.force_release_calls) == 1
-    # confusio's holder has only been held 5 s → spared.
+    # confusio's send has only been outstanding 5 s → spared.
     assert confusio.force_release_calls == []
 
 
@@ -273,7 +287,7 @@ def test_run_skips_non_owned_session_returns() -> None:
     watchdog = SessionLockWatchdog(
         registry,  # type: ignore[arg-type]
         {"FidoCanCode/home": _repo_config("FidoCanCode/home")},
-        hold_deadline_seconds=0.01,
+        no_reply_seconds=0.01,
     )
     assert watchdog.run() == 0
 
@@ -299,7 +313,7 @@ def test_start_thread_returns_running_daemon_that_invokes_run() -> None:
     watchdog = _SignalingWatchdog(
         _StubRegistry({}),  # type: ignore[arg-type]
         {},
-        hold_deadline_seconds=999.0,
+        no_reply_seconds=999.0,
     )
     # Tiny interval so the daemon hits its first ``run`` quickly.  The
     # thread is a daemon — no join needed; process exit will reap it.
@@ -323,15 +337,60 @@ def test_module_level_run_evicts_past_deadline(
     from fido.session_lock_watchdog import run as run_watchdog
 
     repo_name = "FidoCanCode/home"
-    session = _RecordingSession(repo_name)
+    sent_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = _RecordingSession(repo_name, outstanding_send_at=sent_at)
     registry = _StubRegistry({repo_name: session})
-    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     register_talker(
         SessionTalker(
             repo_name=repo_name,
             thread_id=7,
             kind="worker",
             description="wedged",
+            subprocess_pid=1,
+            started_at=sent_at,
+        )
+    )
+    try:
+        monkeypatch.setattr(
+            session_lock_watchdog,
+            "talker_now",
+            lambda: sent_at + timedelta(seconds=2),
+        )
+        result = run_watchdog(
+            registry,  # type: ignore[arg-type]
+            {repo_name: _repo_config(repo_name)},
+            no_reply_seconds=1.0,
+        )
+    finally:
+        unregister_talker(repo_name, 7)
+
+    assert result == 0
+    assert len(session.force_release_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Send/receive semantics (#1709): receive disarms the clock; multi-send
+# restarts it; idle never trips.
+# ---------------------------------------------------------------------------
+
+
+def test_idle_session_with_no_outstanding_send_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session whose ``outstanding_send_at`` is ``None`` (idle, or its
+    last send already received an ACK) is left alone forever — even with
+    a registered talker present and ``talker_now`` arbitrarily far ahead.
+    """
+    repo_name = "FidoCanCode/home"
+    session = _RecordingSession(repo_name)  # outstanding_send_at=None
+    registry = _StubRegistry({repo_name: session})
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    register_talker(
+        SessionTalker(
+            repo_name=repo_name,
+            thread_id=42,
+            kind="worker",
+            description="lock held but no send pending",
             subprocess_pid=1,
             started_at=started_at,
         )
@@ -340,15 +399,49 @@ def test_module_level_run_evicts_past_deadline(
         monkeypatch.setattr(
             session_lock_watchdog,
             "talker_now",
-            lambda: started_at + timedelta(seconds=2),
+            lambda: started_at + timedelta(hours=24),
         )
-        result = run_watchdog(
+        watchdog = SessionLockWatchdog(
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
-            hold_deadline_seconds=1.0,
+            no_reply_seconds=60.0,
         )
+        watchdog.run()
     finally:
-        unregister_talker(repo_name, 7)
+        unregister_talker(repo_name, 42)
 
-    assert result == 0
-    assert len(session.force_release_calls) == 1
+    assert session.force_release_calls == [], (
+        "watchdog must not fire when no send is awaiting a reply"
+    )
+
+
+def test_mark_received_clears_outstanding_send() -> None:
+    """The session's send / receive helpers compose:
+
+    1. ``_mark_send_outstanding()`` arms the clock.
+    2. ``_mark_received()`` disarms it.
+
+    After a receive the watchdog sees ``outstanding_send_at == None``
+    and skips, even though a send was outstanding moments earlier.
+    """
+    session = _RecordingSession("FidoCanCode/home")
+    assert session.outstanding_send_at is None
+    session._mark_send_outstanding()  # noqa: SLF001
+    assert session.outstanding_send_at is not None
+    session._mark_received()  # noqa: SLF001
+    assert session.outstanding_send_at is None
+
+
+def test_multi_send_restarts_no_reply_clock() -> None:
+    """Calling ``_mark_send_outstanding`` twice in a row resets the
+    clock — only the most recent unanswered send matters."""
+    session = _RecordingSession("FidoCanCode/home")
+    session._mark_send_outstanding()  # noqa: SLF001
+    first = session.outstanding_send_at
+    assert first is not None
+    # Force a measurable gap so the second timestamp is strictly later.
+    time.sleep(0.001)
+    session._mark_send_outstanding()  # noqa: SLF001
+    second = session.outstanding_send_at
+    assert second is not None
+    assert second > first

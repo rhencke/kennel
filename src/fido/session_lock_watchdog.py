@@ -6,25 +6,37 @@ but in earlier model revisions the only path out of an owned state was
 the holder firing its voluntary ``WorkerRelease`` / ``HandlerRelease``
 event.  When a holder thread parked inside
 :meth:`~fido.claude.ClaudeSession.consume_until_result` on a subprocess
-that streamed events forever (so ``idle_timeout`` never tripped) and
-never produced ``type=result``, the holder never returned from
-``with self:``, ``__exit__`` never ran, ``_fsm_release`` never fired,
-and the FSM lock leaked indefinitely (closes #1377).
+that wedged before producing ``type=result``, the holder never returned
+from ``with self:``, ``__exit__`` never ran, ``_fsm_release`` never
+fired, and the FSM lock leaked indefinitely (closes #1377).
 
 The model now also proves **liveness** via ``force_release_to_free``
 and ``every_state_reaches_free``: ``ForceRelease`` is accepted in every
 state and always lands in :class:`~fido.rocq.transition.Free`.  This
 watchdog is the runtime driver that fires that event when a holder
-has held the lock past a deadline — guarding the property that no
-acquire can wait forever for a holder that will never release.
+has held the lock without receiving any data from the provider
+subprocess for too long — guarding the property that no acquire can
+wait forever for a holder that will never release.
+
+Trigger semantics — **SYN without ACK** (closes #1709):
+
+* Send arms the clock — setting
+  :attr:`~fido.provider.OwnedSession.outstanding_send_at` to now.
+* Receive disarms it — clearing the field back to ``None``.
+* Multiple sends without an intervening receive simply restart the
+  clock; the most recent unanswered send wins.
+* Idle sessions never trigger (clock is ``None``).
+* Forever-streaming sessions never trigger (each receive disarms).
+* Only the **prompt-sent-no-reply** wedge fires: the clock has been
+  armed continuously for more than ``no_reply_seconds``.
 
 Per repo, every :data:`_WATCHDOG_INTERVAL` seconds:
 
-1. Read the current :class:`~fido.provider.SessionTalker` snapshot.
-2. If a holder is registered and ``now - talker.started_at >
-   hold_deadline_seconds``, log a warning and call
+1. Read :attr:`~fido.provider.OwnedSession.outstanding_send_at`.
+2. If it is not ``None`` and ``now - outstanding_send_at >
+   no_reply_seconds``, log a warning and call
    :meth:`~fido.provider.OwnedSession.force_release` with a reason
-   string identifying the evicted tid and the elapsed hold time.
+   string identifying the evicted tid and the silence duration.
 3. The provider's :meth:`_on_force_release` subclass hook (e.g.
    :meth:`~fido.claude.ClaudeSession._on_force_release`) knocks the
    wedged thread out of its parked IO call by killing the subprocess.
@@ -48,21 +60,26 @@ log = logging.getLogger(__name__)
 # ``_WATCHDOG_INTERVAL`` past the holder's deadline, in the worst case.
 _WATCHDOG_INTERVAL: float = 30.0
 
-# Default per-turn hold deadline.  A worker turn over this threshold is
-# already a code smell (typical legitimate turns finish in seconds to
-# a few minutes); past 15 minutes we assume the holder is wedged.
-# Configurable per session for tests and tightening over time.
-_DEFAULT_HOLD_DEADLINE_SECONDS: float = 900.0
+# Default no-reply deadline: kill the holder when an outstanding send
+# has been waiting for a receive for more than this long.  One hour is
+# generous — the in-process ``idle_timeout`` (30 min) is the first line
+# of defense for the totally-silent subprocess; this watchdog is the
+# safety net for the SYN-without-ACK case where the holder thread is
+# wedged outside of ``iter_events`` and the in-process kill never fires.
+# Forever-streaming sessions that keep producing data are intentionally
+# never killed (#1709).
+_DEFAULT_NO_REPLY_SECONDS: float = 3600.0
 
 
 class SessionLockWatchdog:
-    """Per-repo poller that evicts FSM lock holders past a deadline.
+    """Per-repo poller that evicts FSM lock holders past a no-reply
+    deadline.
 
     Accepts *registry* and *repos* via the constructor so tests can
     drive it directly with hand-rolled fakes (no MagicMock per
-    fido test conventions).  *hold_deadline_seconds* is configurable
+    fido test conventions).  *no_reply_seconds* is configurable
     per instance: tests use a tiny value so a single iteration triggers
-    eviction; production uses :data:`_DEFAULT_HOLD_DEADLINE_SECONDS`.
+    eviction; production uses :data:`_DEFAULT_NO_REPLY_SECONDS`.
     """
 
     def __init__(
@@ -70,45 +87,55 @@ class SessionLockWatchdog:
         registry: WorkerRegistry,
         repos: dict[str, RepoConfig],
         *,
-        hold_deadline_seconds: float = _DEFAULT_HOLD_DEADLINE_SECONDS,
+        no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
     ) -> None:
         self.registry = registry
         self.repos = repos
-        self.hold_deadline_seconds = hold_deadline_seconds
+        self.no_reply_seconds = no_reply_seconds
 
     def run(self) -> int:
         """Run one watchdog iteration. Returns 0.
 
-        For each configured repo with an attached session and an
-        active holder, compute the hold age via
-        :func:`~fido.provider.talker_now` and the talker's
-        ``started_at`` timestamp.  If the age exceeds
-        :attr:`hold_deadline_seconds`, fire
-        :meth:`~fido.provider.OwnedSession.force_release` on the
-        session.
+        For each configured repo with an attached session, read
+        :attr:`~fido.provider.OwnedSession.outstanding_send_at`.  If
+        the clock is armed (not ``None``) and ``now -
+        outstanding_send_at`` exceeds :attr:`no_reply_seconds`, fire
+        :meth:`~fido.provider.OwnedSession.force_release`.
 
-        Repos without a session (provider not yet initialised, or a
-        registry stub during boot) and repos with no current holder
-        (FSM is :class:`~fido.rocq.transition.Free`) are silently
-        skipped — both are normal idle states.
+        * Idle sessions (clock is ``None``) are left alone forever.
+        * Active turns that keep receiving data disarm the clock on
+          every receive and so are left alone forever.
+        * Only the **prompt-sent-no-reply** wedge — clock armed,
+          no receive in too long — triggers a kill.
+
+        The ``talker`` snapshot is consulted only to label the kill
+        reason (which tid / kind / description is being evicted) — the
+        kill decision itself depends only on the session's send/receive
+        history.
         """
         for repo_name in self.repos:
             session = self._resolve_session(repo_name)
             if session is None:
                 continue
+            outstanding = session.outstanding_send_at
+            if outstanding is None:
+                continue
+            silent_for = (talker_now() - outstanding).total_seconds()
+            if silent_for <= self.no_reply_seconds:
+                continue
             talker = get_talker(repo_name)
-            if talker is None:
-                continue
-            held_for = (talker_now() - talker.started_at).total_seconds()
-            if held_for <= self.hold_deadline_seconds:
-                continue
+            label = (
+                f"tid={talker.thread_id} kind={talker.kind}, "
+                f"description={talker.description!r}"
+                if talker is not None
+                else "(no talker registered)"
+            )
             reason = (
-                f"held > {self.hold_deadline_seconds:.0f}s "
-                f"by tid={talker.thread_id} kind={talker.kind} "
-                f"(actual {held_for:.0f}s, description={talker.description!r})"
+                f"no reply for {silent_for:.0f}s "
+                f"(deadline {self.no_reply_seconds:.0f}s, holder {label})"
             )
             log.warning(
-                "session-lock-watchdog[%s]: holder past deadline — %s",
+                "session-lock-watchdog[%s]: outstanding send past deadline — %s",
                 repo_name,
                 reason,
             )
@@ -150,9 +177,7 @@ def run(
     registry: WorkerRegistry,
     repos: dict[str, RepoConfig],
     *,
-    hold_deadline_seconds: float = _DEFAULT_HOLD_DEADLINE_SECONDS,
+    no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
 ) -> int:
     """Module-level entry point — create a watchdog and run one tick."""
-    return SessionLockWatchdog(
-        registry, repos, hold_deadline_seconds=hold_deadline_seconds
-    ).run()
+    return SessionLockWatchdog(registry, repos, no_reply_seconds=no_reply_seconds).run()
