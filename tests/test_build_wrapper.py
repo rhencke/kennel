@@ -301,54 +301,77 @@ class TestFidoLauncher:
     def test_status_fast_path_renders_repo_block_without_color(
         self, tmp_path: Path
     ) -> None:
+        # Pin the renderer's clock so duration assertions like
+        # "up 2m" / "elapsed 1h1m" are deterministic.  Per-field
+        # timestamps are derived by subtracting the desired age from
+        # ``now``.
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 4, 24, 14, 2, 2, tzinfo=timezone.utc)
+        now_unix = int(now.timestamp())
+
+        def ago(seconds: int) -> str:
+            return (now - timedelta(seconds=seconds)).isoformat()
+
         result = run_status(
             {
-                "activities": [
-                    {
-                        "repo_name": "owner/repo",
-                        "what": "Working on: #1",
-                        "busy": True,
-                        "crash_count": 2,
-                        "last_crash_error": "RuntimeError: boom",
-                        "is_stuck": True,
-                        "worker_uptime_seconds": 125,
+                "repos": {
+                    "owner/repo": {
+                        "key": "owner/repo",
+                        "started_at": ago(125),  # "up 2m"
+                        "activity": {
+                            "repo_name": "owner/repo",
+                            "what": "Working on: #1",
+                            "busy": True,
+                            # last_progress_at well in the past → triggers BUSY
+                            "last_progress_at": ago(1920),
+                        },
+                        "crash_record": {
+                            "death_count": 2,
+                            "last_error": "RuntimeError: boom",
+                            "last_crash_time": ago(3600),
+                        },
                         "webhook_activities": [
                             {
+                                "handle_id": 1,
                                 "description": "triaging comment on PR #9",
-                                "elapsed_seconds": 12,
+                                "started_at": ago(12),
                                 "thread_id": 1,
                             },
                             {
+                                "handle_id": 2,
                                 "description": "replying to review",
-                                "elapsed_seconds": 3,
+                                "started_at": ago(3),
                                 "thread_id": 2,
                             },
                         ],
-                        "session_owner": "worker-1",
-                        "session_alive": True,
-                        "session_pid": 4242,
-                        "session_dropped_count": 1,
-                        "claude_talker": {
-                            "repo_name": "owner/repo",
-                            "thread_id": 2,
-                            "kind": "webhook",
-                            "description": "one-shot",
-                            "subprocess_pid": 4242,
-                            "started_at": "2026-04-24T12:00:00+00:00",
+                        "thread": {
+                            "is_alive": True,
+                            "was_stopped": False,
+                            "crash_error": "",
                         },
-                        "provider": "claude-code",
-                        "provider_status": {
-                            "provider": "claude-code",
-                            "window_name": "five_hour",
-                            "pressure": 0.96,
-                            "percent_used": 96,
-                            "resets_at": "2026-04-24T14:00:00+00:00",
-                            "unavailable_reason": None,
-                            "level": "paused",
-                            "warning": False,
-                            "paused": True,
+                        "provider": {
+                            "session_owner": "worker-1",
+                            "session_alive": True,
+                            "session_pid": 4242,
+                            "session_dropped_count": 1,
+                            "session_sent_count": 0,
+                            "session_received_count": 0,
                         },
-                        "rescoping": True,
+                        "issue": {
+                            "issue": 1,
+                            "issue_title": "Fix the thing",
+                            "issue_started_at": ago(3661),  # "elapsed 1h1m"
+                            "pr_number": 99,
+                            "pr_title": "Improve the thing",
+                        },
+                        "task_list": {
+                            "pending_task_count": 2,
+                            "completed_task_count": 3,
+                            "current_task": "Do thing",
+                            "task_number": 1,
+                            "task_total": 4,
+                        },
                         "issue_cache": {
                             "loaded": True,
                             "open_issues": 7,
@@ -358,37 +381,47 @@ class TestFidoLauncher:
                             "last_reconcile_at": "2026-04-24T12:01:00+00:00",
                             "last_reconcile_drift": 3,
                         },
-                        "fido_running": True,
-                        "issue": 1,
-                        "issue_title": "Fix the thing",
-                        "issue_elapsed_seconds": 3661,
-                        "pr_number": 99,
-                        "pr_title": "Improve the thing",
-                        "pending": 2,
-                        "completed": 3,
-                        "current_task": "Do thing",
-                        "task_number": 1,
-                        "task_total": 4,
+                        "talker": {
+                            "thread_id": 2,
+                            "kind": "webhook",
+                            "description": "one-shot",
+                            "subprocess_pid": 4242,
+                            "started_at": "2026-04-24T12:00:00+00:00",
+                        },
+                        "provider_pressure": {
+                            "provider": "claude-code",
+                            "window_name": "five_hour",
+                            "pressure": 0.96,
+                            "percent_used": 96,
+                            "resets_at": "2026-04-24T14:00:00+00:00",
+                            "unavailable_reason": "",
+                            "level": "paused",
+                            "warning": False,
+                            "paused": True,
+                        },
+                        "rescoping": True,
                     }
-                ],
-                "rate_limit": {
+                },
+                "github_limits": {
                     "rest": {
                         "name": "rest",
                         "used": 7,
                         "limit": 5000,
                         "resets_at": "2026-04-24T13:00:00+00:00",
+                        "unit": "",
                     },
                     "graphql": {
                         "name": "graphql",
                         "used": 22,
                         "limit": 5000,
                         "resets_at": "2026-04-24T14:00:00+00:00",
+                        "unit": "",
                     },
                 },
-                "fido_uptime_seconds": 7322,
+                "process_started_at": ago(7322),  # "uptime 2h2m"
             },
             tmp_path,
-            env={"NO_COLOR": "1"},
+            env={"NO_COLOR": "1", "FIDO_STATUS_NOW": str(now_unix)},
         )
 
         assert result.returncode == 0, result.stderr
@@ -424,109 +457,218 @@ class TestFidoLauncher:
     def test_status_fast_path_renders_session_message_counts(
         self, tmp_path: Path
     ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 4, 24, 14, 0, 0, tzinfo=timezone.utc)
+        now_unix = int(now.timestamp())
+
+        def ago(seconds: int) -> str:
+            return (now - timedelta(seconds=seconds)).isoformat()
+
         result = run_status(
             {
-                "activities": [
-                    {
-                        "repo_name": "owner/repo",
-                        "what": "Working on: #1",
-                        "busy": True,
-                        "crash_count": 0,
-                        "last_crash_error": None,
-                        "is_stuck": False,
-                        "worker_uptime_seconds": 60,
-                        "webhook_activities": [],
-                        "session_owner": "worker-1",
-                        "session_alive": True,
-                        "session_pid": 5555,
-                        "session_dropped_count": 0,
-                        "session_sent_count": 42,
-                        "session_received_count": 128,
-                        "claude_talker": {
+                "repos": {
+                    "owner/repo": {
+                        "key": "owner/repo",
+                        "started_at": ago(60),
+                        "activity": {
                             "repo_name": "owner/repo",
+                            "what": "Working on: #1",
+                            "busy": True,
+                            "last_progress_at": ago(5),
+                        },
+                        "crash_record": {
+                            "death_count": 0,
+                            "last_error": "",
+                            "last_crash_time": "1970-01-01T00:00:00+00:00",
+                        },
+                        "webhook_activities": [],
+                        "thread": {
+                            "is_alive": True,
+                            "was_stopped": False,
+                            "crash_error": "",
+                        },
+                        "provider": {
+                            "session_owner": "worker-1",
+                            "session_alive": True,
+                            "session_pid": 5555,
+                            "session_dropped_count": 0,
+                            "session_sent_count": 42,
+                            "session_received_count": 128,
+                        },
+                        "issue": {
+                            "issue": 7,
+                            "issue_title": "Do thing",
+                            "issue_started_at": ago(120),
+                            "pr_number": 0,
+                            "pr_title": "",
+                        },
+                        "task_list": {
+                            "pending_task_count": 1,
+                            "completed_task_count": 0,
+                            "current_task": "Step one",
+                            "task_number": 1,
+                            "task_total": 1,
+                        },
+                        "issue_cache": {
+                            "loaded": False,
+                            "open_issues": 0,
+                            "events_applied": 0,
+                            "events_dropped_stale": 0,
+                            "last_event_at": "1970-01-01T00:00:00+00:00",
+                            "last_reconcile_at": "1970-01-01T00:00:00+00:00",
+                            "last_reconcile_drift": 0,
+                        },
+                        "talker": {
                             "thread_id": 1,
                             "kind": "worker",
                             "description": "task turn",
                             "subprocess_pid": 5555,
-                            "started_at": "2026-04-24T12:00:00+00:00",
+                            "started_at": ago(60),
                         },
-                        "provider": "claude-code",
-                        "provider_status": None,
+                        "provider_pressure": {
+                            "provider": "",
+                            "window_name": "",
+                            "pressure": 0.0,
+                            "percent_used": 0,
+                            "resets_at": "1970-01-01T00:00:00+00:00",
+                            "unavailable_reason": "",
+                            "level": "unknown",
+                            "warning": False,
+                            "paused": False,
+                        },
                         "rescoping": False,
-                        "issue_cache": None,
-                        "fido_running": True,
-                        "issue": 7,
-                        "issue_title": "Do thing",
-                        "issue_elapsed_seconds": 120,
-                        "pr_number": None,
-                        "pr_title": None,
-                        "pending": 1,
-                        "completed": 0,
-                        "current_task": "Step one",
-                        "task_number": 1,
-                        "task_total": 1,
                     }
-                ],
-                "rate_limit": None,
-                "fido_uptime_seconds": 300,
+                },
+                "github_limits": {
+                    "rest": {
+                        "name": "rest",
+                        "used": 0,
+                        "limit": 0,
+                        "resets_at": "1970-01-01T00:00:00+00:00",
+                        "unit": "",
+                    },
+                    "graphql": {
+                        "name": "graphql",
+                        "used": 0,
+                        "limit": 0,
+                        "resets_at": "1970-01-01T00:00:00+00:00",
+                        "unit": "",
+                    },
+                },
+                "process_started_at": ago(300),
             },
             tmp_path,
-            env={"NO_COLOR": "1"},
+            env={"NO_COLOR": "1", "FIDO_STATUS_NOW": str(now_unix)},
         )
 
         assert result.returncode == 0, result.stderr
         assert "42 sent, 128 received" in result.stdout
 
     def test_status_fast_path_renders_with_force_color(self, tmp_path: Path) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 4, 24, 14, 0, 1, tzinfo=timezone.utc)
+        now_unix = int(now.timestamp())
+
+        def ago(seconds: int) -> str:
+            return (now - timedelta(seconds=seconds)).isoformat()
+
         result = run_status(
             {
-                "activities": [
-                    {
-                        "repo_name": "owner/repo",
-                        "what": "Working on: #1",
-                        "busy": True,
-                        "crash_count": 0,
-                        "last_crash_error": None,
-                        "is_stuck": False,
-                        "worker_uptime_seconds": None,
+                "repos": {
+                    "owner/repo": {
+                        "key": "owner/repo",
+                        "started_at": "1970-01-01T00:00:00+00:00",
+                        "activity": {
+                            "repo_name": "owner/repo",
+                            "what": "Working on: #1",
+                            "busy": True,
+                            "last_progress_at": ago(5),
+                        },
+                        "crash_record": {
+                            "death_count": 0,
+                            "last_error": "",
+                            "last_crash_time": "1970-01-01T00:00:00+00:00",
+                        },
                         "webhook_activities": [],
-                        "session_owner": None,
-                        "session_alive": False,
-                        "session_pid": None,
-                        "session_dropped_count": 0,
-                        "claude_talker": None,
-                        "provider": "claude-code",
-                        "provider_status": {
+                        "thread": {
+                            "is_alive": True,
+                            "was_stopped": False,
+                            "crash_error": "",
+                        },
+                        "provider": {
+                            "session_owner": "",
+                            "session_alive": False,
+                            "session_pid": 0,
+                            "session_dropped_count": 0,
+                            "session_sent_count": 0,
+                            "session_received_count": 0,
+                        },
+                        "issue": {
+                            "issue": 0,
+                            "issue_title": "",
+                            "issue_started_at": "",
+                            "pr_number": 0,
+                            "pr_title": "",
+                        },
+                        "task_list": {
+                            "pending_task_count": 0,
+                            "completed_task_count": 0,
+                            "current_task": "",
+                            "task_number": 0,
+                            "task_total": 0,
+                        },
+                        "issue_cache": {
+                            "loaded": False,
+                            "open_issues": 0,
+                            "events_applied": 0,
+                            "events_dropped_stale": 0,
+                            "last_event_at": "1970-01-01T00:00:00+00:00",
+                            "last_reconcile_at": "1970-01-01T00:00:00+00:00",
+                            "last_reconcile_drift": 0,
+                        },
+                        "talker": {
+                            "thread_id": 0,
+                            "kind": "",
+                            "description": "",
+                            "subprocess_pid": 0,
+                            "started_at": "1970-01-01T00:00:00+00:00",
+                        },
+                        "provider_pressure": {
                             "provider": "claude-code",
                             "window_name": "five_hour",
                             "pressure": 0.96,
                             "percent_used": 96,
                             "resets_at": "2026-04-24T14:00:00+00:00",
-                            "unavailable_reason": None,
+                            "unavailable_reason": "",
                             "level": "paused",
                             "warning": False,
                             "paused": True,
                         },
                         "rescoping": False,
-                        "issue_cache": None,
-                        "fido_running": True,
-                        "issue": None,
-                        "issue_title": None,
-                        "issue_elapsed_seconds": None,
-                        "pr_number": None,
-                        "pr_title": None,
-                        "pending": 0,
-                        "completed": 0,
-                        "current_task": None,
-                        "task_number": None,
-                        "task_total": None,
                     }
-                ],
-                "rate_limit": None,
-                "fido_uptime_seconds": 1,
+                },
+                "github_limits": {
+                    "rest": {
+                        "name": "rest",
+                        "used": 0,
+                        "limit": 0,
+                        "resets_at": "1970-01-01T00:00:00+00:00",
+                        "unit": "",
+                    },
+                    "graphql": {
+                        "name": "graphql",
+                        "used": 0,
+                        "limit": 0,
+                        "resets_at": "1970-01-01T00:00:00+00:00",
+                        "unit": "",
+                    },
+                },
+                "process_started_at": ago(1),
             },
             tmp_path,
-            env={"FORCE_COLOR": "1"},
+            env={"FORCE_COLOR": "1", "FIDO_STATUS_NOW": str(now_unix)},
         )
 
         assert result.returncode == 0, result.stderr

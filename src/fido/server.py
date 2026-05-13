@@ -51,6 +51,7 @@ from fido.infra import (
     real_infra,
 )
 from fido.provider_factory import DefaultProviderFactory
+from fido.provider_pressure import ProviderPressureMonitor
 from fido.rate_limit import RateLimitMonitor
 from fido.registry import (
     WebhookActivityHandle,
@@ -1194,6 +1195,7 @@ def run(
     _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
     _SessionLockWatchdog: type[SessionLockWatchdog] = SessionLockWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
+    _ProviderPressureMonitor: type[ProviderPressureMonitor] = ProviderPressureMonitor,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
     _preflight_tools: Callable[..., None] = preflight_tools,
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
@@ -1295,6 +1297,9 @@ def run(
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
     _RateLimitMonitor(gh, state_updater).start_thread()
+    _ProviderPressureMonitor(
+        config.repos, state_updater, WebhookHandler.provider_factory
+    ).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

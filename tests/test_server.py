@@ -2866,6 +2866,8 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -2913,6 +2915,8 @@ class TestRun:
             _GitHub=MagicMock,
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
         mock_kill.assert_called_once()
 
@@ -2943,6 +2947,8 @@ class TestRun:
             _GitHub=MagicMock,
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
         assert _sig.SIGTERM in installed
         assert _sig.SIGINT in installed
@@ -2973,6 +2979,8 @@ class TestRun:
             _GitHub=MagicMock,
             _signal=fake_signal,
             _kill_active_children=mock_kill,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
         # Reset call counts from the KeyboardInterrupt path so we can verify
         # the signal handler invokes the same teardown.
@@ -3011,6 +3019,8 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -3041,6 +3051,8 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -3069,6 +3081,8 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -3111,6 +3125,8 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
             _stderr=fake_stderr,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         import logging
@@ -3154,6 +3170,8 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         import logging
@@ -3184,6 +3202,8 @@ class TestRun:
             _GitHub=MagicMock,
             _Watchdog=mock_watchdog_cls,
             _ReconcileWatchdog=MagicMock(),
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
@@ -3214,6 +3234,7 @@ class TestRun:
             _Watchdog=MagicMock(),
             _ReconcileWatchdog=MagicMock(),
             _RateLimitMonitor=mock_rl_cls,
+            _ProviderPressureMonitor=MagicMock(),
         )
 
         # The state_updater is the second element returned by create_atomic(...).
@@ -3254,6 +3275,8 @@ class TestRun:
             _GitHub=lambda: mock_gh_instance,
             _Watchdog=MagicMock(),
             _ReconcileWatchdog=mock_reconcile_cls,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_reconcile_cls.assert_called_once_with(
@@ -3289,6 +3312,8 @@ class TestRun:
                 _preflight_gh_auth=MagicMock(),
                 _GitHub=MagicMock,
                 _Watchdog=MagicMock(),
+                _ProviderPressureMonitor=MagicMock(),
+                _RateLimitMonitor=MagicMock(),
             )
             assert _sys.excepthook is not saved_sys
             assert _threading.excepthook is not saved_thr
@@ -3353,6 +3378,8 @@ class TestRun:
             _Watchdog=MagicMock(),
             _ReconcileWatchdog=MagicMock(),
             _bootstrap_issue_caches=mock_bootstrap,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_bootstrap.assert_called_once_with(
@@ -3586,6 +3613,8 @@ class TestPreflightRepoIdentity:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos, ANY)
@@ -3617,6 +3646,8 @@ class TestPreflightRepoIdentity:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(ANY)
@@ -3648,6 +3679,8 @@ class TestPreflightRepoIdentity:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=mock_preflight,
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_preflight.assert_called_once()
@@ -3679,6 +3712,8 @@ class TestPreflightRepoIdentity:
             _preflight_sub_dir=mock_preflight,
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(fake_cfg, ANY)
@@ -3711,6 +3746,8 @@ class TestPreflightRepoIdentity:
                 _preflight_gh_auth=MagicMock(),
                 _GitHub=MagicMock,
                 _preflight_repo_identity=MagicMock(),
+                _ProviderPressureMonitor=MagicMock(),
+                _RateLimitMonitor=MagicMock(),
             )
 
 
