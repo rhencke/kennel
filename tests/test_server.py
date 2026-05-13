@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from frozendict import frozendict
@@ -1962,15 +1962,16 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
+        # Pre-claim comment 111 so _prepare_reply returns None (dedup skip).
+        FidoStore(repo_cfg.work_dir).prepare_reply(
+            owner="webhook", comment_type="pulls", anchor_comment_id=111
+        )
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
-        # Simulate dedup skip: _prepare_reply returns None
-        with patch.object(handler, "_prepare_reply", return_value=None):
-            with patch(
-                "fido.server.SynthesisExecutor.remove_eyes_reaction"
-            ) as mock_remove:
-                handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_remove.assert_called_once()
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        # _remove_eyes_best_effort was called → SynthesisExecutor.remove_eyes_reaction
+        # called list_reactions on the comment.
+        handler.gh.list_reactions.assert_called_once_with("owner/repo", "pulls", 111)
 
     def test_eyes_removed_on_pr_comment_dedup_skip(
         self, cfg: Config, repo_cfg: RepoConfig
@@ -1990,14 +1991,16 @@ class TestProcessActionInner:
             },
             is_bot=False,
         )
+        # Pre-claim comment 222 so _prepare_reply returns None (dedup skip).
+        FidoStore(repo_cfg.work_dir).prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=222
+        )
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
-        with patch.object(handler, "_prepare_reply", return_value=None):
-            with patch(
-                "fido.server.SynthesisExecutor.remove_eyes_reaction"
-            ) as mock_remove:
-                handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_remove.assert_called_once()
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        # _remove_eyes_best_effort was called → SynthesisExecutor.remove_eyes_reaction
+        # called list_reactions on the comment.
+        handler.gh.list_reactions.assert_called_once_with("owner/repo", "issues", 222)
 
     def test_eyes_removed_on_recoverable_exception(
         self, cfg: Config, repo_cfg: RepoConfig
@@ -2024,20 +2027,19 @@ class TestProcessActionInner:
         )
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
-        remove_order: list[str] = []
-        with patch(
-            "fido.server.SynthesisExecutor.remove_eyes_reaction",
-            side_effect=lambda _t: remove_order.append("remove_eyes"),
-        ):
-            with patch.object(
-                handler,
-                "_signal_action_error",
-                side_effect=lambda _a: remove_order.append("signal_error"),
-            ):
-                # Recoverable exception — should not propagate
-                handler._process_action_inner(action, repo_cfg, self._activity())
-        # Eyes must be removed before the confused reaction is signalled
-        assert remove_order == ["remove_eyes", "signal_error"]
+        # Recoverable exception — should not propagate
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        # Eyes must be removed before the confused reaction is signalled.
+        # remove_eyes_reaction calls gh.list_reactions; _signal_action_error calls
+        # gh.add_reaction(..., "confused").  Verify ordering via mock_calls.
+        calls = handler.gh.mock_calls
+        list_idx = next(i for i, c in enumerate(calls) if c[0] == "list_reactions")
+        confused_idx = next(
+            i
+            for i, c in enumerate(calls)
+            if c[0] == "add_reaction" and c[1][-1] == "confused"
+        )
+        assert list_idx < confused_idx
 
     def test_eyes_reaction_posted_for_queued_comment_action(
         self, cfg: Config, repo_cfg: RepoConfig
@@ -2068,14 +2070,13 @@ class TestProcessActionInner:
     ) -> None:
         """_remove_eyes_best_effort is a no-op when repo or comment_id is absent."""
         handler = self._handler(cfg)
-        # Missing repo — should not call remove_eyes_reaction at all.
-        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
-            handler._remove_eyes_best_effort(handler.gh, {"comment_id": 99})
-        mock_remove.assert_not_called()
+        # Missing repo — returns early before SynthesisExecutor is created.
+        handler._remove_eyes_best_effort(handler.gh, {"comment_id": 99})
+        handler.gh.list_reactions.assert_not_called()
         # Missing comment_id — same.
-        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
-            handler._remove_eyes_best_effort(handler.gh, {"repo": "owner/repo"})
-        mock_remove.assert_not_called()
+        handler.gh.reset_mock()
+        handler._remove_eyes_best_effort(handler.gh, {"repo": "owner/repo"})
+        handler.gh.list_reactions.assert_not_called()
 
     def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
         """Cover all branches of _describe_action."""
@@ -3284,7 +3285,9 @@ class TestRun:
         )
         mock_reconcile_cls.return_value.start_thread.assert_called_once()
 
-    def test_run_installs_excepthooks(self, tmp_path: Path) -> None:
+    def test_run_installs_excepthooks(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Uncaught exceptions (main thread and worker threads) should route
         through the logger so tracebacks land in fido.log, not just stderr."""
         import sys as _sys
@@ -3319,33 +3322,34 @@ class TestRun:
             assert _threading.excepthook is not saved_thr
 
             # Call the hooks to confirm they don't raise and they go through logging.
-            import fido.server as srv_mod
-
-            with patch.object(srv_mod, "log") as mock_log:
+            caplog.clear()
+            with caplog.at_level(logging.CRITICAL, logger="fido.server"):
                 try:
                     raise ValueError("boom")
                 except ValueError:
                     _sys.excepthook(*_sys.exc_info())
-                mock_log.critical.assert_called_once()
+            assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
-            with patch.object(srv_mod, "log") as mock_log:
+            caplog.clear()
+            with caplog.at_level(logging.CRITICAL, logger="fido.server"):
                 fake_args = MagicMock()
                 fake_args.thread = MagicMock(name="tname")
                 fake_args.exc_type = ValueError
                 fake_args.exc_value = ValueError("boom")
                 fake_args.exc_traceback = None
                 _threading.excepthook(fake_args)
-                mock_log.critical.assert_called_once()
+            assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
             # Also cover the branch where thread is None.
-            with patch.object(srv_mod, "log") as mock_log:
+            caplog.clear()
+            with caplog.at_level(logging.CRITICAL, logger="fido.server"):
                 fake_args = MagicMock()
                 fake_args.thread = None
                 fake_args.exc_type = ValueError
                 fake_args.exc_value = ValueError("boom")
                 fake_args.exc_traceback = None
                 _threading.excepthook(fake_args)
-                mock_log.critical.assert_called_once()
+            assert any(r.levelno == logging.CRITICAL for r in caplog.records)
         finally:
             _sys.excepthook = saved_sys
             _threading.excepthook = saved_thr
