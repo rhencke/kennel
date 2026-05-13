@@ -1,6 +1,5 @@
 import dataclasses
 import faulthandler
-import fcntl
 import hashlib
 import hmac
 import json
@@ -340,36 +339,21 @@ def _serialize_issue_cache(cache: object) -> dict[str, Any] | None:
 
 
 def _collect_fido_state(
-    work_dir: Path, now: datetime, snapshot: "IssueSnapshot | None"
+    now: datetime,
+    snapshot: "IssueSnapshot | None",
+    *,
+    fido_running: bool,
 ) -> dict[str, Any]:
     """Render the issue/PR/task fields for the status endpoint.
 
-    Reads the lock-file state directly from disk (cheap flock probe) and
-    pulls every other field from the in-memory :class:`IssueSnapshot`
-    published by the worker (#1690).  No state.json or tasks.json reads
-    on the request thread.
+    Pure in-memory: every value is read from the :class:`IssueSnapshot`
+    published by the worker plus the ``fido_running`` boolean the caller
+    pulls from ``repo_state.thread.is_alive`` (#1690).  No filesystem
+    syscalls on the request thread.
 
     ``snapshot`` is ``None`` only on cold start before the worker has
     finished its first iteration — defaults match the legacy behaviour.
     """
-    fido_dir = work_dir / ".git" / "fido"
-
-    # Check whether the fido sub-process lock is held.
-    fido_running = False
-    lock_path = fido_dir / "lock"
-    if lock_path.exists():
-        try:
-            fd = open(lock_path)  # noqa: SIM115
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except BlockingIOError:
-                fido_running = True
-            finally:
-                fd.close()
-        except OSError:
-            pass
-
     if snapshot is None:
         return {
             "fido_running": fido_running,
@@ -1381,7 +1365,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 for w in repo_state.webhook_activities
             ]
             fido_state = (
-                _collect_fido_state(repo_cfg.work_dir, now, repo_state.issue)
+                _collect_fido_state(
+                    now,
+                    repo_state.issue,
+                    fido_running=(
+                        repo_state.thread is not None and repo_state.thread.is_alive
+                    ),
+                )
                 if repo_cfg is not None
                 else {
                     "fido_running": False,

@@ -718,13 +718,13 @@ class TestCollectFidoState:
 
         return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
 
-    def test_defaults_when_snapshot_is_none(self, tmp_path: Path) -> None:
+    def test_defaults_when_snapshot_is_none(self) -> None:
         """Cold start: worker has not yet published a snapshot."""
         from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
-        result = _collect_fido_state(tmp_path, self._now(), None)
+        result = _collect_fido_state(self._now(), None, fido_running=False)
         assert result["fido_running"] is False
         assert result["issue"] is None
         assert result["issue_title"] is None
@@ -737,7 +737,17 @@ class TestCollectFidoState:
         assert result["task_number"] is None
         assert result["task_total"] is None
 
-    def test_passes_through_snapshot_fields(self, tmp_path: Path) -> None:
+    def test_fido_running_passes_through(self) -> None:
+        """``fido_running`` is supplied by the caller from the published
+        ``ThreadSnapshot.is_alive`` — no flock probe, no derivation here."""
+        from fido.server import (
+            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        result = _collect_fido_state(self._now(), None, fido_running=True)
+        assert result["fido_running"] is True
+
+    def test_passes_through_snapshot_fields(self) -> None:
         from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
@@ -754,7 +764,7 @@ class TestCollectFidoState:
             task_number=2,
             task_total=4,
         )
-        result = _collect_fido_state(tmp_path, self._now(), snapshot)
+        result = _collect_fido_state(self._now(), snapshot, fido_running=True)
         assert result["issue"] == 42
         assert result["issue_title"] == "Add a thing"
         assert result["pr_number"] == 99
@@ -767,7 +777,7 @@ class TestCollectFidoState:
         # 30 minutes elapsed between issue_started_at and _now().
         assert result["issue_elapsed_seconds"] == 1800
 
-    def test_invalid_issue_started_at_in_snapshot(self, tmp_path: Path) -> None:
+    def test_invalid_issue_started_at_in_snapshot(self) -> None:
         """A bad ISO date in the snapshot must not break the request."""
         from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
@@ -785,68 +795,9 @@ class TestCollectFidoState:
             task_number=None,
             task_total=None,
         )
-        result = _collect_fido_state(tmp_path, self._now(), snapshot)
+        result = _collect_fido_state(self._now(), snapshot, fido_running=True)
         assert result["issue"] == 1
         assert result["issue_elapsed_seconds"] is None
-
-    def test_lock_file_exists_not_held(self, tmp_path: Path) -> None:
-        """Lock file exists but is not held by another process → fido_running=False."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        (fido_dir / "lock").touch()
-        result = _collect_fido_state(tmp_path, self._now(), None)
-        assert result["fido_running"] is False
-
-    def test_lock_file_held(self, tmp_path: Path) -> None:
-        """Lock file held by another thread → fido_running=True."""
-        import fcntl
-        import threading
-
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        lock_path = fido_dir / "lock"
-        lock_path.touch()
-
-        ready = threading.Event()
-        release = threading.Event()
-
-        def hold_lock() -> None:
-            with open(lock_path) as fd:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                ready.set()
-                release.wait(timeout=5)
-                fcntl.flock(fd, fcntl.LOCK_UN)
-
-        t = threading.Thread(target=hold_lock, daemon=True)
-        t.start()
-        ready.wait(timeout=5)
-        try:
-            result = _collect_fido_state(tmp_path, self._now(), None)
-            assert result["fido_running"] is True
-        finally:
-            release.set()
-            t.join(timeout=5)
-
-    def test_lock_file_oserror(self, tmp_path: Path) -> None:
-        """If opening the lock file raises OSError, fido_running stays False."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        # Create a directory at the lock path to cause OSError on open()
-        (fido_dir / "lock").mkdir()
-        result = _collect_fido_state(tmp_path, self._now(), None)
-        assert result["fido_running"] is False
 
 
 class TestRepoStatus:
