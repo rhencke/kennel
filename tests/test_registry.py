@@ -1,6 +1,7 @@
 """Tests for fido.registry — WorkerRegistry lifecycle management."""
 
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -40,12 +41,28 @@ class RepoConfig(_RepoConfig):
 
 
 def _repo(name: str, work_dir: Path) -> RepoConfig:
+    """RepoConfig + git-init the work_dir.
+
+    Registry.start resolves the canonical git_dir via
+    ``git rev-parse --absolute-git-dir`` (#1696 codex P1 round 5) so
+    the work_dir must actually be a git repository.  ``git init`` is
+    idempotent — re-initialising an existing repo is safe.
+    """
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=work_dir,
+        check=True,
+        capture_output=True,
+    )
     return RepoConfig(name=name, work_dir=work_dir)
 
 
 class TestWorkerRegistry:
     def _make_registry(
-        self, *, repos: list[str] | None = None
+        self,
+        *,
+        repos: list[str] | None = None,
+        work_dir: Path | None = None,
     ) -> tuple[WorkerRegistry, MagicMock, object]:
         factory = MagicMock()
         reader, updater = create_atomic(
@@ -53,8 +70,15 @@ class TestWorkerRegistry:
         )
         reg = WorkerRegistry(factory, updater)
         if repos:
+            # Pre-populated registries need a real git work_dir
+            # because registry.start resolves git_dir at construction
+            # (#1696 codex P1 round 5).  Caller passes one when they
+            # need start() to succeed.
+            assert work_dir is not None, (
+                "_make_registry(repos=...) requires work_dir for git resolution"
+            )
             for name in repos:
-                reg.start(_repo(name, Path("/tmp/fake")))
+                reg.start(_repo(name, work_dir))
         return reg, factory, reader
 
     def test_start_calls_factory_with_repo_cfg(self, tmp_path: Path) -> None:
@@ -449,43 +473,43 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_thread_crash_error("foo/bar") is None
 
-    def test_report_activity_stores_entry(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+    def test_report_activity_stores_entry(self, tmp_path: Path) -> None:
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.repo_name == "foo/bar"
         assert activity.what == "Working on: #1"
         assert activity.busy is True
 
-    def test_report_activity_overwrites_previous(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+    def test_report_activity_overwrites_previous(self, tmp_path: Path) -> None:
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.report_activity("foo/bar", "Working on: #1", busy=True)
         reg.report_activity("foo/bar", "Napping", busy=False)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.what == "Napping"
         assert activity.busy is False
 
-    def test_report_activity_records_last_progress_at(self) -> None:
+    def test_report_activity_records_last_progress_at(self, tmp_path: Path) -> None:
         import datetime as dt
 
         fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.last_progress_at == fixed
 
-    def test_report_activity_updates_last_progress_at(self) -> None:
+    def test_report_activity_updates_last_progress_at(self, tmp_path: Path) -> None:
         import datetime as dt
 
         t1 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t2 = dt.datetime(2026, 1, 1, 12, 5, 0, tzinfo=dt.timezone.utc)
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
         reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.last_progress_at == t2
 
-    def test_concurrent_report_and_read_are_safe(self) -> None:
+    def test_concurrent_report_and_read_are_safe(self, tmp_path: Path) -> None:
         """report_activity is safe under concurrent load.
 
         Multiple writer threads each own one repo and hammer report_activity;
@@ -495,7 +519,7 @@ class TestWorkerRegistry:
         """
         n_repos = 8
         repos = [f"owner/repo{i}" for i in range(n_repos)]
-        reg, _, state_reader = self._make_registry(repos=repos)
+        reg, _, state_reader = self._make_registry(repos=repos, work_dir=tmp_path)
         n_writes = 200
         errors: list[Exception] = []
 
@@ -559,9 +583,9 @@ class TestWorkerRegistry:
 
         assert max_concurrent == 1
 
-    def test_atomic_reader_sees_registry_writes(self) -> None:
+    def test_atomic_reader_sees_registry_writes(self, tmp_path: Path) -> None:
         """Atomic reader reflects writes made via the updater."""
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         # reader sees the repo populated by start()
         assert "foo/bar" in reader.get().repos
 
@@ -572,40 +596,40 @@ class TestWorkerRegistry:
         assert not hasattr(reg, "get_state_reader")
         assert not hasattr(reg, "get_state_updater")
 
-    def test_record_crash_stores_error_and_count(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+    def test_record_crash_stores_error_and_count(self, tmp_path: Path) -> None:
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.record_crash("foo/bar", "boom")
         crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == 1
         assert crash.last_error == "boom"
 
-    def test_record_crash_sets_last_crash_time(self) -> None:
+    def test_record_crash_sets_last_crash_time(self, tmp_path: Path) -> None:
         import datetime as dt
 
         before = dt.datetime.now(tz=dt.timezone.utc)
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.record_crash("foo/bar", "oops")
         after = dt.datetime.now(tz=dt.timezone.utc)
         crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count > 0
         assert before <= crash.last_crash_time <= after
 
-    def test_record_crash_increments_death_count(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+    def test_record_crash_increments_death_count(self, tmp_path: Path) -> None:
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.record_crash("foo/bar", "err1")
         reg.record_crash("foo/bar", "err2")
         reg.record_crash("foo/bar", "err3")
         crash = reader.get().repos["foo/bar"].crash_record
         assert crash.death_count == 3
 
-    def test_record_crash_updates_last_error(self) -> None:
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+    def test_record_crash_updates_last_error(self, tmp_path: Path) -> None:
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         reg.record_crash("foo/bar", "first")
         reg.record_crash("foo/bar", "second")
         crash = reader.get().repos["foo/bar"].crash_record
         assert crash.last_error == "second"
 
-    def test_record_crash_accumulates_count(self) -> None:
+    def test_record_crash_accumulates_count(self, tmp_path: Path) -> None:
         """Sequential record_crash calls accumulate death_count correctly.
 
         record_crash is single-writer (watchdog-thread only) by contract —
@@ -613,7 +637,7 @@ class TestWorkerRegistry:
         then publishes via a pure lens write.  This test verifies the counter
         accumulates without loss over many sequential calls.
         """
-        reg, _, reader = self._make_registry(repos=["foo/bar"])
+        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
         n = 200
         for _ in range(n):
             reg.record_crash("foo/bar", "err")

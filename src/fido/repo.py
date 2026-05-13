@@ -22,9 +22,19 @@ from fido.tasks import Tasks
 
 @dataclass(frozen=True, slots=True)
 class Repo:
-    """One managed repository's collaborators."""
+    """One managed repository's collaborators.
+
+    *git_dir* is the canonical absolute git directory, resolved once via
+    ``git rev-parse --absolute-git-dir`` at registry construction.
+    Linked worktrees and submodules have ``work_dir/.git`` as a *file*
+    pointing to the real git directory elsewhere; resolving once and
+    storing the answer here means every consumer (worker, webhook
+    handlers, status path) reaches the same directory without
+    re-shelling out.
+    """
 
     name: str
     work_dir: Path
+    git_dir: Path
     tasks: Tasks
     state: State

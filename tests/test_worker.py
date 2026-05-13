@@ -811,6 +811,15 @@ class TestWorker:
             FidoState(repos=frozendict(), github_limits=GitHubLimit())
         )
         registry = WorkerRegistry(MagicMock(), updater)
+        # registry.start now resolves git_dir via git rev-parse, so
+        # the work_dir must be a real git repo (#1696 codex P1
+        # round 5).  ``git init`` is idempotent.
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
         # Prepopulate FidoState so report_activity can lens-write into it.
         for i in range(3):
             registry.start(_default_repo_cfg(tmp_path, repo_name=f"owner/repo{i}"))

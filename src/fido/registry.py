@@ -27,7 +27,10 @@ from fido.provider import PromptSession, Provider
 from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
-from fido.state import State
+from fido.state import (
+    State,
+    _resolve_git_dir,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.tasks import Tasks
 from fido.worker import WorkerThread
 
@@ -250,10 +253,20 @@ class WorkerRegistry:
         # publisher via on_mutate (#1696).  Created here, single
         # instance per repo, so every webhook handler / worker /
         # reorder_tasks gets the same collaborators via :meth:`repo_for`.
-        fido_dir = repo_cfg.work_dir / ".git" / "fido"
+        # Resolve the canonical git_dir once via ``git rev-parse
+        # --absolute-git-dir`` and store it on the Repo — linked
+        # worktrees / submodules have ``work_dir/.git`` as a *file*
+        # pointing to the actual git directory elsewhere, and every
+        # consumer (worker, webhook handlers, status path) needs the
+        # same resolved path (#1696 codex P1 round 5).  Failing
+        # loudly here surfaces a misconfigured workspace at startup
+        # rather than as a confusing flock-on-a-file error later.
+        git_dir = _resolve_git_dir(repo_cfg.work_dir)  # pyright: ignore[reportPrivateUsage]
+        fido_dir = git_dir / "fido"
         self._repos[repo_cfg.name] = Repo(
             name=repo_cfg.name,
             work_dir=repo_cfg.work_dir,
+            git_dir=git_dir,
             tasks=Tasks(repo_cfg.work_dir, registry=self, repo_name=repo_cfg.name),
             state=State(
                 fido_dir,

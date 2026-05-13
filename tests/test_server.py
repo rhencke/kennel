@@ -159,6 +159,17 @@ def _signal_post_done() -> None:
 def _config(tmp_path: Path) -> Config:
     from fido.config import RepoMembership
 
+    # Registry.start resolves the canonical git_dir via
+    # ``git rev-parse --absolute-git-dir`` (#1696 codex P1 round 5)
+    # so the work_dir must be a real git repo.  ``git init`` is
+    # idempotent — re-initialising an existing repo is safe.
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
     return Config(
         port=0,  # will bind to random port
         secret=b"test-secret",
